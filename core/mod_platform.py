@@ -35,8 +35,27 @@ SUPPORTED_OFFLINE_STATUSES = (
     OFFLINE_STATUS_FAILED,
 )
 PROVIDER_STEAM_ARCHIVE = "steam_archive"
+PROVIDER_NEXUS_SNAPSHOT = "nexus_snapshot"
+PROVIDER_GITHUB_SNAPSHOT = "github_snapshot"
+# Legacy generator ids — kept for rows written before snapshot providers.
 PROVIDER_NEXUS_GENERATOR = "nexus_generator"
 PROVIDER_GITHUB_GENERATOR = "github_generator"
+
+PROVIDER_DISPLAY_NAMES = {
+    PROVIDER_STEAM_ARCHIVE: "Steam Archive",
+    PROVIDER_NEXUS_SNAPSHOT: "Nexus Snapshot",
+    PROVIDER_GITHUB_SNAPSHOT: "GitHub Snapshot",
+    PROVIDER_NEXUS_GENERATOR: "Nexus Generator",
+    PROVIDER_GITHUB_GENERATOR: "GitHub Generator",
+}
+
+
+def format_offline_provider(value: str | None) -> str:
+    """Human-readable offline provider label for UI."""
+    key = str(value or "").strip()
+    if not key:
+        return "—"
+    return PROVIDER_DISPLAY_NAMES.get(key, key)
 
 
 def normalize_offline_status(value: str | None) -> str:

@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS mod_relations (
 CREATE INDEX IF NOT EXISTS idx_mod_relations_source ON mod_relations(source_mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_relations_target ON mod_relations(target_mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_relations_type ON mod_relations(relation_type);
+
+CREATE TABLE IF NOT EXISTS mod_relationships (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_mod_id       INTEGER NOT NULL,
+    target_mod_id       INTEGER NOT NULL,
+    relationship_type   TEXT NOT NULL,
+    created_at          TEXT NOT NULL,
+    FOREIGN KEY (source_mod_id) REFERENCES mods(mod_id),
+    FOREIGN KEY (target_mod_id) REFERENCES mods(mod_id),
+    UNIQUE (source_mod_id, target_mod_id, relationship_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mod_relationships_source
+    ON mod_relationships(source_mod_id);
+CREATE INDEX IF NOT EXISTS idx_mod_relationships_target
+    ON mod_relationships(target_mod_id);
+CREATE INDEX IF NOT EXISTS idx_mod_relationships_type
+    ON mod_relationships(relationship_type);
 """
 
 # Columns added after the initial schema — applied on every startup.
@@ -160,6 +178,18 @@ TAG_TYPE_INVALID = "invalid"
 TAG_TYPE_CONFLICT = "conflict"
 TAG_TYPE_CATEGORY = "category"
 RELATION_TYPE_CONFLICT = "conflict"
+
+# User-declared Mod relationships (mod_relationships) — never auto-guessed
+RELATIONSHIP_DEPENDENCY = "dependency"
+RELATIONSHIP_CONFLICT = "conflict"
+RELATIONSHIP_ADDON = "addon"
+RELATIONSHIP_PATCH = "patch"
+SUPPORTED_RELATIONSHIP_TYPES = (
+    RELATIONSHIP_DEPENDENCY,
+    RELATIONSHIP_CONFLICT,
+    RELATIONSHIP_ADDON,
+    RELATIONSHIP_PATCH,
+)
 
 _MOD_SELECT_COLS = (
     "mod_id, app_id, title, preview_url, description, "
@@ -340,6 +370,29 @@ class ModRelation:
 
 
 @dataclass(frozen=True)
+class ModRelationship:
+    """One user-declared row from ``mod_relationships``."""
+
+    id: int
+    source_mod_id: str
+    target_mod_id: str
+    relationship_type: str
+    created_at: str = ""
+    target_title: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "source_mod_id": self.source_mod_id,
+            "target_mod_id": self.target_mod_id,
+            "mod_id": self.target_mod_id,
+            "relationship_type": self.relationship_type,
+            "title": self.target_title or "",
+            "created_at": self.created_at or "",
+        }
+
+
+@dataclass(frozen=True)
 class ModTagFlags:
     """Compact tag summary for library cards / filters."""
 
@@ -347,6 +400,8 @@ class ModTagFlags:
     conflict: bool = False
     invalid_reason: str = ""
     tag_values: tuple[str, ...] = ()
+    dependency_count: int = 0
+    relationship_conflict_count: int = 0
 
 
 class DatabaseManager:
@@ -1978,7 +2033,6 @@ class DatabaseManager:
         if not str(mod_id).strip().isdigit():
             return False
         mid = int(mod_id)
-        mid_s = str(mid)
         with self._lock:
             self._conn.execute("DELETE FROM mod_tags WHERE mod_id = ?", (mid,))
             self._conn.execute(
@@ -1986,7 +2040,14 @@ class DatabaseManager:
                 DELETE FROM mod_relations
                 WHERE source_mod_id = ? OR target_mod_id = ?
                 """,
-                (mid_s, mid_s),
+                (mid, mid),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM mod_relationships
+                WHERE source_mod_id = ? OR target_mod_id = ?
+                """,
+                (mid, mid),
             )
             cur = self._conn.execute("DELETE FROM mods WHERE mod_id = ?", (mid,))
             self._conn.commit()
@@ -2227,6 +2288,212 @@ class DatabaseManager:
 
         return self.get_mod_relations(src)
 
+    # ------------------------------------------------------------------
+    # Mods — relationships (mod_relationships)
+    # ------------------------------------------------------------------
+
+    def add_mod_relationship(
+        self,
+        source_mod_id: int | str,
+        target_mod_id: int | str,
+        relationship_type: str,
+    ) -> ModRelationship:
+        """
+        Declare a user-confirmed relationship. Never auto-guessed.
+
+        Duplicate ``(source, target, type)`` returns the existing row.
+        """
+        src = int(str(source_mod_id).strip())
+        tgt = int(str(target_mod_id).strip())
+        rtype = str(relationship_type or "").strip().lower()
+        if rtype not in SUPPORTED_RELATIONSHIP_TYPES:
+            raise ValueError(
+                f"unsupported relationship_type: {relationship_type!r}"
+            )
+        if src == tgt:
+            raise ValueError("source_mod_id and target_mod_id must differ")
+        now = _utc_now()
+        with self._lock:
+            self._ensure_mod_stub(src)
+            self._ensure_mod_stub(tgt)
+            existing = self._conn.execute(
+                """
+                SELECT id FROM mod_relationships
+                WHERE source_mod_id = ? AND target_mod_id = ?
+                      AND relationship_type = ?
+                LIMIT 1
+                """,
+                (src, tgt, rtype),
+            ).fetchone()
+            if existing is not None:
+                row_id = int(existing["id"])
+            else:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO mod_relationships
+                        (source_mod_id, target_mod_id, relationship_type, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (src, tgt, rtype, now),
+                )
+                row_id = int(cur.lastrowid)
+            self._conn.commit()
+            row = self._conn.execute(
+                """
+                SELECT r.id, r.source_mod_id, r.target_mod_id, r.relationship_type,
+                       r.created_at,
+                       COALESCE(NULLIF(TRIM(m.display_name), ''), m.title, '')
+                           AS target_title
+                FROM mod_relationships AS r
+                LEFT JOIN mods AS m ON m.mod_id = r.target_mod_id
+                WHERE r.id = ?
+                """,
+                (row_id,),
+            ).fetchone()
+        assert row is not None
+        return _mod_relationship_from_row(row)
+
+    def remove_mod_relationship(self, relationship_id: int | str) -> bool:
+        """Delete one relationship by primary key. Returns True if a row was removed."""
+        rid = int(str(relationship_id).strip())
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM mod_relationships WHERE id = ?",
+                (rid,),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) > 0
+
+    def get_mod_relationships(self, mod_id: int | str) -> dict[str, list[dict[str, Any]]]:
+        """
+        Group outbound relationships for ``mod_id``::
+
+            {
+              "dependencies": [...],
+              "conflicts": [...],
+              "addons": [...],
+              "patches": [...],
+            }
+        """
+        empty: dict[str, list[dict[str, Any]]] = {
+            "dependencies": [],
+            "conflicts": [],
+            "addons": [],
+            "patches": [],
+        }
+        if not str(mod_id).strip().isdigit():
+            return empty
+        mid = int(mod_id)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT r.id, r.source_mod_id, r.target_mod_id, r.relationship_type,
+                       r.created_at,
+                       COALESCE(NULLIF(TRIM(m.display_name), ''), m.title, '')
+                           AS target_title
+                FROM mod_relationships AS r
+                LEFT JOIN mods AS m ON m.mod_id = r.target_mod_id
+                WHERE r.source_mod_id = ?
+                ORDER BY r.relationship_type, r.id
+                """,
+                (mid,),
+            ).fetchall()
+        bucket_key = {
+            RELATIONSHIP_DEPENDENCY: "dependencies",
+            RELATIONSHIP_CONFLICT: "conflicts",
+            RELATIONSHIP_ADDON: "addons",
+            RELATIONSHIP_PATCH: "patches",
+        }
+        for row in rows:
+            rel = _mod_relationship_from_row(row)
+            key = bucket_key.get(rel.relationship_type)
+            if key:
+                empty[key].append(rel.as_dict())
+        return empty
+
+    def get_relationship_counts(
+        self,
+        mod_ids: Iterable[int | str],
+    ) -> dict[str, tuple[int, int]]:
+        """
+        Batch counts for card badges: ``mod_id → (dependency_count, conflict_count)``.
+        """
+        ids = [int(str(i).strip()) for i in mod_ids if str(i).strip().isdigit()]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        out: dict[str, tuple[int, int]] = {str(i): (0, 0) for i in ids}
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT source_mod_id, relationship_type, COUNT(*) AS n
+                FROM mod_relationships
+                WHERE source_mod_id IN ({placeholders})
+                  AND relationship_type IN (?, ?)
+                GROUP BY source_mod_id, relationship_type
+                """,
+                [*ids, RELATIONSHIP_DEPENDENCY, RELATIONSHIP_CONFLICT],
+            ).fetchall()
+        deps: dict[str, int] = {str(i): 0 for i in ids}
+        confs: dict[str, int] = {str(i): 0 for i in ids}
+        for row in rows:
+            mid = str(row["source_mod_id"])
+            n = int(row["n"] or 0)
+            if str(row["relationship_type"]) == RELATIONSHIP_DEPENDENCY:
+                deps[mid] = n
+            elif str(row["relationship_type"]) == RELATIONSHIP_CONFLICT:
+                confs[mid] = n
+        for mid in out:
+            out[mid] = (deps.get(mid, 0), confs.get(mid, 0))
+        return out
+
+    def check_relationship_deploy_warnings(
+        self,
+        mod_id: int | str,
+    ) -> list[dict[str, Any]]:
+        """
+        Warn-only deploy checks for declared relationships.
+
+        - dependency target disabled
+        - known conflict with another Mod
+        Never auto-enables Mods.
+        """
+        warnings: list[dict[str, Any]] = []
+        if not str(mod_id).strip().isdigit():
+            return warnings
+        mid = str(mod_id).strip()
+        grouped = self.get_mod_relationships(mid)
+        for item in grouped["dependencies"]:
+            tid = str(item.get("mod_id") or item.get("target_mod_id") or "")
+            if not tid.isdigit():
+                continue
+            if not self.is_mod_enabled(tid):
+                title = str(item.get("title") or tid)
+                warnings.append(
+                    {
+                        "type": "dependency_disabled",
+                        "target_mod_id": tid,
+                        "title": title,
+                        "message": f"Required Mod disabled:\n{title}",
+                    }
+                )
+        for item in grouped["conflicts"]:
+            tid = str(item.get("mod_id") or item.get("target_mod_id") or "")
+            title = str(item.get("title") or tid)
+            src_info = self.get_mod_display_info(mid)
+            src_name = (
+                src_info.display_name if src_info else mid
+            )
+            warnings.append(
+                {
+                    "type": "known_conflict",
+                    "target_mod_id": tid,
+                    "title": title,
+                    "message": f"Known conflict:\n{src_name} conflicts with {title}",
+                }
+            )
+        return warnings
+
     def _ensure_mod_stub(self, mod_id: int) -> None:
         """Insert a minimal mods row so FK-less tags can still attach to an ID."""
         now = _utc_now()
@@ -2308,6 +2575,20 @@ def _mod_relation_from_row(row: sqlite3.Row) -> ModRelation:
         relation_type=str(row["relation_type"] or ""),
         note=str(row["note"] or ""),
         created_at=str(row["created_at"] or ""),
+    )
+
+
+def _mod_relationship_from_row(row: sqlite3.Row) -> ModRelationship:
+    keys = set(row.keys())
+    return ModRelationship(
+        id=int(row["id"]),
+        source_mod_id=str(row["source_mod_id"]),
+        target_mod_id=str(row["target_mod_id"]),
+        relationship_type=str(row["relationship_type"] or ""),
+        created_at=str(row["created_at"] or ""),
+        target_title=(
+            str(row["target_title"] or "") if "target_title" in keys else ""
+        ),
     )
 
 

@@ -34,7 +34,10 @@ from core.db_manager import (
     DEPLOY_STATUS_FAILED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DEPLOY_TYPE_FOLDER_COPY,
-    PLATFORM_STEAM,
+    RELATIONSHIP_ADDON,
+    RELATIONSHIP_CONFLICT,
+    RELATIONSHIP_DEPENDENCY,
+    RELATIONSHIP_PATCH,
     TAG_TYPE_CONFLICT,
     TAG_TYPE_INVALID,
     ModDisplayInfo,
@@ -45,6 +48,10 @@ from core.mod_platform import (
     OFFLINE_STATUS_FAILED,
     OFFLINE_STATUS_GENERATED,
     OFFLINE_STATUS_NONE,
+    PLATFORM_GITHUB,
+    PLATFORM_NEXUS,
+    PLATFORM_STEAM,
+    format_offline_provider,
     normalize_offline_status,
 )
 from core.mod_status import (
@@ -66,6 +73,7 @@ from ui.platform_labels import (
 COVER_W = 112
 COVER_H = 84
 OFFLINE_INDEX = "index.html"
+OFFLINE_SNAPSHOT_DIR = "offline"
 
 MODE_EMPTY = 0
 MODE_VIEW = 1
@@ -126,6 +134,7 @@ class ModDetailPanel(QWidget):
         self._conflict_hint = ""
         self._tag_deploy_hint = ""
         self._peer_mods: list[tuple[str, str]] = []
+        self._peer_candidates: list[dict] = []
         self._offline_worker = None
         self._current_platform = PLATFORM_STEAM
         self._source_url_value = ""
@@ -199,6 +208,7 @@ class ModDetailPanel(QWidget):
         self._conflict_hint = ""
         self._tag_deploy_hint = ""
         self._peer_mods = []
+        self._peer_candidates = []
         if hasattr(self, "view_tag_deploy_hint"):
             self.view_tag_deploy_hint.clear()
         if hasattr(self, "tag_conflict_list"):
@@ -209,6 +219,9 @@ class ModDetailPanel(QWidget):
             self.tag_invalid_reason.clear()
         if hasattr(self, "status_reason_edit"):
             self._reset_status_widgets()
+        if hasattr(self, "_rel_lists"):
+            for lst in self._rel_lists.values():
+                lst.clear()
 
     def enter_edit(self) -> None:
         if self._managed_path is None or self._metadata is None:
@@ -582,6 +595,45 @@ class ModDetailPanel(QWidget):
         self.btn_remove_category_tag.clicked.connect(self._on_remove_category_tag)
         layout.addWidget(cat_sec)
 
+        # --- Relationships (user-declared only) ---
+        rel_sec = self._make_section("Relationships")
+        rel_body = rel_sec.layout()
+        assert isinstance(rel_body, QVBoxLayout)
+
+        self._rel_lists: dict[str, QListWidget] = {}
+        self._rel_add_buttons: dict[str, QPushButton] = {}
+        for key, caption, add_label, rtype in (
+            ("dependencies", "Dependencies", "+ Add Mod", RELATIONSHIP_DEPENDENCY),
+            ("conflicts", "Conflicts", "+ Add Conflict", RELATIONSHIP_CONFLICT),
+            ("addons", "Addons", "+ Add Extension", RELATIONSHIP_ADDON),
+            ("patches", "Patches", "+ Add Patch", RELATIONSHIP_PATCH),
+        ):
+            rel_body.addWidget(self._field_caption(caption))
+            lst = QListWidget()
+            lst.setMinimumHeight(48)
+            lst.setMaximumHeight(90)
+            lst.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self._rel_lists[key] = lst
+            rel_body.addWidget(lst)
+            row = QHBoxLayout()
+            add_btn = QPushButton(add_label)
+            add_btn.setObjectName("panelActionButton")
+            rem_btn = QPushButton("Remove")
+            rem_btn.setObjectName("panelActionButton")
+            add_btn.clicked.connect(
+                lambda _=False, t=rtype: self._on_add_relationship(t)
+            )
+            rem_btn.clicked.connect(
+                lambda _=False, k=key: self._on_remove_relationship(k)
+            )
+            row.addWidget(add_btn)
+            row.addWidget(rem_btn)
+            row.addStretch(1)
+            rel_body.addLayout(row)
+            self._rel_add_buttons[key] = add_btn
+
+        layout.addWidget(rel_sec)
+
         # --- Section: User Tags (relation targets; legacy + peer conflicts) ---
         tags_sec = self._make_section("用户标记")
         tags_body = tags_sec.layout()
@@ -646,7 +698,7 @@ class ModDetailPanel(QWidget):
         row4.setSpacing(8)
         self.btn_folder = QPushButton("打开目录")
         self.btn_steam = QPushButton("原链接")
-        self.btn_download_offline = QPushButton("刷新离线信息")
+        self.btn_download_offline = QPushButton("保存离线页面")
         self.btn_offline = QPushButton("打开离线页面")
         self.btn_deploy = QPushButton("Deploy")
         self.btn_redeploy = QPushButton("重新部署")
@@ -904,6 +956,7 @@ class ModDetailPanel(QWidget):
         self.view_notes.setText(notes or "（无）")
 
         self._fill_lifecycle_status()
+        self._fill_relationships()
         self._fill_user_tags()
         mid = self.current_mod_id()
         if mid:
@@ -979,17 +1032,121 @@ class ModDetailPanel(QWidget):
         if self._managed_path is not None:
             self.tags_saved.emit(self._managed_path)
 
-    def set_peer_mods(self, peers: list[tuple[str, str]]) -> None:
-        """Other library Mods available for conflict selection ``(mod_id, name)``."""
-        self._peer_mods = [
-            (str(mid), str(name or mid))
-            for mid, name in peers
-            if str(mid).strip().isdigit()
-        ]
-        # Rebuild list if panel already showing a mod
+    def set_peer_mods(self, peers) -> None:
+        """
+        Other library Mods for pickers.
+
+        Accepts ``list[tuple[mod_id, name]]`` or ``list[dict]`` with
+        ``mod_id`` / ``title`` / ``platform`` / ``game_name``.
+        """
+        self._peer_mods = []
+        self._peer_candidates = []
+        for entry in peers or []:
+            if isinstance(entry, dict):
+                mid = str(entry.get("mod_id") or "").strip()
+                if not mid.isdigit():
+                    continue
+                title = str(entry.get("title") or mid)
+                self._peer_mods.append((mid, title))
+                self._peer_candidates.append(
+                    {
+                        "mod_id": mid,
+                        "title": title,
+                        "platform": str(entry.get("platform") or "steam"),
+                        "game_name": str(entry.get("game_name") or ""),
+                    }
+                )
+            else:
+                mid = str(entry[0]).strip()
+                if not mid.isdigit():
+                    continue
+                title = str(entry[1] if len(entry) > 1 else mid)
+                self._peer_mods.append((mid, title))
+                self._peer_candidates.append(
+                    {
+                        "mod_id": mid,
+                        "title": title,
+                        "platform": "steam",
+                        "game_name": "",
+                    }
+                )
         if self._mode == MODE_VIEW and self._metadata is not None:
             selected = self._selected_conflict_ids()
             self._rebuild_conflict_list(preselect=selected)
+
+    def _fill_relationships(self) -> None:
+        if not hasattr(self, "_rel_lists"):
+            return
+        for lst in self._rel_lists.values():
+            lst.clear()
+        mid = self.current_mod_id()
+        if not mid or not mid.isdigit():
+            return
+        try:
+            grouped = get_db().get_mod_relationships(mid)
+        except Exception:  # noqa: BLE001
+            return
+        for key, items in grouped.items():
+            lst = self._rel_lists.get(key)
+            if lst is None:
+                continue
+            for item in items:
+                title = str(item.get("title") or item.get("mod_id") or "")
+                tid = str(item.get("mod_id") or "")
+                label = title if title else tid
+                row = QListWidgetItem(label)
+                row.setData(Qt.ItemDataRole.UserRole, int(item.get("id") or 0))
+                row.setToolTip(f"ID {tid}")
+                lst.addItem(row)
+
+    def _on_add_relationship(self, relationship_type: str) -> None:
+        mid = self.current_mod_id()
+        if not mid or not mid.isdigit():
+            return
+        from ui.mod_picker_dialog import ModPickerDialog
+
+        candidates = [
+            c
+            for c in self._peer_candidates
+            if str(c.get("mod_id")) != mid
+        ]
+        dlg = ModPickerDialog(
+            candidates,
+            title=f"Add {relationship_type}",
+            parent=self,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        target = dlg.selected_mod_id()
+        if not target:
+            return
+        try:
+            get_db().add_mod_relationship(mid, target, relationship_type)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "添加关系失败", str(exc))
+            return
+        self._fill_relationships()
+        if self._managed_path is not None:
+            self.tags_saved.emit(self._managed_path)
+
+    def _on_remove_relationship(self, group_key: str) -> None:
+        lst = self._rel_lists.get(group_key)
+        if lst is None:
+            return
+        item = lst.currentItem()
+        if item is None:
+            return
+        rid = item.data(Qt.ItemDataRole.UserRole)
+        if not rid:
+            return
+        try:
+            get_db().remove_mod_relationship(int(rid))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "删除关系失败", str(exc))
+            return
+        self._fill_relationships()
+        if self._managed_path is not None:
+            self.tags_saved.emit(self._managed_path)
 
     def set_tag_deploy_hint(self, text: str) -> None:
         """Show pre-deploy invalid/conflict warning (hint only)."""
@@ -1378,35 +1535,65 @@ class ModDetailPanel(QWidget):
             if status != OFFLINE_STATUS_NONE:
                 return status
         if self._has_offline_page():
-            if self._current_platform == PLATFORM_STEAM:
-                return OFFLINE_STATUS_ARCHIVED
-            return OFFLINE_STATUS_GENERATED
+            return OFFLINE_STATUS_ARCHIVED
         return OFFLINE_STATUS_NONE
 
+    def _format_offline_updated_at(self) -> str:
+        info = self._display_info
+        raw = (info.offline_updated_at if info is not None else "") or ""
+        text = str(raw).strip()
+        if not text:
+            return "—"
+        # Prefer date portion for display (ISO / SQLite UTC).
+        if "T" in text:
+            return text.split("T", 1)[0]
+        if " " in text:
+            return text.split(" ", 1)[0]
+        return text[:10] if len(text) >= 10 else text
+
     def _refresh_offline_status_label(self, *, busy: bool = False) -> None:
-        """Show offline info status with green / yellow / red coloring."""
+        """Show offline snapshot status, provider, and update time."""
         if busy:
-            self.view_offline.setText("离线信息：刷新中…")
+            self.view_offline.setText("离线状态：刷新中…")
             self.view_offline.setStyleSheet("color: #d4a017;")
             return
         status = self._offline_status_key()
+        provider = ""
+        if self._display_info is not None:
+            provider = format_offline_provider(self._display_info.offline_provider)
+        updated = self._format_offline_updated_at()
         if status in (OFFLINE_STATUS_GENERATED, OFFLINE_STATUS_ARCHIVED):
-            label = "已生成" if status == OFFLINE_STATUS_GENERATED else "已归档"
-            self.view_offline.setText(f"离线信息：{label}")
+            lines = [
+                "离线状态：✓ 已保存",
+                f"Provider：{provider}",
+                f"更新时间：{updated}",
+            ]
+            self.view_offline.setText("\n".join(lines))
             self.view_offline.setStyleSheet("color: #3fb950;")
         elif status == OFFLINE_STATUS_FAILED:
-            self.view_offline.setText("离线信息：失败")
+            lines = [
+                "离线状态：失败",
+                f"Provider：{provider}",
+                f"更新时间：{updated}",
+            ]
+            self.view_offline.setText("\n".join(lines))
             self.view_offline.setStyleSheet("color: #e06c75;")
         else:
-            self.view_offline.setText("离线信息：未生成")
+            self.view_offline.setText("离线状态：未保存")
             self.view_offline.setStyleSheet("color: #d4a017;")
 
-    def _has_offline_page(self) -> bool:
-        """Existence check only — does not read HTML content or hit Steam."""
+    def _iter_offline_index_candidates(self):
+        """Yield candidate offline index paths (snapshot first, then Steam layout)."""
         if self._managed_path is None:
-            return False
+            return
+        root = self._managed_path
         for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            index = self._managed_path / info_name / OFFLINE_INDEX
+            yield root / info_name / OFFLINE_SNAPSHOT_DIR / OFFLINE_INDEX
+            yield root / info_name / OFFLINE_INDEX
+
+    def _has_offline_page(self) -> bool:
+        """Existence check only — does not read HTML content or hit the network."""
+        for index in self._iter_offline_index_candidates():
             try:
                 if index.is_file() and index.stat().st_size > 0:
                     return True
@@ -1415,10 +1602,7 @@ class ModDetailPanel(QWidget):
         return False
 
     def _index_path(self) -> Path | None:
-        if self._managed_path is None:
-            return None
-        for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            index = self._managed_path / info_name / OFFLINE_INDEX
+        for index in self._iter_offline_index_candidates():
             try:
                 if index.is_file() and index.stat().st_size > 0:
                     return index
@@ -1459,16 +1643,24 @@ class ModDetailPanel(QWidget):
     def _update_offline_download_button(self) -> None:
         busy = self._offline_worker is not None and self._offline_worker.isRunning()
         if busy:
-            self.btn_download_offline.setText("正在刷新...")
+            self.btn_download_offline.setText("正在保存...")
             self.btn_download_offline.setEnabled(False)
             self.btn_download_offline.setToolTip("")
             return
-        self.btn_download_offline.setText("刷新离线信息")
-        self.btn_download_offline.setEnabled(True)
-        if self._current_platform == PLATFORM_STEAM:
-            self.btn_download_offline.setToolTip("重新抓取 Steam Workshop 离线页面")
+        plat = self._current_platform
+        if plat == PLATFORM_STEAM:
+            self.btn_download_offline.setText("下载 Steam 页面")
+            self.btn_download_offline.setToolTip("抓取 Steam Workshop 网页并保存为离线页面")
+        elif plat == PLATFORM_NEXUS:
+            self.btn_download_offline.setText("保存 Nexus 页面")
+            self.btn_download_offline.setToolTip("下载 Nexus Mods 网页快照（HTML + 资源）")
+        elif plat == PLATFORM_GITHUB:
+            self.btn_download_offline.setText("保存 GitHub 页面")
+            self.btn_download_offline.setToolTip("下载 GitHub 仓库网页快照（HTML + 资源）")
         else:
-            self.btn_download_offline.setToolTip("根据本地数据库信息重新生成离线页面")
+            self.btn_download_offline.setText("保存离线页面")
+            self.btn_download_offline.setToolTip("下载来源网站页面快照")
+        self.btn_download_offline.setEnabled(True)
 
     def _download_offline_page(self) -> None:
         if self._managed_path is None or self._metadata is None:
@@ -1507,9 +1699,9 @@ class ModDetailPanel(QWidget):
         self._update_offline_download_button()
 
     def _on_offline_archive_failed(self, error: str) -> None:
-        self.view_offline.setText(f"离线信息：失败 — {error}")
+        self.view_offline.setText(f"离线状态：失败 — {error}")
         self.view_offline.setStyleSheet("color: #e06c75;")
-        QMessageBox.warning(self, "离线信息", error or "刷新失败")
+        QMessageBox.warning(self, "离线页面", error or "保存失败")
         self._update_offline_download_button()
 
     def _on_offline_archive_thread_finished(self) -> None:
@@ -1522,7 +1714,7 @@ class ModDetailPanel(QWidget):
             QMessageBox.information(
                 self,
                 "离线页面",
-                "离线信息未生成。\n可点击「刷新离线信息」生成。",
+                "离线页面尚未保存。\n可点击上方按钮下载来源网页快照。",
             )
             return
         if not webbrowser.open(index.resolve().as_uri()):

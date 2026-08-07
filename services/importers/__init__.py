@@ -16,7 +16,11 @@ from services.importers.importer_base import (
     MISSING_GAME_CONTEXT,
     ModImporter,
 )
-from services.importers.local_scanner import scan_mod_directory
+from services.importers.cleanup import (
+    cleanup_image_entries_in_mod_files,
+    cleanup_mod_files_images,
+)
+from services.importers.local_scanner import IMAGE_EXTENSIONS, scan_mod_directory
 from services.importers.materialize import materialize_imported_mod
 from services.importers.nexus import NexusImporter
 from services.importers.steam import SteamImporter
@@ -24,13 +28,16 @@ from services.importers.steam import SteamImporter
 __all__ = [
     "ArchiveImporter",
     "GithubImporter",
+    "IMAGE_EXTENSIONS",
     "ImportContext",
     "ImportResult",
     "MISSING_GAME_CONTEXT",
     "ModImporter",
     "NexusImporter",
     "SteamImporter",
+    "cleanup_image_entries_in_mod_files",
     "cleanup_import_cache",
+    "cleanup_mod_files_images",
     "detect_importer",
     "extract_archive",
     "find_mod_root",

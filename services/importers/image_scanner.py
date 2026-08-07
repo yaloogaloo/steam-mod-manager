@@ -11,14 +11,16 @@ from services.file_ops import COVER_BASENAME, INFO_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+# Alias used by local_scanner / cleanup — display assets, never Mod packages.
+IMAGE_EXTENSIONS = IMAGE_SUFFIXES
 # Filename priority (lower index wins). Task 3 order.
 _PRIORITY_NAMES = ("cover", "thumbnail", "preview", "icon", "image", "thumb", "header")
 _SKIP_DIRS = {".info", "info", ".git", "__pycache__", "node_modules", ".vs"}
 
 
 def is_image_path(path: Path | str) -> bool:
-    return Path(path).suffix.lower() in IMAGE_SUFFIXES
+    return Path(path).suffix.lower() in IMAGE_EXTENSIONS
 
 
 def _priority_rank(path: Path) -> int:

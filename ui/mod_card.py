@@ -39,6 +39,7 @@ COVER_HEIGHT = 112
 TEXT_WIDTH = CARD_WIDTH - 24
 TITLE_LINES = 2
 OFFLINE_INDEX_NAME = "index.html"
+OFFLINE_SNAPSHOT_DIR = "offline"
 OFFLINE_MISSING_LABEL = "离线页未同步"
 
 
@@ -147,6 +148,16 @@ class ModCardWidget(QFrame):
         self.platform_badge.hide()
         self.platform_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
+        # Relationship counts — overlay bottom-left of cover (no height change).
+        self.relation_badge = QLabel(self.cover_label)
+        self.relation_badge.setObjectName("modRelationBadge")
+        self.relation_badge.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.relation_badge.setFixedHeight(16)
+        self.relation_badge.hide()
+        self.relation_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
         self.title_label = QLabel()
         title_font = self.title_label.font()
         title_font.setBold(True)
@@ -239,6 +250,7 @@ class ModCardWidget(QFrame):
         self._apply_offline_status()
         self._apply_deploy_status()
         self._apply_user_tag_badges()
+        self._apply_relation_badge()
         self._apply_platform_badge()
         self.set_selected(False)
 
@@ -352,6 +364,7 @@ class ModCardWidget(QFrame):
         self._apply_offline_status()
         self._apply_deploy_status()
         self._apply_user_tag_badges()
+        self._apply_relation_badge()
         self._apply_platform_badge()
 
     def _mod_id(self) -> str:
@@ -433,12 +446,16 @@ class ModCardWidget(QFrame):
         """Existence check only — does not read HTML or hit the network."""
         root = self.managed_path
         for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            index = root / info_name / OFFLINE_INDEX_NAME
-            try:
-                if index.is_file() and index.stat().st_size > 0:
-                    return True
-            except OSError:
-                continue
+            for relative in (
+                (info_name, OFFLINE_SNAPSHOT_DIR, OFFLINE_INDEX_NAME),
+                (info_name, OFFLINE_INDEX_NAME),
+            ):
+                index = root.joinpath(*relative)
+                try:
+                    if index.is_file() and index.stat().st_size > 0:
+                        return True
+                except OSError:
+                    continue
         return False
 
     def _apply_offline_status(self) -> None:
@@ -570,6 +587,49 @@ class ModCardWidget(QFrame):
         self.tag_badge.show()
         self.tag_badge.raise_()
 
+    def _apply_relation_badge(self) -> None:
+        """Small dependency / conflict count overlay — fixed cover height."""
+        mid = self._mod_id()
+        deps = 0
+        confs = 0
+        if mid:
+            try:
+                counts = get_db().get_relationship_counts([mid]).get(mid, (0, 0))
+                deps, confs = int(counts[0]), int(counts[1])
+            except Exception:  # noqa: BLE001
+                deps, confs = 0, 0
+        parts: list[str] = []
+        tips: list[str] = []
+        if confs:
+            parts.append(f"⚠ {confs}")
+            tips.append(f"{confs} conflicts")
+        if deps:
+            parts.append(f"↑ {deps}")
+            tips.append(f"{deps} dependencies")
+        if not parts:
+            self.relation_badge.hide()
+            self.relation_badge.clear()
+            self.relation_badge.setToolTip("")
+            return
+        self.relation_badge.setText("  ".join(parts))
+        self.relation_badge.setToolTip("\n".join(tips))
+        self.relation_badge.setStyleSheet(
+            "QLabel#modRelationBadge {"
+            "background-color: rgba(20, 24, 32, 200);"
+            "color: #e8eef5;"
+            "border-radius: 3px;"
+            "font-size: 9px;"
+            "font-weight: 600;"
+            "padding: 0px 4px;"
+            "}"
+        )
+        self.relation_badge.adjustSize()
+        cover_h = self.cover_label.height() or COVER_HEIGHT
+        y = max(4, cover_h - self.relation_badge.height() - 4)
+        self.relation_badge.move(4, y)
+        self.relation_badge.show()
+        self.relation_badge.raise_()
+
     def _apply_platform_badge(self) -> None:
         """Overlay [Steam]/[Nexus]/[GitHub] — no layout height change."""
         platform = "steam"
@@ -606,9 +666,11 @@ class ModCardWidget(QFrame):
         self.platform_badge.move(x, 4)
         self.platform_badge.show()
         self.platform_badge.raise_()
-        # Keep status badge above platform when both visible
+        # Keep status / relation badges above platform when visible
         if self.tag_badge.isVisible():
             self.tag_badge.raise_()
+        if self.relation_badge.isVisible():
+            self.relation_badge.raise_()
 
     def _resolve_cover(self) -> Path | None:
         manager = ModFileManager(

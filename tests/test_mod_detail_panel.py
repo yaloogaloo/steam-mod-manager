@@ -88,4 +88,4 @@ def test_offline_missing_label_without_reading_html(
     folder = _mod_folder(tmp_path, pub_id=pub, title="No Offline")
     db.upsert_mod(ModMetadata(published_file_id=pub, title="No Offline"))
     panel.show_mod(folder)
-    assert "未生成" in panel.view_offline.text()
+    assert "未保存" in panel.view_offline.text()

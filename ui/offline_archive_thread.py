@@ -13,7 +13,7 @@ from services.offline.manager import OfflineManager
 
 class OfflineArchiveWorker(QThread):
     """
-    Routes through ``OfflineManager`` (Steam archive / Nexus+GitHub generators).
+    Routes through ``OfflineManager`` (Steam archive / Nexus+GitHub snapshots).
 
     UI must not call platform providers directly.
     """

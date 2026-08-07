@@ -95,7 +95,7 @@ def test_steam_button_starts_worker_and_calls_manager(
     panel = ModDetailPanel()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert panel.btn_download_offline.text() == "刷新离线信息"
+    assert panel.btn_download_offline.text() == "下载 Steam 页面"
     assert panel.btn_offline.text() == "打开离线页面"
     assert panel.btn_steam.text() == "原链接"
 
@@ -148,8 +148,8 @@ def test_non_steam_uses_manager_and_button_label(
             return OfflineUpdateResult(
                 mod_id=str(mod_id),
                 index_path=path,
-                status="generated",
-                provider="nexus_generator",
+                status="archived",
+                provider="nexus_snapshot",
             )
 
     monkeypatch.setattr("ui.offline_archive_thread.OfflineManager", FakeManager)
@@ -157,7 +157,7 @@ def test_non_steam_uses_manager_and_button_label(
     panel = ModDetailPanel()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert panel.btn_download_offline.text() == "刷新离线信息"
+    assert panel.btn_download_offline.text() == "保存 Nexus 页面"
 
     panel._download_offline_page()
     for _ in range(50):

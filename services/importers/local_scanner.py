@@ -12,7 +12,7 @@ from core.mod_platform import (
     new_file_id,
     normalize_file_type,
 )
-from services.importers.image_scanner import IMAGE_SUFFIXES, is_image_path
+from services.importers.image_scanner import IMAGE_EXTENSIONS, is_image_path
 
 # Recognized package / config extensions (not Steam/Nexus/GitHub specific).
 KNOWN_EXTENSIONS = {
@@ -34,7 +34,7 @@ KNOWN_EXTENSIONS = {
 
 _SKIP_DIRS = {".info", "info", ".git", "__pycache__", "node_modules", ".vs"}
 # Preview / cover images are UI-only — never enter mod_files / deploy.
-_SKIP_SUFFIXES = set(IMAGE_SUFFIXES)
+_SKIP_SUFFIXES = set(IMAGE_EXTENSIONS)
 
 
 def classify_file_kind(path: Path | str) -> str:

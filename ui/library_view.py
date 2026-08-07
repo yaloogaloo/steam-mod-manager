@@ -760,12 +760,21 @@ class ModLibraryView(QWidget):
             self._apply_audit_to_panel(card._mod_id())
 
     def _sync_peer_mods_to_panel(self, *, exclude: str = "") -> None:
-        peers: list[tuple[str, str]] = []
+        peers: list[dict] = []
         for index, card in self._card_entries:
             mid = card._mod_id() or index.mod_id
             if not mid or mid == exclude:
                 continue
-            peers.append((mid, index.display_name or mid))
+            peers.append(
+                {
+                    "mod_id": mid,
+                    "title": index.display_name or mid,
+                    "platform": getattr(index, "platform", "steam") or "steam",
+                    "game_name": (index.game_name or "").split()[0]
+                    if index.game_name
+                    else "",
+                }
+            )
         self.detail_panel.set_peer_mods(peers)
 
     def _clear_selection(self) -> None:

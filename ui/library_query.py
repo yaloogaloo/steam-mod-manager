@@ -36,6 +36,7 @@ SORT_MTIME = "mtime"
 SORT_NAME = "name"
 
 OFFLINE_INDEX_NAME = "index.html"
+OFFLINE_SNAPSHOT_DIR = "offline"
 
 # Status chips (exclusive within group).
 STATUS_FILTER_LABELS: tuple[tuple[str, str], ...] = (
@@ -98,12 +99,16 @@ def offline_page_exists(managed_path: Path) -> bool:
     """True when offline ``index.html`` exists — ``is_file`` only (no content read)."""
     root = Path(managed_path)
     for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-        index = root / info_name / OFFLINE_INDEX_NAME
-        try:
-            if index.is_file():
-                return True
-        except OSError:
-            continue
+        for relative in (
+            (info_name, OFFLINE_SNAPSHOT_DIR, OFFLINE_INDEX_NAME),
+            (info_name, OFFLINE_INDEX_NAME),
+        ):
+            index = root.joinpath(*relative)
+            try:
+                if index.is_file():
+                    return True
+            except OSError:
+                continue
     return False
 
 

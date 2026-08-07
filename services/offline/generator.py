@@ -1,4 +1,8 @@
-"""Shared offline HTML generator for Nexus / GitHub (and local stubs)."""
+"""Shared offline HTML generator (legacy Nexus/GitHub info pages).
+
+Prefer ``services.offline.snapshot.WebSnapshotDownloader`` for new work.
+This module remains for historical local stubs / tests only — do not extend.
+"""
 
 from __future__ import annotations
 
