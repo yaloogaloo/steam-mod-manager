@@ -255,6 +255,18 @@ class ModDeployer:
                 "mod_id": mid,
             }
 
+        # Relationship warnings (hint only — never blocks, never auto-enables)
+        relationship_warnings: list[dict[str, Any]] = []
+        if mid.isdigit():
+            try:
+                relationship_warnings = (
+                    self._database().check_relationship_deploy_warnings(mid)
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("%s relationship warning check failed", log_prefix)
+            for w in relationship_warnings:
+                logger.warning("%s relation_warn=%s", log_prefix, w.get("message"))
+
         ctx, early = self._resolve_context(mod_id, require_target_exists=True)
         if early is not None:
             logger.warning("%s result=fail error=%s", log_prefix, early.get("error"))
@@ -320,9 +332,11 @@ class ModDeployer:
                 "mod_id": ctx.mod_id,
                 "deploy_type": ctx.deploy_type,
             }
-            if conflicts_payload:
-                out["conflicts"] = conflicts_payload
-            return out
+        if conflicts_payload:
+            out["conflicts"] = conflicts_payload
+        if relationship_warnings:
+            out["relationship_warnings"] = relationship_warnings
+        return out
 
         assert result.manifest is not None
         try:
