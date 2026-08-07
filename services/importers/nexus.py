@@ -1,0 +1,153 @@
+"""Nexus Mods manual folder importer (multi-file → one Mod)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from core.mod_platform import PLATFORM_NEXUS
+from services.importers.importer_base import (
+    ImportContext,
+    ImportResult,
+    ModImporter,
+    require_import_context,
+)
+from services.importers.local_scanner import scan_mod_directory
+from services.importers.materialize import materialize_imported_mod
+
+
+def parse_nexus_id(nexus_url: str = "", nexus_id: str = "") -> str:
+    ext = str(nexus_id or "").strip()
+    if ext:
+        return ext.split("?")[0].strip()
+    url = str(nexus_url or "").strip()
+    if not url:
+        return ""
+    parts = [p for p in urlparse(url).path.split("/") if p]
+    if "mods" in parts:
+        try:
+            idx = parts.index("mods")
+            return parts[idx + 1].split("?")[0]
+        except (ValueError, IndexError):
+            return ""
+    if url.isdigit():
+        return url
+    return ""
+
+
+def parse_nexus_game(nexus_url: str = "") -> str:
+    """Extract Nexus URL game slug (informational only — not used as library game)."""
+    url = str(nexus_url or "").strip()
+    parts = [p for p in urlparse(url).path.split("/") if p]
+    if "mods" in parts:
+        idx = parts.index("mods")
+        if idx > 0:
+            return parts[idx - 1]
+    return ""
+
+
+class NexusImporter(ModImporter):
+    platform = PLATFORM_NEXUS
+
+    def detect(self, value: str) -> bool:
+        text = str(value or "").strip()
+        low = text.lower()
+        if "nexusmods.com" in low:
+            return True
+        return text.isdigit()
+
+    def import_mod(
+        self,
+        *,
+        source_folder: str | Path = "",
+        title: str = "",
+        nexus_url: str = "",
+        nexus_id: str = "",
+        app_id: int = 0,
+        library_root: str | Path = "",
+        game_name: str = "",
+        context: ImportContext | dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> ImportResult:
+        required = require_import_context(
+            context, game_id=app_id, game_name=game_name, app_id=app_id
+        )
+        if isinstance(required, ImportResult):
+            return required
+        ctx = required
+
+        folder = Path(str(source_folder or "")).expanduser()
+        if not str(source_folder or "").strip() or not folder.is_dir():
+            return ImportResult(
+                success=False,
+                error="Mod目录不存在",
+                platform=self.platform,
+            )
+
+        url = str(nexus_url or "").strip()
+        ext = parse_nexus_id(url, nexus_id)
+        if not ext:
+            ext = folder.name
+        if url.isdigit() and not nexus_id:
+            ext = url
+            url = f"https://www.nexusmods.com/mods/{ext}"
+        name = (title or "").strip() or folder.name
+        if not url and ext:
+            # Prefer context game name for canonical URL; never invent a library game.
+            slug = parse_nexus_game(url) or ctx.game_name.replace(" ", "").lower()
+            if slug and slug.lower() != "mods":
+                url = f"https://www.nexusmods.com/{slug}/mods/{ext}"
+            else:
+                url = f"https://www.nexusmods.com/mods/{ext}"
+
+        db = self._database()
+        existing = db.find_mod_by_external(PLATFORM_NEXUS, ext)
+        if existing is not None:
+            return ImportResult(
+                success=False,
+                error="该Mod已经存在",
+                platform=self.platform,
+                external_id=ext,
+                mod_id=existing.mod_id,
+                source_url=existing.source_url,
+            )
+
+        bundle = scan_mod_directory(folder)
+        info = db.register_external_mod(
+            platform=PLATFORM_NEXUS,
+            external_id=ext,
+            source_url=url,
+            title=name,
+            app_id=ctx.game_id,
+            game_name=ctx.game_name,
+            mod_files=bundle,
+        )
+
+        managed = ""
+        if library_root:
+            dest = materialize_imported_mod(
+                library_root=library_root,
+                mod_id=info.mod_id,
+                title=name,
+                game_name=ctx.game_name,
+                source_folder=folder,
+                cover_flat_roots=_kwargs.get("cover_flat_roots"),
+                cover_search_roots=_kwargs.get("cover_search_roots"),
+                context=ctx,
+            )
+            managed = str(dest)
+
+        return ImportResult(
+            success=True,
+            mod_id=info.mod_id,
+            platform=PLATFORM_NEXUS,
+            external_id=ext,
+            source_url=url,
+            title=info.display_name,
+            display=info,
+            files_count=len(bundle.files),
+            managed_path=managed,
+            game_id=ctx.game_id,
+            game_name=ctx.game_name,
+        )

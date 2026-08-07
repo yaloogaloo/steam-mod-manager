@@ -14,6 +14,8 @@ from .models import ModMetadata
 logger = logging.getLogger(__name__)
 
 WORKSHOP_PAGE_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id={id}"
+NO_PROXY: dict[str, str | None] = {"http": None, "https": None}
+DEFAULT_TIMEOUT = 10
 
 
 class WorkshopPageScraper:
@@ -26,12 +28,15 @@ class WorkshopPageScraper:
         self,
         *,
         session: requests.Session | None = None,
-        timeout: float = 30,
+        timeout: float = DEFAULT_TIMEOUT,
         user_agent: str | None = None,
     ) -> None:
         self.timeout = timeout
         self._session = session or requests.Session()
         self._owns_session = session is None
+        if self._owns_session:
+            self._session.trust_env = False
+            self._session.proxies.update(NO_PROXY)
         ua = user_agent or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -54,7 +59,11 @@ class WorkshopPageScraper:
         file_id = str(published_file_id)
         url = WORKSHOP_PAGE_URL.format(id=file_id)
         try:
-            response = self._session.get(url, timeout=self.timeout)
+            response = self._session.get(
+                url,
+                timeout=self.timeout,
+                proxies=NO_PROXY,
+            )
             response.raise_for_status()
         except requests.RequestException as exc:
             logger.warning("Workshop page fetch failed for %s: %s", file_id, exc)

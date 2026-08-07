@@ -19,6 +19,7 @@ class ModMetadata:
     time_updated: int = 0
     creator_steam_id: str = ""
     app_id: int = 0
+    game_name: str = ""  # English store name (sanitized when used as folder)
     tags: list[str] = field(default_factory=list)
     source_path: str | None = None
     # Local paths after sync (filled by later steps)
@@ -26,6 +27,16 @@ class ModMetadata:
     cover_path: str | None = None
     offline_page_path: str | None = None
     fetch_error: str | None = None
+    custom_notes: str = ""  # user notes stored in .info/mod.json
+
+    @property
+    def game_display_name(self) -> str:
+        """Prefer resolved game name; fall back to App_<id> / Unknown Game."""
+        if self.game_name.strip():
+            return self.game_name.strip()
+        if self.app_id:
+            return f"App_{self.app_id}"
+        return "Unknown Game"
 
     @property
     def workshop_url(self) -> str:
@@ -36,8 +47,19 @@ class ModMetadata:
 
     @property
     def display_name(self) -> str:
-        """Prefer Steam title; fall back to numeric ID."""
-        return self.title.strip() or self.published_file_id
+        """
+        Human-readable Mod name for UI and folders.
+
+        Never returns a bare numeric ID — falls back to ``Unknown_Mod_<id>``.
+        """
+        return self.effective_title()
+
+    def effective_title(self) -> str:
+        """Real title if usable; otherwise ``Unknown_Mod_<published_file_id>``."""
+        title = (self.title or "").strip()
+        if title and not title.isdigit():
+            return title
+        return f"Unknown_Mod_{self.published_file_id}"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

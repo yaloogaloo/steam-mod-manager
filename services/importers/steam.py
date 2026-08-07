@@ -1,0 +1,144 @@
+"""Steam Workshop importer — preserves existing Workshop ID identity."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from core.mod_platform import PLATFORM_STEAM, ModFilesBundle, steam_workshop_url
+from core.models import ModMetadata
+from services.importers.importer_base import (
+    ImportContext,
+    ImportResult,
+    ModImporter,
+    coerce_import_context,
+    is_invalid_game_name,
+    resolve_game_for_import,
+)
+from services.importers.local_scanner import scan_mod_directory
+from services.importers.materialize import materialize_imported_mod
+
+
+class SteamImporter(ModImporter):
+    platform = PLATFORM_STEAM
+
+    def detect(self, value: str) -> bool:
+        text = str(value or "").strip()
+        if text.isdigit():
+            return True
+        low = text.lower()
+        return "steamcommunity.com" in low and "filedetails" in low
+
+    def import_mod(
+        self,
+        *,
+        workshop_id: str | int = "",
+        title: str = "",
+        app_id: int = 0,
+        source_folder: str | Path = "",
+        library_root: str | Path = "",
+        game_name: str = "",
+        context: ImportContext | dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> ImportResult:
+        mid = str(workshop_id or "").strip()
+        if not mid:
+            return ImportResult(
+                success=False, error="缺少 Workshop ID", platform=self.platform
+            )
+        if not mid.isdigit():
+            if "id=" in mid:
+                mid = mid.split("id=", 1)[-1].split("&", 1)[0].strip()
+            if not mid.isdigit():
+                return ImportResult(
+                    success=False,
+                    error=f"无效的 Workshop ID：{workshop_id}",
+                    platform=self.platform,
+                )
+
+        ctx = coerce_import_context(context, game_id=app_id, game_name=game_name, app_id=app_id)
+        resolved = resolve_game_for_import(
+            context=ctx,
+            game_name=game_name,
+            app_id=int(app_id or 0),
+            require_context=False,
+        )
+        if isinstance(resolved, ImportResult):
+            return resolved
+        resolved_app_id, resolved_game = resolved
+        # Prefer explicit Steam app_id when provided; else ImportContext fallback.
+        if int(app_id or 0) > 0:
+            resolved_app_id = int(app_id)
+        elif ctx is not None and ctx.game_id > 0:
+            resolved_app_id = ctx.game_id
+        if ctx is not None and ctx.game_name and (
+            not game_name.strip() or is_invalid_game_name(game_name)
+        ):
+            resolved_game = ctx.game_name
+
+        db = self._database()
+        if db.get_mod_display_info(mid) is not None:
+            return ImportResult(
+                success=False,
+                error="该Mod已经存在",
+                platform=self.platform,
+                external_id=mid,
+                mod_id=mid,
+            )
+
+        folder = Path(str(source_folder or "")).expanduser() if source_folder else None
+        if folder is not None and str(source_folder).strip() and not folder.is_dir():
+            return ImportResult(
+                success=False,
+                error="Mod目录不存在",
+                platform=self.platform,
+            )
+
+        url = steam_workshop_url(mid)
+        name = (title or "").strip() or f"Unknown_Mod_{mid}"
+        db.upsert_mod(
+            ModMetadata(
+                published_file_id=mid,
+                title=name,
+                app_id=int(resolved_app_id or 0),
+            )
+        )
+        info = db.update_mod_platform_info(
+            mid,
+            platform=PLATFORM_STEAM,
+            source_url=url,
+            external_id=mid,
+            title=name,
+            app_id=int(resolved_app_id or 0),
+        )
+        bundle = ModFilesBundle()
+        if folder is not None and folder.is_dir():
+            bundle = scan_mod_directory(folder)
+        db.set_mod_files(mid, bundle)
+
+        managed = ""
+        if library_root:
+            dest = materialize_imported_mod(
+                library_root=library_root,
+                mod_id=mid,
+                title=name,
+                game_name=resolved_game,
+                source_folder=folder if folder and folder.is_dir() else None,
+                context=ctx,
+                allow_invalid_game_name=ctx is None,
+            )
+            managed = str(dest)
+
+        return ImportResult(
+            success=True,
+            mod_id=mid,
+            platform=PLATFORM_STEAM,
+            external_id=mid,
+            source_url=url,
+            title=info.display_name,
+            display=info,
+            files_count=len(bundle.files),
+            managed_path=managed,
+            game_id=int(resolved_app_id or 0),
+            game_name=resolved_game,
+        )

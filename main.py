@@ -1,8 +1,8 @@
 """
 Steam Workshop Mod Manager — application entry point.
 
-Steps 1–2: project bootstrap + Steam metadata core.
-GUI (Step 4) will replace the CLI smoke-test path below.
+Default: launch the PySide6 GUI.
+CLI subcommands (scan / fetch / sync) remain available for scripting.
 """
 
 from __future__ import annotations
@@ -46,6 +46,49 @@ def build_parser() -> argparse.ArgumentParser:
     fetch_cmd = sub.add_parser("fetch", help="Fetch Steam metadata for one or more Mod IDs")
     fetch_cmd.add_argument("ids", nargs="+", help="Published file ID(s)")
 
+    sync_cmd = sub.add_parser(
+        "sync",
+        help="Scan, rename-copy, download covers, and archive offline pages",
+    )
+    sync_cmd.add_argument("workshop_dir", help="Steam workshop content directory")
+    sync_cmd.add_argument("target_dir", help="Managed library (destination) directory")
+    sync_cmd.add_argument(
+        "--no-skip-existing",
+        action="store_true",
+        help="Do not skip mods already present in the target library",
+    )
+    sync_cmd.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Skip offline Workshop page archiving",
+    )
+    sync_cmd.add_argument(
+        "--no-covers",
+        action="store_true",
+        help="Skip downloading preview covers",
+    )
+    sync_cmd.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing managed folders / archived pages",
+    )
+    sync_cmd.add_argument(
+        "--flat",
+        action="store_true",
+        help="Only scan the given workshop directory (no appid recursion)",
+    )
+
+    backfill_cmd = sub.add_parser(
+        "backfill",
+        help="Generate missing .info/index.html fallback pages in a library",
+    )
+    backfill_cmd.add_argument(
+        "target_dir",
+        nargs="?",
+        default=None,
+        help="Managed library directory (default: <project>/mod)",
+    )
+
     return parser
 
 
@@ -80,27 +123,92 @@ def cmd_fetch(ids: list[str]) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    _configure_logging(verbose=getattr(args, "verbose", False))
+def cmd_sync(args: argparse.Namespace) -> int:
+    from services.sync import ModSyncService, SyncOptions
 
-    if args.command == "scan":
-        return cmd_scan(args.workshop_dir, recursive=not args.flat)
-    if args.command == "fetch":
-        return cmd_fetch(args.ids)
+    options = SyncOptions(
+        skip_existing=not args.no_skip_existing,
+        archive_pages=not args.no_archive,
+        download_covers=not args.no_covers,
+        overwrite_files=args.overwrite,
+        recursive_scan=not args.flat,
+    )
 
-    # No subcommand: later this launches the GUI.
-    # For now, print a short status so the entry point is runnable.
-    print("Steam Workshop Mod Manager")
-    print("Core modules ready. GUI will be wired in Step 4.")
+    def on_progress(phase: str, current: int, total: int, message: str) -> None:
+        total = max(total, 1)
+        pct = int(current / total * 100)
+        print(f"[{phase} {pct:3d}%] {message}")
+
+    with ModSyncService(args.workshop_dir, args.target_dir) as service:
+        result = service.sync(options, on_progress=on_progress)
+
     print()
-    print("Try:")
-    print("  python main.py scan <steam_workshop_content_dir>")
-    print("  python main.py fetch <mod_id> [<mod_id> ...]")
-    print()
-    print("Install deps:  pip install -r requirements.txt")
+    print(
+        f"Done. success={len(result.success)} "
+        f"skipped={len(result.skipped)} "
+        f"failed={len(result.failed)}"
+    )
+    for meta, err in result.failed:
+        mid = meta.published_file_id if meta else "?"
+        print(f"  FAIL [{mid}] {err}")
+    return 1 if result.failed and not result.success else 0
+
+
+def cmd_backfill(target_dir: str | None) -> int:
+    from core.paths import default_mod_library
+    from services.archive import backfill_offline_pages
+
+    root = target_dir or str(default_mod_library())
+    created = backfill_offline_pages(root)
+    print(f"Backfilled {created} offline page(s) under: {root}")
     return 0
+
+
+def launch_gui() -> int:
+    from PySide6.QtWidgets import QApplication
+
+    from core.db_manager import get_db
+    from ui.main_window import MainWindow
+
+    # Ensure SQLite schema exists before any sync / UI lookup
+    get_db()
+
+    app = QApplication(sys.argv)
+    app.setOrganizationName("SteamModManager")
+    app.setApplicationName("WorkshopLibrary")
+    app.setStyle("Fusion")
+
+    window = MainWindow()
+    window.show()
+    return app.exec()
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+
+    cli_commands = {"scan", "fetch", "sync", "backfill"}
+    if argv and argv[0] in cli_commands:
+        args = parser.parse_args(argv)
+        _configure_logging(verbose=args.verbose)
+
+        if args.command == "scan":
+            return cmd_scan(args.workshop_dir, recursive=not args.flat)
+        if args.command == "fetch":
+            return cmd_fetch(args.ids)
+        if args.command == "sync":
+            return cmd_sync(args)
+        if args.command == "backfill":
+            return cmd_backfill(args.target_dir)
+
+    if argv and argv[0] in {"-h", "--help"}:
+        parser.print_help()
+        print("\nWithout a subcommand, the graphical interface is launched.")
+        return 0
+
+    verbose = "-v" in argv or "--verbose" in argv
+    _configure_logging(verbose=verbose)
+    return launch_gui()
 
 
 if __name__ == "__main__":
