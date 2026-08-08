@@ -162,7 +162,7 @@ class ModLibraryView(QWidget):
         center_layout.addWidget(self.search_box)
 
         filter_row = QHBoxLayout()
-        filter_row.setSpacing(6)
+        filter_row.setSpacing(8)
         self._filter_group = QButtonGroup(self)
         self._filter_group.setExclusive(True)
         self._filter_buttons: dict[str, QPushButton] = {}
@@ -171,6 +171,9 @@ class ModLibraryView(QWidget):
             btn.setObjectName("libraryFilterChip")
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
             if key == FILTER_ALL:
                 btn.setChecked(True)
             self._filter_group.addButton(btn)
@@ -182,8 +185,9 @@ class ModLibraryView(QWidget):
         filter_row.addStretch(1)
         center_layout.addLayout(filter_row)
 
+        # Row 1: platform filter chips only (never share space with combos).
         platform_row = QHBoxLayout()
-        platform_row.setSpacing(6)
+        platform_row.setSpacing(8)
         self._platform_group = QButtonGroup(self)
         self._platform_group.setExclusive(True)
         self._platform_buttons: dict[str, QPushButton] = {}
@@ -192,6 +196,9 @@ class ModLibraryView(QWidget):
             btn.setObjectName("libraryFilterChip")
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
             if key == FILTER_PLATFORM_ALL:
                 btn.setChecked(True)
             self._platform_group.addButton(btn)
@@ -202,26 +209,31 @@ class ModLibraryView(QWidget):
                 lambda checked, k=key: self._on_platform_filter_toggled(k, checked)
             )
         platform_row.addStretch(1)
+        center_layout.addLayout(platform_row)
 
+        # Row 2: category + sort (separate from platform chips).
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(10)
         tag_label = QLabel("标签")
         tag_label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
-        platform_row.addWidget(tag_label)
+        meta_row.addWidget(tag_label)
         self.category_combo = QComboBox()
         self.category_combo.setObjectName("librarySortCombo")
         self.category_combo.addItem("全部标签", FILTER_CATEGORY_ALL)
         self.category_combo.currentIndexChanged.connect(self._on_category_changed)
-        platform_row.addWidget(self.category_combo)
-
+        meta_row.addWidget(self.category_combo)
+        meta_row.addSpacing(16)
         sort_label = QLabel("排序")
         sort_label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
-        platform_row.addWidget(sort_label)
+        meta_row.addWidget(sort_label)
         self.sort_combo = QComboBox()
         self.sort_combo.setObjectName("librarySortCombo")
         for key, label in SORT_LABELS:
             self.sort_combo.addItem(label, key)
         self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
-        platform_row.addWidget(self.sort_combo)
-        center_layout.addLayout(platform_row)
+        meta_row.addWidget(self.sort_combo)
+        meta_row.addStretch(1)
+        center_layout.addLayout(meta_row)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -969,8 +981,25 @@ class ModLibraryView(QWidget):
         manager: ModFileManager,
         prefer: str | None = None,
     ) -> None:
+        # Diagnostic only — detect duplicate rebuild / ghost-list symptoms.
+        before_count = int(self.game_list.count())
+        call_n = int(getattr(self, "_game_list_rebuild_count", 0)) + 1
+        self._game_list_rebuild_count = call_n
+        logger.info(
+            "[GAME_LIST] rebuild#%s begin before_count=%s prefer=%r",
+            call_n,
+            before_count,
+            prefer,
+        )
+
         self.game_list.blockSignals(True)
         self.game_list.clear()
+        after_clear = int(self.game_list.count())
+        logger.info(
+            "[GAME_LIST] rebuild#%s after_clear count=%s",
+            call_n,
+            after_clear,
+        )
 
         total = len(manager.list_managed_mods())
         all_item = QListWidgetItem(f"{ALL_GAMES_LABEL}  ·  {total}")
@@ -1003,6 +1032,24 @@ class ModLibraryView(QWidget):
         self._set_current_game_context(key or None)
         self._pending_game_filter = None
         self.game_list.blockSignals(False)
+
+        after_count = int(self.game_list.count())
+        logger.info(
+            "[GAME_LIST] rebuild#%s end after_count=%s games=%s "
+            "(before=%s clear=%s)",
+            call_n,
+            after_count,
+            max(0, after_count - 1),
+            before_count,
+            after_clear,
+        )
+        if after_clear != 0:
+            logger.warning(
+                "[GAME_LIST] rebuild#%s clear did not empty list "
+                "(count=%s) — possible duplicate/ghost state",
+                call_n,
+                after_clear,
+            )
 
     def _on_game_item_changed(
         self,
