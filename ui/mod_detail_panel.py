@@ -688,8 +688,11 @@ class ModDetailPanel(QWidget):
         actions_caption.setObjectName("detailPanelSection")
         actions.addWidget(actions_caption)
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(8)
+        # Open / offline actions: two rows so labels never compress sideways.
+        link_row1 = QHBoxLayout()
+        link_row1.setSpacing(8)
+        link_row2 = QHBoxLayout()
+        link_row2.setSpacing(8)
         row2 = QHBoxLayout()
         row2.setSpacing(8)
         row3 = QHBoxLayout()
@@ -707,28 +710,50 @@ class ModDetailPanel(QWidget):
         self.btn_copy_info = QPushButton("复制全部信息")
         self.btn_edit = QPushButton("编辑")
         self.btn_remove_mod = QPushButton("Remove Mod")
-        for btn in (
-            self.btn_folder,
-            self.btn_steam,
-            self.btn_download_offline,
-            self.btn_offline,
-        ):
+        for btn in (self.btn_folder, self.btn_steam):
             btn.setObjectName("panelActionButton")
-            row1.addWidget(btn)
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
+            btn.setMinimumWidth(max(96, btn.sizeHint().width()))
+            link_row1.addWidget(btn)
+        link_row1.addStretch(1)
+        for btn in (self.btn_download_offline, self.btn_offline):
+            btn.setObjectName("panelActionButton")
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
+            btn.setMinimumWidth(max(120, btn.sizeHint().width()))
+            link_row2.addWidget(btn)
+        link_row2.addStretch(1)
         for btn in (self.btn_deploy, self.btn_redeploy, self.btn_undeploy):
             btn.setObjectName("panelActionButton")
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
             row2.addWidget(btn)
+        row2.addStretch(1)
         for btn in (self.btn_copy_link, self.btn_copy_info):
             btn.setObjectName("panelActionButton")
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
             row4.addWidget(btn)
         row4.addStretch(1)
         self.btn_edit.setObjectName("panelPrimaryButton")
+        self.btn_edit.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
         self.btn_remove_mod.setObjectName("panelActionButton")
+        self.btn_remove_mod.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
         self.btn_remove_mod.setStyleSheet("color: #e06c75;")
         row3.addWidget(self.btn_edit)
         row3.addWidget(self.btn_remove_mod)
         row3.addStretch(1)
-        actions.addLayout(row1)
+        actions.addLayout(link_row1)
+        actions.addLayout(link_row2)
         actions.addLayout(row2)
         actions.addLayout(row4)
         actions.addLayout(row3)
