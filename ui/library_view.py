@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -330,6 +330,10 @@ class ModLibraryView(QWidget):
         Read + render only — no network, Steam archive, migration, or sync.
         Shows a loading overlay so the window is never silent during work.
         """
+        scroll = self._capture_scroll()
+        selected_mid = ""
+        if self._selected_card is not None:
+            selected_mid = self._selected_card._mod_id() or ""
         self._set_loading(True)
         try:
             root = Path(self._target_root)
@@ -354,6 +358,35 @@ class ModLibraryView(QWidget):
                 self.detail_panel.clear()
         finally:
             self._set_loading(False)
+            self._restore_scroll_after_layout(
+                scroll, focus_mod_id=selected_mid
+            )
+
+    def _capture_scroll(self) -> int:
+        return int(self.scroll.verticalScrollBar().value())
+
+    def _set_scroll_value(self, value: int) -> None:
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(max(0, min(int(value), bar.maximum())))
+
+    def _restore_scroll_after_layout(
+        self,
+        value: int,
+        *,
+        focus_mod_id: str = "",
+    ) -> None:
+        """Restore scrollbar after FlowLayout rebuild (next event-loop tick)."""
+
+        def _apply() -> None:
+            mid = str(focus_mod_id or "").strip()
+            if mid:
+                for _index, card in self._card_entries:
+                    if card._mod_id() == mid and not card.isHidden():
+                        self.scroll.ensureWidgetVisible(card, 16, 16)
+                        return
+            self._set_scroll_value(value)
+
+        QTimer.singleShot(0, _apply)
 
     def get_current_game_context(self) -> dict[str, int | str] | None:
         """
@@ -916,19 +949,22 @@ class ModLibraryView(QWidget):
         mid = self._deploy_mod_id or str(data.get("mod_id") or "")
         self.detail_panel.apply_deploy_result(data)
         # Status stays in DetailPanel — no modal dialogs.
-        self._refresh_mod_ui(mid)
+        focus = mid if data.get("success") else ""
+        self._refresh_mod_ui(mid, focus_mod_id=focus)
 
     def _on_deploy_failed(self, error: str) -> None:
         self.detail_panel.apply_deploy_failure(error)
         self._refresh_mod_ui(self._deploy_mod_id or "")
+
     def _on_deploy_thread_finished(self) -> None:
         self._deploy_worker = None
         self._deploy_mod_id = None
 
-    def _refresh_mod_ui(self, mod_id: str) -> None:
+    def _refresh_mod_ui(self, mod_id: str, *, focus_mod_id: str = "") -> None:
         """Update only the matching card + detail panel (no library.refresh)."""
         if not mod_id:
             return
+        scroll = self._capture_scroll()
         for i, (index, card) in enumerate(self._card_entries):
             if card._mod_id() != str(mod_id):
                 continue
@@ -958,7 +994,14 @@ class ModLibraryView(QWidget):
                 if not self.detail_panel._deploy_busy:
                     self._sync_peer_mods_to_panel(exclude=card._mod_id())
                     self.detail_panel.show_mod(card.managed_path)
+            self._restore_scroll_after_layout(
+                scroll, focus_mod_id=focus_mod_id or ""
+            )
             break
+        else:
+            self._restore_scroll_after_layout(
+                scroll, focus_mod_id=focus_mod_id or ""
+            )
 
     # ------------------------------------------------------------------
     # Game list / cards
