@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from core.models import ModMetadata
 from core.sanitize import sanitize_folder_name
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
-from services.importers.image_scanner import install_cover_from_source
+from services.importers.image_picker import apply_cover_to_mod
 from services.importers.importer_base import (
     MISSING_GAME_CONTEXT,
     ImportContext,
@@ -75,20 +74,26 @@ def materialize_imported_mod(
     title: str,
     game_name: str = "",
     source_folder: str | Path | None = None,
-    cover_flat_roots: Sequence[str | Path] | None = None,
-    cover_search_roots: Sequence[str | Path] | None = None,
+    cover_source: str | Path | None = None,
     context: ImportContext | dict[str, Any] | None = None,
     allow_invalid_game_name: bool = False,
+    copy_ignore: list[Path] | tuple[Path, ...] | None = None,
+    # Deprecated kwargs — ignored (legacy auto cover scan hooks).
+    cover_flat_roots=None,
+    cover_search_roots=None,
 ) -> Path:
     """
     Ensure a filesystem folder exists under the managed library.
 
     - If *source_folder* is a directory → copy into ``<game>/<title>/``
     - Else → create an empty stub folder with ``.info/mod.json`` only
-    - When source exists, install a primary cover into ``.info/preview.*``
+    - Cover images / ``.mhtml`` discovered under the source (or passed via
+      *copy_ignore*) are excluded from the managed copy
+    - If *cover_source* is set → copy into ``.info/cover.<ext>`` and set cover_path
 
     Does not change ``.info`` schema — writes the existing ``mod.json`` shape.
     """
+    del cover_flat_roots, cover_search_roots
     mid = str(mod_id).strip()
     name = (title or "").strip() or f"Unknown_Mod_{mid}"
     game = sanitize_folder_name(
@@ -108,25 +113,91 @@ def materialize_imported_mod(
         title=name,
         game_name=game,
         source_path=str(source_folder) if source_folder else None,
+        cover_path="",
     )
     src = Path(str(source_folder)).expanduser() if source_folder else None
+    ignore_files: list[Path] = list(copy_ignore or ())
+    cover_raw = str(cover_source or "").strip()
+    effective_cover: Path | None = Path(cover_raw).expanduser() if cover_raw else None
+    offline_sidecar: Path | None = None
+
     if src is not None and src.is_dir():
-        dest = mgr.copy_mod(meta, overwrite_existing=False)
+        # Auto-extract cover / mhtml sidecars; never raise when missing.
+        try:
+            from services.importers.directory_batch import extract_directory_sidecars
+
+            sidecars = extract_directory_sidecars(src)
+            for path in sidecars.ignore_paths:
+                ignore_files.append(path)
+            if effective_cover is None and sidecars.cover is not None:
+                effective_cover = sidecars.cover
+            if sidecars.offline_page is not None:
+                offline_sidecar = Path(sidecars.offline_page)
+        except Exception:  # noqa: BLE001
+            pass
+        dest = mgr.copy_mod(
+            meta,
+            overwrite_existing=False,
+            ignore_files=ignore_files or None,
+        )
     else:
         dest = mgr.allocate_destination(meta)
         dest.mkdir(parents=True, exist_ok=True)
     meta.managed_path = str(dest)
     mgr.save_metadata(meta, dest)
 
-    if src is not None and src.is_dir():
-        cover = install_cover_from_source(
-            src,
-            dest,
-            extra_flat_roots=cover_flat_roots,
-            extra_recursive_roots=cover_search_roots,
-        )
-        if cover is not None:
-            meta.cover_path = str(cover)
+    if effective_cover is not None:
+        rel = apply_cover_to_mod(dest, effective_cover, mod_id=mid, update_db=True)
+        meta.cover_path = rel
+        mgr.save_metadata(meta, dest)
+    else:
+        try:
+            from core.db_manager import get_db
+
+            get_db().update_mod_cover_path(mid, "")
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Persist discovered offline page into ``.info/offline/`` and metadata.
+    # Sidecar mhtml is excluded from the Mod tree copy, so this must not be skipped.
+    if offline_sidecar is not None and offline_sidecar.is_file():
+        try:
+            from core.db_manager import get_db
+            from core.mod_platform import (
+                OFFLINE_STATUS_ARCHIVED,
+                PROVIDER_NEXUS_MANUAL_IMPORT,
+            )
+            from services.offline.manual_import import import_offline_snapshot
+            from services.offline.nexus_manual import OFFLINE_SUBDIR
+
+            info_dir = mgr.ensure_info_dir(dest)
+            output_dir = info_dir / OFFLINE_SUBDIR
+            index, _count, _fmt = import_offline_snapshot(
+                offline_sidecar,
+                output_dir,
+                title=name,
+                clean=True,
+            )
+            meta.offline_page_path = str(index)
             mgr.save_metadata(meta, dest)
+            try:
+                get_db().update_mod_offline_status(
+                    mid,
+                    status=OFFLINE_STATUS_ARCHIVED,
+                    provider=PROVIDER_NEXUS_MANUAL_IMPORT,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            # Missing / corrupt offline sidecars must never fail Mod import.
+            pass
+
+    # Portable snapshot for folder-copy reimport.
+    try:
+        from services.info_sidecar import write_sidecar_for_mod
+
+        write_sidecar_for_mod(dest, mid)
+    except Exception:  # noqa: BLE001
+        pass
 
     return dest

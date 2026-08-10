@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
+from typing import Any, Mapping
 
 from core.models import ModMetadata
 from core.sanitize import sanitize_folder_name, unique_destination
@@ -14,24 +16,10 @@ logger = logging.getLogger(__name__)
 
 INFO_DIR_NAME = ".info"
 LEGACY_INFO_DIR_NAME = "info"
-METADATA_FILENAME = "mod.json"
-COVER_BASENAME = "preview"
-
-# Common cover / preview filenames found inside Workshop downloads
-_LOCAL_COVER_CANDIDATES = (
-    "preview.png",
-    "preview.jpg",
-    "preview.jpeg",
-    "preview.webp",
-    "headerimage.png",
-    "headerimage.jpg",
-    "thumb.png",
-    "thumb.jpg",
-    "thumbnail.png",
-    "thumbnail.jpg",
-    "icon.png",
-    "icon.jpg",
-)
+METADATA_FILENAME = "metadata.json"
+LEGACY_METADATA_FILENAME = "mod.json"
+COVER_BASENAME = "cover"
+LEGACY_COVER_BASENAME = "preview"
 
 
 class ModFileManager:
@@ -41,7 +29,7 @@ class ModFileManager:
         <target_root>/
             <Game English Name>/
                 <Mod Title>/
-                    .info/mod.json
+                    .info/metadata.json
                     .info/index.html
                     …
     """
@@ -74,7 +62,16 @@ class ModFileManager:
         return Path(managed_path) / INFO_DIR_NAME
 
     def metadata_path(self, managed_path: Path) -> Path:
-        return self.info_dir(managed_path) / METADATA_FILENAME
+        """Canonical write path: ``.info/metadata.json``."""
+        return self.info_dir_for_write(managed_path) / METADATA_FILENAME
+
+    @staticmethod
+    def _metadata_read_candidates(info_dir: Path) -> list[Path]:
+        """Prefer ``metadata.json``; fall back to legacy ``mod.json``."""
+        return [
+            info_dir / METADATA_FILENAME,
+            info_dir / LEGACY_METADATA_FILENAME,
+        ]
 
     def game_folder_name(self, metadata: ModMetadata) -> str:
         """Sanitized English game folder under the library root."""
@@ -122,7 +119,7 @@ class ModFileManager:
         """
         Rename legacy ``…/<Game>/<digits>/`` folders to real Mod titles.
 
-        Uses ``.info/mod.json`` title first, then SQLite snapshot. Returns
+        Uses ``.info/metadata.json`` title first, then SQLite snapshot. Returns
         list of ``(old_path, new_path)`` renames performed.
         """
         from core.db_manager import get_db
@@ -193,7 +190,7 @@ class ModFileManager:
             try:
                 self.save_metadata(meta, target)
             except OSError as exc:
-                logger.warning("Renamed but failed to update mod.json: %s", exc)
+                logger.warning("Renamed but failed to update metadata.json: %s", exc)
 
             logger.info("Renamed numeric mod folder: %s -> %s", folder.name, target.name)
             renames.append((folder, target))
@@ -227,12 +224,14 @@ class ModFileManager:
         *,
         overwrite_existing: bool = False,
         destination: Path | None = None,
+        ignore_files: list[Path] | tuple[Path, ...] | None = None,
     ) -> Path:
         """
         Copy the source Mod folder into the target library.
 
-        Returns the managed destination path. Updates
-        ``metadata.managed_path``.
+        *ignore_files* are excluded from the copy (e.g. cover images / ``.mhtml``
+        that belong in ``.info`` only). Returns the managed destination path.
+        Updates ``metadata.managed_path``.
         """
         if not metadata.source_path:
             raise ValueError(
@@ -253,7 +252,29 @@ class ModFileManager:
             shutil.rmtree(dest)
 
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, dest)
+        ignore_resolved: set[Path] = set()
+        for raw in ignore_files or ():
+            try:
+                ignore_resolved.add(Path(raw).resolve())
+            except OSError:
+                ignore_resolved.add(Path(raw))
+
+        def _ignore(directory: str, names: list[str]) -> set[str]:
+            if not ignore_resolved:
+                return set()
+            base = Path(directory)
+            skipped: set[str] = set()
+            for name in names:
+                candidate = base / name
+                try:
+                    resolved = candidate.resolve()
+                except OSError:
+                    resolved = candidate
+                if resolved in ignore_resolved:
+                    skipped.add(name)
+            return skipped
+
+        shutil.copytree(source, dest, ignore=_ignore if ignore_resolved else None)
         metadata.managed_path = str(dest)
         logger.info(
             "Copied mod %s -> %s",
@@ -268,75 +289,63 @@ class ModFileManager:
         return info
 
     def save_metadata(self, metadata: ModMetadata, managed_path: Path | None = None) -> Path:
-        """Write ``.info/mod.json`` next to the managed Mod."""
+        """Write unified ``.info/metadata.json`` and remove legacy ``mod.json``."""
         path = Path(managed_path or metadata.managed_path or "")
         if not path:
             raise ValueError("managed_path is required to save metadata")
 
+        existing = read_info_metadata_dict(path) or {}
         info = self.ensure_info_dir(path)
-        meta_file = info / METADATA_FILENAME
-        payload = metadata.to_dict()
-        meta_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return meta_file
+        payload = _build_unified_payload(metadata)
+        merged = dict(existing)
+        for key, value in payload.items():
+            if key == "file_roles":
+                if value:
+                    merged["file_roles"] = value
+                continue
+            if value in (None, "", {}, []):
+                continue
+            merged[key] = value
+        return _write_unified_metadata(info, merged)
 
     def load_metadata(self, managed_path: Path) -> ModMetadata | None:
-        meta_file = self.metadata_path(managed_path)
-        if not meta_file.is_file():
+        data = read_info_metadata_dict(managed_path)
+        if not data:
             return None
-        try:
-            data = json.loads(meta_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to read metadata %s: %s", meta_file, exc)
-            return None
-        return _metadata_from_dict(data, managed_path)
+        meta = _metadata_from_dict(data, managed_path)
+        _backfill_mod_runtime_paths(meta, managed_path)
+        return meta
 
     def find_local_cover(self, managed_path: Path) -> Path | None:
-        """Search the managed Mod tree for a likely cover / preview image."""
+        """
+        Resolve an installed cover under ``.info/`` only.
+
+        Does **not** scan Mod package images (icon / screenshot / texture).
+        Looks for ``cover.*`` then legacy ``preview.*``.
+        """
         root = Path(managed_path)
         info = self.info_dir(root)
 
-        for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-            candidate = info / f"{COVER_BASENAME}{ext}"
-            if candidate.is_file():
-                return candidate
-
-        for name in _LOCAL_COVER_CANDIDATES:
-            direct = root / name
-            if direct.is_file():
-                return direct
-
-        try:
-            for child in root.iterdir():
-                if child.is_file() and child.name.lower() in {
-                    n.lower() for n in _LOCAL_COVER_CANDIDATES
-                }:
-                    return child
-                if not child.is_dir() or child.name in {
-                    INFO_DIR_NAME,
-                    LEGACY_INFO_DIR_NAME,
-                }:
-                    continue
-                for nested in child.iterdir():
-                    if nested.is_file() and nested.name.lower() in {
-                        n.lower() for n in _LOCAL_COVER_CANDIDATES
-                    }:
-                        return nested
-        except PermissionError:
-            return None
+        for basename in (COVER_BASENAME, LEGACY_COVER_BASENAME):
+            for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                candidate = info / f"{basename}{ext}"
+                if candidate.is_file():
+                    return candidate
         return None
 
     def list_games(self) -> list[str]:
         """Sorted game folder names under the library root (excludes legacy flat mods)."""
         if not self.target_root.is_dir():
             return []
+        from services.importers.importer_base import is_invalid_game_name
+
         names: list[str] = []
         for p in self.target_root.iterdir():
             if not p.is_dir():
                 continue
             if self._is_legacy_flat_mod(p):
+                continue
+            if is_invalid_game_name(p.name):
                 continue
             names.append(p.name)
         return sorted(names, key=str.lower)
@@ -368,7 +377,7 @@ class ModFileManager:
         return mods
 
     def find_by_published_id(self, published_file_id: str) -> Path | None:
-        """Locate an already-managed Mod by ID stored in ``.info/mod.json``."""
+        """Locate an already-managed Mod by ID stored in ``.info/metadata.json``."""
         for folder in self.list_managed_mods():
             meta = self.load_metadata(folder)
             if meta and meta.published_file_id == str(published_file_id):
@@ -404,17 +413,151 @@ class ModFileManager:
     @staticmethod
     def _is_legacy_flat_mod(path: Path) -> bool:
         """True when a library-root child is itself a mod (old flat layout)."""
-        return (
-            (path / INFO_DIR_NAME / METADATA_FILENAME).is_file()
-            or (path / LEGACY_INFO_DIR_NAME / METADATA_FILENAME).is_file()
-        )
+        for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
+            info = path / info_name
+            if (info / METADATA_FILENAME).is_file():
+                return True
+            if (info / LEGACY_METADATA_FILENAME).is_file():
+                return True
+        return False
 
 
+def read_info_metadata_dict(managed_path: str | Path) -> dict[str, Any] | None:
+    """
+    Read ``.info/metadata.json``; fall back to legacy ``mod.json``.
+
+    Returns the parsed dict or ``None``.
+    """
+    root = Path(managed_path)
+    modern = root / INFO_DIR_NAME
+    legacy = root / LEGACY_INFO_DIR_NAME
+    info = modern if modern.is_dir() else (legacy if legacy.is_dir() else modern)
+    for candidate in ModFileManager._metadata_read_candidates(info):
+        if not candidate.is_file():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to read metadata %s: %s", candidate, exc)
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _remove_legacy_mod_json(info_dir: Path) -> None:
+    legacy = info_dir / LEGACY_METADATA_FILENAME
+    if legacy.is_file():
+        try:
+            os.remove(legacy)
+        except OSError as exc:
+            logger.warning("Failed to remove legacy mod.json %s: %s", legacy, exc)
+
+
+def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
+    info_dir.mkdir(parents=True, exist_ok=True)
+    meta_file = info_dir / METADATA_FILENAME
+    meta_file.write_text(
+        json.dumps(dict(payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    _remove_legacy_mod_json(info_dir)
+    return meta_file
+
+
+def _backfill_mod_runtime_paths(metadata: ModMetadata, managed_path: Path) -> None:
+    """Restore filesystem paths that are never authoritative in ``metadata.json``."""
+    path_str = str(Path(managed_path).expanduser().resolve())
+    metadata.managed_path = path_str
+    metadata.local_path = path_str
+
+
+def _read_metadata_url(data: Mapping[str, Any]) -> str:
+    return str(
+        data.get("url")
+        or data.get("source_url")
+        or data.get("website")
+        or ""
+    ).strip()
+
+
+def _read_metadata_offline_page(data: Mapping[str, Any]) -> str:
+    return str(
+        data.get("offline_page_path")
+        or data.get("offline_page")
+        or ""
+    ).strip()
+
+
+def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
+    """Merge ModMetadata with optional DB snapshot fields for portable sidecar."""
+    payload: dict[str, Any] = dict(metadata.to_dict())
+    url = str(getattr(metadata, "url", "") or "").strip()
+    offline = _read_metadata_offline_page(payload) or str(
+        metadata.offline_page_path or ""
+    ).strip()
+    if url:
+        payload["url"] = url
+    if offline:
+        payload["offline_page_path"] = offline
+        payload["offline_page"] = offline
+    mid = str(metadata.published_file_id or "").strip()
+    if mid.isdigit():
+        try:
+            from core.db_manager import get_db
+            from services.info_sidecar import build_sidecar_from_db
+
+            sidecar = build_sidecar_from_db(
+                mid,
+                metadata.managed_path,
+                db=get_db(),
+            )
+            extra = sidecar.to_dict()
+            for key, value in extra.items():
+                if key == "file_roles":
+                    if value:
+                        payload["file_roles"] = value
+                    continue
+                if key in ("url", "offline_page_path", "offline_page"):
+                    continue
+                if value not in (None, "", {}, []):
+                    payload[key] = value
+            if sidecar.url and not url:
+                payload["url"] = sidecar.url
+            sidecar_offline = str(sidecar.offline_page_path or "").strip()
+            if sidecar_offline and not offline:
+                payload["offline_page_path"] = sidecar_offline
+                payload["offline_page"] = sidecar_offline
+            if sidecar.display_name and not str(payload.get("title") or "").strip():
+                payload["title"] = sidecar.display_name
+            if sidecar.description and not str(payload.get("description") or "").strip():
+                payload["description"] = sidecar.description
+        except Exception:  # noqa: BLE001
+            pass
+    return payload
+
+
+def persist_unified_metadata_dict(
+    managed_path: str | Path,
+    payload: Mapping[str, Any],
+) -> Path:
+    """Write ``metadata.json`` at *managed_path* and delete legacy ``mod.json``."""
+    root = Path(managed_path)
+    info = root / INFO_DIR_NAME
+    return _write_unified_metadata(info, payload)
 def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
-    return ModMetadata(
+    from core.mod_platform import parse_metadata_platform
+
+    path_str = str(Path(managed_path).expanduser().resolve())
+    title = str(data.get("title") or data.get("display_name") or "")
+    description = str(
+        data.get("description") or data.get("custom_description") or ""
+    )
+    offline = _read_metadata_offline_page(data)
+    meta = ModMetadata(
         published_file_id=str(data.get("published_file_id", "")),
-        title=str(data.get("title") or ""),
-        description=str(data.get("description") or ""),
+        title=title,
+        description=description,
         preview_url=str(data.get("preview_url") or ""),
         file_size=int(data.get("file_size") or 0),
         time_created=int(data.get("time_created") or 0),
@@ -424,9 +567,13 @@ def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
         game_name=str(data.get("game_name") or ""),
         tags=list(data.get("tags") or []),
         source_path=data.get("source_path"),
-        managed_path=str(managed_path),
+        managed_path=path_str,
+        local_path=path_str,
+        url=_read_metadata_url(data),
         cover_path=data.get("cover_path"),
-        offline_page_path=data.get("offline_page_path"),
+        offline_page_path=offline or None,
         fetch_error=data.get("fetch_error"),
         custom_notes=str(data.get("custom_notes") or ""),
+        source_type=parse_metadata_platform(data),
     )
+    return meta

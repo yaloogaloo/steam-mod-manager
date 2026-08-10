@@ -8,7 +8,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from core.db_manager import DatabaseManager, get_db
+from core.db_manager import (
+    RELATIONSHIP_CONFLICT,
+    DatabaseManager,
+    get_db,
+)
 from core.mod_status import (
     CONFLICT_STATUS_CONFLICT,
     CONFLICT_STATUS_NONE,
@@ -32,6 +36,7 @@ def _norm(path: str | Path) -> str:
 class ConflictType(str, Enum):
     FILE_OVERWRITE = "FILE_OVERWRITE"
     PAK_OVERLAP = "PAK_OVERLAP"
+    RELATIONSHIP = "RELATIONSHIP"
     UNKNOWN = "UNKNOWN"
 
 
@@ -178,13 +183,49 @@ class ConflictDetector:
                     continue
                 existing.append(entry)
 
+        # Type 3 — user-declared conflict relationships (warn / conflict note)
+        try:
+            with self._database()._lock:
+                rel_rows = self._database()._conn.execute(
+                    """
+                    SELECT source_mod_id, target_mod_id
+                    FROM mod_relationships
+                    WHERE relationship_type = ?
+                    """,
+                    (RELATIONSHIP_CONFLICT,),
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            rel_rows = []
+        for row in rel_rows:
+            src = str(row["source_mod_id"])
+            tgt = str(row["target_mod_id"])
+            if not self._is_enabled(src):
+                continue
+            entry = ConflictEntry(
+                file=f"relationship:{src}->{tgt}",
+                mods=[src, tgt],
+                conflict_type=ConflictType.RELATIONSHIP.value,
+            )
+            all_manifest_mods.add(src)
+            existing = per_mod.setdefault(src, [])
+            if not any(
+                e.conflict_type == ConflictType.RELATIONSHIP.value
+                and e.file == entry.file
+                for e in existing
+            ):
+                existing.append(entry)
+
         reports: dict[str, ConflictReport] = {}
         for mid in sorted(all_manifest_mods):
             conflicts = per_mod.get(mid) or []
             hard = [
                 c
                 for c in conflicts
-                if c.conflict_type == ConflictType.FILE_OVERWRITE.value
+                if c.conflict_type
+                in (
+                    ConflictType.FILE_OVERWRITE.value,
+                    ConflictType.RELATIONSHIP.value,
+                )
             ]
             soft = [
                 c

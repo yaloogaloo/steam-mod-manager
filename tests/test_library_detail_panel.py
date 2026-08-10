@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from ui.library_view import ModLibraryView
-from ui.mod_detail_panel import MODE_EDIT, MODE_EMPTY, MODE_VIEW
+from ui.mod_detail_panel import MODE_EMPTY, MODE_VIEW
 
 
 @pytest.fixture(scope="module")
@@ -86,8 +86,12 @@ def test_click_card_shows_detail_panel_no_dialog(
 
 
 def test_edit_save_updates_card_without_rescan(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
+    from PySide6.QtWidgets import QDialog
+
+    from ui.edit_mod_dialog import EditModDialog
+
     lib = tmp_path / "library"
     folder = _seed_mod(lib, pub_id="92003", title="Editable")
     db.upsert_mod(ModMetadata(published_file_id="92003", title="Editable"))
@@ -98,16 +102,20 @@ def test_edit_save_updates_card_without_rescan(
     view.on_mod_selected(folder)
 
     panel = view.detail_panel
+
+    def _accept(self: EditModDialog) -> int:
+        self.display_name_edit.setText("NewNick")
+        return int(QDialog.DialogCode.Accepted)
+
+    monkeypatch.setattr(EditModDialog, "exec", _accept)
     panel.enter_edit()
-    assert panel._mode == MODE_EDIT
-    panel.edit_display_name.setText("NewNick")
-    panel._save_edit()
 
     assert panel._mode == MODE_VIEW
     assert "NewNick" in panel.view_title.text()
     card = view._card_for_path(folder)
     assert card is not None
     assert "NewNick" in card.title_label.text()
+    assert folder.name == "Editable"
 
     info = db.get_mod_display_info(92003)
     assert info is not None

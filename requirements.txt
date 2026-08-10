@@ -5,3 +5,9 @@ beautifulsoup4>=4.12.0
 # Preferred HTML parser for OfflinePageArchiver / scraper (falls back to html.parser)
 lxml>=5.0.0
 pywebcopy>=7.0.2
+# Nexus/GitHub offline snapshot fallback (Cloudflare / JS challenge)
+playwright>=1.40.0
+# Nexus .7z extract fallback when system 7-Zip is absent
+py7zr>=0.21.0
+# Nexus .rar extract fallback (uses UnRAR/7z backends when present)
+rarfile>=4.2

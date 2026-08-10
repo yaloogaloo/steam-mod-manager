@@ -7,8 +7,8 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QPixmap, QPainter, QColor, QFont
+from PySide6.QtCore import Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -262,12 +263,28 @@ class ModDetailDialog(QDialog):
             self.setWindowTitle(f"Mod 详情 — {dialog.saved_info.display_name}")
             self._populate(refresh_offline=False)
 
-    def _index_path(self) -> Path:
-        return self.files.ensure_info_dir(self.managed_path) / DEFAULT_INDEX_NAME
+    def _index_path(self) -> Path | None:
+        raw = str(getattr(self.metadata, "offline_page_path", None) or "").strip()
+        if raw:
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                path = self.managed_path / path
+            try:
+                if path.is_file() and path.stat().st_size > 0:
+                    return path.resolve()
+            except OSError:
+                pass
+        index = self.files.ensure_info_dir(self.managed_path) / DEFAULT_INDEX_NAME
+        try:
+            if index.is_file() and index.stat().st_size > 0:
+                return index.resolve()
+        except OSError:
+            pass
+        return None
 
     def _show_cached_offline_state(self) -> None:
         index = self._index_path()
-        if index.is_file() and index.stat().st_size > 0:
+        if index is not None:
             self.metadata.offline_page_path = str(index)
             if is_stub_offline_page(index):
                 if is_archive_cooldown_active(index.parent):
@@ -338,24 +355,40 @@ class ModDetailDialog(QDialog):
         self.cover_label.setPixmap(_placeholder(COVER_W, COVER_H))
 
     def _open_offline(self) -> None:
-        # Open whatever is on disk — do not wait for Steam on the UI thread.
+        # Strict guards — never hand an empty / missing path to the OS browser.
+        raw = str(getattr(self.metadata, "offline_page_path", None) or "").strip()
         index = self._index_path()
-        if not index.is_file() or index.stat().st_size <= 0:
-            QMessageBox.information(
-                self,
-                "离线页面",
-                "离线页面尚未生成，请稍候后台更新完成后再试。",
-            )
+        if index is None or not str(index).strip():
+            tip = "未找到离线页面文件"
+            btn = getattr(self, "btn_offline", None)
+            if btn is not None:
+                QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
             self._start_offline_refresh_if_needed()
             return
-        if is_stub_offline_page(index):
+        try:
+            abs_path = str(Path(index).resolve())
+        except OSError:
+            abs_path = ""
+        if not abs_path or not Path(abs_path).exists():
+            tip = "未找到离线页面文件"
+            btn = getattr(self, "btn_offline", None)
+            if btn is not None:
+                QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
+            if not raw:
+                self._start_offline_refresh_if_needed()
+            return
+        if is_stub_offline_page(abs_path):
             QMessageBox.information(
                 self,
                 "离线页面",
                 "离线页面暂不可用，稍后自动重试。\n仍可打开当前占位页查看错误信息。",
             )
-        if not webbrowser.open(index.resolve().as_uri()):
-            QMessageBox.warning(self, "打开失败", f"无法打开：\n{index}")
+        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
+        if not ok:
+            tip = "未找到离线页面文件"
+            btn = getattr(self, "btn_offline", None)
+            if btn is not None:
+                QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
 
     def _open_folder(self) -> None:
         folder = self.managed_path.resolve()

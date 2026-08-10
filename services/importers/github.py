@@ -13,8 +13,8 @@ from services.importers.importer_base import (
     ModImporter,
     require_import_context,
 )
-from services.importers.local_scanner import scan_mod_directory
 from services.importers.materialize import materialize_imported_mod
+from services.importers.source_files import build_github_mod_files
 
 
 class GithubImporter(ModImporter):
@@ -54,19 +54,6 @@ class GithubImporter(ModImporter):
             return required
         ctx = required
 
-        url = str(github_url or "").strip()
-        if not url:
-            return ImportResult(
-                success=False, error="缺少 GitHub URL", platform=self.platform
-            )
-        repo = self.parse_repo(url)
-        if not repo or "/" not in repo:
-            return ImportResult(
-                success=False,
-                error=f"无法解析仓库：{github_url}",
-                platform=self.platform,
-            )
-
         folder = Path(str(source_folder or "")).expanduser()
         if not str(source_folder or "").strip() or not folder.is_dir():
             return ImportResult(
@@ -75,24 +62,54 @@ class GithubImporter(ModImporter):
                 platform=self.platform,
             )
 
+        is_batch = bool(_kwargs.get("is_batch_mode"))
+        suffix = str(_kwargs.get("external_id_suffix") or "").strip()
+        url = str(github_url or "").strip()
+
+        # Single-mod imports still require a GitHub URL (absolute red line).
+        # Batch mode may leave the link empty and use a local placeholder id.
+        if not url:
+            if not (is_batch or suffix):
+                return ImportResult(
+                    success=False, error="缺少 GitHub URL", platform=self.platform
+                )
+            local_key = suffix or folder.name
+            external_id = f"local/{local_key}"
+            name = (title or "").strip() or local_key
+            canonical = ""
+        else:
+            repo = self.parse_repo(url)
+            if not repo or "/" not in repo:
+                return ImportResult(
+                    success=False,
+                    error=f"无法解析仓库：{github_url}",
+                    platform=self.platform,
+                )
+            external_id = f"{repo}#{suffix}" if suffix else repo
+            name = (title or "").strip() or (
+                suffix if suffix else repo.split("/")[-1]
+            )
+            canonical = url if url.startswith("http") else f"https://github.com/{repo}"
+
         db = self._database()
-        existing = db.find_mod_by_external(PLATFORM_GITHUB, repo)
+        existing = db.find_mod_by_external(PLATFORM_GITHUB, external_id)
         if existing is not None:
             return ImportResult(
                 success=False,
                 error="该Mod已经存在",
                 platform=self.platform,
-                external_id=repo,
+                external_id=external_id,
                 mod_id=existing.mod_id,
                 source_url=existing.source_url,
             )
 
-        bundle = scan_mod_directory(folder)
-        name = (title or "").strip() or repo.split("/")[-1]
-        canonical = url if url.startswith("http") else f"https://github.com/{repo}"
+        bundle = build_github_mod_files(
+            folder,
+            file_entries=_kwargs.get("file_entries"),
+        )
         info = db.register_external_mod(
             platform=PLATFORM_GITHUB,
-            external_id=repo,
+            external_id=external_id,
             source_url=canonical,
             title=name,
             app_id=ctx.game_id,
@@ -108,8 +125,7 @@ class GithubImporter(ModImporter):
                 title=name,
                 game_name=ctx.game_name,
                 source_folder=folder,
-                cover_flat_roots=_kwargs.get("cover_flat_roots"),
-                cover_search_roots=_kwargs.get("cover_search_roots"),
+                cover_source=_kwargs.get("cover_source") or _kwargs.get("cover_path"),
                 context=ctx,
             )
             managed = str(dest)
@@ -118,7 +134,7 @@ class GithubImporter(ModImporter):
             success=True,
             mod_id=info.mod_id,
             platform=PLATFORM_GITHUB,
-            external_id=repo,
+            external_id=external_id,
             source_url=canonical,
             title=info.display_name,
             display=info,

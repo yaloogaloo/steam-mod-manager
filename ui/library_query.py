@@ -96,7 +96,7 @@ class ModFilterIndex:
 
 
 def offline_page_exists(managed_path: Path) -> bool:
-    """True when offline ``index.html`` exists — ``is_file`` only (no content read)."""
+    """True when an offline page file exists — ``is_file`` only (no content read)."""
     root = Path(managed_path)
     for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
         for relative in (
@@ -109,6 +109,15 @@ def offline_page_exists(managed_path: Path) -> bool:
                     return True
             except OSError:
                 continue
+        info_dir = root / info_name
+        try:
+            if info_dir.is_dir():
+                for path in info_dir.iterdir():
+                    if path.suffix.lower() in {".mhtml", ".mht", ".html", ".htm"}:
+                        if path.is_file():
+                            return True
+        except OSError:
+            continue
     return False
 
 
@@ -175,13 +184,14 @@ def matches_platform_filter(index: ModFilterIndex, platform_key: str) -> bool:
     key = platform_key or FILTER_PLATFORM_ALL
     if key in (FILTER_ALL, FILTER_PLATFORM_ALL, ""):
         return True
-    if key == FILTER_PLATFORM_STEAM:
-        return normalize_platform(index.platform) == PLATFORM_STEAM
-    if key == FILTER_PLATFORM_NEXUS:
-        return normalize_platform(index.platform) == PLATFORM_NEXUS
-    if key == FILTER_PLATFORM_GITHUB:
-        return normalize_platform(index.platform) == PLATFORM_GITHUB
-    return True
+    legacy = {
+        FILTER_PLATFORM_STEAM: PLATFORM_STEAM,
+        FILTER_PLATFORM_NEXUS: PLATFORM_NEXUS,
+        FILTER_PLATFORM_GITHUB: PLATFORM_GITHUB,
+    }
+    if key in legacy:
+        return normalize_platform(index.platform) == legacy[key]
+    return normalize_platform(index.platform) == normalize_platform(key)
 
 
 def matches_category_filter(index: ModFilterIndex, category_key: str) -> bool:

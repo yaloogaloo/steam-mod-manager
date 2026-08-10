@@ -169,6 +169,7 @@ def launch_gui() -> int:
 
     from core.db_manager import get_db
     from ui.main_window import MainWindow
+    from ui.styles import APP_STYLE, apply_dark_palette
 
     # Ensure SQLite schema exists before any sync / UI lookup
     get_db()
@@ -177,6 +178,9 @@ def launch_gui() -> int:
     app.setOrganizationName("SteamModManager")
     app.setApplicationName("WorkshopLibrary")
     app.setStyle("Fusion")
+    apply_dark_palette(app)
+    # App-level sheet so top-level popups (QMenu / QToolTip / combo lists) inherit dark tokens.
+    app.setStyleSheet(APP_STYLE)
 
     window = MainWindow()
     window.show()

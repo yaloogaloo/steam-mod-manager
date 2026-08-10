@@ -44,6 +44,18 @@ class DeployContext:
     # When set, only these relative paths (posix) may be deployed.
     # None = legacy behaviour (entire Mod folder / strategy scan).
     allowed_rel_paths: frozenset[str] | None = None
+    # Managed library folder (manifest + deploy target name). Defaults to source.
+    managed_path: Path | None = None
+    # Non-empty → CustomPathStrategy wins over game-level rules.
+    custom_deploy_path: str = ""
+
+    def content_root(self) -> Path:
+        """Directory whose files are copied (may be an extract staging folder)."""
+        return Path(self.source)
+
+    def library_folder(self) -> Path:
+        """Original managed Mod folder under the library."""
+        return Path(self.managed_path) if self.managed_path is not None else Path(self.source)
 
 
 @dataclass

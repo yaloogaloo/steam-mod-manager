@@ -79,6 +79,7 @@ def test_context_menu_parent_is_card(qapp: QApplication, tmp_path: Path) -> None
         "打开目录",
         "打开 Steam 页面",
         "收藏",
+        "设置分类",
     ]
     menu.deleteLater()
     qapp.processEvents()

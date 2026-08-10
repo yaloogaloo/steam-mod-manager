@@ -23,7 +23,6 @@ from .sync_view import SyncCenterView
 
 ORG_NAME = "SteamModManager"
 APP_NAME = "WorkshopLibrary"
-SETTING_WORKSHOP = "paths/workshop_dir"
 SETTING_TARGET = "paths/target_dir"
 SETTING_GEOMETRY = "ui/geometry"
 SETTING_GAME_FILTER = "ui/game_filter"
@@ -107,13 +106,16 @@ class MainWindow(QMainWindow):
             self.library_view.refresh()
         elif row == PAGE_DEPLOY:
             self.deploy_view.refresh()
+        elif row == PAGE_SYNC:
+            self.sync_view.refresh_games()
         self.settings.setValue(SETTING_PAGE, row)
 
     def _goto_page(self, index: int) -> None:
         self.nav_list.setCurrentRow(index)
 
     def _on_paths_changed(self, workshop: str, target: str) -> None:
-        self.settings.setValue(SETTING_WORKSHOP, workshop)
+        # Workshop path is per-game in SQLite; only persist the shared library root.
+        del workshop
         self.settings.setValue(SETTING_TARGET, target)
         self.library_view.set_target_root(target)
 
@@ -129,9 +131,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _restore_settings(self) -> None:
-        workshop = self.settings.value(SETTING_WORKSHOP, "", str)
+        # Legacy global workshop path is no longer the source of truth.
         target = self.settings.value(SETTING_TARGET, "", str) or str(default_mod_library())
-        self.sync_view.set_paths(workshop, target)
+        self.sync_view.set_paths("", target)
         self.library_view.set_target_root(target)
 
         saved_filter = self.settings.value(SETTING_GAME_FILTER, ALL_GAMES_LABEL, str)
@@ -144,6 +146,8 @@ class MainWindow(QMainWindow):
             self.library_view.refresh()
         elif page == PAGE_DEPLOY:
             self.deploy_view.refresh()
+        elif page == PAGE_SYNC:
+            self.sync_view.refresh_games()
 
         geometry = self.settings.value(SETTING_GEOMETRY)
         if geometry is not None:
@@ -160,7 +164,6 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.settings.setValue(SETTING_WORKSHOP, self.sync_view.workshop_path())
         self.settings.setValue(SETTING_TARGET, self.sync_view.target_path())
         self.settings.setValue(SETTING_GEOMETRY, self.saveGeometry())
         self.settings.setValue(SETTING_PAGE, self.stack.currentIndex())

@@ -97,7 +97,7 @@ def test_copy_buttons_and_clipboard(
     assert panel.btn_copy_name.text() == "复制"
     assert panel.btn_copy_id.text() == "复制"
     assert panel.btn_copy_source_url.text() == "复制链接"
-    assert panel.btn_copy_info.text() == "复制全部信息"
+    assert "复制全部信息" in (panel.btn_copy_info.toolTip() or "")
 
     copied: list[str] = []
     real_copy = panel._copy_to_clipboard

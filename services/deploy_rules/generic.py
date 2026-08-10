@@ -64,8 +64,9 @@ class FolderCopyStrategy(DeployStrategy):
             return StrategyResult(success=False, error="请先配置游戏部署目录")
 
         mod_path = Path(mod_path_raw).expanduser()
-        target = (mod_path / ctx.source.name).resolve()
-        source = ctx.source.resolve()
+        folder_name = ctx.library_folder().name
+        target = (mod_path / folder_name).resolve()
+        source = ctx.content_root().resolve()
 
         try:
             if (
@@ -115,7 +116,7 @@ class FolderCopyStrategy(DeployStrategy):
             return StrategyResult(success=False, error=msg)
 
         target = Path(planned.target)
-        source = ctx.source.resolve()
+        source = ctx.content_root().resolve()
 
         # Legacy: full tree copy when no mod_files allow-list.
         # Multi-file Mods: copy only enabled entries.
@@ -157,19 +158,35 @@ class FolderCopyStrategy(DeployStrategy):
                 )
 
         when = _utc_now()
+        # Record every deployed file (whole-tree or selective).
+        manifest_files = _iter_deployable_files(
+            source, allowed_rel_paths=ctx.allowed_rel_paths
+        )
+        entries = [
+            ManifestFileEntry(
+                source=str(src_file),
+                target=str((target / src_file.relative_to(source)).resolve()),
+            )
+            for src_file in manifest_files
+        ]
+        if not entries:
+            return StrategyResult(
+                success=False,
+                error="没有可部署的文件（Mod 目录为空或全部被排除）",
+            )
         manifest = DeployManifest(
             mod_id=ctx.mod_id,
             deploy_time=when,
             deploy_type=self.deploy_type,
-            files=list(planned.files),
+            files=entries,
         )
         return StrategyResult(
             success=True,
             target=str(target),
-            copied_files=len(planned.files),
+            copied_files=len(entries),
             deploy_type=self.deploy_type,
             deploy_time=when,
-            files=list(planned.files),
+            files=entries,
             manifest=manifest,
         )
 

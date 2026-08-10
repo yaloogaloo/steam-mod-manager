@@ -92,7 +92,7 @@ def test_copy_link_and_copy_info_buttons(
     assert panel.btn_copy_link is not None
     assert panel.btn_copy_info is not None
     assert panel.btn_copy_link.text() == "复制链接"
-    assert panel.btn_copy_info.text() == "复制全部信息"
+    assert "复制全部信息" in (panel.btn_copy_info.toolTip() or "")
 
     url = "https://www.nexusmods.com/palworld/mods/336"
     assert panel._current_source_url() == url

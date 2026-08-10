@@ -1,4 +1,4 @@
-"""Mod card layout: fixed bands → identical card heights."""
+"""Mod card layout: cover + title + status strip → identical card heights."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
-from ui.mod_card import ModCardWidget, _elide_to_lines
+from ui.mod_card import OFFLINE_MISSING_LABEL, ModCardWidget, _elide_to_lines
 
 
 @pytest.fixture(scope="module")
@@ -45,6 +45,12 @@ def test_cards_same_height_short_vs_long_display_name(
         display_name="Short",
         user_display_name="",
         favorite=False,
+        platform="steam",
+        source_url="",
+        external_id="1",
+        mod_version="",
+        installed_version="",
+        offline_status="archived",
     )
     long_info = MagicMock(
         steam_name="Original Steam Workshop Title That Is Quite Long",
@@ -54,6 +60,12 @@ def test_cards_same_height_short_vs_long_display_name(
         ),
         user_display_name="用户自定义超长显示名称用于验证两行截断与卡片高度一致再追加更多文字确保超出两行",
         favorite=True,
+        platform="steam",
+        source_url="",
+        external_id="2",
+        mod_version="",
+        installed_version="",
+        offline_status="archived",
     )
 
     def fake_get_info(mod_id: str):
@@ -61,6 +73,11 @@ def test_cards_same_height_short_vs_long_display_name(
 
     db = MagicMock()
     db.get_mod_display_info.side_effect = fake_get_info
+    db.get_mod_deploy_info.return_value = None
+    db.get_mod_status.return_value = None
+    db.is_mod_enabled.return_value = True
+    db.get_mods_tag_flags.return_value = {}
+    db.get_relationship_counts.return_value = {}
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
 
     card_a = ModCardWidget(
@@ -78,13 +95,12 @@ def test_cards_same_height_short_vs_long_display_name(
 
     assert card_a.height() == card_b.height()
     assert card_a.title_label.height() == card_b.title_label.height()
-    assert card_a.steam_label.height() == card_b.steam_label.height()
-    assert card_a.meta_label.height() == card_b.meta_label.height()
-    assert card_a.offline_label.height() == card_b.offline_label.height()
-    # Steam Name row always present (elided + tooltip)
-    assert card_a.steam_label.text().startswith("Steam:")
-    assert card_b.steam_label.text().startswith("Steam:")
-    assert card_a.steam_label.toolTip() == "Short"
+    assert card_a.status_strip.height() == card_b.status_strip.height()
+    # Phase B: no Steam / Workshop ID body labels
+    assert not hasattr(card_a, "steam_label")
+    assert not hasattr(card_a, "meta_label")
+    # Hover panel removed — title tooltip only.
+    assert card_b.toolTip() == long_info.display_name
     assert "…" in card_b.title_label.text() or "..." in card_b.title_label.text() or len(
         card_b.title_label.text()
     ) < len(long_info.display_name)
@@ -106,4 +122,7 @@ def test_offline_missing_keeps_same_height(
     a = ModCardWidget(with_page)
     b = ModCardWidget(without)
     assert a.height() == b.height()
-    assert a.offline_label.height() == b.offline_label.height()
+    assert a.status_strip.height() == b.status_strip.height()
+    assert a.offline_badge.isHidden()
+    assert not b.offline_badge.isHidden()
+    assert b.offline_badge.text() == OFFLINE_MISSING_LABEL

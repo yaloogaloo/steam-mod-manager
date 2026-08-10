@@ -13,8 +13,8 @@ from services.importers.importer_base import (
     ModImporter,
     require_import_context,
 )
-from services.importers.local_scanner import scan_mod_directory
 from services.importers.materialize import materialize_imported_mod
+from services.importers.source_files import build_nexus_mod_files
 
 
 def parse_nexus_id(nexus_url: str = "", nexus_id: str = "") -> str:
@@ -113,7 +113,10 @@ class NexusImporter(ModImporter):
                 source_url=existing.source_url,
             )
 
-        bundle = scan_mod_directory(folder)
+        bundle = build_nexus_mod_files(
+            folder,
+            file_entries=_kwargs.get("file_entries"),
+        )
         info = db.register_external_mod(
             platform=PLATFORM_NEXUS,
             external_id=ext,
@@ -132,8 +135,7 @@ class NexusImporter(ModImporter):
                 title=name,
                 game_name=ctx.game_name,
                 source_folder=folder,
-                cover_flat_roots=_kwargs.get("cover_flat_roots"),
-                cover_search_roots=_kwargs.get("cover_search_roots"),
+                cover_source=_kwargs.get("cover_source") or _kwargs.get("cover_path"),
                 context=ctx,
             )
             managed = str(dest)

@@ -71,7 +71,7 @@ def test_fresh_db_has_deploy_columns(db: DatabaseManager) -> None:
     mod_cols = {
         str(r[1]) for r in db._conn.execute("PRAGMA table_info(mods)").fetchall()
     }
-    assert {"install_path", "mod_path", "deploy_type"} <= game_cols
+    assert {"install_path", "mod_path", "deploy_type", "workshop_path"} <= game_cols
     assert {"deploy_status", "deploy_time", "deploy_path"} <= mod_cols
 
 
@@ -96,6 +96,7 @@ def test_migration_adds_deploy_columns_to_legacy_db(tmp_path: Path) -> None:
     assert "install_path" in game_cols
     assert "mod_path" in game_cols
     assert "deploy_type" in game_cols
+    assert "workshop_path" in game_cols
     assert "deploy_status" in mod_cols
     assert "deploy_time" in mod_cols
     assert "deploy_path" in mod_cols

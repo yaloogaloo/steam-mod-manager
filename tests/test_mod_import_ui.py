@@ -17,7 +17,7 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.game_info import GameInfo
-from services.file_ops import ModFileManager
+from services.file_ops import INFO_DIR_NAME, ModFileManager
 from services.importers import (
     GithubImporter,
     NexusImporter,
@@ -73,6 +73,8 @@ def test_local_scanner_classifies_and_builds_mod_files(tmp_path: Path) -> None:
             "config.ini": b"x=1",
             "plugin.dll": b"MZ",
             "meta.json": b"{}",
+            "main.zip": b"PK",
+            "Optional/extra.7z": b"7z",
         },
     )
     assert classify_file_kind("a.pak") == "pak"
@@ -82,13 +84,14 @@ def test_local_scanner_classifies_and_builds_mod_files(tmp_path: Path) -> None:
     assert classify_file_kind("e.cfg") == "cfg"
     assert classify_file_kind("f.bin") == "other"
 
+    # Archives only — loose pak/json/dll never enter Files list.
     bundle = scan_mod_directory(folder)
-    assert len(bundle.files) >= 4
+    assert {f.filename for f in bundle.files} == {"main.zip", "extra.7z"}
     enabled = [f for f in bundle.files if f.enabled]
     assert len(enabled) == 1
     assert enabled[0].type == "main"
     optionals = [f for f in bundle.files if not f.enabled]
-    assert optionals
+    assert len(optionals) == 1
     # Alias used by older callers
     assert len(scan_folder_to_mod_files(folder).files) == len(bundle.files)
 
@@ -127,8 +130,10 @@ def test_nexus_import_multi_file_and_ui_refresh(
         tmp_path,
         "MyCharacterMod",
         {
+            "Character.zip": b"PK",
+            "Optional/HatAddon.7z": b"7z",
+            # Loose packages ignored by Files list scan.
             "Character.pak": b"A",
-            "Optional/HatAddon.pak": b"B",
         },
     )
     result = NexusImporter(db=db).import_mod(
@@ -145,7 +150,9 @@ def test_nexus_import_multi_file_and_ui_refresh(
     assert result.files_count == 2
     files = db.get_mod_files(result.mod_id).files
     assert sum(1 for f in files if f.enabled) == 1
-    assert any(f.path.endswith("HatAddon.pak") for f in files)
+    assert any(f.path.endswith("HatAddon.7z") for f in files)
+    assert result.managed_path
+    assert (Path(result.managed_path) / INFO_DIR_NAME / "metadata.json").is_file()
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -199,7 +206,7 @@ def test_github_import(
     src = _mod_folder(
         tmp_path,
         "repo",
-        {"mod.pak": b"1", "settings.json": b"{}", "helper.dll": b"x"},
+        {"mod.zip": b"PK", "extra.7z": b"7z", "settings.json": b"{}", "helper.dll": b"x"},
     )
     result = GithubImporter(db=db).import_mod(
         github_url="https://github.com/user/project",

@@ -24,10 +24,14 @@ class ModMetadata:
     source_path: str | None = None
     # Local paths after sync (filled by later steps)
     managed_path: str | None = None
+    local_path: str | None = None  # runtime only — backfilled from disk, not in JSON
+    url: str = ""  # portable source link (JSON key: ``url``)
     cover_path: str | None = None
     offline_page_path: str | None = None
     fetch_error: str | None = None
     custom_notes: str = ""  # user notes stored in .info/mod.json
+    # Mod-level source platform (canonical JSON key: ``source_type``).
+    source_type: str = ""
 
     @property
     def game_display_name(self) -> str:

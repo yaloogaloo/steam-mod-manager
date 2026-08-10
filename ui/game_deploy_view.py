@@ -90,11 +90,11 @@ class GameDeployView(QWidget):
         panel_layout.setSpacing(12)
 
         heading = QLabel("游戏部署设置")
-        heading.setStyleSheet("font-size: 16px; font-weight: 600;")
+        heading.setObjectName("pageTitle")
         panel_layout.addWidget(heading)
 
         hint = QLabel(
-            "为每个游戏配置安装目录与 Mod 部署目录。"
+            "为每个游戏配置安装目录、Mod 部署目录与 Steam 创意工坊目录。"
             "路径保存在数据库中，属于游戏级配置；不会修改 Mod 归档或 .info。"
         )
         hint.setObjectName("subtitleLabel")
@@ -105,7 +105,7 @@ class GameDeployView(QWidget):
         picker_col = QVBoxLayout()
         picker_col.setSpacing(4)
         picker_label = QLabel("选择游戏")
-        picker_label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
+        picker_label.setObjectName("fieldCaption")
         picker_col.addWidget(picker_label)
         picker_row = QHBoxLayout()
         picker_row.setSpacing(8)
@@ -144,6 +144,18 @@ class GameDeployView(QWidget):
             self._path_row("Mod 部署目录", self.mod_path_edit, self._browse_mod_path)
         )
 
+        self.workshop_edit = QLineEdit()
+        self.workshop_edit.setPlaceholderText(
+            r"例如 F:\SteamLibrary\steamapps\workshop\content\1623730（无工坊可留空）"
+        )
+        panel_layout.addLayout(
+            self._path_row(
+                "Steam 创意工坊目录",
+                self.workshop_edit,
+                self._browse_workshop,
+            )
+        )
+
         self.deploy_type_combo = QComboBox()
         self.deploy_type_combo.setObjectName("deployTypeCombo")
         self.deploy_type_combo.addItem("folder_copy（通用复制）", DEPLOY_TYPE_FOLDER_COPY)
@@ -153,7 +165,7 @@ class GameDeployView(QWidget):
         type_col = QVBoxLayout()
         type_col.setSpacing(4)
         type_caption = QLabel("部署类型")
-        type_caption.setStyleSheet("color: #8b9bb0; font-size: 12px;")
+        type_caption.setObjectName("fieldCaption")
         type_col.addWidget(type_caption)
         type_col.addWidget(self.deploy_type_combo)
         panel_layout.addLayout(type_col)
@@ -182,7 +194,7 @@ class GameDeployView(QWidget):
         col = QVBoxLayout()
         col.setSpacing(4)
         label = QLabel(label_text)
-        label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
+        label.setObjectName("fieldCaption")
         col.addWidget(label)
         col.addWidget(edit)
         return col
@@ -191,7 +203,7 @@ class GameDeployView(QWidget):
         col = QVBoxLayout()
         col.setSpacing(4)
         label = QLabel(label_text)
-        label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
+        label.setObjectName("fieldCaption")
         col.addWidget(label)
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -267,6 +279,7 @@ class GameDeployView(QWidget):
         self.app_id_edit.clear()
         self.install_edit.clear()
         self.mod_path_edit.clear()
+        self.workshop_edit.clear()
         self._set_deploy_type(DEPLOY_TYPE_FOLDER_COPY)
         if not keep_status:
             self.status_label.setText("选择游戏或填写 AppID 后保存。")
@@ -278,6 +291,7 @@ class GameDeployView(QWidget):
             self.name_edit.clear()
             self.install_edit.clear()
             self.mod_path_edit.clear()
+            self.workshop_edit.clear()
             self._set_deploy_type(DEPLOY_TYPE_FOLDER_COPY)
             self.status_label.setText(f"AppID {app_id} 尚无部署配置。")
             return
@@ -285,6 +299,7 @@ class GameDeployView(QWidget):
         self.name_edit.setText(cfg.name)
         self.install_edit.setText(cfg.install_path)
         self.mod_path_edit.setText(cfg.mod_path)
+        self.workshop_edit.setText(cfg.workshop_path)
         self._set_deploy_type(cfg.deploy_type or DEPLOY_TYPE_FOLDER_COPY)
         self.status_label.setText(f"已加载 AppID {cfg.app_id} 的部署配置。")
 
@@ -301,6 +316,14 @@ class GameDeployView(QWidget):
         if chosen:
             self.mod_path_edit.setText(chosen)
 
+    def _browse_workshop(self) -> None:
+        start = self.workshop_edit.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(
+            self, "选择 Steam 创意工坊目录", start
+        )
+        if chosen:
+            self.workshop_edit.setText(chosen)
+
     def _parse_app_id(self) -> int | None:
         raw = self.app_id_edit.text().strip()
         if not raw.isdigit() or int(raw) <= 0:
@@ -315,6 +338,7 @@ class GameDeployView(QWidget):
         name = self.name_edit.text().strip()
         install = self.install_edit.text().strip()
         mod_path = self.mod_path_edit.text().strip()
+        workshop_path = self.workshop_edit.text().strip()
         deploy_type = (
             str(self.deploy_type_combo.currentData() or DEPLOY_TYPE_FOLDER_COPY).strip()
             or DEPLOY_TYPE_FOLDER_COPY
@@ -327,6 +351,7 @@ class GameDeployView(QWidget):
                 install_path=install,
                 mod_path=mod_path,
                 deploy_type=deploy_type,
+                workshop_path=workshop_path,
             )
         except ValueError as exc:
             QMessageBox.critical(self, "保存失败", str(exc))

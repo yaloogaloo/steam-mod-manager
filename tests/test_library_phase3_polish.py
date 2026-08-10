@@ -64,10 +64,17 @@ def test_game_list_shows_mod_counts(
     view.set_target_root(str(lib))
     view.refresh()
 
-    texts = [view.game_list.item(i).text() for i in range(view.game_list.count())]
-    assert any(t.startswith(ALL_GAMES_LABEL) and "3" in t for t in texts)
-    assert any("Palworld" in t and "2" in t for t in texts)
-    assert any("OtherGame" in t and "1" in t for t in texts)
+    # Display comes from item widgets (item.text() stays empty to avoid ghost paint)
+    rows = []
+    for i in range(view.game_list.count()):
+        item = view.game_list.item(i)
+        widget = view.game_list.itemWidget(item)
+        assert widget is not None
+        assert item.text() == ""
+        rows.append((widget.name_label.text(), widget.count_label.text()))
+    assert any(n == ALL_GAMES_LABEL and c == "3" for n, c in rows)
+    assert any(n == "Palworld" and c == "2" for n, c in rows)
+    assert any(n == "OtherGame" and c == "1" for n, c in rows)
 
     # Filter key stored separately from display text
     pal = None
@@ -95,7 +102,7 @@ def test_search_box_ui_present_and_editable(
     assert set(view._filter_buttons) >= {"all", "favorite", "deployed", "offline_missing"}
 
 
-def test_card_always_shows_steam_and_status_band(
+def test_card_tooltip_is_simple_title(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from unittest.mock import MagicMock
@@ -107,21 +114,36 @@ def test_card_always_shows_steam_and_status_band(
         display_name="Display",
         user_display_name="Display",
         favorite=False,
+        platform="steam",
+        source_url="",
+        external_id="1",
+        mod_version="",
+        installed_version="",
+        offline_status="none",
     )
     db = MagicMock()
     db.get_mod_display_info.return_value = info
     db.get_mod_deploy_info.return_value = None
+    db.get_mod_status.return_value = None
+    db.is_mod_enabled.return_value = True
+    db.get_mods_tag_flags.return_value = {}
+    db.get_relationship_counts.return_value = {}
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
 
     card = ModCardWidget(
         mod, ModMetadata(published_file_id="1", title="Steam Title Long Enough")
     )
-    assert card.steam_label.text().startswith("Steam:")
-    assert card.steam_label.toolTip() == "Steam Title Long Enough"
-    assert "Workshop ID" in card.meta_label.text()
-    assert card.offline_label.text() == OFFLINE_MISSING_LABEL
+    assert not hasattr(card, "steam_label")
+    assert not hasattr(card, "meta_label")
+    tip = card.toolTip()
+    # Hover panel removed — tooltip is display name only.
+    assert tip == "Display"
+    assert "Platform:" not in tip
+    assert "External ID" not in tip
+    assert not card.offline_badge.isHidden()
+    assert card.offline_badge.text() == OFFLINE_MISSING_LABEL
     assert card.height() == card.minimumHeight()
-    assert "Workshop ID: 1" in card.title_label.toolTip()
+    assert card.title_label.toolTip() == "Display"
 
 
 def test_selecting_mod_does_not_touch_archive(
@@ -182,18 +204,23 @@ def test_detail_panel_sections_and_footer(
     assert panel._mode == MODE_VIEW
     assert panel.view_title.text() == "SectionMod"
     assert panel.view_title.toolTip() == "SectionMod"
-    assert "SectionMod" in panel.view_steam.text()
-    assert "Workshop ID" in panel.view_id_caption.text()
-    assert "93111" in panel.view_id.text()
-    assert "离线" in panel.view_offline.text()
-    # Footer actions stay outside the scroll area
-    assert panel.btn_edit is not None
+    assert "名称：SectionMod" in panel.meta_name_line.text()
+    assert panel.meta_source_line.text().startswith("来源：")
+    # Action strip is independent; Deploy lives in footer
     assert panel.btn_folder is not None
+    assert panel.btn_folder.text() == "打开目录"
+    assert panel.btn_steam.text() == "打开官网"
+    assert panel.btn_offline.text() == "打开离线页面"
     assert panel._view_footer is not None
-    assert panel.btn_edit.parentWidget() is panel._view_footer
+    assert panel.btn_deploy.parentWidget() is panel._view_footer
+    assert panel.btn_folder.parentWidget() is panel._view_footer
+    assert panel.btn_steam.parentWidget() is panel._view_footer
     assert panel._view_footer is not panel._view_scroll
-    assert panel._view_scroll.widget() is not None
-    # Buttons must not live inside the scrolled content
-    scrolled = panel._view_scroll.widget()
-    assert scrolled is not None
-    assert not scrolled.isAncestorOf(panel.btn_edit)
+    assert panel.btn_deploy.text() == "部署"
+    assert panel.btn_remove_mod.isHidden()
+    assert panel.btn_folder.text() == "打开目录"
+    assert "目录" in (panel.btn_folder.toolTip() or "")
+    assert panel.btn_tag_conflict.text() == "冲突"
+    assert panel.btn_tag_invalid.text() == "失效"
+    # Status banner hidden for healthy mods
+    assert panel._status_banner.isHidden()

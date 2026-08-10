@@ -65,16 +65,19 @@ def test_add_remove_toggle(db: DatabaseManager) -> None:
 def test_scan_folder_main_enabled_others_optional(tmp_path: Path) -> None:
     folder = tmp_path / "CharacterA"
     folder.mkdir()
-    (folder / "Main.pak").write_bytes(b"M")
-    (folder / "HatAddon.pak").write_bytes(b"H")
-    (folder / "ClothesAddon.pak").write_bytes(b"C")
+    (folder / "Main.zip").write_bytes(b"PK")
+    (folder / "HatAddon.7z").write_bytes(b"7z")
+    (folder / "ClothesAddon.rar").write_bytes(b"Rar")
+    # Loose packages must NOT enter the Files list.
+    (folder / "loose.pak").write_bytes(b"M")
 
     bundle = scan_folder_to_mod_files(folder)
     assert len(bundle.files) == 3
     mains = [f for f in bundle.files if f.type == FILE_TYPE_MAIN]
     assert len(mains) == 1
     assert mains[0].enabled is True
-    assert mains[0].filename == "Main.pak"
+    assert mains[0].filename == "Main.zip"
     optionals = [f for f in bundle.files if f.type == FILE_TYPE_OPTIONAL]
     assert len(optionals) == 2
     assert all(not f.enabled for f in optionals)
+    assert all(f.filename != "loose.pak" for f in bundle.files)

@@ -1,4 +1,8 @@
-"""Generic webpage snapshot downloader for Nexus / GitHub offline pages."""
+"""Generic webpage snapshot downloader for Nexus / GitHub offline pages.
+
+Nexus Mods must use :class:`~services.offline.layout_snapshot.NexusSnapshotProvider`
+(browser-first). Do not use ``requests`` / ``httpx`` as the primary fetch for Nexus.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +13,20 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
 from urllib.parse import urljoin, urlparse, unquote
 
 import requests
 from bs4 import BeautifulSoup, Tag
+from requests import HTTPError
+
+from services.offline.browser import BrowserSnapshotBackend, BrowserSnapshotError
+from services.offline.layout_snapshot import (
+    LayoutSnapshotProcessor,
+    LayoutSnapshotResult as NexusSnapshotResult,
+    NexusSnapshotProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +35,10 @@ DEFAULT_ASSETS_DIR = "assets"
 DEFAULT_TIMEOUT = 30
 MAX_ASSETS = 200
 MAX_ASSET_BYTES = 12 * 1024 * 1024
+
+# Phase-1 offline assets — skip JavaScript.
+ALLOWED_ASSET_EXTENSIONS = {".css", ".png", ".jpg", ".jpeg", ".webp"}
+BROWSER_FALLBACK_STATUSES = frozenset({401, 403, 429})
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -43,6 +60,20 @@ class SnapshotResult:
     html_path: Path
     asset_count: int
     error: str | None = None
+    used_browser: bool = False
+    backend: str = "http"  # http | browser | layout | fallback
+    used_fallback: bool = False
+
+
+# Re-exported for callers that import Nexus types from this module.
+__all__ = [
+    "ALLOWED_ASSET_EXTENSIONS",
+    "LayoutSnapshotProcessor",
+    "NexusSnapshotProvider",
+    "NexusSnapshotResult",
+    "SnapshotResult",
+    "WebSnapshotDownloader",
+]
 
 
 def _guess_extension(url_path: str, content_type: str = "") -> str:
@@ -67,18 +98,43 @@ def _safe_filename(url: str, content_type: str = "") -> str:
     return f"{digest}{ext}"
 
 
+def _is_allowed_asset(url: str, content_type: str = "") -> bool:
+    """Phase 1: only CSS + png/jpg/jpeg/webp (no .js)."""
+    ext = _guess_extension(urlparse(url).path, content_type)
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+
+    if ext in {".js", ".mjs"}:
+        return False
+    if mime.startswith("application/javascript") or mime.startswith("text/javascript"):
+        return False
+
+    if mime:
+        if mime == "text/css":
+            return True
+        if mime in {"image/png", "image/jpeg", "image/jpg", "image/webp"}:
+            return True
+        return False
+
+    # Pre-download: allow known extensions, or extension-less CDN URLs.
+    if ext in ALLOWED_ASSET_EXTENSIONS:
+        return True
+    if ext in {"", ".bin"}:
+        return True
+    return False
+
+
 class WebSnapshotDownloader:
     """
-    Download a remote HTML page and localize linked CSS / JS / images.
+    Download a remote HTML page and localize linked CSS / images.
 
-    Writes::
+    Prefer :class:`NexusSnapshotProvider` for Nexus Mods (browser-first).
+    This class remains for GitHub / legacy paths.
 
-        output_dir/
-          index.html
-          assets/
-            <hash>.css
-            <hash>.js
-            ...
+    When ``prefer_browser=True``, Playwright runs first (no ``requests`` primary).
+    Otherwise on HTTP 401 / 403 / 429 from ``requests``, falls back to Playwright.
+
+    Phase 1 assets: ``.css`` / ``.png`` / ``.jpg`` / ``.jpeg`` / ``.webp``
+    (JavaScript is not saved).
     """
 
     def __init__(
@@ -88,12 +144,20 @@ class WebSnapshotDownloader:
         timeout: float = DEFAULT_TIMEOUT,
         max_assets: int = MAX_ASSETS,
         headers: dict[str, str] | None = None,
+        browser_backend: BrowserSnapshotBackend | None = None,
+        browser_factory: Callable[[], BrowserSnapshotBackend] | None = None,
+        enable_browser_fallback: bool = True,
+        prefer_browser: bool = False,
     ) -> None:
         self._owns_session = session is None
         self.session = session or requests.Session()
         self.timeout = float(timeout)
         self.max_assets = max(1, int(max_assets))
         self.headers = dict(headers or {"User-Agent": _USER_AGENT})
+        self._browser_backend = browser_backend
+        self._browser_factory = browser_factory
+        self.enable_browser_fallback = bool(enable_browser_fallback)
+        self.prefer_browser = bool(prefer_browser)
 
     def close(self) -> None:
         if self._owns_session:
@@ -108,6 +172,17 @@ class WebSnapshotDownloader:
     def __exit__(self, *exc: Any) -> None:
         self.close()
 
+    def _get_browser(self) -> BrowserSnapshotBackend:
+        if self._browser_backend is not None:
+            return self._browser_backend
+        if self._browser_factory is not None:
+            self._browser_backend = self._browser_factory()
+            return self._browser_backend
+        self._browser_backend = BrowserSnapshotBackend(
+            timeout_ms=int(max(self.timeout, 30) * 1000),
+        )
+        return self._browser_backend
+
     def download(self, url: str, output_dir: Path | str) -> SnapshotResult:
         """Fetch *url* into *output_dir* and rewrite asset references."""
         target = Path(output_dir)
@@ -121,6 +196,7 @@ class WebSnapshotDownloader:
                 error="Empty URL",
             )
 
+        used_browser = False
         try:
             target.mkdir(parents=True, exist_ok=True)
             assets_dir = target / DEFAULT_ASSETS_DIR
@@ -128,21 +204,14 @@ class WebSnapshotDownloader:
                 shutil.rmtree(assets_dir, ignore_errors=True)
             assets_dir.mkdir(parents=True, exist_ok=True)
 
-            response = self.session.get(
-                page_url,
-                headers=self.headers,
-                timeout=self.timeout,
-                allow_redirects=True,
-            )
-            response.raise_for_status()
-            final_url = str(response.url or page_url)
-            html_text = response.text or ""
+            html_text, final_url, used_browser = self._fetch_html(page_url)
             if not html_text.strip():
                 return SnapshotResult(
                     success=False,
                     html_path=index_path,
                     asset_count=0,
                     error="Empty HTML response",
+                    used_browser=used_browser,
                 )
 
             soup = BeautifulSoup(html_text, "html.parser")
@@ -163,6 +232,7 @@ class WebSnapshotDownloader:
                 html_path=index_path,
                 asset_count=asset_count,
                 error=None,
+                used_browser=used_browser,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Snapshot failed for %s: %s", page_url, exc)
@@ -171,7 +241,66 @@ class WebSnapshotDownloader:
                 html_path=index_path,
                 asset_count=0,
                 error=str(exc),
+                used_browser=used_browser,
             )
+
+    def _fetch_html(self, page_url: str) -> tuple[str, str, bool]:
+        """
+        Return ``(html, final_url, used_browser)``.
+
+        When ``prefer_browser`` is set, Playwright runs first (Nexus path).
+        Otherwise tries ``requests`` first; on 401/403/429 falls back to browser.
+        """
+        if self.prefer_browser:
+            logger.info(
+                "[NEXUS_OFFLINE] stage=browser status=start prefer_browser=1 url=%s",
+                page_url,
+            )
+            return self._fetch_html_via_browser(page_url)
+
+        try:
+            response = self.session.get(
+                page_url,
+                headers=self.headers,
+                timeout=self.timeout,
+                allow_redirects=True,
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status in BROWSER_FALLBACK_STATUSES:
+                logger.info(
+                    "HTTP %s for %s — falling back to browser snapshot",
+                    status,
+                    page_url,
+                )
+                return self._fetch_html_via_browser(page_url)
+
+            response.raise_for_status()
+            final_url = str(response.url or page_url)
+            return (response.text or ""), final_url, False
+        except HTTPError as exc:
+            status = int(getattr(getattr(exc, "response", None), "status_code", 0) or 0)
+            if status in BROWSER_FALLBACK_STATUSES and self.enable_browser_fallback:
+                logger.info(
+                    "HTTPError %s for %s — falling back to browser snapshot",
+                    status,
+                    page_url,
+                )
+                return self._fetch_html_via_browser(page_url)
+            raise
+        except BrowserSnapshotError:
+            raise
+        except Exception:
+            # Non-HTTP transport failures: do not auto-browser unless enabled
+            # and caller wants challenge fallback only for 401/403/429.
+            raise
+
+    def _fetch_html_via_browser(self, page_url: str) -> tuple[str, str, bool]:
+        if not self.enable_browser_fallback:
+            raise BrowserSnapshotError(
+                f"Browser fallback disabled; cannot load {page_url}"
+            )
+        html = self._get_browser().capture(page_url)
+        return html, page_url, True
 
     def _rewrite_and_download_assets(
         self,
@@ -182,12 +311,18 @@ class WebSnapshotDownloader:
         seen: dict[str, str] = {}
         downloaded = 0
 
-        # <link href="...">
+        # <link href="..."> — stylesheets / icons that are allowed types
         for link in list(soup.find_all("link")):
             if not isinstance(link, Tag):
                 continue
             href = link.get("href")
             if not href:
+                continue
+            rel = " ".join(link.get("rel") or []).lower()
+            # Prefer stylesheets; still allow image icons if extension matches
+            if "stylesheet" not in rel and not _is_allowed_asset(str(href)):
+                continue
+            if not _is_allowed_asset(str(href), "text/css" if "stylesheet" in rel else ""):
                 continue
             local = self._download_asset(str(href), page_url, assets_dir, seen)
             if local:
@@ -196,19 +331,8 @@ class WebSnapshotDownloader:
             if downloaded >= self.max_assets:
                 return downloaded
 
-        # <script src="...">
-        for script in list(soup.find_all("script")):
-            if not isinstance(script, Tag):
-                continue
-            src = script.get("src")
-            if not src:
-                continue
-            local = self._download_asset(str(src), page_url, assets_dir, seen)
-            if local:
-                script["src"] = local
-                downloaded += 1
-            if downloaded >= self.max_assets:
-                return downloaded
+        # <script src="..."> — phase 1: do not download / rewrite JS
+        # Leave remote src so online viewing still works; offline skips scripts.
 
         # <img src="..."> (+ lazy attrs / srcset first candidate)
         for img in list(soup.find_all("img")):
@@ -226,6 +350,8 @@ class WebSnapshotDownloader:
                     candidates.append(first)
             local: str | None = None
             for raw in candidates:
+                if not _is_allowed_asset(raw):
+                    continue
                 local = self._download_asset(raw, page_url, assets_dir, seen)
                 if local:
                     break
@@ -273,6 +399,8 @@ class WebSnapshotDownloader:
             return None
         if absolute in seen:
             return seen[absolute]
+        if not _is_allowed_asset(absolute):
+            return None
 
         try:
             resp = self.session.get(
@@ -284,7 +412,23 @@ class WebSnapshotDownloader:
             )
             resp.raise_for_status()
             content_type = str(resp.headers.get("Content-Type") or "")
+            if not _is_allowed_asset(absolute, content_type):
+                return None
             filename = _safe_filename(absolute, content_type)
+            # Force allowed extension when MIME is clear but path had .bin
+            ext = Path(filename).suffix.lower()
+            if ext not in ALLOWED_ASSET_EXTENSIONS:
+                if "text/css" in content_type.lower():
+                    filename = f"{Path(filename).stem}.css"
+                elif "image/webp" in content_type.lower():
+                    filename = f"{Path(filename).stem}.webp"
+                elif "image/png" in content_type.lower():
+                    filename = f"{Path(filename).stem}.png"
+                elif "image/jpeg" in content_type.lower() or "image/jpg" in content_type.lower():
+                    filename = f"{Path(filename).stem}.jpg"
+                else:
+                    return None
+
             dest = assets_dir / filename
 
             # Avoid clobber when hash collision with different ext
@@ -352,6 +496,8 @@ class WebSnapshotDownloader:
             quote = match.group(1) or ""
             raw = (match.group(2) or "").strip()
             if not raw or raw.startswith("data:") or raw.startswith("#"):
+                return match.group(0)
+            if not _is_allowed_asset(raw):
                 return match.group(0)
             local = self._download_asset(
                 raw, base_url, assets_dir, seen, rewrite_css=rewrite_css

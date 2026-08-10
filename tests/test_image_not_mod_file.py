@@ -18,6 +18,7 @@ from services.importers.local_scanner import IMAGE_EXTENSIONS, scan_mod_director
 def test_image_not_mod_file(tmp_path: Path) -> None:
     folder = tmp_path / "mod"
     folder.mkdir()
+    (folder / "test.zip").write_bytes(b"PK")
     (folder / "test.pak").write_bytes(b"pak")
     (folder / "thumbnail.webp").write_bytes(b"WEBP")
     (folder / "preview.png").write_bytes(b"PNG")
@@ -25,15 +26,14 @@ def test_image_not_mod_file(tmp_path: Path) -> None:
 
     bundle = scan_mod_directory(folder)
     names = {f.filename for f in bundle.files}
-    assert names == {"test.pak"}
+    assert names == {"test.zip"}
+    assert "test.pak" not in names
     assert "thumbnail.webp" not in names
     assert "preview.png" not in names
     assert "icon.gif" not in names
 
-    # Cover scanner still sees images.
-    cover = find_cover_candidate(folder)
-    assert cover is not None
-    assert cover.suffix.lower() in IMAGE_EXTENSIONS
+    # Auto cover discovery is disabled.
+    assert find_cover_candidate(folder) is None
 
 
 def test_image_extensions_constant() -> None:

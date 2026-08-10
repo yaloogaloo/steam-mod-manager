@@ -14,7 +14,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, urlparse, urlunparse, unquote
 
 from bs4 import BeautifulSoup, FeatureNotFound, Tag
 from curl_cffi import requests as curl_requests
@@ -81,6 +81,22 @@ RATE_LIMIT_USER_MESSAGE = "Steam 当前限流，请稍后重试"
 
 # Per-thread archive context so shared Session workers never mix mod_id logs.
 _archive_tls = threading.local()
+
+
+def normalize_page_url(url: str) -> str:
+    """
+    Normalize a page URL for HTTP fetch.
+
+    Strips the fragment (``#...``) via ``urlparse`` / ``urlunparse`` —
+    fragments are never sent to the server.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, "")
+    )
 
 
 def reset_asset_cache_stats() -> None:
@@ -950,6 +966,80 @@ class OfflinePageArchiver:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def archive_webpage(
+        self,
+        page_url: str,
+        output_dir: str | Path,
+        *,
+        referer: str | None = None,
+    ) -> Path:
+        """
+        Mirror an arbitrary webpage into ``output_dir/index.html`` + ``assets/``.
+
+        Reuses the Steam HTTP stack (curl_cffi + ``impersonate=chrome131``),
+        HTML asset rewrite / download, ``data/asset_cache/``, and atomic write.
+        Does **not** use ``SteamArchiveLimiter`` (Steam Workshop pacing only).
+        """
+        page_url = normalize_page_url(page_url)
+        if not page_url:
+            raise ValueError("Empty page URL")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        assets_dir = output_dir / DEFAULT_ASSETS_DIR
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        index_path = output_dir / DEFAULT_INDEX_NAME
+
+        kwargs = self._request_kwargs(allow_redirects=True)
+        headers = dict(kwargs.get("headers") or {})
+        if referer:
+            headers["Referer"] = referer
+        else:
+            parsed = urlparse(page_url)
+            if parsed.scheme and parsed.netloc:
+                headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+        kwargs["headers"] = headers
+
+        try:
+            response = self._perform_get(page_url, kwargs)
+        except _PROXY_TRANSPORT_ERRORS as exc:
+            raise RuntimeError("网络连接失败") from exc
+
+        status = getattr(response, "status_code", None)
+        try:
+            if status is not None and int(status) >= 400:
+                raise RuntimeError(f"页面访问失败 (HTTP {status})")
+            encoding = (
+                getattr(response, "charset_encoding", None)
+                or getattr(response, "apparent_encoding", None)
+                or "utf-8"
+            )
+            response.encoding = encoding
+            html_text = response.text or ""
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("页面访问失败") from exc
+
+        if len(html_text) < 200:
+            raise RuntimeError("页面访问失败")
+
+        try:
+            soup = _parse_workshop_html(html_text)
+            for selector in ("script", "iframe", "noscript"):
+                for node in soup.select(selector):
+                    node.decompose()
+            self._rewrite_and_download_assets(soup, page_url, assets_dir)
+            self._write_atomic(index_path, str(soup))
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("资源下载失败") from exc
+
+        if not index_path.is_file() or index_path.stat().st_size <= 0:
+            raise RuntimeError("资源下载失败")
+        return index_path
 
     def archive(
         self,

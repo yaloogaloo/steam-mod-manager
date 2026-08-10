@@ -84,6 +84,7 @@ class ModPickerDialog(QDialog):
         root.addLayout(filters)
 
         self.list = QListWidget()
+        self.list.setObjectName("detailList")
         self.list.itemDoubleClicked.connect(self._accept_item)
         self.list.itemSelectionChanged.connect(self._on_select)
         root.addWidget(self.list, stretch=1)

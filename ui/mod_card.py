@@ -1,10 +1,10 @@
-"""Card widget representing one managed Mod in the library grid."""
+"""Card widget representing one managed Mod in the library grid (Phase B IA)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -18,6 +18,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QSizePolicy,
@@ -31,16 +32,61 @@ from core.db_manager import (
     DEPLOY_STATUS_NOT_DEPLOYED,
     get_db,
 )
+from core.mod_platform import (
+    OFFLINE_STATUS_ARCHIVED,
+    OFFLINE_STATUS_FAILED,
+    OFFLINE_STATUS_GENERATED,
+    OFFLINE_STATUS_NONE,
+    normalize_offline_status,
+)
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, ModFileManager
+from ui.styles import (
+    ACCENT_DISABLED_BG,
+    ACCENT_DISABLED_BORDER,
+    ACCENT_DISABLED_FG,
+    ACCENT_ERROR,
+    ACCENT_ERROR_BG,
+    ACCENT_NEUTRAL_BG,
+    ACCENT_NEUTRAL_BORDER,
+    ACCENT_SUCCESS,
+    ACCENT_WARNING,
+    ACCENT_WARNING_BG,
+    ACCENT_WARNING_BORDER,
+    PLATFORM_GITHUB_BG,
+    PLATFORM_GITHUB_BORDER,
+    PLATFORM_GITHUB_FG,
+    PLATFORM_MODIO_BG,
+    PLATFORM_MODIO_BORDER,
+    PLATFORM_MODIO_FG,
+    PLATFORM_NEXUS_BG,
+    PLATFORM_NEXUS_BORDER,
+    PLATFORM_NEXUS_FG,
+    PLATFORM_OTHER_BG,
+    PLATFORM_OTHER_BORDER,
+    PLATFORM_OTHER_FG,
+    PLATFORM_STEAM_BG,
+    PLATFORM_STEAM_BORDER,
+    PLATFORM_STEAM_FG,
+    STATE_CONFLICT_BORDER,
+    STATE_CONFLICT_FG,
+    STATE_INVALID_BORDER,
+    STATE_INVALID_FG,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
 CARD_WIDTH = 200
 COVER_HEIGHT = 112
+COVER_WIDTH = CARD_WIDTH - 20
 TEXT_WIDTH = CARD_WIDTH - 24
 TITLE_LINES = 2
+STATUS_STRIP_HEIGHT = 18
+DEPLOY_DOT_SIZE = 10
+DEPLOY_DOT_BORDER = "#121820"
 OFFLINE_INDEX_NAME = "index.html"
 OFFLINE_SNAPSHOT_DIR = "offline"
-OFFLINE_MISSING_LABEL = "离线页未同步"
+OFFLINE_MISSING_LABEL = "Offline"
 
 
 def _line_height(metrics: QFontMetrics) -> int:
@@ -88,18 +134,23 @@ def _elide_to_lines(text: str, font: QFont, width: int, max_lines: int) -> str:
 
 
 class ModCardWidget(QFrame):
-    """Visual card for a single managed Workshop mod (selection → detail panel)."""
+    """
+    Quick-scan library card: Cover + Name + core status badges.
+
+    Body text is limited to the display name. Identity / IDs / offline / deploy
+    details live in cover overlays, status strip, and hover tooltip.
+    """
 
     selection_requested = Signal(object)  # Path managed_path
-    # Kept for compatibility with older callers / tests.
     detail_requested = Signal(object)
     metadata_changed = Signal(object)
-    # Context-menu actions — library_view wires these to existing handlers.
     edit_requested = Signal(object)  # Path
     deploy_requested = Signal(str)  # mod_id
     open_folder_requested = Signal(object)  # Path
     open_steam_requested = Signal(object)  # Path
     favorite_toggle_requested = Signal(str)  # mod_id
+    context_menu_opening = Signal()
+    set_category_requested = Signal(str)  # category label; "" = clear
 
     def __init__(
         self,
@@ -112,35 +163,55 @@ class ModCardWidget(QFrame):
         self.managed_path = Path(managed_path)
         self.metadata = metadata
         self._selected = False
+        self._category_options: list[str] = []
         self.setFixedWidth(CARD_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 10, 10, 8)
         layout.setSpacing(6)
 
         self.cover_label = QLabel()
-        self.cover_label.setFixedSize(CARD_WIDTH - 20, COVER_HEIGHT)
+        self.cover_label.setFixedSize(COVER_WIDTH, COVER_HEIGHT)
         self.cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cover_label.setScaledContents(False)
         self.cover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._set_cover(self._resolve_cover())
         layout.addWidget(self.cover_label)
 
-        # User-tag badges overlaid on cover — does not change card height/layout.
-        self.tag_badge = QLabel(self.cover_label)
-        self.tag_badge.setObjectName("modTagBadge")
-        self.tag_badge.setAlignment(
+        # Cover overlays (do not affect card height).
+        self.state_badge = QLabel(self.cover_label)
+        self.state_badge.setObjectName("modTagBadge")
+        self.state_badge.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self.tag_badge.setFixedHeight(18)
-        self.tag_badge.move(4, 4)
-        self.tag_badge.hide()
-        self.tag_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.state_badge.setFixedHeight(18)
+        self.state_badge.move(4, 4)
+        self.state_badge.hide()
+        self.state_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # Back-compat alias used by older badge helpers / tests.
+        self.tag_badge = self.state_badge
 
-        # Platform badge — overlay top-right; does not change card height.
+        self.category_badge = QLabel(self.cover_label)
+        self.category_badge.setObjectName("modCategoryBadge")
+        self.category_badge.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.category_badge.move(4, 4)
+        self.category_badge.hide()
+        self.category_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.category_badge.setStyleSheet(
+            "QLabel#modCategoryBadge {"
+            "color: #4da6ff;"
+            "font-size: 11px;"
+            "font-weight: bold;"
+            "background: transparent;"
+            "padding: 2px 0;"
+            "}"
+        )
+
         self.platform_badge = QLabel(self.cover_label)
         self.platform_badge.setObjectName("modPlatformBadge")
         self.platform_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -148,7 +219,6 @@ class ModCardWidget(QFrame):
         self.platform_badge.hide()
         self.platform_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # Relationship counts — overlay bottom-left of cover (no height change).
         self.relation_badge = QLabel(self.cover_label)
         self.relation_badge.setObjectName("modRelationBadge")
         self.relation_badge.setAlignment(
@@ -157,6 +227,12 @@ class ModCardWidget(QFrame):
         self.relation_badge.setFixedHeight(16)
         self.relation_badge.hide()
         self.relation_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        self.deploy_dot = QLabel(self.cover_label)
+        self.deploy_dot.setObjectName("deployDot")
+        self.deploy_dot.setFixedSize(DEPLOY_DOT_SIZE, DEPLOY_DOT_SIZE)
+        self.deploy_dot.hide()
+        self.deploy_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.title_label = QLabel()
         title_font = self.title_label.font()
@@ -174,84 +250,37 @@ class ModCardWidget(QFrame):
         self.title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.title_label)
 
-        self.steam_label = QLabel()
-        self.steam_label.setStyleSheet("color: #6b7c8f; font-size: 11px;")
-        steam_h = _line_height(self.steam_label.fontMetrics())
-        self.steam_label.setFixedHeight(steam_h)
-        self.steam_label.setWordWrap(False)
-        self.steam_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.steam_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
-        )
-        self.steam_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self.steam_label)
+        # Status strip: offline-missing only (fixed height for stable grid).
+        self.status_strip = QWidget()
+        self.status_strip.setFixedHeight(STATUS_STRIP_HEIGHT)
+        self.status_strip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        strip_layout = QHBoxLayout(self.status_strip)
+        strip_layout.setContentsMargins(0, 0, 0, 0)
+        strip_layout.setSpacing(4)
 
-        self.meta_label = QLabel()
-        self.meta_label.setStyleSheet("color: #6b7c8f; font-size: 11px;")
-        meta_h = _line_height(self.meta_label.fontMetrics())
-        self.meta_label.setFixedHeight(meta_h)
-        self.meta_label.setWordWrap(False)
-        self.meta_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.meta_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
-        )
-        self.meta_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self.meta_label)
-
-        # Offline status (fixed height)
-        self.offline_label = QLabel()
-        self.status_label = self.offline_label
-        self.offline_label.setStyleSheet("color: #c9a227; font-size: 11px;")
-        offline_h = _line_height(self.offline_label.fontMetrics())
-        self.offline_label.setFixedHeight(offline_h)
-        self.offline_label.setWordWrap(False)
-        self.offline_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self.offline_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
-        )
-        self.offline_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self.offline_label)
-
-        # Deploy badge (grey / green / red)
-        self.deploy_badge = QLabel()
-        self.deploy_badge.setObjectName("deployBadge")
-        self.deploy_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.deploy_badge.setFixedHeight(22)
-        self.deploy_badge.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
-        )
-        self.deploy_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self.deploy_badge)
+        self.offline_badge = QLabel()
+        self.offline_badge.setObjectName("cardOfflineBadge")
+        self.offline_badge.setFixedHeight(STATUS_STRIP_HEIGHT)
+        self.offline_badge.hide()
+        self.offline_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        strip_layout.addWidget(self.offline_badge)
+        strip_layout.addStretch(1)
+        layout.addWidget(self.status_strip)
 
         margins = layout.contentsMargins()
         spacing = layout.spacing()
-        sections = 6  # cover, title, steam, meta, offline, deploy badge
-        badge_h = 22
+        # cover + title + status strip
         card_h = (
             margins.top()
             + margins.bottom()
             + COVER_HEIGHT
             + title_h
-            + steam_h
-            + meta_h
-            + offline_h
-            + badge_h
-            + spacing * (sections - 1)
+            + STATUS_STRIP_HEIGHT
+            + spacing * 2
         )
         self.setFixedHeight(card_h)
 
-        self._apply_titles()
-        self._apply_offline_status()
-        self._apply_deploy_status()
-        self._apply_user_tag_badges()
-        self._apply_relation_badge()
-        self._apply_platform_badge()
+        self.refresh_display()
         self.set_selected(False)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
@@ -260,8 +289,13 @@ class ModCardWidget(QFrame):
             self.detail_requested.emit(self.managed_path)
         super().mousePressEvent(event)
 
+    def set_category_options(self, options: list[str]) -> None:
+        """Game-scoped category labels for the context-menu submenu."""
+        self._category_options = [
+            str(o).strip() for o in (options or []) if str(o).strip()
+        ]
+
     def _build_context_menu(self) -> QMenu:
-        """Build a card-owned context menu (never parent=None)."""
         menu = QMenu(self)
 
         act_detail = QAction("查看详情", menu)
@@ -293,20 +327,33 @@ class ModCardWidget(QFrame):
         menu.addAction(act_steam)
         menu.addSeparator()
         menu.addAction(act_fav)
+        menu.addSeparator()
+
+        cat_menu = menu.addMenu("设置分类")
+        act_clear = cat_menu.addAction("（未分类）")
+        act_clear.triggered.connect(
+            lambda: self.set_category_requested.emit("")
+        )
+        seen: set[str] = set()
+        for label in self._category_options:
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            act = cat_menu.addAction(label)
+            act.triggered.connect(
+                lambda _=False, t=label: self.set_category_requested.emit(t)
+            )
         return menu
 
     def _exec_context_menu(self, menu: QMenu, global_pos) -> None:
-        """Show popup at ``global_pos`` (never bare ``exec()``)."""
         menu.exec(global_pos)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.context_menu_opening.emit()
         menu = self._build_context_menu()
         try:
-            # Always pass a global position — bare exec() can open at (0,0).
             self._exec_context_menu(menu, event.globalPos())
         finally:
-            # Destroy after close so the popup cannot linger as a ghost window
-            # when the card is later reparented / cleared.
             menu.hide()
             menu.deleteLater()
         event.accept()
@@ -337,20 +384,12 @@ class ModCardWidget(QFrame):
 
     def set_selected(self, selected: bool) -> None:
         self._selected = bool(selected)
-        if self._selected:
-            self.setProperty("selected", True)
-            self.setStyleSheet(
-                "QFrame#modCard {"
-                "background-color: #1e2a3a;"
-                "border: 2px solid #66c0f4;"
-                "border-radius: 10px;"
-                "}"
-            )
-        else:
-            self.setProperty("selected", False)
-            self.setStyleSheet("")
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self.setProperty("selected", self._selected)
+        style = self.style()
+        if style is not None:
+            style.unpolish(self)
+            style.polish(self)
+        self.update()
 
     def add_selected_style(self) -> None:
         self.set_selected(True)
@@ -359,13 +398,31 @@ class ModCardWidget(QFrame):
         self.set_selected(False)
 
     def refresh_display(self) -> None:
-        """Reload titles / offline / deploy status from local metadata + SQLite."""
+        """Reload title / badges / tooltip from local metadata + SQLite."""
         self._apply_titles()
-        self._apply_offline_status()
-        self._apply_deploy_status()
-        self._apply_user_tag_badges()
-        self._apply_relation_badge()
-        self._apply_platform_badge()
+        self._render_state_badge()
+        self._render_category_badge()
+        self._render_platform_badge()
+        self._render_deploy_indicator()
+        self._render_offline_badge()
+        self._render_relation_badge()
+        self._render_tooltip()
+
+    # Back-compat aliases (older tests / callers).
+    def _apply_user_tag_badges(self) -> None:
+        self._render_state_badge()
+
+    def _apply_platform_badge(self) -> None:
+        self._render_platform_badge()
+
+    def _apply_deploy_status(self) -> None:
+        self._render_deploy_indicator()
+
+    def _apply_offline_status(self) -> None:
+        self._render_offline_badge()
+
+    def _apply_relation_badge(self) -> None:
+        self._render_relation_badge()
 
     def _mod_id(self) -> str:
         meta = self.metadata
@@ -373,7 +430,6 @@ class ModCardWidget(QFrame):
             return str(meta.published_file_id)
         if self.managed_path.name.isdigit():
             return self.managed_path.name
-        # Local fallback for context menu when metadata was not passed in
         try:
             root = (
                 self.managed_path.parents[1]
@@ -388,22 +444,24 @@ class ModCardWidget(QFrame):
             return str(loaded.published_file_id)
         return ""
 
+    def _display_info(self):
+        mid = self._mod_id()
+        if not mid:
+            return None
+        try:
+            return get_db().get_mod_display_info(mid)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _apply_titles(self) -> None:
-        mod_id = self._mod_id()
+        info = self._display_info()
         steam_name = ""
         display = ""
         favorite = False
-
-        if mod_id:
-            try:
-                info = get_db().get_mod_display_info(mod_id)
-            except Exception:  # noqa: BLE001
-                info = None
-            if info is not None:
-                steam_name = info.steam_name
-                display = info.display_name
-                favorite = info.favorite
-
+        if info is not None:
+            steam_name = info.steam_name
+            display = info.display_name
+            favorite = info.favorite
         if not steam_name and self.metadata:
             steam_name = (self.metadata.title or "").strip()
         if not display:
@@ -418,32 +476,10 @@ class ModCardWidget(QFrame):
         self.title_label.setText(
             _elide_to_lines(shown, self.title_label.font(), TEXT_WIDTH, TITLE_LINES)
         )
-        tip_parts = [display]
-        if steam_name and steam_name != display:
-            tip_parts.append(f"Steam: {steam_name}")
-        if mod_id:
-            tip_parts.append(f"Workshop ID: {mod_id}")
-        self.title_label.setToolTip("\n".join(tip_parts))
-
-        # Always reserve Steam Name row (elide + full tooltip).
-        steam_full = steam_name or "—"
-        steam_line = f"Steam: {steam_full}"
-        metrics = self.steam_label.fontMetrics()
-        self.steam_label.setText(
-            metrics.elidedText(steam_line, Qt.TextElideMode.ElideRight, TEXT_WIDTH)
-        )
-        self.steam_label.setToolTip(steam_full if steam_name else "")
-
-        id_full = f"Workshop ID: {mod_id}" if mod_id else "Workshop ID: —"
-        self.meta_label.setText(
-            metrics.elidedText(id_full, Qt.TextElideMode.ElideRight, TEXT_WIDTH)
-            if mod_id
-            else "Workshop ID: —"
-        )
-        self.meta_label.setToolTip(id_full if mod_id else "")
+        self._cached_display_name = display
+        self._cached_steam_name = steam_name
 
     def _has_offline_page(self) -> bool:
-        """Existence check only — does not read HTML or hit the network."""
         root = self.managed_path
         for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
             for relative in (
@@ -458,58 +494,47 @@ class ModCardWidget(QFrame):
                     continue
         return False
 
-    def _apply_offline_status(self) -> None:
-        if self._has_offline_page():
-            self.offline_label.setText("离线页已同步")
-            self.offline_label.setStyleSheet("color: #6b9e78; font-size: 11px;")
-            self.offline_label.setToolTip("本地已存在离线页面文件")
+    def _offline_needs_attention(self) -> tuple[bool, str]:
+        """
+        Return ``(show_badge, tip)``.
+
+        Show only when offline is missing / failed — never for successful sync.
+        """
+        info = self._display_info()
+        status = OFFLINE_STATUS_NONE
+        if info is not None:
+            raw = getattr(info, "offline_status", OFFLINE_STATUS_NONE)
+            if not isinstance(raw, str):
+                raw = OFFLINE_STATUS_NONE
+            status = normalize_offline_status(raw)
+        has_page = self._has_offline_page()
+        if status == OFFLINE_STATUS_FAILED:
+            return True, "离线页面保存失败"
+        if status in (OFFLINE_STATUS_GENERATED, OFFLINE_STATUS_ARCHIVED) or has_page:
+            return False, "离线页面已保存"
+        return True, "离线页面未保存"
+
+    def _render_offline_badge(self) -> None:
+        show, tip = self._offline_needs_attention()
+        if not show:
+            self.offline_badge.hide()
+            self.offline_badge.clear()
+            self.offline_badge.setToolTip("")
             return
-        self.offline_label.setText(OFFLINE_MISSING_LABEL)
-        self.offline_label.setStyleSheet("color: #c9a227; font-size: 11px;")
-        self.offline_label.setToolTip(
-            "请在「同步中心」使用「同步 Steam 离线网页」补全"
-        )
-
-    def _apply_deploy_status(self) -> None:
-        """Show a grey / green / red deploy badge (independent of offline line)."""
-        status = DEPLOY_STATUS_NOT_DEPLOYED
-        tip = "尚未部署到游戏目录"
-        mod_id = self._mod_id()
-        if mod_id:
-            try:
-                info = get_db().get_mod_deploy_info(mod_id)
-            except Exception:  # noqa: BLE001
-                info = None
-            if info is not None:
-                status = info.deploy_status or DEPLOY_STATUS_NOT_DEPLOYED
-                if status == DEPLOY_STATUS_DEPLOYED:
-                    tip = info.deploy_path or "已部署到游戏 Mod 目录"
-                elif status == DEPLOY_STATUS_FAILED:
-                    tip = "最近一次部署失败"
-
-        if status == DEPLOY_STATUS_DEPLOYED:
-            text, bg, fg, border = "已部署", "#1a3d2e", "#6b9e78", "#2d6b4f"
-        elif status == DEPLOY_STATUS_FAILED:
-            text, bg, fg, border = "部署失败", "#3d1a1a", "#e07070", "#8b3a3a"
-        else:
-            text, bg, fg, border = "未部署", "#2a3038", "#8b9bb0", "#3d4654"
-
-        self.deploy_badge.setText(text)
-        self.deploy_badge.setToolTip(tip)
-        self.deploy_badge.setStyleSheet(
-            f"QLabel#deployBadge {{"
-            f"background-color: {bg}; color: {fg};"
-            f"border: 1px solid {border}; border-radius: 4px;"
-            f"font-size: 11px; font-weight: 600; padding: 1px 6px;"
+        self.offline_badge.setText(OFFLINE_MISSING_LABEL)
+        self.offline_badge.setToolTip(tip)
+        self.offline_badge.setStyleSheet(
+            f"QLabel#cardOfflineBadge {{"
+            f"background-color: {ACCENT_WARNING_BG}; color: {ACCENT_WARNING};"
+            f"border: 1px solid {ACCENT_WARNING_BORDER}; border-radius: 3px;"
+            f"font-size: 10px; font-weight: 600; padding: 1px 5px;"
             f"}}"
         )
+        self.offline_badge.adjustSize()
+        self.offline_badge.show()
 
-    def _apply_user_tag_badges(self) -> None:
-        """
-        Overlay status badges on cover — fixed height, no layout growth.
-
-        Priority: Conflict > Invalid > Disabled. Platform stays separate.
-        """
+    def _render_state_badge(self) -> None:
+        """Cover top-left: Conflict > Invalid > Disabled (mutually exclusive)."""
         mid = self._mod_id()
         conflict = False
         invalid = False
@@ -561,34 +586,159 @@ class ModCardWidget(QFrame):
                         tip_parts.append("已失效" + (f"：{reason}" if reason else ""))
 
         if conflict:
-            text, bg, fg, border = ("Conflict", "#3a1418", "#ff6b6b", "#8b2e2e")
+            text, bg, fg, border = (
+                "Conflict",
+                ACCENT_ERROR_BG,
+                STATE_CONFLICT_FG,
+                STATE_CONFLICT_BORDER,
+            )
         elif invalid:
-            text, bg, fg, border = ("Invalid", "#3a2410", "#f0a040", "#8b5a20")
+            text, bg, fg, border = (
+                "Invalid",
+                ACCENT_WARNING_BG,
+                STATE_INVALID_FG,
+                STATE_INVALID_BORDER,
+            )
         elif disabled:
-            text, bg, fg, border = ("Disabled", "#2a2a2a", "#b0b0b0", "#555555")
+            text, bg, fg, border = (
+                "Disabled",
+                ACCENT_DISABLED_BG,
+                ACCENT_DISABLED_FG,
+                ACCENT_DISABLED_BORDER,
+            )
             tip_parts.append("已禁用")
         else:
-            self.tag_badge.hide()
-            self.tag_badge.clear()
-            self.tag_badge.setToolTip("")
+            self.state_badge.hide()
+            self.state_badge.clear()
+            self.state_badge.setToolTip("")
             return
 
-        self.tag_badge.setText(text)
-        self.tag_badge.setToolTip("\n".join(tip_parts) if tip_parts else text)
-        self.tag_badge.setStyleSheet(
+        self.state_badge.setText(text)
+        self.state_badge.setToolTip("\n".join(tip_parts) if tip_parts else text)
+        self.state_badge.setStyleSheet(
             f"QLabel#modTagBadge {{"
             f"background-color: {bg}; color: {fg};"
             f"border: 1px solid {border}; border-radius: 3px;"
             f"font-size: 10px; font-weight: 600; padding: 1px 5px;"
             f"}}"
         )
-        self.tag_badge.adjustSize()
-        self.tag_badge.move(4, 4)
-        self.tag_badge.show()
-        self.tag_badge.raise_()
+        self.state_badge.adjustSize()
+        y = 4
+        if self.category_badge.isVisible():
+            y = self.category_badge.y() + self.category_badge.height() + 2
+        self.state_badge.move(4, y)
+        self.state_badge.show()
+        self.state_badge.raise_()
 
-    def _apply_relation_badge(self) -> None:
-        """Small dependency / conflict count overlay — fixed cover height."""
+    def _render_category_badge(self) -> None:
+        mid = self._mod_id()
+        label = ""
+        if mid:
+            try:
+                tags = get_db().get_category_tags(mid)
+                label = str(tags[0] if tags else "").strip()
+            except Exception:  # noqa: BLE001
+                label = ""
+        if not label:
+            self.category_badge.hide()
+            self.category_badge.clear()
+            return
+        self.category_badge.setText(label)
+        self.category_badge.adjustSize()
+        self.category_badge.move(4, 4)
+        self.category_badge.show()
+        self.category_badge.raise_()
+
+    def _render_platform_badge(self) -> None:
+        platform = "steam"
+        info = self._display_info()
+        if info is not None:
+            platform = getattr(info, "platform", "steam") or "steam"
+        key = str(platform).strip().lower()
+        from ui.platform_labels import platform_badge_label
+
+        styles = {
+            "steam": (PLATFORM_STEAM_BG, PLATFORM_STEAM_FG, PLATFORM_STEAM_BORDER),
+            "nexus": (PLATFORM_NEXUS_BG, PLATFORM_NEXUS_FG, PLATFORM_NEXUS_BORDER),
+            "github": (PLATFORM_GITHUB_BG, PLATFORM_GITHUB_FG, PLATFORM_GITHUB_BORDER),
+            "modio": (PLATFORM_MODIO_BG, PLATFORM_MODIO_FG, PLATFORM_MODIO_BORDER),
+            "other": (PLATFORM_OTHER_BG, PLATFORM_OTHER_FG, PLATFORM_OTHER_BORDER),
+        }
+        text = platform_badge_label(key)
+        bg, fg, border = styles.get(
+            key, (ACCENT_NEUTRAL_BG, TEXT_SECONDARY, ACCENT_NEUTRAL_BORDER)
+        )
+        self.platform_badge.setText(text)
+        self.platform_badge.setToolTip(f"平台：{text}")
+        self.platform_badge.setStyleSheet(
+            f"QLabel#modPlatformBadge {{"
+            f"background-color: {bg}; color: {fg};"
+            f"border: 1px solid {border}; border-radius: 3px;"
+            f"font-size: 10px; font-weight: 600; padding: 1px 5px;"
+            f"}}"
+        )
+        self.platform_badge.adjustSize()
+        cover_w = self.cover_label.width() or COVER_WIDTH
+        x = max(4, cover_w - self.platform_badge.width() - 4)
+        self.platform_badge.move(x, 4)
+        self.platform_badge.show()
+        self.platform_badge.raise_()
+        if self.state_badge.isVisible():
+            self.state_badge.raise_()
+        if self.relation_badge.isVisible():
+            self.relation_badge.raise_()
+        if self.deploy_dot.isVisible():
+            self.deploy_dot.raise_()
+
+    def _render_deploy_indicator(self) -> None:
+        """Cover bottom-right: green/red dot; hide when not deployed."""
+        status = DEPLOY_STATUS_NOT_DEPLOYED
+        tip = "尚未部署到游戏目录"
+        mid = self._mod_id()
+        if mid:
+            try:
+                info = get_db().get_mod_deploy_info(mid)
+            except Exception:  # noqa: BLE001
+                info = None
+            if info is not None:
+                status = info.deploy_status or DEPLOY_STATUS_NOT_DEPLOYED
+                if status == DEPLOY_STATUS_DEPLOYED:
+                    tip = info.deploy_path or "已部署到游戏 Mod 目录"
+                elif status == DEPLOY_STATUS_FAILED:
+                    tip = "最近一次部署失败"
+
+        if status == DEPLOY_STATUS_DEPLOYED:
+            color = ACCENT_SUCCESS
+        elif status == DEPLOY_STATUS_FAILED:
+            color = ACCENT_ERROR
+        else:
+            self.deploy_dot.hide()
+            self.deploy_dot.clear()
+            self.deploy_dot.setToolTip("")
+            self._cached_deploy_label = "Not deployed"
+            return
+
+        self._cached_deploy_label = (
+            "Installed" if status == DEPLOY_STATUS_DEPLOYED else "Failed"
+        )
+        self.deploy_dot.setToolTip(tip)
+        self.deploy_dot.setStyleSheet(
+            f"QLabel#deployDot {{"
+            f"background-color: {color};"
+            f"border: 1px solid {DEPLOY_DOT_BORDER};"
+            f"border-radius: {DEPLOY_DOT_SIZE // 2}px;"
+            f"}}"
+        )
+        cover_w = self.cover_label.width() or COVER_WIDTH
+        cover_h = self.cover_label.height() or COVER_HEIGHT
+        x = max(4, cover_w - DEPLOY_DOT_SIZE - 4)
+        y = max(4, cover_h - DEPLOY_DOT_SIZE - 4)
+        self.deploy_dot.move(x, y)
+        self.deploy_dot.show()
+        self.deploy_dot.raise_()
+
+    def _render_relation_badge(self) -> None:
+        """Cover bottom-left counts — overlay only, no layout height."""
         mid = self._mod_id()
         deps = 0
         confs = 0
@@ -614,14 +764,14 @@ class ModCardWidget(QFrame):
         self.relation_badge.setText("  ".join(parts))
         self.relation_badge.setToolTip("\n".join(tips))
         self.relation_badge.setStyleSheet(
-            "QLabel#modRelationBadge {"
-            "background-color: rgba(20, 24, 32, 200);"
-            "color: #e8eef5;"
-            "border-radius: 3px;"
-            "font-size: 9px;"
-            "font-weight: 600;"
-            "padding: 0px 4px;"
-            "}"
+            f"QLabel#modRelationBadge {{"
+            f"background-color: rgba(20, 24, 32, 200);"
+            f"color: {TEXT_PRIMARY};"
+            f"border-radius: 3px;"
+            f"font-size: 9px;"
+            f"font-weight: 600;"
+            f"padding: 0px 4px;"
+            f"}}"
         )
         self.relation_badge.adjustSize()
         cover_h = self.cover_label.height() or COVER_HEIGHT
@@ -630,65 +780,32 @@ class ModCardWidget(QFrame):
         self.relation_badge.show()
         self.relation_badge.raise_()
 
-    def _apply_platform_badge(self) -> None:
-        """Overlay [Steam]/[Nexus]/[GitHub] — no layout height change."""
-        platform = "steam"
-        mid = self._mod_id()
-        if mid:
-            try:
-                info = get_db().get_mod_display_info(mid)
-            except Exception:  # noqa: BLE001
-                info = None
-            if info is not None:
-                platform = getattr(info, "platform", "steam") or "steam"
-        key = str(platform).strip().lower()
-        from ui.platform_labels import platform_badge_label
-
-        styles = {
-            "steam": ("#1b2838", "#66c0f4", "#2a475e"),
-            "nexus": ("#2a1f14", "#d4a017", "#6b4f1d"),
-            "github": ("#1c1c1c", "#c9d1d9", "#484f58"),
-        }
-        text = platform_badge_label(key)
-        bg, fg, border = styles.get(key, ("#2a3038", "#8b9bb0", "#3d4654"))
-        self.platform_badge.setText(text)
-        self.platform_badge.setToolTip(f"平台：{text}")
-        self.platform_badge.setStyleSheet(
-            f"QLabel#modPlatformBadge {{"
-            f"background-color: {bg}; color: {fg};"
-            f"border: 1px solid {border}; border-radius: 3px;"
-            f"font-size: 10px; font-weight: 600; padding: 1px 5px;"
-            f"}}"
-        )
-        self.platform_badge.adjustSize()
-        cover_w = self.cover_label.width() or (CARD_WIDTH - 20)
-        x = max(4, cover_w - self.platform_badge.width() - 4)
-        self.platform_badge.move(x, 4)
-        self.platform_badge.show()
-        self.platform_badge.raise_()
-        # Keep status / relation badges above platform when visible
-        if self.tag_badge.isVisible():
-            self.tag_badge.raise_()
-        if self.relation_badge.isVisible():
-            self.relation_badge.raise_()
+    def _render_tooltip(self) -> None:
+        """Simple title tooltip only — no yellow multi-line identity panel."""
+        display = getattr(self, "_cached_display_name", "") or ""
+        tip = display or self.managed_path.name
+        self.setToolTip(tip)
+        self.title_label.setToolTip(tip)
 
     def _resolve_cover(self) -> Path | None:
+        from services.importers.image_picker import resolve_cover_file
+
+        cover_ref = ""
+        if self.metadata and self.metadata.cover_path:
+            cover_ref = str(self.metadata.cover_path).strip()
+        if cover_ref:
+            resolved = resolve_cover_file(self.managed_path, cover_ref)
+            if resolved is not None:
+                return resolved
         manager = ModFileManager(
             self.managed_path.parents[1]
             if len(self.managed_path.parts) > 1
             else self.managed_path.parent
         )
-        found = manager.find_local_cover(self.managed_path)
-        if found:
-            return found
-        if self.metadata and self.metadata.cover_path:
-            path = Path(self.metadata.cover_path)
-            if path.is_file():
-                return path
-        return None
+        return manager.find_local_cover(self.managed_path)
 
     def _set_cover(self, path: Path | None) -> None:
-        target_w = CARD_WIDTH - 20
+        target_w = COVER_WIDTH
         target_h = COVER_HEIGHT
         if path and path.is_file():
             pixmap = QPixmap(str(path))
@@ -707,10 +824,12 @@ class ModCardWidget(QFrame):
 
 
 def _placeholder_cover(width: int, height: int) -> QPixmap:
+    from ui.styles import BACKGROUND_BUTTON_PRESSED, BORDER_STRONG
+
     pixmap = QPixmap(width, height)
-    pixmap.fill(QColor("#1b2838"))
+    pixmap.fill(QColor(BACKGROUND_BUTTON_PRESSED))
     painter = QPainter(pixmap)
-    painter.setPen(QColor("#3d5a73"))
+    painter.setPen(QColor(BORDER_STRONG))
     painter.setFont(QFont("Segoe UI", 11))
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "No Preview")
     painter.end()

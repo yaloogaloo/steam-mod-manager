@@ -7,7 +7,9 @@ from urllib.parse import urlparse
 
 from core.mod_platform import (
     PLATFORM_GITHUB,
+    PLATFORM_MODIO,
     PLATFORM_NEXUS,
+    PLATFORM_OTHER,
     PLATFORM_STEAM,
     normalize_platform,
 )
@@ -31,6 +33,8 @@ def format_platform_name(platform: str | None) -> str:
         PLATFORM_STEAM: "Steam Workshop",
         PLATFORM_NEXUS: "Nexus Mods",
         PLATFORM_GITHUB: "GitHub",
+        PLATFORM_MODIO: "mod.io",
+        PLATFORM_OTHER: "其它",
     }.get(key, key)
 
 
@@ -41,6 +45,8 @@ def platform_badge_label(platform: str | None) -> str:
         PLATFORM_STEAM: "Steam",
         PLATFORM_NEXUS: "Nexus",
         PLATFORM_GITHUB: "GitHub",
+        PLATFORM_MODIO: "mod.io",
+        PLATFORM_OTHER: "其它",
     }.get(key, key.title() or "Mod")
 
 
@@ -50,6 +56,8 @@ def get_platform_metadata_labels(platform: str | None) -> PlatformMetadataLabels
         PLATFORM_STEAM: "Workshop ID",
         PLATFORM_NEXUS: "Nexus Mod ID",
         PLATFORM_GITHUB: "GitHub Repository",
+        PLATFORM_MODIO: "mod.io ID",
+        PLATFORM_OTHER: "本地标识",
     }
     return PlatformMetadataLabels(
         name="名称",
@@ -95,6 +103,8 @@ def parse_external_id_from_url(platform: str | None, url: str = "") -> str:
         return _parse_github_external_id(text)
     if key == PLATFORM_STEAM:
         return _parse_steam_external_id(text)
+    if key == PLATFORM_MODIO:
+        return _parse_modio_external_id(text)
     return ""
 
 
@@ -135,6 +145,19 @@ def _parse_steam_external_id(text: str) -> str:
     if marker in low:
         frag = text[low.index(marker) + len(marker) :]
         return "".join(ch for ch in frag if ch.isdigit()) or ""
+    return ""
+
+
+def _parse_modio_external_id(text: str) -> str:
+    if text.isdigit():
+        return text
+    parts = [p for p in urlparse(text).path.split("/") if p]
+    if "m" in parts:
+        try:
+            idx = parts.index("m")
+            return parts[idx + 1].split("?")[0].strip()
+        except (ValueError, IndexError):
+            return ""
     return ""
 
 

@@ -10,7 +10,6 @@ import pytest
 from core.db_manager import PLATFORM_NEXUS, DatabaseManager
 from services.file_ops import ModFileManager
 from services.importers.archive import (
-    NO_MOD_FILES_MSG,
     ArchiveImporter,
     extract_archive,
     find_mod_root,
@@ -61,11 +60,20 @@ def test_find_mod_root_nested(tmp_path: Path) -> None:
     assert find_mod_root(root) == nested.resolve()
 
 
-def test_find_mod_root_empty(tmp_path: Path) -> None:
+def test_find_mod_root_without_known_extensions(tmp_path: Path) -> None:
+    """Archives with only docs / data still resolve a content root."""
     root = tmp_path / "empty"
     root.mkdir()
     (root / "readme.txt").write_text("hi", encoding="utf-8")
-    assert find_mod_root(root) is None
+    assert find_mod_root(root) == root.resolve()
+
+    wrapped = tmp_path / "wrap"
+    inner = wrapped / "ModPack"
+    inner.mkdir(parents=True)
+    (inner / "folder").mkdir()
+    (inner / "folder" / "data.bin").write_bytes(b"x")
+    (inner / "readme.txt").write_text("doc", encoding="utf-8")
+    assert find_mod_root(wrapped) == inner.resolve()
 
 
 def test_zip_import_success(tmp_path: Path, db: DatabaseManager) -> None:
@@ -90,7 +98,7 @@ def test_zip_import_success(tmp_path: Path, db: DatabaseManager) -> None:
     assert ModFileManager(lib).list_managed_mods()
 
 
-def test_zip_nested_root_and_no_mod_files(tmp_path: Path, db: DatabaseManager) -> None:
+def test_zip_nested_root_and_docs_only_import(tmp_path: Path, db: DatabaseManager) -> None:
     nested = _make_zip(
         tmp_path / "nested.zip",
         {"release/package/ModName/core.pak": b"X"},
@@ -100,17 +108,17 @@ def test_zip_nested_root_and_no_mod_files(tmp_path: Path, db: DatabaseManager) -
     assert root is not None
     assert root.name == "ModName"
 
-    empty = _make_zip(tmp_path / "empty.zip", {"docs/readme.txt": b"hi"})
+    docs_only = _make_zip(tmp_path / "docs.zip", {"docs/readme.txt": b"hi"})
     imp = ArchiveImporter(db=db)
     result = imp.import_mod(
-        archive_path=empty,
+        archive_path=docs_only,
         platform=PLATFORM_NEXUS,
         nexus_id="99",
         library_root=tmp_path / "lib2",
         context=PALWORLD,
     )
-    assert not result.success
-    assert NO_MOD_FILES_MSG in result.error or "未找到" in result.error
+    assert result.success, result.error
+    assert result.files_count >= 1
 
 
 def test_cleanup_import_cache_after_success(
@@ -142,12 +150,15 @@ def test_cleanup_import_cache_after_success(
         context=PALWORLD,
     )
     assert result.success, result.error
-    # Successful import removes the uuid extract folder under cache
+    # Successful import removes the staging folder under cache
     leftovers = [p for p in cache.iterdir() if p.is_dir()]
     assert leftovers == []
-    # Cover installed from sibling
+    # Sibling image is NOT auto-installed without cover_source
     assert result.managed_path
     from services.file_ops import COVER_BASENAME, INFO_DIR_NAME
 
     covers = list(Path(result.managed_path).joinpath(INFO_DIR_NAME).glob(f"{COVER_BASENAME}.*"))
-    assert covers
+    assert covers == []
+    # Archive kept as source unit on disk
+    assert (Path(result.managed_path) / "ok.zip").is_file()
+    assert result.files_count == 1

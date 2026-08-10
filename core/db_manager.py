@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from .game_info import GameInfo
 from .models import ModMetadata
@@ -22,8 +22,10 @@ from .mod_platform import (
     SUPPORTED_PLATFORMS,
     ModFileEntry,
     ModFilesBundle,
+    generate_unique_workspace_id,
     normalize_offline_status,
     normalize_platform,
+    resolve_workspace_id,
     steam_workshop_url,
 )
 from .mod_status import (
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS games (
     install_path TEXT NOT NULL DEFAULT '',
     mod_path    TEXT NOT NULL DEFAULT '',
     deploy_type TEXT NOT NULL DEFAULT 'folder_copy',
+    workshop_path TEXT NOT NULL DEFAULT '',
     updated_at  TEXT NOT NULL
 );
 
@@ -67,6 +70,8 @@ CREATE TABLE IF NOT EXISTS mods (
     platform TEXT NOT NULL DEFAULT 'steam',
     source_url TEXT NOT NULL DEFAULT '',
     external_id TEXT NOT NULL DEFAULT '',
+    workspace_id TEXT NOT NULL DEFAULT '',
+    custom_deploy_path TEXT NOT NULL DEFAULT '',
     mod_files TEXT NOT NULL DEFAULT '{}',
     is_invalid INTEGER NOT NULL DEFAULT 0,
     invalid_reason TEXT NOT NULL DEFAULT '',
@@ -81,10 +86,10 @@ CREATE TABLE IF NOT EXISTS mods (
     offline_status TEXT NOT NULL DEFAULT 'none',
     offline_provider TEXT NOT NULL DEFAULT '',
     offline_updated_at TEXT NOT NULL DEFAULT '',
+    cover_path TEXT NOT NULL DEFAULT '',
     updated_at  TEXT NOT NULL,
     FOREIGN KEY (app_id) REFERENCES games(app_id)
 );
-
 CREATE INDEX IF NOT EXISTS idx_mods_app_id ON mods(app_id);
 
 CREATE TABLE IF NOT EXISTS mod_tags (
@@ -129,6 +134,17 @@ CREATE INDEX IF NOT EXISTS idx_mod_relationships_target
     ON mod_relationships(target_mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_relationships_type
     ON mod_relationships(relationship_type);
+
+CREATE TABLE IF NOT EXISTS game_categories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id      INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    UNIQUE (app_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_game_categories_app_id
+    ON game_categories(app_id);
 """
 
 # Columns added after the initial schema — applied on every startup.
@@ -136,6 +152,7 @@ _GAMES_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("install_path", "TEXT NOT NULL DEFAULT ''"),
     ("mod_path", "TEXT NOT NULL DEFAULT ''"),
     ("deploy_type", "TEXT NOT NULL DEFAULT 'folder_copy'"),
+    ("workshop_path", "TEXT NOT NULL DEFAULT ''"),
 )
 
 _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
@@ -150,6 +167,8 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("platform", "TEXT NOT NULL DEFAULT 'steam'"),
     ("source_url", "TEXT NOT NULL DEFAULT ''"),
     ("external_id", "TEXT NOT NULL DEFAULT ''"),
+    ("workspace_id", "TEXT NOT NULL DEFAULT ''"),
+    ("custom_deploy_path", "TEXT NOT NULL DEFAULT ''"),
     ("mod_files", "TEXT NOT NULL DEFAULT '{}'"),
     ("is_invalid", "INTEGER NOT NULL DEFAULT 0"),
     ("invalid_reason", "TEXT NOT NULL DEFAULT ''"),
@@ -164,6 +183,7 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("offline_status", "TEXT NOT NULL DEFAULT 'none'"),
     ("offline_provider", "TEXT NOT NULL DEFAULT ''"),
     ("offline_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("cover_path", "TEXT NOT NULL DEFAULT ''"),
 )
 
 DEPLOY_STATUS_NOT_DEPLOYED = "not_deployed"
@@ -194,11 +214,13 @@ SUPPORTED_RELATIONSHIP_TYPES = (
 _MOD_SELECT_COLS = (
     "mod_id, app_id, title, preview_url, description, "
     "display_name, custom_description, user_notes, favorite, "
-    "platform, source_url, external_id, mod_files, "
+    "platform, source_url, external_id, workspace_id, custom_deploy_path, "
+    "mod_files, "
     "is_invalid, invalid_reason, conflict_status, conflict_note, last_check_time, "
     "mod_version, installed_version, version_source, version_checked_at, "
     "enabled, "
     "offline_status, offline_provider, offline_updated_at, "
+    "cover_path, "
     "updated_at"
 )
 
@@ -262,6 +284,8 @@ class ModDisplayInfo:
     platform: str = PLATFORM_STEAM
     source_url: str = ""
     external_id: str = ""
+    workspace_id: str = ""
+    custom_deploy_path: str = ""
     mod_files_json: str = DEFAULT_MOD_FILES_JSON
     is_invalid: bool = False
     invalid_reason: str = ""
@@ -276,6 +300,7 @@ class ModDisplayInfo:
     offline_status: str = OFFLINE_STATUS_NONE
     offline_provider: str = ""
     offline_updated_at: str = ""
+    cover_path: str = ""
 
     @property
     def mod_files(self) -> ModFilesBundle:
@@ -331,6 +356,7 @@ class GameDeployConfig:
     mod_path: str = ""
     deploy_type: str = DEPLOY_TYPE_FOLDER_COPY
     name: str = ""
+    workshop_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -461,8 +487,12 @@ class DatabaseManager:
             self._migrate_games_table()
             self._migrate_mods_table()
             self._backfill_steam_platform_fields()
+            self._backfill_workspace_ids()
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_mods_platform ON mods(platform)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mods_workspace_id ON mods(workspace_id)"
             )
             self._ensure_unique_platform_external_index()
             # Allow mods.app_id = 0 (unknown) under FOREIGN KEY to games.
@@ -535,6 +565,88 @@ class DatabaseManager:
                 END
             """
         )
+
+    def _backfill_workspace_ids(self) -> None:
+        """Assign persistent ``workspace_id`` for rows that still lack one."""
+        cols = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(mods)").fetchall()
+        }
+        if "workspace_id" not in cols:
+            return
+        rows = self._conn.execute(
+            """
+            SELECT mod_id, platform, source_url, external_id, workspace_id
+            FROM mods
+            WHERE workspace_id IS NULL OR TRIM(workspace_id) = ''
+            """
+        ).fetchall()
+        if not rows:
+            return
+        existing = {
+            str(r["workspace_id"] or "").strip()
+            for r in self._conn.execute(
+                "SELECT workspace_id FROM mods "
+                "WHERE workspace_id IS NOT NULL AND TRIM(workspace_id) != ''"
+            ).fetchall()
+        }
+        existing.discard("")
+        for row in rows:
+            mid = str(row["mod_id"])
+            wid = resolve_workspace_id(
+                str(row["platform"] or PLATFORM_STEAM),
+                mod_id=mid,
+                source_url=str(row["source_url"] or ""),
+                external_id=str(row["external_id"] or ""),
+                existing=str(row["workspace_id"] or ""),
+            )
+            if not wid:
+                wid = generate_unique_workspace_id(existing)
+            existing.add(wid)
+            self._conn.execute(
+                "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
+                (wid, int(mid)),
+            )
+
+    def _ensure_mod_workspace_id_locked(self, mod_id: int) -> str:
+        """
+        Ensure ``mods.workspace_id`` is set (caller must hold ``_lock``).
+
+        Returns the final workspace_id. Never overwrites a non-empty value.
+        """
+        row = self._conn.execute(
+            """
+            SELECT mod_id, platform, source_url, external_id, workspace_id
+            FROM mods WHERE mod_id = ?
+            """,
+            (int(mod_id),),
+        ).fetchone()
+        if row is None:
+            return ""
+        existing = str(row["workspace_id"] or "").strip()
+        if existing:
+            return existing
+        wid = resolve_workspace_id(
+            str(row["platform"] or PLATFORM_STEAM),
+            mod_id=str(row["mod_id"]),
+            source_url=str(row["source_url"] or ""),
+            external_id=str(row["external_id"] or ""),
+        )
+        if not wid:
+            taken = {
+                str(r["workspace_id"] or "").strip()
+                for r in self._conn.execute(
+                    "SELECT workspace_id FROM mods "
+                    "WHERE workspace_id IS NOT NULL AND TRIM(workspace_id) != ''"
+                ).fetchall()
+            }
+            taken.discard("")
+            wid = generate_unique_workspace_id(taken)
+        self._conn.execute(
+            "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
+            (wid, int(mod_id)),
+        )
+        return wid
 
     def _ensure_unique_platform_external_index(self) -> None:
         """
@@ -639,7 +751,8 @@ class DatabaseManager:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT app_id, name, install_path, mod_path, deploy_type
+                SELECT app_id, name, install_path, mod_path, deploy_type,
+                       workshop_path
                 FROM games WHERE app_id = ?
                 """,
                 (app_id,),
@@ -656,6 +769,7 @@ class DatabaseManager:
         mod_path: str | None = None,
         deploy_type: str | None = None,
         name: str | None = None,
+        workshop_path: str | None = None,
     ) -> GameDeployConfig:
         """
         Persist game-level deploy paths.
@@ -671,7 +785,8 @@ class DatabaseManager:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT app_id, name, install_path, mod_path, deploy_type
+                SELECT app_id, name, install_path, mod_path, deploy_type,
+                       workshop_path
                 FROM games WHERE app_id = ?
                 """,
                 (app_id,),
@@ -686,15 +801,27 @@ class DatabaseManager:
                     else (str(deploy_type).strip() or DEPLOY_TYPE_FOLDER_COPY)
                 )
                 new_name = "" if name is None else str(name).strip()
+                new_workshop = (
+                    "" if workshop_path is None else str(workshop_path).strip()
+                )
                 self._conn.execute(
                     """
                     INSERT INTO games (
                         app_id, name, header_url, description,
-                        install_path, mod_path, deploy_type, updated_at
+                        install_path, mod_path, deploy_type, workshop_path,
+                        updated_at
                     )
-                    VALUES (?, ?, '', '', ?, ?, ?, ?)
+                    VALUES (?, ?, '', '', ?, ?, ?, ?, ?)
                     """,
-                    (app_id, new_name, new_install, new_mod, new_type, _utc_now()),
+                    (
+                        app_id,
+                        new_name,
+                        new_install,
+                        new_mod,
+                        new_type,
+                        new_workshop,
+                        _utc_now(),
+                    ),
                 )
             else:
                 new_install = (
@@ -715,6 +842,15 @@ class DatabaseManager:
                 new_name = (
                     str(row["name"] or "") if name is None else str(name).strip()
                 )
+                keys = set(row.keys())
+                prev_workshop = (
+                    str(row["workshop_path"] or "") if "workshop_path" in keys else ""
+                )
+                new_workshop = (
+                    prev_workshop
+                    if workshop_path is None
+                    else str(workshop_path).strip()
+                )
                 self._conn.execute(
                     """
                     UPDATE games SET
@@ -722,15 +858,25 @@ class DatabaseManager:
                         install_path = ?,
                         mod_path = ?,
                         deploy_type = ?,
+                        workshop_path = ?,
                         updated_at = ?
                     WHERE app_id = ?
                     """,
-                    (new_name, new_install, new_mod, new_type, _utc_now(), app_id),
+                    (
+                        new_name,
+                        new_install,
+                        new_mod,
+                        new_type,
+                        new_workshop,
+                        _utc_now(),
+                        app_id,
+                    ),
                 )
             self._conn.commit()
             out = self._conn.execute(
                 """
-                SELECT app_id, name, install_path, mod_path, deploy_type
+                SELECT app_id, name, install_path, mod_path, deploy_type,
+                       workshop_path
                 FROM games WHERE app_id = ?
                 """,
                 (app_id,),
@@ -782,18 +928,21 @@ class DatabaseManager:
                 INSERT INTO mods (
                     mod_id, app_id, title, preview_url, description,
                     display_name, custom_description, user_notes, favorite,
-                    platform, source_url, external_id, mod_files, updated_at
+                    platform, source_url, external_id, workspace_id, mod_files, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, '{}', ?)
+                VALUES (?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, ?, '{}', ?)
                 ON CONFLICT(mod_id) DO UPDATE SET
                     app_id = excluded.app_id,
                     title = excluded.title,
                     preview_url = excluded.preview_url,
                     description = excluded.description,
-                    platform = 'steam',
-                    external_id = excluded.external_id,
+                    workspace_id = CASE
+                        WHEN mods.workspace_id = '' OR mods.workspace_id IS NULL
+                        THEN excluded.workspace_id
+                        ELSE mods.workspace_id
+                    END,
                     source_url = CASE
-                        WHEN mods.source_url = '' OR mods.platform = 'steam'
+                        WHEN mods.source_url IS NULL OR TRIM(mods.source_url) = ''
                         THEN excluded.source_url
                         ELSE mods.source_url
                     END,
@@ -807,6 +956,7 @@ class DatabaseManager:
                     meta.description or "",
                     PLATFORM_STEAM,
                     source,
+                    str(mid),
                     str(mid),
                     _utc_now(),
                 ),
@@ -832,6 +982,7 @@ class DatabaseManager:
                     PLATFORM_STEAM,
                     steam_workshop_url(mid),
                     str(mid),
+                    str(mid),
                     _utc_now(),
                 )
             )
@@ -843,18 +994,21 @@ class DatabaseManager:
                 INSERT INTO mods (
                     mod_id, app_id, title, preview_url, description,
                     display_name, custom_description, user_notes, favorite,
-                    platform, source_url, external_id, mod_files, updated_at
+                    platform, source_url, external_id, workspace_id, mod_files, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, '{}', ?)
+                VALUES (?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, ?, '{}', ?)
                 ON CONFLICT(mod_id) DO UPDATE SET
                     app_id = excluded.app_id,
                     title = excluded.title,
                     preview_url = excluded.preview_url,
                     description = excluded.description,
-                    platform = 'steam',
-                    external_id = excluded.external_id,
+                    workspace_id = CASE
+                        WHEN mods.workspace_id = '' OR mods.workspace_id IS NULL
+                        THEN excluded.workspace_id
+                        ELSE mods.workspace_id
+                    END,
                     source_url = CASE
-                        WHEN mods.source_url = '' OR mods.platform = 'steam'
+                        WHEN mods.source_url IS NULL OR TRIM(mods.source_url) = ''
                         THEN excluded.source_url
                         ELSE mods.source_url
                     END,
@@ -1007,6 +1161,7 @@ class DatabaseManager:
                     """,
                     (plat, url, ext, new_title, new_title, new_app, now, mid),
                 )
+                self._ensure_mod_workspace_id_locked(mid)
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
@@ -1020,6 +1175,42 @@ class DatabaseManager:
             ).fetchone()
         assert out is not None
         return _display_info_from_row(out)
+
+    def batch_update_platform(
+        self,
+        mod_ids: Sequence[int | str],
+        platform: str,
+    ) -> int:
+        """
+        Update only ``mods.platform`` for many Mods.
+
+        Never touches display_name / custom_description / source_url / external_id.
+        Returns the number of rows updated.
+        """
+        plat = normalize_platform(platform)
+        ids: list[int] = []
+        for raw in mod_ids:
+            text = str(raw or "").strip()
+            if text.isdigit():
+                mid = int(text)
+                if mid not in ids:
+                    ids.append(mid)
+        if not ids:
+            return 0
+        now = _utc_now()
+        updated = 0
+        with self._lock:
+            for mid in ids:
+                cur = self._conn.execute(
+                    """
+                    UPDATE mods SET platform = ?, updated_at = ?
+                    WHERE mod_id = ?
+                    """,
+                    (plat, now, mid),
+                )
+                updated += int(cur.rowcount or 0)
+            self._conn.commit()
+        return updated
 
     def get_mod_files(self, mod_id: int | str) -> ModFilesBundle:
         try:
@@ -1121,6 +1312,22 @@ class DatabaseManager:
                 WHERE mod_id = ?
                 """,
                 (new_status, new_provider, new_updated, now, mid),
+            )
+            self._conn.commit()
+
+    def update_mod_cover_path(self, mod_id: int | str, cover_path: str = "") -> None:
+        """Set ``mods.cover_path`` (relative ``.info/cover.ext`` or empty)."""
+        mid = int(str(mod_id).strip())
+        value = str(cover_path or "").strip()
+        now = _utc_now()
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            self._conn.execute(
+                """
+                UPDATE mods SET cover_path = ?, updated_at = ?
+                WHERE mod_id = ?
+                """,
+                (value, now, mid),
             )
             self._conn.commit()
 
@@ -1633,6 +1840,21 @@ class DatabaseManager:
         user_notes = str(data.get("user_notes", "") or "")
         favorite_raw = data.get("favorite", 0)
         favorite = 1 if favorite_raw in (True, 1, "1", "true", "True") else 0
+        # Optional — only update when the key is present (edit dialog).
+        touch_source = "source_url" in data
+        source_url = str(data.get("source_url", "") or "").strip() if touch_source else None
+        touch_platform = "platform" in data
+        platform = (
+            normalize_platform(str(data.get("platform") or ""))
+            if touch_platform
+            else None
+        )
+        touch_custom_deploy = "custom_deploy_path" in data
+        custom_deploy_path = (
+            str(data.get("custom_deploy_path", "") or "").strip()
+            if touch_custom_deploy
+            else None
+        )
         now = _utc_now()
 
         with self._lock:
@@ -1641,14 +1863,40 @@ class DatabaseManager:
                 (mid,),
             ).fetchone()
             if existing is None:
+                plat = platform or PLATFORM_STEAM
+                url = (
+                    source_url
+                    if source_url is not None
+                    else (
+                        steam_workshop_url(mid)
+                        if mid > 0 and mid < NON_STEAM_MOD_ID_BASE
+                        else ""
+                    )
+                )
+                ext = str(mid) if mid > 0 and mid < NON_STEAM_MOD_ID_BASE else ""
+                wid = resolve_workspace_id(
+                    plat, mod_id=mid, source_url=url, external_id=ext
+                )
+                if not wid:
+                    taken = {
+                        str(r["workspace_id"] or "").strip()
+                        for r in self._conn.execute(
+                            "SELECT workspace_id FROM mods "
+                            "WHERE workspace_id IS NOT NULL "
+                            "AND TRIM(workspace_id) != ''"
+                        ).fetchall()
+                    }
+                    taken.discard("")
+                    wid = generate_unique_workspace_id(taken)
                 self._conn.execute(
                     """
                     INSERT INTO mods (
                         mod_id, app_id, title, preview_url, description,
                         display_name, custom_description, user_notes, favorite,
-                        platform, source_url, external_id, mod_files, updated_at
+                        platform, source_url, external_id, workspace_id,
+                        custom_deploy_path, mod_files, updated_at
                     )
-                    VALUES (?, 0, '', '', '', ?, ?, ?, ?, 'steam', ?, ?, '{}', ?)
+                    VALUES (?, 0, '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
                     """,
                     (
                         mid,
@@ -1656,31 +1904,113 @@ class DatabaseManager:
                         custom_description,
                         user_notes,
                         favorite,
-                        steam_workshop_url(mid) if mid > 0 and mid < NON_STEAM_MOD_ID_BASE else "",
-                        str(mid) if mid > 0 and mid < NON_STEAM_MOD_ID_BASE else "",
+                        plat,
+                        url,
+                        ext,
+                        wid,
+                        custom_deploy_path or "",
                         now,
                     ),
                 )
             else:
-                self._conn.execute(
-                    """
-                    UPDATE mods SET
-                        display_name = ?,
-                        custom_description = ?,
-                        user_notes = ?,
-                        favorite = ?,
-                        updated_at = ?
-                    WHERE mod_id = ?
-                    """,
-                    (
-                        display_name,
-                        custom_description,
-                        user_notes,
-                        favorite,
-                        now,
-                        mid,
-                    ),
-                )
+                if touch_source or touch_platform:
+                    if touch_source and touch_platform:
+                        self._conn.execute(
+                            """
+                            UPDATE mods SET
+                                display_name = ?,
+                                custom_description = ?,
+                                user_notes = ?,
+                                favorite = ?,
+                                platform = ?,
+                                source_url = ?,
+                                updated_at = ?
+                            WHERE mod_id = ?
+                            """,
+                            (
+                                display_name,
+                                custom_description,
+                                user_notes,
+                                favorite,
+                                platform or PLATFORM_STEAM,
+                                source_url or "",
+                                now,
+                                mid,
+                            ),
+                        )
+                    elif touch_source:
+                        self._conn.execute(
+                            """
+                            UPDATE mods SET
+                                display_name = ?,
+                                custom_description = ?,
+                                user_notes = ?,
+                                favorite = ?,
+                                source_url = ?,
+                                updated_at = ?
+                            WHERE mod_id = ?
+                            """,
+                            (
+                                display_name,
+                                custom_description,
+                                user_notes,
+                                favorite,
+                                source_url or "",
+                                now,
+                                mid,
+                            ),
+                        )
+                    else:
+                        self._conn.execute(
+                            """
+                            UPDATE mods SET
+                                display_name = ?,
+                                custom_description = ?,
+                                user_notes = ?,
+                                favorite = ?,
+                                platform = ?,
+                                updated_at = ?
+                            WHERE mod_id = ?
+                            """,
+                            (
+                                display_name,
+                                custom_description,
+                                user_notes,
+                                favorite,
+                                platform or PLATFORM_STEAM,
+                                now,
+                                mid,
+                            ),
+                        )
+                else:
+                    self._conn.execute(
+                        """
+                        UPDATE mods SET
+                            display_name = ?,
+                            custom_description = ?,
+                            user_notes = ?,
+                            favorite = ?,
+                            updated_at = ?
+                        WHERE mod_id = ?
+                        """,
+                        (
+                            display_name,
+                            custom_description,
+                            user_notes,
+                            favorite,
+                            now,
+                            mid,
+                        ),
+                    )
+                if touch_custom_deploy:
+                    self._conn.execute(
+                        """
+                        UPDATE mods SET custom_deploy_path = ?, updated_at = ?
+                        WHERE mod_id = ?
+                        """,
+                        (custom_deploy_path or "", now, mid),
+                    )
+                self._ensure_mod_workspace_id_locked(mid)
             self._conn.commit()
             row = self._conn.execute(
                 f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?",
@@ -1765,16 +2095,17 @@ class DatabaseManager:
 
             if existing is None:
                 resolved_app = 0 if app_id is None else int(app_id)
+                is_steam_range = mid > 0 and mid < NON_STEAM_MOD_ID_BASE
                 self._conn.execute(
                     """
                     INSERT INTO mods (
                         mod_id, app_id, title, preview_url, description,
                         display_name, custom_description, user_notes, favorite,
                         deploy_status, deploy_time, deploy_path, deploy_error,
-                        platform, source_url, external_id, mod_files,
+                        platform, source_url, external_id, workspace_id, mod_files,
                         updated_at
                     )
-                    VALUES (?, ?, '', '', '', '', '', '', 0, ?, ?, ?, ?, 'steam', ?, ?, '{}', ?)
+                    VALUES (?, ?, '', '', '', '', '', '', 0, ?, ?, ?, ?, 'steam', ?, ?, ?, '{}', ?)
                     """,
                     (
                         mid,
@@ -1783,13 +2114,14 @@ class DatabaseManager:
                         when,
                         path,
                         err,
-                        steam_workshop_url(mid)
-                        if mid > 0 and mid < NON_STEAM_MOD_ID_BASE
-                        else "",
-                        str(mid) if mid > 0 and mid < NON_STEAM_MOD_ID_BASE else "",
+                        steam_workshop_url(mid) if is_steam_range else "",
+                        str(mid) if is_steam_range else "",
+                        str(mid) if is_steam_range else "",
                         now,
                     ),
                 )
+                if not is_steam_range:
+                    self._ensure_mod_workspace_id_locked(mid)
             else:
                 if app_id is not None:
                     self._conn.execute(
@@ -2023,6 +2355,50 @@ class DatabaseManager:
                 (TAG_TYPE_CATEGORY,),
             ).fetchall()
         return [str(r["tag_value"]) for r in rows]
+
+    def add_game_category(self, app_id: int | str, name: str) -> bool:
+        """Persist a user-defined category label for one game (sidebar)."""
+        label = str(name or "").strip()
+        aid = int(app_id or 0)
+        if not label or aid <= 0:
+            return False
+        with self._lock:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO game_categories (app_id, name, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (aid, label, _utc_now()),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def list_game_categories(self, app_id: int | str) -> list[str]:
+        """Category labels defined for one game (sorted)."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT name FROM game_categories
+                WHERE app_id = ?
+                ORDER BY name COLLATE NOCASE
+                """,
+                (aid,),
+            ).fetchall()
+        return [str(r["name"]) for r in rows]
+
+    def set_mod_category(self, mod_id: int | str, category: str) -> None:
+        """Replace all category tags with a single label (empty clears)."""
+        label = str(category or "").strip()
+        for tag in self.get_category_tags(mod_id):
+            self.remove_category_tag(mod_id, tag)
+        if label:
+            self.add_category_tag(mod_id, label)
 
     def delete_mod_record(self, mod_id: int | str) -> bool:
         """
@@ -2506,15 +2882,18 @@ class DatabaseManager:
             INSERT INTO mods (
                 mod_id, app_id, title, preview_url, description,
                 display_name, custom_description, user_notes, favorite,
-                platform, source_url, external_id, mod_files, updated_at
+                platform, source_url, external_id, workspace_id, mod_files, updated_at
             )
-            VALUES (?, 0, '', '', '', '', '', '', 0, 'steam', ?, ?, '{}', ?)
+            VALUES (?, 0, '', '', '', '', '', '', 0, 'steam', ?, ?, ?, '{}', ?)
             ON CONFLICT(mod_id) DO NOTHING
             """,
             (
                 mid,
                 steam_workshop_url(mid) if is_steam_range else "",
                 str(mid),
+                # Only Steam-range stubs may reuse Workshop ID as Workspace ID.
+                # Non-Steam rows get workspace_id after platform identity is set.
+                str(mid) if is_steam_range else "",
                 now,
             ),
         )
@@ -2534,12 +2913,17 @@ def _game_from_row(row: sqlite3.Row) -> GameInfo:
 
 def _game_deploy_from_row(row: sqlite3.Row) -> GameDeployConfig:
     dtype = str(row["deploy_type"] or "").strip() or DEPLOY_TYPE_FOLDER_COPY
+    keys = set(row.keys())
+    workshop = (
+        str(row["workshop_path"] or "") if "workshop_path" in keys else ""
+    )
     return GameDeployConfig(
         app_id=int(row["app_id"]),
         install_path=str(row["install_path"] or ""),
         mod_path=str(row["mod_path"] or ""),
         deploy_type=dtype,
         name=str(row["name"] or ""),
+        workshop_path=workshop,
     )
 
 
@@ -2666,6 +3050,15 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
         if "offline_updated_at" in keys
         else ""
     )
+    cover_path = str(row["cover_path"] or "") if "cover_path" in keys else ""
+    workspace_id = (
+        str(row["workspace_id"] or "") if "workspace_id" in keys else ""
+    )
+    custom_deploy_path = (
+        str(row["custom_deploy_path"] or "")
+        if "custom_deploy_path" in keys
+        else ""
+    )
     return ModDisplayInfo(
         mod_id=str(row["mod_id"]),
         steam_name=steam_name,
@@ -2680,6 +3073,8 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
         platform=platform,
         source_url=source_url,
         external_id=external_id,
+        workspace_id=workspace_id,
+        custom_deploy_path=custom_deploy_path,
         mod_files_json=mod_files_json,
         is_invalid=is_invalid,
         invalid_reason=invalid_reason,
@@ -2694,6 +3089,7 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
         offline_status=offline_status,
         offline_provider=offline_provider,
         offline_updated_at=offline_updated_at,
+        cover_path=cover_path,
     )
 
 

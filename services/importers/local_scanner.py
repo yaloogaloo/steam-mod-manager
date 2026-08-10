@@ -14,7 +14,11 @@ from core.mod_platform import (
 )
 from services.importers.image_scanner import IMAGE_EXTENSIONS, is_image_path
 
+# Multi-file Files list: archives only (absolute rule).
+ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
+
 # Recognized package / config extensions (not Steam/Nexus/GitHub specific).
+# Kept for classify_file_kind / directory_batch hints — NOT for Files list scan.
 KNOWN_EXTENSIONS = {
     ".pak": "pak",
     ".dll": "dll",
@@ -43,6 +47,11 @@ def classify_file_kind(path: Path | str) -> str:
     return KNOWN_EXTENSIONS.get(ext, "other")
 
 
+def is_archive_mod_file(path: Path | str) -> bool:
+    """True when *path* is a Files-list archive (``.zip`` / ``.7z`` / ``.rar``)."""
+    return Path(path).suffix.lower() in ARCHIVE_SUFFIXES
+
+
 def scan_mod_directory(
     folder: str | Path,
     *,
@@ -51,11 +60,12 @@ def scan_mod_directory(
     """
     Scan a Mod directory into a ``ModFilesBundle``.
 
-    Rules (platform-neutral):
-    - Skip ``.info`` / ``info`` / VCS / hidden files
-    - Prefer files whose stem looks like ``main`` / common package extensions
-    - First primary file → ``type=main``, ``enabled=True``
-    - Remaining → ``type=optional``, ``enabled=False``
+    Absolute rule for the Detail Files list:
+    - **Only** ``.zip`` / ``.7z`` / ``.rar`` archives are enrolled
+    - Pure directory Mods (loose ``.pak`` / ``.json`` / … only) → empty bundle
+    - Skip ``.info`` / ``info`` / VCS / hidden files / images
+
+    First archive → ``type=main``, ``enabled=True``; remaining → optional.
     """
     root = Path(folder).expanduser().resolve()
     base = Path(relative_to).expanduser().resolve() if relative_to else root
@@ -67,6 +77,8 @@ def scan_mod_directory(
         if not path.is_file():
             continue
         if path.name.startswith("."):
+            continue
+        if not is_archive_mod_file(path):
             continue
         if is_image_path(path) or path.suffix.lower() in _SKIP_SUFFIXES:
             continue
@@ -81,18 +93,8 @@ def scan_mod_directory(
     def _rank(p: Path) -> tuple[int, int, str]:
         stem = p.stem.lower()
         main_boost = 0 if ("main" in stem or stem in {"main", "primary"}) else 1
-        ext = p.suffix.lower()
-        prefer = {
-            ".pak": 0,
-            ".zip": 1,
-            ".7z": 2,
-            ".rar": 3,
-            ".dll": 4,
-            ".json": 5,
-            ".ini": 6,
-            ".cfg": 7,
-        }
-        return (main_boost, prefer.get(ext, 50), p.name.lower())
+        prefer = {".zip": 0, ".7z": 1, ".rar": 2}
+        return (main_boost, prefer.get(p.suffix.lower(), 50), p.name.lower())
 
     candidates.sort(key=_rank)
     files: list[ModFileEntry] = []

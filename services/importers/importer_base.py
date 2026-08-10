@@ -37,11 +37,14 @@ class ImportContext:
 
     game_id: int = 0
     game_name: str = ""
+    offline_html_path: str | None = None
 
     def normalized(self) -> ImportContext:
+        html = str(self.offline_html_path or "").strip() or None
         return ImportContext(
             game_id=int(self.game_id or 0),
             game_name=str(self.game_name or "").strip(),
+            offline_html_path=html,
         )
 
     def is_complete(self) -> bool:
@@ -54,7 +57,10 @@ class ImportContext:
 
     def as_dict(self) -> dict[str, Any]:
         ctx = self.normalized()
-        return {"game_id": ctx.game_id, "game_name": ctx.game_name}
+        out: dict[str, Any] = {"game_id": ctx.game_id, "game_name": ctx.game_name}
+        if ctx.offline_html_path:
+            out["offline_html_path"] = ctx.offline_html_path
+        return out
 
 
 @dataclass
@@ -71,6 +77,9 @@ class ImportResult:
     managed_path: str = ""
     game_id: int = 0
     game_name: str = ""
+    # Multi-directory batch summary (0 / 1 = single-mod import).
+    imported_count: int = 0
+    skipped_count: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -84,6 +93,8 @@ class ImportResult:
             "managed_path": self.managed_path,
             "game_id": self.game_id,
             "game_name": self.game_name,
+            "imported_count": self.imported_count,
+            "skipped_count": self.skipped_count,
         }
         if self.error:
             out["error"] = self.error
@@ -96,22 +107,39 @@ def coerce_import_context(
     game_id: int = 0,
     game_name: str = "",
     app_id: int = 0,
+    offline_html_path: str | None = None,
 ) -> ImportContext | None:
     """Build an :class:`ImportContext` from a dict / kwargs, or ``None``."""
+    html_from_kw = str(offline_html_path or "").strip() or None
     if isinstance(context, ImportContext):
         ctx = context.normalized()
-        if ctx.game_id or ctx.game_name:
+        if html_from_kw and not ctx.offline_html_path:
+            ctx = ImportContext(
+                game_id=ctx.game_id,
+                game_name=ctx.game_name,
+                offline_html_path=html_from_kw,
+            ).normalized()
+        if ctx.game_id or ctx.game_name or ctx.offline_html_path:
             return ctx
         context = None
     if isinstance(context, dict):
         gid = int(context.get("game_id") or context.get("app_id") or 0)
         gname = str(context.get("game_name") or "").strip()
-        if gid or gname:
-            return ImportContext(game_id=gid, game_name=gname).normalized()
+        html = (
+            str(context.get("offline_html_path") or "").strip()
+            or html_from_kw
+            or None
+        )
+        if gid or gname or html:
+            return ImportContext(
+                game_id=gid, game_name=gname, offline_html_path=html
+            ).normalized()
     gid = int(game_id or app_id or 0)
     gname = str(game_name or "").strip()
-    if gid or gname:
-        return ImportContext(game_id=gid, game_name=gname).normalized()
+    if gid or gname or html_from_kw:
+        return ImportContext(
+            game_id=gid, game_name=gname, offline_html_path=html_from_kw
+        ).normalized()
     return None
 
 

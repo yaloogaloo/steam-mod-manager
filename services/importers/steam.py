@@ -15,8 +15,8 @@ from services.importers.importer_base import (
     is_invalid_game_name,
     resolve_game_for_import,
 )
-from services.importers.local_scanner import scan_mod_directory
 from services.importers.materialize import materialize_imported_mod
+from services.importers.source_files import apply_steam_file_semantics
 
 
 class SteamImporter(ModImporter):
@@ -111,9 +111,19 @@ class SteamImporter(ModImporter):
             title=name,
             app_id=int(resolved_app_id or 0),
         )
-        bundle = ModFilesBundle()
-        if folder is not None and folder.is_dir():
-            bundle = scan_mod_directory(folder)
+        # Single Workshop Content semantics: empty bundle → deploy whole Mod.
+        # Optional file_entries (tests / advanced) are annotated as steam_content.
+        raw_entries = _kwargs.get("file_entries")
+        if raw_entries:
+            from core.mod_platform import ModFileEntry
+
+            files = [
+                e if isinstance(e, ModFileEntry) else ModFileEntry.from_dict(e)
+                for e in raw_entries
+            ]
+            bundle = apply_steam_file_semantics(ModFilesBundle(files=files))
+        else:
+            bundle = ModFilesBundle()
         db.set_mod_files(mid, bundle)
 
         managed = ""
@@ -124,6 +134,7 @@ class SteamImporter(ModImporter):
                 title=name,
                 game_name=resolved_game,
                 source_folder=folder if folder and folder.is_dir() else None,
+                cover_source=_kwargs.get("cover_source") or _kwargs.get("cover_path"),
                 context=ctx,
                 allow_invalid_game_name=ctx is None,
             )

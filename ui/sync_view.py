@@ -1,13 +1,14 @@
-"""Sync Center view — paths, game preview, sync controls."""
+"""Sync Center view — game picker, library path, sync controls."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QTimer, Signal
+from PySide6.QtCore import QSettings, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.db_manager import DatabaseManager, get_db
 from core.game_info import GameInfo
 from core.paths import default_mod_library, extract_app_id_from_workshop_path
 from services.sync import SyncOptions
@@ -40,29 +42,34 @@ _SETTING_STEAM_COOKIE = "network/steam_cookie"
 
 
 class SyncCenterView(QWidget):
-    """View A: configure paths, preview the detected game, run sync."""
+    """View A: pick a game, preview it, run workshop / offline sync."""
 
     sync_completed = Signal()
-    paths_changed = Signal(str, str)  # workshop, target
+    paths_changed = Signal(str, str)  # workshop (from game), target
     request_open_library = Signal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        db: DatabaseManager | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._db = db
         self._sync_worker: SyncWorker | None = None
         self._offline_worker: OfflinePagesSyncWorker | None = None
         self._info_worker: GameInfoWorker | None = None
-        self._detected_app_id: int | None = None
+        self._selected_app_id: int | None = None
+        self._workshop_path: str = ""
+        self._loading_games = False
         self._settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
-        self._path_debounce = QTimer(self)
-        self._path_debounce.setSingleShot(True)
-        self._path_debounce.setInterval(450)
-        self._path_debounce.timeout.connect(self._resolve_game_from_path)
 
         self._build_ui()
         self._restore_proxy_setting()
         self._restore_steam_cookie_setting()
-        self._restore_steam_cookie_setting()
-        self._restore_steam_cookie_setting()
+
+    def _database(self) -> DatabaseManager:
+        return self._db if self._db is not None else get_db()
 
     # ------------------------------------------------------------------
     # UI
@@ -84,21 +91,35 @@ class SyncCenterView(QWidget):
         panel_layout.addWidget(heading)
 
         hint = QLabel(
-            "选择某一游戏的创意工坊目录（…/workshop/content/<AppID>），"
-            "系统会自动识别游戏并同步其 Mod。"
+            "选择游戏后，系统会读取该游戏在「游戏部署」中配置的创意工坊目录。"
+            "未配置工坊路径的游戏将跳过工坊同步（例如无 Steam 工坊的游戏）。"
         )
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
         panel_layout.addWidget(hint)
 
-        self.workshop_edit = QLineEdit()
-        self.workshop_edit.setPlaceholderText(
-            r"例如 F:\SteamLibrary\steamapps\workshop\content\1623730"
-        )
-        self.workshop_edit.textChanged.connect(self._on_workshop_text_changed)
-        panel_layout.addLayout(
-            self._path_row("Steam 创意工坊目录", self.workshop_edit, self._browse_workshop)
-        )
+        picker_col = QVBoxLayout()
+        picker_col.setSpacing(4)
+        picker_label = QLabel("选择游戏")
+        picker_label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
+        picker_col.addWidget(picker_label)
+        picker_row = QHBoxLayout()
+        picker_row.setSpacing(8)
+        self.game_combo = QComboBox()
+        self.game_combo.setObjectName("syncGameCombo")
+        self.game_combo.currentIndexChanged.connect(self._on_game_selected)
+        picker_row.addWidget(self.game_combo, stretch=1)
+        self.refresh_games_btn = QPushButton("刷新列表")
+        self.refresh_games_btn.setObjectName("browseButton")
+        self.refresh_games_btn.clicked.connect(self.refresh_games)
+        picker_row.addWidget(self.refresh_games_btn)
+        picker_col.addLayout(picker_row)
+        panel_layout.addLayout(picker_col)
+
+        self.workshop_status = QLabel("工坊路径：未选择游戏")
+        self.workshop_status.setObjectName("subtitleLabel")
+        self.workshop_status.setWordWrap(True)
+        panel_layout.addWidget(self.workshop_status)
 
         self.target_edit = QLineEdit()
         default_lib = str(default_mod_library())
@@ -146,7 +167,7 @@ class SyncCenterView(QWidget):
         )
         panel_layout.addWidget(self.force_overwrite_check)
 
-        preview_label = QLabel("检测到的游戏")
+        preview_label = QLabel("当前游戏")
         preview_label.setStyleSheet("color: #8b9bb0; font-size: 12px;")
         panel_layout.addWidget(preview_label)
 
@@ -207,30 +228,65 @@ class SyncCenterView(QWidget):
     # ------------------------------------------------------------------
 
     def set_paths(self, workshop: str, target: str) -> None:
-        self.workshop_edit.blockSignals(True)
+        """
+        Restore library target path.
+
+        *workshop* is ignored as a global setting — workshop paths live on
+        each game's deploy config. Kept for call-site compatibility.
+        """
+        del workshop
         self.target_edit.blockSignals(True)
-        self.workshop_edit.setText(workshop)
         if target:
             self.target_edit.setText(target)
         elif not self.target_edit.text().strip():
             self.target_edit.setText(str(default_mod_library()))
-        self.workshop_edit.blockSignals(False)
         self.target_edit.blockSignals(False)
+        self.refresh_games()
         self._emit_paths()
-        self._resolve_game_from_path()
 
     def workshop_path(self) -> str:
-        return self.workshop_edit.text().strip()
+        return str(self._workshop_path or "").strip()
 
     def target_path(self) -> str:
         text = self.target_edit.text().strip()
         return text or str(default_mod_library())
+
+    def selected_app_id(self) -> int | None:
+        return self._selected_app_id
 
     def proxy_url(self) -> str:
         return self.proxy_edit.text().strip()
 
     def steam_cookie(self) -> str:
         return self.steam_cookie_edit.text().strip()
+
+    def refresh_games(self) -> None:
+        """Reload games from SQLite and keep the current AppID if possible."""
+        previous = int(self._selected_app_id or 0)
+        games = [g for g in self._database().list_games() if g.app_id]
+
+        self._loading_games = True
+        self.game_combo.blockSignals(True)
+        self.game_combo.clear()
+        self.game_combo.addItem("— 选择游戏 —", 0)
+        for game in games:
+            label = game.name.strip() or f"App_{game.app_id}"
+            self.game_combo.addItem(f"{label}  ({game.app_id})", int(game.app_id))
+
+        select_index = 0
+        if previous > 0:
+            for i in range(self.game_combo.count()):
+                if int(self.game_combo.itemData(i) or 0) == previous:
+                    select_index = i
+                    break
+        self.game_combo.setCurrentIndex(select_index)
+        self.game_combo.blockSignals(False)
+        self._loading_games = False
+
+        if select_index > 0:
+            self._apply_selected_game(int(self.game_combo.currentData() or 0))
+        else:
+            self._clear_selected_game()
 
     def _restore_proxy_setting(self) -> None:
         saved = self._settings.value(_SETTING_PROXY, "", str)
@@ -249,42 +305,48 @@ class SyncCenterView(QWidget):
         self._settings.setValue(_SETTING_STEAM_COOKIE, self.steam_cookie())
 
     # ------------------------------------------------------------------
-    # Path + AppID resolve
+    # Game selection → workshop_path
     # ------------------------------------------------------------------
 
-    def _on_workshop_text_changed(self, _text: str) -> None:
+    def _on_game_selected(self, index: int) -> None:
+        if self._loading_games:
+            return
+        app_id = int(self.game_combo.itemData(index) or 0)
+        if app_id <= 0:
+            self._clear_selected_game()
+            return
+        self._apply_selected_game(app_id)
+
+    def _clear_selected_game(self) -> None:
+        self._selected_app_id = None
+        self._workshop_path = ""
+        self.workshop_status.setText("工坊路径：未选择游戏")
+        self.game_card.clear()
         self._emit_paths()
-        self._path_debounce.start()
+
+    def _apply_selected_game(self, app_id: int) -> None:
+        self._selected_app_id = app_id
+        cfg = self._database().get_game_deploy_config(app_id)
+        workshop = (cfg.workshop_path if cfg is not None else "") or ""
+        self._workshop_path = workshop.strip()
+        if self._workshop_path:
+            self.workshop_status.setText(f"工坊路径：{self._workshop_path}")
+        else:
+            self.workshop_status.setText(
+                "工坊路径：未配置（此游戏将跳过创意工坊同步）"
+            )
+        self._emit_paths()
+        self._load_game_preview(app_id)
 
     def _emit_paths(self) -> None:
         self.paths_changed.emit(self.workshop_path(), self.target_path())
 
-    def _resolve_game_from_path(self) -> None:
-        path = self.workshop_path()
-        if not path:
-            self._detected_app_id = None
-            self.game_card.clear()
-            return
-
-        app_id = extract_app_id_from_workshop_path(path)
-        if app_id is None:
-            self._detected_app_id = None
-            self.game_card.show_message(
-                "未能从路径解析 AppID",
-                "请指向 …/workshop/content/<AppID> 这一层目录。",
-            )
-            return
-
-        if self._detected_app_id == app_id and self._info_worker and self._info_worker.isRunning():
-            return
-
-        self._detected_app_id = app_id
+    def _load_game_preview(self, app_id: int) -> None:
         self.game_card.show_loading(app_id)
         self.status_label.setText(f"正在查询 AppID {app_id} 的商店信息…")
 
         if self._info_worker and self._info_worker.isRunning():
             self._info_worker.requestInterruption()
-            # Do not wait long — start a new worker
         worker = GameInfoWorker(app_id)
         worker.finished_ok.connect(self._on_game_info_ok)
         worker.finished_error.connect(self._on_game_info_error)
@@ -293,7 +355,7 @@ class SyncCenterView(QWidget):
 
     def _on_game_info_ok(self, info: object, cover_path: object) -> None:
         assert isinstance(info, GameInfo)
-        if self._detected_app_id and info.app_id != self._detected_app_id:
+        if self._selected_app_id and info.app_id != self._selected_app_id:
             return
         cover = None
         if isinstance(cover_path, str) and cover_path:
@@ -306,19 +368,13 @@ class SyncCenterView(QWidget):
         )
 
     def _on_game_info_error(self, message: str) -> None:
-        app_id = self._detected_app_id or 0
+        app_id = self._selected_app_id or 0
         self.game_card.show_info(GameInfo.fallback(app_id, message))
         self.status_label.setText(f"游戏信息获取失败，将使用 App_{app_id}")
 
     # ------------------------------------------------------------------
     # Browse
     # ------------------------------------------------------------------
-
-    def _browse_workshop(self) -> None:
-        start = self.workshop_path() or str(Path.home())
-        path = QFileDialog.getExistingDirectory(self, "选择 Steam 创意工坊目录", start)
-        if path:
-            self.workshop_edit.setText(path)
 
     def _browse_target(self) -> None:
         start = self.target_path() or str(default_mod_library())
@@ -346,12 +402,30 @@ class SyncCenterView(QWidget):
             QMessageBox.information(self, "同步进行中", "请等待当前同步完成。")
             return
 
+        if not self._selected_app_id:
+            QMessageBox.information(self, "请选择游戏", "请先在下拉菜单中选择要同步的游戏。")
+            return
+
         workshop = self.workshop_path()
         target = self.target_path()
         self.target_edit.setText(target)
 
-        if not workshop or not Path(workshop).is_dir():
-            QMessageBox.warning(self, "路径无效", "请选择有效的 Steam 创意工坊目录。")
+        # No workshop path → game has no Steam Workshop; skip quietly.
+        if not workshop:
+            self.progress_bar.setValue(0)
+            self.status_label.setText(
+                "当前游戏未配置创意工坊路径，已跳过工坊同步。"
+            )
+            self._emit_paths()
+            return
+
+        if not Path(workshop).is_dir():
+            QMessageBox.warning(
+                self,
+                "路径无效",
+                "该游戏配置的 Steam 创意工坊目录不存在或不是文件夹。"
+                "请到「游戏部署」中修正。",
+            )
             return
 
         Path(target).mkdir(parents=True, exist_ok=True)

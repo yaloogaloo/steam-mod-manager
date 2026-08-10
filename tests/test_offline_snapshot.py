@@ -93,10 +93,13 @@ def test_nexus_like_snapshot_rewrites_assets(tmp_path: Path) -> None:
     assert result.success
     assert result.html_path == out / "index.html"
     assert result.html_path.is_file()
-    assert result.asset_count >= 3
+    assert result.used_browser is False
+    # Phase 1: CSS + image only (JS not downloaded)
+    assert result.asset_count >= 2
     assets = out / "assets"
     assert assets.is_dir()
     assert list(assets.iterdir()), "assets/ should contain downloaded files"
+    assert not any(p.suffix.lower() == ".js" for p in assets.iterdir())
 
     saved = result.html_path.read_text(encoding="utf-8")
     assert "cdn.example.com/main.css" not in saved
@@ -104,6 +107,8 @@ def test_nexus_like_snapshot_rewrites_assets(tmp_path: Path) -> None:
     assert 'href="assets/' in saved
     assert 'src="assets/' in saved
     assert "Nexus Mod 336" in saved
+    # Script src left remote (not localized in phase 1)
+    assert "/static/app.js" in saved or "app.js" in saved
 
 
 def test_github_like_snapshot_rewrites_assets(tmp_path: Path) -> None:

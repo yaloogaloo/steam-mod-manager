@@ -8,6 +8,7 @@ from typing import Iterable, Sequence
 from core.db_manager import DatabaseManager, get_db
 from core.mod_platform import (
     PLATFORM_GITHUB,
+    PLATFORM_MODIO,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
     normalize_platform,
@@ -15,7 +16,8 @@ from core.mod_platform import (
 from core.paths import default_mod_library
 from services.offline.base import OfflineProvider, OfflineUpdateResult
 from services.offline.github import GithubOfflineProvider
-from services.offline.nexus import NexusOfflineProvider
+from services.offline.modio import ModioOfflineProvider
+from services.offline.nexus_manual import NexusManualOfflineProvider
 from services.offline.steam import SteamOfflineProvider
 
 
@@ -40,8 +42,9 @@ class OfflineManager:
             if providers is not None
             else (
                 SteamOfflineProvider(),
-                NexusOfflineProvider(),
+                NexusManualOfflineProvider(),
                 GithubOfflineProvider(),
+                ModioOfflineProvider(),
             )
         )
 
@@ -66,6 +69,39 @@ class OfflineManager:
             raise ValueError(f"Mod not found: {mod_id}")
         return self.get_provider_for_platform(info.platform)
 
+    def import_mod_offline_html(
+        self,
+        mod_id: str | int,
+        html_path: str | Path,
+        *,
+        managed_path: str | Path | None = None,
+        metadata=None,
+        platform: str | None = None,
+        clean: bool = True,
+    ) -> OfflineUpdateResult:
+        """Import a local HTML file as the Nexus offline snapshot."""
+        del metadata
+        mid = str(mod_id).strip()
+        info = self.db.get_mod_display_info(mid)
+        plat = normalize_platform(
+            platform
+            if platform is not None
+            else (info.platform if info is not None else PLATFORM_NEXUS)
+        )
+        provider = self.get_provider_for_platform(plat)
+        import_fn = getattr(provider, "import_offline_page", None)
+        if not callable(import_fn):
+            raise TypeError(
+                f"Provider {provider.get_provider_name()!r} does not support HTML import"
+            )
+        return import_fn(
+            mid,
+            html_path,
+            managed_path=managed_path,
+            library_root=self.library_root,
+            clean=clean,
+        )
+
     def update_mod_offline(
         self,
         mod_id: str | int,
@@ -89,7 +125,7 @@ class OfflineManager:
         )
         if info is None and plat != PLATFORM_STEAM:
             # Steam can still archive from filesystem metadata alone.
-            if plat in (PLATFORM_NEXUS, PLATFORM_GITHUB):
+            if plat in (PLATFORM_NEXUS, PLATFORM_GITHUB, PLATFORM_MODIO):
                 raise ValueError(f"Mod not found: {mid}")
 
         provider = self.get_provider_for_platform(plat)
@@ -99,3 +135,33 @@ class OfflineManager:
             library_root=self.library_root,
             metadata=metadata,
         )
+
+
+def attach_nexus_offline_page(
+    mod_id: str | int,
+    page_path: str | Path,
+    *,
+    managed_path: str | Path | None = None,
+    library_root: str | Path | None = None,
+    clean: bool = True,
+) -> OfflineUpdateResult:
+    """
+    Shared entry for Nexus offline page attach (HTML or MHTML).
+
+    Used by Mod Import (optional offline page) and Detail Panel「导入离线页面」.
+    Routes through :class:`NexusManualOfflineProvider` only.
+
+    *clean* (default True) runs Nexus MHTML Offline Snapshot Cleaner when the
+    source is ``.mhtml`` / ``.mht``.
+    """
+    return OfflineManager(library_root=library_root).import_mod_offline_html(
+        mod_id,
+        page_path,
+        managed_path=managed_path,
+        platform=PLATFORM_NEXUS,
+        clean=clean,
+    )
+
+
+# Backward-compatible alias.
+attach_nexus_offline_html = attach_nexus_offline_page

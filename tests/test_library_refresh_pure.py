@@ -74,10 +74,11 @@ def test_mod_card_shows_offline_missing_when_index_absent(
     (mod / INFO_DIR_NAME).mkdir()
 
     card = ModCardWidget(mod, metadata=None)
-    assert card.offline_label.text() == OFFLINE_MISSING_LABEL
+    assert not card.offline_badge.isHidden()
+    assert card.offline_badge.text() == OFFLINE_MISSING_LABEL
 
 
-def test_mod_card_shows_offline_status_when_index_present(
+def test_mod_card_hides_offline_badge_when_index_present(
     qapp: QApplication, tmp_path: Path
 ) -> None:
     mod = tmp_path / "SomeGame" / "SomeMod"
@@ -86,4 +87,5 @@ def test_mod_card_shows_offline_status_when_index_present(
     (info / "index.html").write_text("<html></html>", encoding="utf-8")
 
     card = ModCardWidget(mod, metadata=None)
-    assert card.offline_label.text() == "离线页已同步"
+    assert card.offline_badge.isHidden()
+    assert "Saved" in card.toolTip() or "Offline" in card.toolTip()

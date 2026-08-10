@@ -13,6 +13,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.db_manager import PLATFORM_GITHUB, PLATFORM_NEXUS, PLATFORM_STEAM, DatabaseManager
+from core.mod_platform import PLATFORM_OTHER
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, ModFileManager
 from services.offline.base import OfflineUpdateResult
@@ -95,9 +96,13 @@ def test_steam_button_starts_worker_and_calls_manager(
     panel = ModDetailPanel()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert panel.btn_download_offline.text() == "下载 Steam 页面"
+    assert "保存离线页面" in (panel.btn_download_offline.toolTip() or "")
     assert panel.btn_offline.text() == "打开离线页面"
-    assert panel.btn_steam.text() == "原链接"
+    assert "离线" in (panel.btn_offline.toolTip() or "")
+    assert panel.btn_steam.text() == "打开官网"
+    assert "来源" in (panel.btn_steam.toolTip() or "") or "官网" in (
+        panel.btn_steam.toolTip() or ""
+    )
 
     updated: list = []
     panel.offline_page_updated.connect(lambda p: updated.append(p))
@@ -136,28 +141,31 @@ def test_non_steam_uses_manager_and_button_label(
 
     calls: list[str] = []
 
-    class FakeManager:
-        def __init__(self, *a, **k):
-            pass
+    def fake_attach(mod_id, html_path, **kwargs):
+        calls.append("nexus")
+        path = Path(kwargs["managed_path"]) / INFO_DIR_NAME / "offline" / "index.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<html>nexus</html>", encoding="utf-8")
+        return OfflineUpdateResult(
+            mod_id=str(mod_id),
+            index_path=path,
+            status="archived",
+            provider="nexus_manual_import",
+        )
 
-        def update_mod_offline(self, mod_id, **kwargs):
-            calls.append("nexus")
-            path = Path(kwargs["managed_path"]) / INFO_DIR_NAME / "index.html"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("<html>nexus</html>", encoding="utf-8")
-            return OfflineUpdateResult(
-                mod_id=str(mod_id),
-                index_path=path,
-                status="archived",
-                provider="nexus_snapshot",
-            )
+    monkeypatch.setattr("ui.offline_archive_thread.attach_nexus_offline_page", fake_attach)
 
-    monkeypatch.setattr("ui.offline_archive_thread.OfflineManager", FakeManager)
+    chosen = tmp_path / "saved.html"
+    chosen.write_text("<html>ok</html>", encoding="utf-8")
+    monkeypatch.setattr(
+        "ui.mod_detail_panel.QFileDialog.getOpenFileName",
+        lambda *a, **k: (str(chosen), "HTML"),
+    )
 
     panel = ModDetailPanel()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert panel.btn_download_offline.text() == "保存 Nexus 页面"
+    assert "导入离线页面" in (panel.btn_download_offline.toolTip() or "")
 
     panel._download_offline_page()
     for _ in range(50):
@@ -169,6 +177,74 @@ def test_non_steam_uses_manager_and_button_label(
         time.sleep(0.02)
 
     assert calls == ["nexus"]
+    assert panel._has_offline_page()
+
+
+def test_other_platform_uses_manual_html_import(
+    qapp: QApplication,
+    tmp_path: Path,
+    db: DatabaseManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lib = tmp_path / "library"
+    lib.mkdir()
+    mid = "99001"
+    folder = _seed_mod(lib, mid=mid, title="LocalMod")
+    from core.game_info import GameInfo
+
+    db.upsert_game(
+        GameInfo(app_id=1623730, name="Palworld", header_image="", short_description="")
+    )
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id=mid,
+            title="LocalMod",
+            app_id=1623730,
+            managed_path=str(folder),
+        )
+    )
+    db.batch_update_platform([mid], PLATFORM_OTHER)
+    monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
+    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+
+    calls: list[str] = []
+
+    def fake_attach(mod_id, html_path, **kwargs):
+        calls.append("other")
+        path = Path(kwargs["managed_path"]) / INFO_DIR_NAME / "offline" / "index.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<html>other</html>", encoding="utf-8")
+        return OfflineUpdateResult(
+            mod_id=str(mod_id),
+            index_path=path,
+            status="archived",
+            provider="nexus_manual_import",
+        )
+
+    monkeypatch.setattr("ui.offline_archive_thread.attach_nexus_offline_page", fake_attach)
+
+    chosen = tmp_path / "saved.mhtml"
+    chosen.write_text("From: <saved>\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "ui.mod_detail_panel.QFileDialog.getOpenFileName",
+        lambda *a, **k: (str(chosen), "MHTML"),
+    )
+
+    panel = ModDetailPanel()
+    panel.show_mod(folder)
+    qapp.processEvents()
+    assert panel.btn_download_offline.text() == "导入离线页面"
+
+    panel._download_offline_page()
+    for _ in range(50):
+        qapp.processEvents()
+        if panel._offline_worker is None or not panel._offline_worker.isRunning():
+            break
+        import time
+
+        time.sleep(0.02)
+
+    assert calls == ["other"]
     assert panel._has_offline_page()
 
 

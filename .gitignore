@@ -18,6 +18,7 @@ mod/*
 # data/mod_manager.db-*
 # data/headers/
 data/asset_cache/
+data/browser_profile/
 # # legacy JSON caches (no longer used)
 # data/app_names.json
 # data/game_info.json
