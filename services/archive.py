@@ -967,6 +967,47 @@ class OfflinePageArchiver:
     # Public API
     # ------------------------------------------------------------------
 
+    def archive_rendered_html(
+        self,
+        html_text: str,
+        page_url: str,
+        output_dir: str | Path,
+    ) -> Path:
+        """
+        Persist already-rendered HTML into ``output_dir/index.html`` + ``assets/``.
+
+        Reuses asset rewrite / download, ``data/asset_cache/``, and atomic write.
+        Used by mod.io (Playwright DOM) — does not change Steam Workshop archive.
+        """
+        page_url = normalize_page_url(page_url)
+        if not page_url:
+            raise ValueError("Empty page URL")
+        text = str(html_text or "")
+        if len(text) < 200:
+            raise RuntimeError("页面访问失败")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        assets_dir = output_dir / DEFAULT_ASSETS_DIR
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        index_path = output_dir / DEFAULT_INDEX_NAME
+
+        try:
+            soup = _parse_workshop_html(text)
+            for selector in ("script", "iframe", "noscript"):
+                for node in soup.select(selector):
+                    node.decompose()
+            self._rewrite_and_download_assets(soup, page_url, assets_dir)
+            self._write_atomic(index_path, str(soup))
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("资源下载失败") from exc
+
+        if not index_path.is_file() or index_path.stat().st_size <= 0:
+            raise RuntimeError("资源下载失败")
+        return index_path
+
     def archive_webpage(
         self,
         page_url: str,
@@ -984,12 +1025,6 @@ class OfflinePageArchiver:
         page_url = normalize_page_url(page_url)
         if not page_url:
             raise ValueError("Empty page URL")
-
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        assets_dir = output_dir / DEFAULT_ASSETS_DIR
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        index_path = output_dir / DEFAULT_INDEX_NAME
 
         kwargs = self._request_kwargs(allow_redirects=True)
         headers = dict(kwargs.get("headers") or {})
@@ -1022,24 +1057,7 @@ class OfflinePageArchiver:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("页面访问失败") from exc
 
-        if len(html_text) < 200:
-            raise RuntimeError("页面访问失败")
-
-        try:
-            soup = _parse_workshop_html(html_text)
-            for selector in ("script", "iframe", "noscript"):
-                for node in soup.select(selector):
-                    node.decompose()
-            self._rewrite_and_download_assets(soup, page_url, assets_dir)
-            self._write_atomic(index_path, str(soup))
-        except RuntimeError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("资源下载失败") from exc
-
-        if not index_path.is_file() or index_path.stat().st_size <= 0:
-            raise RuntimeError("资源下载失败")
-        return index_path
+        return self.archive_rendered_html(html_text, page_url, output_dir)
 
     def archive(
         self,

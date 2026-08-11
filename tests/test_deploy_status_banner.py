@@ -91,6 +91,7 @@ def test_status_banner_shows_concrete_deploy_failure(
     assert "部署失败" in body
     assert ".rar" in body
     assert body.strip() != "部署失败"
+    assert panel._status_banner.property("tone") == "error"
 
 
 def test_unified_ops_parent(qapp: QApplication) -> None:

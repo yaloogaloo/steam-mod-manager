@@ -519,6 +519,9 @@ def test_sidebar_category_filters_mod_list(
             cat_row = i
             break
     assert cat_row is not None
+    # Categories are collapsed by default — expand parent game first.
+    view._expanded_games.add("GameX")
+    view._sync_category_row_visibility()
     view.game_list.setCurrentRow(cat_row)
     qapp.processEvents()
 

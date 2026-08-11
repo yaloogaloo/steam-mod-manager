@@ -17,6 +17,7 @@ from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.library_view import ModLibraryView
 from ui.mod_detail_panel import ModDetailPanel
+from ui.styles import APP_STYLE
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +25,7 @@ def qapp() -> QApplication:
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    app.setStyleSheet(APP_STYLE)
     return app
 
 
@@ -133,27 +135,39 @@ def test_detail_actions_visible_with_long_title_narrow_panel(
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
 
     panel = ModDetailPanel()
-    panel.resize(280, 720)
+    # Two-row footer needs ~panel min width; 260px was for an older FlowLayout wrap.
+    panel.resize(400, 720)
     panel.show()
     panel.show_mod(folder)
     _pump()
-    panel.resize(260, 720)
+    panel.resize(360, 720)
     _pump()
     panel._elide_header_title()
     _pump()
 
     assert panel.view_title.toolTip() == long_name
-    for btn in (
+    row1 = (
         panel.btn_folder,
         panel.btn_steam,
         panel.btn_offline,
         panel.btn_download_offline,
-    ):
+    )
+    row2 = (
+        panel.btn_deploy,
+        panel.btn_redeploy,
+        panel.btn_undeploy,
+        panel.btn_edit_info,
+    )
+    for btn in (*row1, *row2):
         assert btn.isVisible()
-        assert btn.width() >= 96
         top_left = btn.mapTo(panel, btn.rect().topLeft())
         assert top_left.x() >= 0
         assert top_left.x() + btn.width() <= panel.width() + 2
+    row1_ys = [b.mapTo(panel, b.rect().topLeft()).y() for b in row1]
+    row2_ys = [b.mapTo(panel, b.rect().topLeft()).y() for b in row2]
+    assert max(row1_ys) - min(row1_ys) <= 2
+    assert max(row2_ys) - min(row2_ys) <= 2
+    assert min(row2_ys) > max(row1_ys)
     assert panel.btn_remove_mod.isHidden()
 
 

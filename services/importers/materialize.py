@@ -200,4 +200,12 @@ def materialize_imported_mod(
     except Exception:  # noqa: BLE001
         pass
 
+    # Empty dir / empty archive payloads are allowed — mark missing content.
+    try:
+        from services.file_ops import apply_missing_content_marker
+
+        apply_missing_content_marker(dest)
+    except Exception:  # noqa: BLE001
+        pass
+
     return dest

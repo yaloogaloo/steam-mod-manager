@@ -48,6 +48,8 @@ class DeployContext:
     managed_path: Path | None = None
     # Non-empty → CustomPathStrategy wins over game-level rules.
     custom_deploy_path: str = ""
+    # Optional workspace / Steam file id (used by game-specific rules).
+    workspace_id: str = ""
 
     def content_root(self) -> Path:
         """Directory whose files are copied (may be an extract staging folder)."""

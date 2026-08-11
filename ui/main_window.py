@@ -20,6 +20,11 @@ from .game_deploy_view import GameDeployView
 from .library_view import ALL_GAMES_LABEL, ModLibraryView
 from .styles import APP_STYLE
 from .sync_view import SyncCenterView
+from .window_chrome import (
+    TITLE_BAR_STYLE,
+    install_frameless_main_window,
+    polish_top_level_window,
+)
 
 ORG_NAME = "SteamModManager"
 APP_NAME = "WorkshopLibrary"
@@ -38,36 +43,46 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Steam 创意工坊 Mod 本地管理器")
-        self.setMinimumSize(QSize(1080, 700))
-        self.resize(1200, 780)
+        # Room for nav(128) + game(140) + 4-card Mod grid(~852) + detail(350).
+        self.setMinimumSize(QSize(1520, 700))
+        self.resize(1600, 820)
 
         self.settings = QSettings(ORG_NAME, APP_NAME)
-        self.setStyleSheet(APP_STYLE)
+        self.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
         self._build_ui()
+        # Frameless dark chrome — custom title strip replaces the white native bar.
+        self._title_bar = install_frameless_main_window(
+            self, title=self.windowTitle()
+        )
+        polish_top_level_window(self)
         self._restore_settings()
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         outer = QHBoxLayout(central)
-        outer.setContentsMargins(16, 16, 16, 16)
-        outer.setSpacing(14)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
 
         # ---- Left navigation ----
+        nav_width = 128
         nav_wrap = QVBoxLayout()
         nav_wrap.setSpacing(8)
         brand = QLabel("Steam Mod\nManager")
         brand.setObjectName("titleLabel")
         brand.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        brand.setMaximumWidth(nav_width)
         nav_wrap.addWidget(brand)
 
         sub = QLabel("备份 · 整理 · 离线浏览 · 部署")
         sub.setObjectName("subtitleLabel")
+        sub.setWordWrap(True)
+        sub.setMaximumWidth(nav_width)
         nav_wrap.addWidget(sub)
 
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("navList")
-        self.nav_list.setFixedWidth(168)
+        self.nav_list.setFixedWidth(nav_width)
         self.nav_list.addItem(QListWidgetItem("同步中心"))
         self.nav_list.addItem(QListWidgetItem("Mod 库"))
         self.nav_list.addItem(QListWidgetItem("游戏部署"))

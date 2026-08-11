@@ -16,8 +16,15 @@ from core.db_manager import (
     PLATFORM_STEAM,
     DatabaseManager,
 )
+from core.mod_platform import PLATFORM_OTHER
 from core.game_info import GameInfo
-from services.file_ops import INFO_DIR_NAME, ModFileManager
+from services.file_ops import (
+    INFO_DIR_NAME,
+    MISSING_CONTENT_METADATA_KEY,
+    ModFileManager,
+    read_info_metadata_dict,
+    read_is_missing_content,
+)
 from services.importers import (
     GithubImporter,
     NexusImporter,
@@ -29,6 +36,7 @@ from services.importers.local_scanner import classify_file_kind
 from services.mod_files import scan_folder_to_mod_files
 from ui.library_view import ModLibraryView
 from ui.mod_card import ModCardWidget
+from ui.import_thread import ImportWorker
 from ui.mod_import_dialog import ModImportDialog
 
 PALWORLD = ImportContext(game_id=1623730, game_name="Palworld")
@@ -273,6 +281,39 @@ def test_duplicate_and_missing_folder(
     )
     assert not gh.success
     assert gh.error == "Mod目录不存在"
+
+
+def test_import_dialog_empty_path_creates_missing_content(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    del qapp
+    lib = tmp_path / "library"
+    lib.mkdir()
+    dlg = ModImportDialog(
+        lib,
+        game_context={"game_id": 1623730, "game_name": "Palworld"},
+    )
+    dlg.radio_other.setChecked(True)
+    dlg.other_title_edit.setText("Empty Stub")
+    dlg.other_folder_edit.clear()
+    params = dlg._collect_params(PLATFORM_OTHER)
+    assert params is not None
+    stub = Path(params["folder"])
+    assert stub.is_dir()
+    assert not any(stub.iterdir())
+
+    result = ImportWorker(
+        platform=PLATFORM_OTHER,
+        library_root=lib,
+        params=params,
+    )._do_import()
+    assert result.success, result.error
+    assert result.managed_path
+    managed = Path(result.managed_path)
+    assert read_is_missing_content(managed)
+    meta = read_info_metadata_dict(managed) or {}
+    assert meta.get(MISSING_CONTENT_METADATA_KEY) is True
+    dlg.close()
 
 
 def test_import_button_present(qapp: QApplication, tmp_path: Path, db: DatabaseManager) -> None:

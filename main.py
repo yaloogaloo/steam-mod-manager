@@ -170,6 +170,11 @@ def launch_gui() -> int:
     from core.db_manager import get_db
     from ui.main_window import MainWindow
     from ui.styles import APP_STYLE, apply_dark_palette
+    from ui.window_chrome import (
+        DarkTitleBarFilter,
+        TITLE_BAR_STYLE,
+        apply_application_icon,
+    )
 
     # Ensure SQLite schema exists before any sync / UI lookup
     get_db()
@@ -179,8 +184,15 @@ def launch_gui() -> int:
     app.setApplicationName("WorkshopLibrary")
     app.setStyle("Fusion")
     apply_dark_palette(app)
+    apply_application_icon(app)
     # App-level sheet so top-level popups (QMenu / QToolTip / combo lists) inherit dark tokens.
-    app.setStyleSheet(APP_STYLE)
+    app.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
+
+    # Dark native titlebars + icon for dialogs / message boxes.
+    chrome_filter = DarkTitleBarFilter(app)
+    app.installEventFilter(chrome_filter)
+    # Keep filter alive for the app lifetime.
+    app.setProperty("_dark_titlebar_filter", chrome_filter)
 
     window = MainWindow()
     window.show()

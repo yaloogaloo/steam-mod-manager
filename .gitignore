@@ -12,11 +12,13 @@ __pycache__/
 *.log
 config.local.json
 settings.json
+config/modio.json
 mod/*
 !mod/.gitkeep
 # data/mod_manager.db
 # data/mod_manager.db-*
 # data/headers/
+data/import_cache
 data/asset_cache/
 data/browser_profile/
 # # legacy JSON caches (no longer used)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -55,18 +57,19 @@ def test_get_available_sources_injects_modio_only_for_anno() -> None:
 
     anno = get_available_sources("纪元1800", 916440)
     ids = [p for p, _ in anno]
-    assert ids[:4] == [
+    assert ids[0] == PLATFORM_MODIO
+    assert ids[1:] == [
         PLATFORM_STEAM,
         PLATFORM_NEXUS,
         PLATFORM_GITHUB,
         PLATFORM_OTHER,
     ]
-    assert PLATFORM_MODIO in ids
     labels = dict(anno)
     assert labels[PLATFORM_MODIO] == "mod.io"
 
     anno_en = get_available_sources("Anno 1800", 0)
     assert PLATFORM_MODIO in {p for p, _ in anno_en}
+    assert [p for p, _ in anno_en][0] == PLATFORM_MODIO
 
 
 def test_other_platform_url_optional() -> None:
@@ -116,11 +119,13 @@ def test_import_dialog_shows_modio_for_anno(
     assert dlg.radio_modio.text() == "mod.io"
     assert dlg.radio_steam is not None
     assert dlg.radio_steam.isHidden()
-    dlg.radio_modio.setChecked(True)
+    assert dlg.radio_modio.isChecked()
     assert dlg.selected_platform() == PLATFORM_MODIO
     params = dlg._collect_params(PLATFORM_MODIO)
-    # No folder selected → validation fails
-    assert params is None
+    # No folder selected → empty stub import is allowed
+    assert params is not None
+    assert params["folder"]
+    assert Path(params["folder"]).is_dir()
     dlg.modio_folder_edit.setText(str(tmp_path))
     (tmp_path / "mod.txt").write_text("x", encoding="utf-8")
     params = dlg._collect_params(PLATFORM_MODIO)

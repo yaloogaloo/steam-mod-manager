@@ -155,14 +155,27 @@ def test_deploy_dependency_disabled_warning(
         mod_id = "50"
         app_id = 1
         source = folder
+        managed_path = folder
         deploy_type = "folder_copy"
         config = cfg
         allowed_rel_paths = None
+        custom_deploy_path = ""
+        workspace_id = "50"
+
+        def content_root(self):
+            return folder
+
+        def library_folder(self):
+            return folder
 
     monkeypatch.setattr(
         ModDeployer,
         "_resolve_context",
-        lambda self, mid, require_target_exists=False: (Ctx(), None),
+        lambda self, mid, require_target_exists=False, prepare_archives=True: (
+            Ctx(),
+            None,
+            None,
+        ),
     )
 
     out = ModDeployer(library_root=library, db=db).deploy_mod(50)

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
     QFont,
     QFontMetrics,
+    QImage,
     QMouseEvent,
     QPainter,
     QPixmap,
@@ -40,7 +41,12 @@ from core.mod_platform import (
     normalize_offline_status,
 )
 from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, ModFileManager
+from services.file_ops import (
+    INFO_DIR_NAME,
+    LEGACY_INFO_DIR_NAME,
+    ModFileManager,
+    read_is_missing_content,
+)
 from ui.styles import (
     ACCENT_DISABLED_BG,
     ACCENT_DISABLED_BORDER,
@@ -84,8 +90,6 @@ TITLE_LINES = 2
 STATUS_STRIP_HEIGHT = 18
 DEPLOY_DOT_SIZE = 10
 DEPLOY_DOT_BORDER = "#121820"
-OFFLINE_INDEX_NAME = "index.html"
-OFFLINE_SNAPSHOT_DIR = "offline"
 OFFLINE_MISSING_LABEL = "Offline"
 
 
@@ -178,7 +182,8 @@ class ModCardWidget(QFrame):
         self.cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cover_label.setScaledContents(False)
         self.cover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._set_cover(self._resolve_cover())
+        self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
+        self._cover_token = ""
         layout.addWidget(self.cover_label)
 
         # Cover overlays (do not affect card height).
@@ -204,11 +209,30 @@ class ModCardWidget(QFrame):
         self.category_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.category_badge.setStyleSheet(
             "QLabel#modCategoryBadge {"
+            "background-color: rgba(20, 24, 33, 0.85);"
             "color: #4da6ff;"
+            "border: 1px solid rgba(77, 166, 255, 0.4);"
+            "border-radius: 4px;"
+            "padding: 2px 6px;"
             "font-size: 11px;"
             "font-weight: bold;"
-            "background: transparent;"
-            "padding: 2px 0;"
+            "}"
+        )
+
+        self.missing_badge = QLabel(self.cover_label)
+        self.missing_badge.setObjectName("modMissingContentBadge")
+        self.missing_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.missing_badge.setText("内容缺失")
+        self.missing_badge.hide()
+        self.missing_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.missing_badge.setStyleSheet(
+            "QLabel#modMissingContentBadge {"
+            "background-color: rgba(220, 53, 69, 0.85);"
+            "color: white;"
+            "border-radius: 6px;"
+            "padding: 4px 10px;"
+            "font-weight: bold;"
+            "font-size: 12px;"
             "}"
         )
 
@@ -282,6 +306,77 @@ class ModCardWidget(QFrame):
 
         self.refresh_display()
         self.set_selected(False)
+        from services.cover_loader import CoverLoaderManager
+
+        CoverLoaderManager.instance().image_ready.connect(self._on_cover_image_ready)
+        CoverLoaderManager.instance().path_release_requested.connect(
+            self._on_cover_path_release_requested
+        )
+        self.destroyed.connect(self._on_card_destroyed)
+        self._request_cover()
+
+    def _on_cover_path_release_requested(self, path_key: str) -> None:
+        """Cancel cover token and clear pixmap when this card's folder renames."""
+        try:
+            current = str(
+                self.managed_path.expanduser().resolve()
+                if self.managed_path.exists()
+                else self.managed_path
+            )
+        except OSError:
+            current = str(self.managed_path)
+        if current.lower().replace("/", "\\") != str(path_key or "").lower().replace(
+            "/", "\\"
+        ):
+            return
+        from services.cover_loader import CoverLoaderManager
+
+        tok = getattr(self, "_cover_token", "") or ""
+        if tok:
+            CoverLoaderManager.instance().cancel(tok)
+        self._cover_token = ""
+        self.cover_label.clear()
+        self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
+
+    def _on_card_destroyed(self, *_args) -> None:
+        """Cancel in-flight cover work and disconnect from the singleton loader."""
+        try:
+            from services.cover_loader import CoverLoaderManager
+
+            mgr = CoverLoaderManager.instance()
+            tok = getattr(self, "_cover_token", "") or ""
+            if tok:
+                mgr.cancel(tok)
+            self._cover_token = ""
+            try:
+                mgr.image_ready.disconnect(self._on_cover_image_ready)
+            except (RuntimeError, TypeError):
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def rebind(
+        self,
+        managed_path: Path,
+        metadata: ModMetadata | None = None,
+    ) -> None:
+        """Reuse this widget for another (or updated) Mod without recreating UI."""
+        new_path = Path(managed_path)
+        old_ref = ""
+        if self.metadata and self.metadata.cover_path:
+            old_ref = str(self.metadata.cover_path).strip()
+        new_ref = ""
+        if metadata and metadata.cover_path:
+            new_ref = str(metadata.cover_path).strip()
+        path_changed = new_path != self.managed_path
+        cover_changed = path_changed or (new_ref != old_ref)
+
+        self.managed_path = new_path
+        self.metadata = metadata
+        self.refresh_display()
+        if cover_changed:
+            self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
+            self._request_cover()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -406,6 +501,7 @@ class ModCardWidget(QFrame):
         self._render_deploy_indicator()
         self._render_offline_badge()
         self._render_relation_badge()
+        self._render_missing_content_badge()
         self._render_tooltip()
 
     # Back-compat aliases (older tests / callers).
@@ -454,22 +550,29 @@ class ModCardWidget(QFrame):
             return None
 
     def _apply_titles(self) -> None:
+        from ui.library_query import resolve_mod_library_title
+
         info = self._display_info()
         steam_name = ""
-        display = ""
+        db_display = ""
         favorite = False
         if info is not None:
-            steam_name = info.steam_name
-            display = info.display_name
+            steam_name = (info.steam_name or "").strip()
+            db_display = (info.user_display_name or "").strip()
             favorite = info.favorite
         if not steam_name and self.metadata:
             steam_name = (self.metadata.title or "").strip()
-        if not display:
-            display = steam_name or (
-                self.metadata.effective_title()
-                if self.metadata
-                else self.managed_path.name
-            )
+        meta_display = (
+            (self.metadata.json_display_name or "").strip() if self.metadata else ""
+        )
+        meta_title = (self.metadata.title or "").strip() if self.metadata else ""
+        display = resolve_mod_library_title(
+            metadata_display_name=meta_display,
+            metadata_title=meta_title,
+            db_display_name=db_display,
+            db_steam_name=steam_name,
+            folder_name=self.managed_path.name,
+        )
 
         star = "★ " if favorite else ""
         shown = f"{star}{display}"
@@ -480,19 +583,9 @@ class ModCardWidget(QFrame):
         self._cached_steam_name = steam_name
 
     def _has_offline_page(self) -> bool:
-        root = self.managed_path
-        for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            for relative in (
-                (info_name, OFFLINE_SNAPSHOT_DIR, OFFLINE_INDEX_NAME),
-                (info_name, OFFLINE_INDEX_NAME),
-            ):
-                index = root.joinpath(*relative)
-                try:
-                    if index.is_file() and index.stat().st_size > 0:
-                        return True
-                except OSError:
-                    continue
-        return False
+        from services.offline.paths import offline_page_file_exists
+
+        return offline_page_file_exists(self.managed_path)
 
     def _offline_needs_attention(self) -> tuple[bool, str]:
         """
@@ -649,6 +742,23 @@ class ModCardWidget(QFrame):
         self.category_badge.show()
         self.category_badge.raise_()
 
+    def _render_missing_content_badge(self) -> None:
+        """Center overlay when the managed folder has no payload files."""
+        missing = read_is_missing_content(self.managed_path)
+        if not missing:
+            self.missing_badge.hide()
+            return
+        self.missing_badge.setText("内容缺失")
+        self.missing_badge.setToolTip("Mod 目录中没有有效内容文件（仅有元数据或空目录）")
+        self.missing_badge.adjustSize()
+        cover_w = self.cover_label.width() or COVER_WIDTH
+        cover_h = self.cover_label.height() or COVER_HEIGHT
+        x = max(0, (cover_w - self.missing_badge.width()) // 2)
+        y = max(0, (cover_h - self.missing_badge.height()) // 2)
+        self.missing_badge.move(x, y)
+        self.missing_badge.show()
+        self.missing_badge.raise_()
+
     def _render_platform_badge(self) -> None:
         platform = "steam"
         info = self._display_info()
@@ -683,10 +793,14 @@ class ModCardWidget(QFrame):
         self.platform_badge.move(x, 4)
         self.platform_badge.show()
         self.platform_badge.raise_()
+        if self.category_badge.isVisible():
+            self.category_badge.raise_()
         if self.state_badge.isVisible():
             self.state_badge.raise_()
         if self.relation_badge.isVisible():
             self.relation_badge.raise_()
+        if hasattr(self, "missing_badge") and self.missing_badge.isVisible():
+            self.missing_badge.raise_()
         if self.deploy_dot.isVisible():
             self.deploy_dot.raise_()
 
@@ -787,29 +901,79 @@ class ModCardWidget(QFrame):
         self.setToolTip(tip)
         self.title_label.setToolTip(tip)
 
-    def _resolve_cover(self) -> Path | None:
-        from services.importers.image_picker import resolve_cover_file
+    def _request_cover(self) -> None:
+        from services.cover_loader import CoverLoaderManager
 
         cover_ref = ""
         if self.metadata and self.metadata.cover_path:
             cover_ref = str(self.metadata.cover_path).strip()
-        if cover_ref:
-            resolved = resolve_cover_file(self.managed_path, cover_ref)
-            if resolved is not None:
-                return resolved
-        manager = ModFileManager(
-            self.managed_path.parents[1]
-            if len(self.managed_path.parts) > 1
-            else self.managed_path.parent
+        token = f"{id(self)}:{self.managed_path.resolve() if self.managed_path.exists() else self.managed_path}"
+        prev = self._cover_token
+        self._cover_token = token
+        mgr = CoverLoaderManager.instance()
+        if prev:
+            mgr.cancel(prev)
+        mgr.request(
+            token,
+            self.managed_path,
+            cover_ref=cover_ref,
+            width=COVER_WIDTH,
+            height=COVER_HEIGHT,
         )
-        return manager.find_local_cover(self.managed_path)
+
+    def _on_cover_image_ready(self, token: str, image: object) -> None:
+        if str(token) != getattr(self, "_cover_token", ""):
+            return
+        if not isinstance(image, QImage) or image.isNull():
+            return
+        if not self._cover_widget_alive():
+            return
+        self._apply_cover_image(image)
+
+    def _cover_widget_alive(self) -> bool:
+        try:
+            from shiboken6 import isValid
+
+            if not isValid(self):
+                return False
+            label = getattr(self, "cover_label", None)
+            return label is not None and isValid(label)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _apply_cover_image(self, qimage: QImage) -> None:
+        """GUI-thread only: convert background QImage to QPixmap and paint."""
+        if not self._cover_widget_alive():
+            return
+        target_w = COVER_WIDTH
+        target_h = COVER_HEIGHT
+        x = max(0, (qimage.width() - target_w) // 2)
+        y = max(0, (qimage.height() - target_h) // 2)
+        try:
+            pixmap = QPixmap.fromImage(qimage).copy(x, y, target_w, target_h)
+            self.cover_label.setPixmap(pixmap)
+        except RuntimeError:
+            return
+
+    def _resolve_cover(self) -> Path | None:
+        from services.cover_loader import resolve_cover_path
+
+        cover_ref = ""
+        if self.metadata and self.metadata.cover_path:
+            cover_ref = str(self.metadata.cover_path).strip()
+        return resolve_cover_path(self.managed_path, cover_ref)
 
     def _set_cover(self, path: Path | None) -> None:
+        """Synchronous fallback — load via bytes to avoid Windows file locks."""
         target_w = COVER_WIDTH
         target_h = COVER_HEIGHT
         if path and path.is_file():
-            pixmap = QPixmap(str(path))
-            if not pixmap.isNull():
+            try:
+                data = path.read_bytes()
+            except OSError:
+                data = b""
+            pixmap = QPixmap()
+            if data and pixmap.loadFromData(data) and not pixmap.isNull():
                 scaled = pixmap.scaled(
                     target_w,
                     target_h,

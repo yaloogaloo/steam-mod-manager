@@ -51,19 +51,30 @@ from .library_query import (
     folder_mtime,
     offline_page_exists,
 )
-from .mod_card import ModCardWidget
+from .mod_card import CARD_WIDTH, ModCardWidget
 from .mod_detail_panel import ModDetailPanel
 
 logger = logging.getLogger(__name__)
 
 ALL_GAMES_LABEL = "全部游戏"
-GAME_PANEL_MIN = 160
-GAME_PANEL_MAX = 220
-GAME_PANEL_WIDTH = 180
+GAME_PANEL_MIN = 120
+GAME_PANEL_MAX = 180
+GAME_PANEL_WIDTH = 140
 DETAIL_PANEL_MIN = 350
-DETAIL_PANEL_PREFERRED = 400
-# Default splitter sizes honor Game≈180 / Detail≈400 mins (center takes remainder)
-SPLITTER_DEFAULT_SIZES = (180, 520, 400)
+DETAIL_PANEL_PREFERRED = 360
+DETAIL_PANEL_MAX = 420
+# Default splitter sizes: slim game column, wide Mod grid, compact detail
+SPLITTER_DEFAULT_SIZES = (140, 720, 360)
+# FlowLayout wraps by width — reserve room for 4 cards + spacing + chrome
+LIBRARY_CARDS_PER_ROW = 4
+LIBRARY_CARD_H_SPACING = 8
+LIBRARY_FLOW_MARGIN = 2
+LIBRARY_CENTER_MIN_WIDTH = (
+    LIBRARY_CARDS_PER_ROW * CARD_WIDTH
+    + (LIBRARY_CARDS_PER_ROW - 1) * LIBRARY_CARD_H_SPACING
+    + 2 * LIBRARY_FLOW_MARGIN
+    + 24
+)
 GAME_ROLE = Qt.ItemDataRole.UserRole
 GAME_ID_ROLE = Qt.ItemDataRole.UserRole + 1
 GAME_CATEGORY_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -74,7 +85,7 @@ EMPTY_SEARCH = "empty_search"
 
 
 class _GameFilterRow(QWidget):
-    """Steam-sidebar row: game name + weak secondary count."""
+    """Steam-sidebar row: optional chevron + game name + weak secondary count."""
 
     def __init__(
         self,
@@ -83,15 +94,26 @@ class _GameFilterRow(QWidget):
         *,
         show_count: bool = True,
         indent: bool = False,
+        expandable: bool = False,
+        expanded: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("gameFilterRow")
         self.setMinimumHeight(28)
+        self.expandable = bool(expandable)
         layout = QHBoxLayout(self)
         left = 8 + (14 if indent else 0)
         layout.setContentsMargins(left, 4, 8, 4)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
+        self.chevron_label = QLabel("")
+        self.chevron_label.setObjectName("gameListChevron")
+        self.chevron_label.setFixedWidth(12)
+        if self.expandable:
+            layout.addWidget(self.chevron_label)
+            self.set_expanded(expanded)
+        else:
+            self.chevron_label.hide()
         self.name_label = QLabel(name)
         self.name_label.setObjectName("gameListName")
         self.count_label = QLabel(str(count))
@@ -105,6 +127,12 @@ class _GameFilterRow(QWidget):
         else:
             self.count_label.hide()
 
+    def set_expanded(self, expanded: bool) -> None:
+        if not self.expandable:
+            return
+        self.chevron_label.setText("▾" if expanded else "▸")
+        self.chevron_label.setToolTip("收起分类" if expanded else "展开分类")
+
 
 class ModLibraryView(QWidget):
     """View B: browse managed mods under the local library (3-column workspace)."""
@@ -116,6 +144,9 @@ class ModLibraryView(QWidget):
         super().__init__(parent)
         self._cards: list[ModCardWidget] = []
         self._card_entries: list[tuple[ModFilterIndex, ModCardWidget]] = []
+        self._card_cache: dict[str, ModCardWidget] = {}
+        self._card_create_count = 0
+        self._card_reuse_count = 0
         self._selected_card: ModCardWidget | None = None
         self._selected_path: Path | None = None
         self._selected_cards: list[ModCardWidget] = []
@@ -132,6 +163,7 @@ class ModLibraryView(QWidget):
         self._platform_filter = FILTER_PLATFORM_ALL
         self._category_filter = FILTER_CATEGORY_ALL
         self._sidebar_category: str | None = None
+        self._expanded_games: set[str] = set()
         self._sort_mode = SORT_MTIME
         self._loading = False
         self._deploy_audit: dict[str, object] = {}
@@ -225,6 +257,7 @@ class ModLibraryView(QWidget):
             self._on_game_list_context_menu
         )
         self.game_list.currentItemChanged.connect(self._on_game_item_changed)
+        self.game_list.itemClicked.connect(self._on_game_item_clicked)
         game_layout.addWidget(self.game_list)
         self.splitter.addWidget(game_panel)
 
@@ -234,7 +267,7 @@ class ModLibraryView(QWidget):
         center.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        center.setMinimumWidth(240)
+        center.setMinimumWidth(LIBRARY_CENTER_MIN_WIDTH)
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(4, 0, 4, 0)
         center_layout.setSpacing(6)
@@ -357,7 +390,10 @@ class ModLibraryView(QWidget):
         )
         # D-5: tighter card grid density
         self.library_layout = FlowLayout(
-            self.library_host, margin=2, h_spacing=8, v_spacing=8
+            self.library_host,
+            margin=LIBRARY_FLOW_MARGIN,
+            h_spacing=LIBRARY_CARD_H_SPACING,
+            v_spacing=8,
         )
         # Keep host min-height in sync with flow content so the scrollbar
         # range shrinks when switching to a smaller Mod set.
@@ -373,11 +409,11 @@ class ModLibraryView(QWidget):
 
         # --- Right: detail panel (single instance for the page lifetime) ---
         self.detail_panel = ModDetailPanel()
-        # Enforce non-collapsible detail column (panel also sets Expanding + min)
+        # Cap width so the column cannot overflow the window / clip footer actions.
         self.detail_panel.setMinimumWidth(DETAIL_PANEL_MIN)
-        self.detail_panel.setMaximumWidth(16777215)
+        self.detail_panel.setMaximumWidth(DETAIL_PANEL_MAX)
         self.detail_panel.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
         )
         self.detail_panel.metadata_saved.connect(self._on_panel_metadata_saved)
         self.detail_panel.tags_saved.connect(self._on_panel_metadata_saved)
@@ -1012,19 +1048,33 @@ class ModLibraryView(QWidget):
         mid = str(meta.published_file_id or "").strip()
         game_fs = manager.game_name_for_path(folder)
         if db_fields is not None:
-            display = db_fields.display_name
             steam = db_fields.steam_name
+            # Prefer raw user override when available; else resolved display_name.
+            db_display = str(
+                getattr(db_fields, "user_display_name", None)
+                or db_fields.display_name
+                or ""
+            ).strip()
             notes = db_fields.user_notes
             favorite = db_fields.favorite
             deployed = db_fields.deploy_status == DEPLOY_STATUS_DEPLOYED
             game_db = db_fields.game_name or ""
         else:
-            display = meta.effective_title() if meta else folder.name
             steam = (meta.title or "").strip() if meta else ""
+            db_display = ""
             notes = ""
             favorite = False
             deployed = False
             game_db = ""
+        from ui.library_query import resolve_mod_library_title
+
+        display = resolve_mod_library_title(
+            metadata_display_name=(meta.json_display_name if meta else "") or "",
+            metadata_title=(meta.title if meta else "") or "",
+            db_display_name=db_display,
+            db_steam_name=steam,
+            folder_name=folder.name,
+        )
         game_name = game_db or game_fs or (meta.game_name if meta else "") or ""
         # Include both DB game name and folder name in searchable text
         game_search = " ".join(p for p in (game_db, game_fs) if p)
@@ -1090,6 +1140,7 @@ class ModLibraryView(QWidget):
         self.scroll.setUpdatesEnabled(False)
         self.library_host.setUpdatesEnabled(False)
         try:
+            self.library_layout.setEnabled(False)
             # Detach cards from flow layout without destroying them
             while self.library_layout.count():
                 item = self.library_layout.takeAt(0)
@@ -1097,7 +1148,6 @@ class ModLibraryView(QWidget):
                 if widget is None or widget is self.empty_overlay:
                     continue
                 widget.hide()
-                widget.setParent(self.library_host)
 
             query = self.search_box.text()
             category_key = (
@@ -1162,6 +1212,7 @@ class ModLibraryView(QWidget):
             self._sync_library_host_size()
             assert id(self.detail_panel) == detail_id
         finally:
+            self.library_layout.setEnabled(True)
             self.library_host.setUpdatesEnabled(True)
             self.scroll.setUpdatesEnabled(True)
             self._set_scroll_value(scroll)
@@ -1446,17 +1497,21 @@ class ModLibraryView(QWidget):
         """Refresh only the affected card + panel — do not rescan the library."""
         path = Path(str(mod_path))
         card = self._card_for_path(path)
+        manager = ModFileManager(self._target_root)
+        meta = manager.load_metadata(path)
+        if card is None and meta is not None and meta.published_file_id:
+            card = self._card_for_mod_id(str(meta.published_file_id))
         if card is not None:
-            card.refresh_display()
-            # Rebuild index for this card so search/favorite filters stay correct
-            manager = ModFileManager(self._target_root)
-            meta = manager.load_metadata(path) or card.metadata or ModMetadata(
-                published_file_id=path.name if path.name.isdigit() else "",
-                title="",
-                managed_path=str(path),
-            )
+            if meta is None:
+                meta = card.metadata or ModMetadata(
+                    published_file_id=path.name if path.name.isdigit() else "",
+                    title="",
+                    managed_path=str(path),
+                )
             meta.managed_path = str(path)
             meta.local_path = str(path)
+            card.rebind(path, meta)
+            # Rebuild index for this card so search/favorite filters stay correct
             new_index = self._rebuild_card_index(path, meta, manager)
             for i, (_old, c) in enumerate(self._card_entries):
                 if c is card:
@@ -1663,28 +1718,38 @@ class ModLibraryView(QWidget):
 
         for key in sorted(entries.keys(), key=str.lower):
             display, app_id, count = entries[key]
-            self._add_game_list_item(display, count, key=key, game_id=app_id)
+            categories: list[str] = []
             if app_id > 0:
                 try:
-                    for cat in get_db().list_game_categories(app_id):
-                        cat_count = self._count_mods_for_category(
-                            key, cat, manager
-                        )
-                        self._add_game_list_item(
-                            cat,
-                            cat_count,
-                            key=key,
-                            game_id=app_id,
-                            category=cat,
-                            indent=True,
-                        )
+                    categories = list(get_db().list_game_categories(app_id))
                 except Exception:  # noqa: BLE001
                     logger.debug("list_game_categories failed", exc_info=True)
+                    categories = []
+            self._add_game_list_item(
+                display,
+                count,
+                key=key,
+                game_id=app_id,
+                expandable=bool(categories),
+                expanded=key in self._expanded_games,
+            )
+            for cat in categories:
+                cat_count = self._count_mods_for_category(key, cat, manager)
+                self._add_game_list_item(
+                    cat,
+                    cat_count,
+                    key=key,
+                    game_id=app_id,
+                    category=cat,
+                    indent=True,
+                )
 
         prefer_key = prefer or ""
         if prefer_key == ALL_GAMES_LABEL:
             prefer_key = ""
         prefer_category = self._sidebar_category or ""
+        if prefer_category and prefer_key:
+            self._expanded_games.add(prefer_key)
 
         target_row = 0
         for i in range(self.game_list.count()):
@@ -1706,6 +1771,7 @@ class ModLibraryView(QWidget):
         gid = int(current.data(GAME_ID_ROLE) or 0) if current else 0
         self._set_current_game_context(key or None, game_id=gid or None)
         self._pending_game_filter = None
+        self._sync_category_row_visibility()
         self.game_list.blockSignals(False)
 
     def _count_mods_for_category(
@@ -1741,6 +1807,8 @@ class ModLibraryView(QWidget):
         game_id: int = 0,
         category: str = "",
         indent: bool = False,
+        expandable: bool = False,
+        expanded: bool = False,
     ) -> None:
         """Steam-sidebar row via item widget only (empty item text avoids ghost paint)."""
         # Empty DisplayRole — QListWidgetItem text + setItemWidget stacked = 重影.
@@ -1750,11 +1818,56 @@ class ModLibraryView(QWidget):
         item.setData(GAME_CATEGORY_ROLE, str(category or ""))
         item.setToolTip(f"{name}  ·  {count}" if not category else f"{name}  ·  {count}")
         row = _GameFilterRow(
-            name, count, show_count=True, indent=indent or bool(category)
+            name,
+            count,
+            show_count=True,
+            indent=indent or bool(category),
+            expandable=expandable and not category,
+            expanded=expanded,
         )
         item.setSizeHint(row.sizeHint())
         self.game_list.addItem(item)
         self.game_list.setItemWidget(item, row)
+
+    def _sync_category_row_visibility(self) -> None:
+        """Hide category rows unless their parent game is expanded."""
+        for i in range(self.game_list.count()):
+            item = self.game_list.item(i)
+            if item is None:
+                continue
+            key = str(item.data(GAME_ROLE) or "")
+            cat = str(item.data(GAME_CATEGORY_ROLE) or "").strip()
+            widget = self.game_list.itemWidget(item)
+            if cat:
+                item.setHidden(bool(key) and key not in self._expanded_games)
+                continue
+            if isinstance(widget, _GameFilterRow) and widget.expandable:
+                widget.set_expanded(key in self._expanded_games)
+
+    def _toggle_game_expanded(self, game_key: str) -> None:
+        key = str(game_key or "").strip()
+        if not key:
+            return
+        if key in self._expanded_games:
+            self._expanded_games.discard(key)
+        else:
+            self._expanded_games.add(key)
+        self._sync_category_row_visibility()
+
+    def _on_game_item_clicked(self, item: QListWidgetItem | None) -> None:
+        """Toggle category fold when a primary game row is clicked."""
+        if item is None:
+            return
+        category = str(item.data(GAME_CATEGORY_ROLE) or "").strip()
+        if category:
+            return
+        key = str(item.data(GAME_ROLE) or "")
+        if not key:
+            return
+        widget = self.game_list.itemWidget(item)
+        if isinstance(widget, _GameFilterRow) and not widget.expandable:
+            return
+        self._toggle_game_expanded(key)
 
     def _on_game_list_context_menu(self, pos) -> None:
         item = self.game_list.itemAt(pos)
@@ -1785,6 +1898,7 @@ class ModLibraryView(QWidget):
         except Exception:  # noqa: BLE001
             logger.debug("add_game_category failed", exc_info=True)
             return
+        self._expanded_games.add(key)
         self._rebuild_game_list(ModFileManager(self._target_root), prefer=key)
 
     def _on_game_item_changed(
@@ -1828,11 +1942,14 @@ class ModLibraryView(QWidget):
         self.filter_changed.emit(key or ALL_GAMES_LABEL)
 
     def _render_mod_cards(self, manager: ModFileManager) -> None:
-        self._clear_cards()
+        self._detach_active_cards()
         game = self._current_game_filter
         folders = manager.list_managed_mods(game_name=game)
 
         if not folders:
+            self._cards = []
+            self._card_entries = []
+            self._prune_stale_card_cache(set(), game)
             self._rebuild_platform_filter_bar()
             self._apply_view_filter()
             return
@@ -1849,12 +1966,9 @@ class ModLibraryView(QWidget):
                 )
             meta.managed_path = str(folder)
             meta.local_path = str(folder)
-            # Prefer ``.info/metadata.json`` when present (portable restore).
+            # Read-only sidecar overlay for display — never sync DB during render.
             try:
-                from services.info_sidecar import (
-                    apply_sidecar_to_db,
-                    load_info_sidecar,
-                )
+                from services.info_sidecar import load_info_sidecar
 
                 side = load_info_sidecar(folder)
                 if side is not None:
@@ -1862,18 +1976,18 @@ class ModLibraryView(QWidget):
                         side.published_file_id
                         or str(meta.published_file_id or "")
                     )
-                    if mid_hint.isdigit():
-                        apply_sidecar_to_db(folder, mod_id=mid_hint)
-                        if side.display_name:
-                            meta.title = side.display_name
-                        if side.description and not meta.description:
-                            meta.description = side.description
-                        if side.cover_path and not meta.cover_path:
-                            meta.cover_path = side.cover_path
-                        if side.offline_page_path and not meta.offline_page_path:
-                            meta.offline_page_path = side.offline_page_path
-                        if not str(meta.published_file_id or "").isdigit():
-                            meta.published_file_id = mid_hint
+                    if side.display_name:
+                        meta.json_display_name = side.display_name
+                    if side.description and not meta.description:
+                        meta.description = side.description
+                    if side.cover_path and not meta.cover_path:
+                        meta.cover_path = side.cover_path
+                    if side.offline_page_path and not meta.offline_page_path:
+                        meta.offline_page_path = side.offline_page_path
+                    if mid_hint.isdigit() and not str(
+                        meta.published_file_id or ""
+                    ).isdigit():
+                        meta.published_file_id = mid_hint
             except Exception:  # noqa: BLE001
                 pass
             manager.enrich_title_from_db(meta)
@@ -1897,21 +2011,27 @@ class ModLibraryView(QWidget):
         except Exception:  # noqa: BLE001
             game_cats = []
 
+        created = 0
+        reused = 0
+        keep_keys: set[str] = set()
+        cards: list[ModCardWidget] = []
+        entries: list[tuple[ModFilterIndex, ModCardWidget]] = []
+
         for folder, meta in metas:
             mid = str(meta.published_file_id or "")
-            # Always parent to library_host — never parent=None then show().
-            card = ModCardWidget(folder, metadata=meta, parent=self.library_host)
-            card.hide()  # stay invisible until _reveal_card / layout
-            card.selection_requested.connect(self.on_mod_selected)
-            card.edit_requested.connect(self._on_card_edit_requested)
-            card.deploy_requested.connect(self._on_deploy_requested)
-            card.open_folder_requested.connect(self._on_card_open_folder)
-            card.open_steam_requested.connect(self._on_card_open_steam)
-            card.favorite_toggle_requested.connect(self._on_card_favorite_toggle)
-            card.context_menu_opening.connect(
-                lambda c=card: self._prepare_card_context_menu(c)
-            )
-            card.set_category_requested.connect(self._on_batch_set_category)
+            key = self._card_cache_key(folder)
+            keep_keys.add(key)
+            card = self._card_cache.get(key)
+            if card is None:
+                card = ModCardWidget(folder, metadata=meta, parent=self.library_host)
+                card.hide()
+                self._connect_card_signals(card)
+                self._card_cache[key] = card
+                created += 1
+            else:
+                card.rebind(folder, meta)
+                card.hide()
+                reused += 1
             card.set_category_options(game_cats)
             index = self._build_filter_index(
                 folder,
@@ -1920,31 +2040,105 @@ class ModLibraryView(QWidget):
                 fields_map.get(mid),
                 tag_flags=tag_flags_map.get(mid),
             )
-            self._cards.append(card)
-            self._card_entries.append((index, card))
+            cards.append(card)
+            entries.append((index, card))
+
+        self._cards = cards
+        self._card_entries = entries
+        self._card_create_count = created
+        self._card_reuse_count = reused
+
+        # Drop missing paths always; within the active game, drop renamed leftovers.
+        # Other games' cached cards stay for reuse on switch.
+        self._prune_stale_card_cache(keep_keys, game)
 
         self._rebuild_platform_filter_bar()
         self._apply_view_filter()
 
-    def _clear_cards(self) -> None:
+    @staticmethod
+    def _card_cache_key(folder: Path) -> str:
+        try:
+            return str(Path(folder).resolve())
+        except OSError:
+            return str(Path(folder))
+
+    def _connect_card_signals(self, card: ModCardWidget) -> None:
+        card.selection_requested.connect(self.on_mod_selected)
+        card.edit_requested.connect(self._on_card_edit_requested)
+        card.deploy_requested.connect(self._on_deploy_requested)
+        card.open_folder_requested.connect(self._on_card_open_folder)
+        card.open_steam_requested.connect(self._on_card_open_steam)
+        card.favorite_toggle_requested.connect(self._on_card_favorite_toggle)
+        card.context_menu_opening.connect(
+            lambda c=card: self._prepare_card_context_menu(c)
+        )
+        card.set_category_requested.connect(self._on_batch_set_category)
+
+    def _detach_active_cards(self) -> None:
+        """Hide / detach from layout without destroying widgets (card cache reuse)."""
         self._last_clicked_index = 0
         self._clear_selection()
         while self.library_layout.count():
             item = self.library_layout.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is not None and widget is not self.empty_overlay:
-                # hide BEFORE setParent(None) — otherwise Qt promotes to top-level
                 widget.hide()
-                widget.setParent(None)
-                widget.deleteLater()
-        for _index, card in self._card_entries:
+        for card in self._cards:
             card.hide()
-            if card.parent() is not None:
-                card.setParent(None)
+        self.library_host.setMinimumHeight(0)
+        self.library_layout.invalidate()
+        self._sync_library_host_size()
+
+    def _drop_cache_key(self, key: str) -> None:
+        card = self._card_cache.pop(key, None)
+        if card is None:
+            return
+        card.hide()
+        card.deleteLater()
+
+    def _prune_stale_card_cache(
+        self, keep_keys: set[str], game: str | None
+    ) -> None:
+        """
+        Prune deleted/renamed paths without wiping other games' reuse cache.
+
+        - Always remove cache entries whose folder no longer exists.
+        - When a game is selected, also remove entries under that game not in
+          *keep_keys* (covers in-game renames / deletes).
+        - On All Games (game is None), remove every key not in *keep_keys*.
+        """
+        game_name = str(game or "").strip()
+        for key in list(self._card_cache.keys()):
+            if key in keep_keys:
+                continue
+            path = Path(key)
+            if not path.is_dir():
+                self._drop_cache_key(key)
+                continue
+            if not game_name:
+                self._drop_cache_key(key)
+                continue
+            # Same game folder but not in current dataset → renamed/deleted leftover.
+            try:
+                if path.parent.name == game_name:
+                    self._drop_cache_key(key)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _prune_card_cache(self, keep_keys: set[str]) -> None:
+        for key in list(self._card_cache.keys()):
+            if key in keep_keys:
+                continue
+            self._drop_cache_key(key)
+    def _clear_cards(self) -> None:
+        """Clear active lists and destroy cached cards (full wipe)."""
+        self._detach_active_cards()
+        for card in list(self._card_cache.values()):
+            card.hide()
             card.deleteLater()
+        self._card_cache.clear()
         self._cards.clear()
         self._card_entries.clear()
-        # Reset host min-height so QScrollArea range can shrink with fewer cards.
         self.library_host.setMinimumHeight(0)
         self.library_layout.invalidate()
         self._sync_library_host_size()
@@ -2065,9 +2259,12 @@ class ModLibraryView(QWidget):
         # Apply defaults once the page has a real width (do not override user drags later)
         total = max(self.splitter.width(), sum(SPLITTER_DEFAULT_SIZES))
         left = GAME_PANEL_WIDTH
-        right = max(DETAIL_PANEL_PREFERRED, int(total * 0.30))
-        right = max(DETAIL_PANEL_MIN, min(right, total - left - 240))
-        center = max(240, total - left - right)
+        # Prefer a 4-card Mod grid; detail keeps its minimum and may grow with leftover.
+        right = max(
+            DETAIL_PANEL_MIN,
+            min(DETAIL_PANEL_PREFERRED, total - left - LIBRARY_CENTER_MIN_WIDTH),
+        )
+        center = max(LIBRARY_CENTER_MIN_WIDTH, total - left - right)
         self.splitter.setSizes([left, center, right])
         self._splitter_defaults_applied = True
 

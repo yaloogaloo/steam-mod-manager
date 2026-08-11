@@ -1088,12 +1088,17 @@ class DatabaseManager:
         external_id: str | None = None,
         title: str | None = None,
         app_id: int | None = None,
+        description: str | None = None,
+        preview_url: str | None = None,
     ) -> ModDisplayInfo:
         """
         Create or update platform identity fields (never writes ``.info``).
 
         Changing ``platform`` / ``external_id`` is allowed only when the new
         ``(platform, external_id)`` pair is free (or is this same row).
+
+        Optional ``description`` / ``preview_url`` update remote catalog text
+        (used by Mod.io refresh; Steam refresh still uses ``upsert_mod``).
         """
         mid = int(str(mod_id).strip())
         now = _utc_now()
@@ -1127,6 +1132,16 @@ class DatabaseManager:
                 else str(row["title"] or "")
             )
             new_app = int(app_id) if app_id is not None else int(row["app_id"] or 0)
+            new_description = (
+                str(description)
+                if description is not None
+                else str(row["description"] or "")
+            )
+            new_preview = (
+                str(preview_url).strip()
+                if preview_url is not None
+                else str(row["preview_url"] or "")
+            )
 
             if plat != old_plat or ext != old_ext:
                 if not ext:
@@ -1148,19 +1163,47 @@ class DatabaseManager:
                     )
 
             try:
-                self._conn.execute(
-                    """
-                    UPDATE mods SET
-                        platform = ?,
-                        source_url = ?,
-                        external_id = ?,
-                        title = CASE WHEN ? != '' THEN ? ELSE title END,
-                        app_id = ?,
-                        updated_at = ?
-                    WHERE mod_id = ?
-                    """,
-                    (plat, url, ext, new_title, new_title, new_app, now, mid),
-                )
+                if description is not None or preview_url is not None:
+                    self._conn.execute(
+                        """
+                        UPDATE mods SET
+                            platform = ?,
+                            source_url = ?,
+                            external_id = ?,
+                            title = CASE WHEN ? != '' THEN ? ELSE title END,
+                            app_id = ?,
+                            description = ?,
+                            preview_url = ?,
+                            updated_at = ?
+                        WHERE mod_id = ?
+                        """,
+                        (
+                            plat,
+                            url,
+                            ext,
+                            new_title,
+                            new_title,
+                            new_app,
+                            new_description,
+                            new_preview,
+                            now,
+                            mid,
+                        ),
+                    )
+                else:
+                    self._conn.execute(
+                        """
+                        UPDATE mods SET
+                            platform = ?,
+                            source_url = ?,
+                            external_id = ?,
+                            title = CASE WHEN ? != '' THEN ? ELSE title END,
+                            app_id = ?,
+                            updated_at = ?
+                        WHERE mod_id = ?
+                        """,
+                        (plat, url, ext, new_title, new_title, new_app, now, mid),
+                    )
                 self._ensure_mod_workspace_id_locked(mid)
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
@@ -1786,6 +1829,13 @@ class DatabaseManager:
             steam = str(row["title"] or "").strip()
             user_display = str(row["display_name"] or "").strip()
             mid = str(row["mod_id"])
+            try:
+                from core.models import is_unknown_mod_title
+
+                if is_unknown_mod_title(user_display, published_file_id=mid):
+                    user_display = ""
+            except Exception:  # noqa: BLE001
+                pass
             status = (
                 str(row["deploy_status"] or "").strip() or DEPLOY_STATUS_NOT_DEPLOYED
             )
@@ -2668,6 +2718,27 @@ class DatabaseManager:
     # Mods — relationships (mod_relationships)
     # ------------------------------------------------------------------
 
+    def find_mod_id_by_workspace_id(
+        self, workspace_id: int | str
+    ) -> str | None:
+        """Resolve a Workspace ID (or mod_id string) to ``mods.mod_id``."""
+        wid = str(workspace_id or "").strip()
+        if not wid:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id FROM mods
+                WHERE TRIM(COALESCE(workspace_id, '')) = ?
+                   OR CAST(mod_id AS TEXT) = ?
+                LIMIT 1
+                """,
+                (wid, wid),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["mod_id"])
+
     def add_mod_relationship(
         self,
         source_mod_id: int | str,
@@ -2992,6 +3063,16 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
     keys = set(row.keys())
     steam_name = str(row["title"] or "").strip()
     user_display = str(row["display_name"] or "").strip()
+    # Placeholder Unknown_Mod_* overrides must not hide a real Steam title.
+    try:
+        from core.models import is_unknown_mod_title
+
+        if is_unknown_mod_title(
+            user_display, published_file_id=str(row["mod_id"] or "")
+        ):
+            user_display = ""
+    except Exception:  # noqa: BLE001
+        pass
     resolved = user_display or steam_name or f"Unknown_Mod_{row['mod_id']}"
     platform = (
         normalize_platform(str(row["platform"] or PLATFORM_STEAM))

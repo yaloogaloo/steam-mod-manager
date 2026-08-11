@@ -37,7 +37,7 @@ def test_image_not_mod_file(tmp_path: Path) -> None:
 
 
 def test_image_extensions_constant() -> None:
-    assert IMAGE_EXTENSIONS == {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    assert IMAGE_EXTENSIONS == {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".gif"}
 
 
 def test_cleanup_strips_images_from_db(tmp_path: Path) -> None:

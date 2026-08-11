@@ -15,10 +15,15 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.deploy_rules.palworld import PalworldPakStrategy, PalworldStrategy
+from services.deploy_rules.slay_the_spire import (
+    SLAY_THE_SPIRE_APP_ID,
+    SlayTheSpireStrategy,
+)
 
 DEPLOY_TYPE_FOLDER_COPY = FolderCopyStrategy.deploy_type
 DEPLOY_TYPE_PALWORLD_PAK = PalworldStrategy.deploy_type
 DEPLOY_TYPE_ANNO_1800 = Anno1800Strategy.deploy_type
+DEPLOY_TYPE_SLAY_THE_SPIRE = SlayTheSpireStrategy.deploy_type
 
 # Steam AppID — always use enhanced PalworldStrategy (pak rules + folder_copy fallback).
 PALWORLD_APP_ID = 1623730
@@ -27,6 +32,7 @@ _STRATEGIES: dict[str, DeployStrategy] = {
     DEPLOY_TYPE_FOLDER_COPY: FolderCopyStrategy(),
     DEPLOY_TYPE_PALWORLD_PAK: PalworldStrategy(),
     DEPLOY_TYPE_ANNO_1800: Anno1800Strategy(),
+    DEPLOY_TYPE_SLAY_THE_SPIRE: SlayTheSpireStrategy(),
     DEPLOY_TYPE_CUSTOM_PATH: CustomPathStrategy(),
 }
 
@@ -38,6 +44,7 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
     Palworld (1623730) always uses the enhanced ``palworld_pak`` strategy
     (special pak rules with folder_copy fallback).
     Anno 1800 (916440) always deploys into ``<install>/mods/``.
+    Slay the Spire (646570) always uses jar → mods/ (+ ModTheSpire root).
     Other games keep configured type.
     """
     try:
@@ -48,6 +55,8 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
         return DEPLOY_TYPE_PALWORLD_PAK
     if aid == ANNO_1800_APP_ID:
         return DEPLOY_TYPE_ANNO_1800
+    if aid == SLAY_THE_SPIRE_APP_ID:
+        return DEPLOY_TYPE_SLAY_THE_SPIRE
     key = (deploy_type or DEPLOY_TYPE_FOLDER_COPY).strip() or DEPLOY_TYPE_FOLDER_COPY
     return key
 
@@ -71,7 +80,9 @@ __all__ = [
     "DEPLOY_TYPE_CUSTOM_PATH",
     "DEPLOY_TYPE_FOLDER_COPY",
     "DEPLOY_TYPE_PALWORLD_PAK",
+    "DEPLOY_TYPE_SLAY_THE_SPIRE",
     "PALWORLD_APP_ID",
+    "SLAY_THE_SPIRE_APP_ID",
     "Anno1800Strategy",
     "CustomPathStrategy",
     "DeployContext",
@@ -81,6 +92,7 @@ __all__ = [
     "ManifestFileEntry",
     "PalworldPakStrategy",
     "PalworldStrategy",
+    "SlayTheSpireStrategy",
     "StrategyResult",
     "delete_manifest",
     "get_strategy",

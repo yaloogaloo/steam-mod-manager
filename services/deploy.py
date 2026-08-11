@@ -23,6 +23,7 @@ from services.deploy_rules import (
     DEPLOY_TYPE_CUSTOM_PATH,
     DEPLOY_TYPE_FOLDER_COPY,
     DEPLOY_TYPE_PALWORLD_PAK,
+    DEPLOY_TYPE_SLAY_THE_SPIRE,
     PALWORLD_APP_ID,
     DeployContext,
     delete_manifest,
@@ -33,9 +34,11 @@ from services.deploy_rules import (
     supported_deploy_types,
 )
 from services.deploy_rules.custom import CustomPathStrategy
-from services.file_ops import ModFileManager
+from services.file_ops import ModFileManager, read_is_missing_content
 
 logger = logging.getLogger(__name__)
+
+MISSING_CONTENT_DEPLOY_ERROR = "该 Mod 内容缺失，无法部署"
 
 
 def _entry_is_archive_source(entry: Any) -> bool:
@@ -456,6 +459,9 @@ class ModDeployer:
         custom_deploy_path = (
             str(display.custom_deploy_path or "").strip() if display else ""
         )
+        workspace_id = (
+            str(display.workspace_id or "").strip() if display else ""
+        ) or mid
 
         if custom_deploy_path:
             # Custom absolute path overrides all game-level deploy rules.
@@ -509,6 +515,14 @@ class ModDeployer:
                         "error": "请先配置游戏安装目录或部署目录",
                         "mod_id": mid,
                     }, None
+            # Slay the Spire: jars land under <install>/mods (strategy mkdir).
+            if deploy_type == DEPLOY_TYPE_SLAY_THE_SPIRE:
+                if not str(cfg.install_path or "").strip():
+                    return None, {
+                        "success": False,
+                        "error": "请先配置游戏安装目录",
+                        "mod_id": mid,
+                    }, None
             if (
                 require_target_exists
                 and deploy_type == DEPLOY_TYPE_FOLDER_COPY
@@ -554,6 +568,14 @@ class ModDeployer:
                         "error": "Target mod directory does not exist",
                         "mod_id": mid,
                     }, None
+            if require_target_exists and deploy_type == DEPLOY_TYPE_SLAY_THE_SPIRE:
+                install_raw = str(cfg.install_path or "").strip()
+                if not install_raw or not Path(install_raw).expanduser().is_dir():
+                    return None, {
+                        "success": False,
+                        "error": "Target mod directory does not exist",
+                        "mod_id": mid,
+                    }, None
 
         cleanup: Path | None = None
         content_root = source
@@ -585,6 +607,7 @@ class ModDeployer:
                 deploy_type=deploy_type,
                 allowed_rel_paths=allowed,
                 custom_deploy_path=custom_deploy_path,
+                workspace_id=workspace_id,
             ),
             None,
             cleanup,
@@ -611,7 +634,12 @@ class ModDeployer:
                 msg,
             )
 
-    def deploy_mod(self, mod_id: int | str) -> dict[str, Any]:
+    def deploy_mod(
+        self,
+        mod_id: int | str,
+        *,
+        _deploy_stack: frozenset[str] | None = None,
+    ) -> dict[str, Any]:
         """Deploy one Mod by Workshop / published file id."""
         mid = str(mod_id).strip()
         log_prefix = f"[DEPLOY] mod_id={mid}"
@@ -624,6 +652,54 @@ class ModDeployer:
                 "error": error,
                 "mod_id": mid,
             }
+
+        source_for_gate = self.files.find_by_published_id(mid)
+        if source_for_gate is not None and read_is_missing_content(source_for_gate):
+            logger.warning(
+                "%s result=fail error=%s", log_prefix, MISSING_CONTENT_DEPLOY_ERROR
+            )
+            return {
+                "success": False,
+                "error": MISSING_CONTENT_DEPLOY_ERROR,
+                "mod_id": mid,
+                "is_missing_content": True,
+            }
+
+        # Absolute order: deploy declared dependencies first, then this Mod.
+        stack = set(_deploy_stack or ())
+        if mid not in stack:
+            stack.add(mid)
+            db = self._database()
+            for dep_mid in self._dependency_mod_ids_for_deploy(mid):
+                if not dep_mid or dep_mid == mid or dep_mid in stack:
+                    continue
+                if dep_mid.isdigit() and not db.is_mod_enabled(dep_mid):
+                    logger.warning(
+                        "%s skip disabled dependency dep_mod_id=%s",
+                        log_prefix,
+                        dep_mid,
+                    )
+                    continue
+                logger.info(
+                    "%s deploy dependency first dep_mod_id=%s",
+                    log_prefix,
+                    dep_mid,
+                )
+                dep_out = self.deploy_mod(
+                    dep_mid, _deploy_stack=frozenset(stack)
+                )
+                if not dep_out.get("success"):
+                    err = (
+                        f"依赖 Mod {dep_mid} 部署失败："
+                        f"{dep_out.get('error') or 'unknown'}"
+                    )
+                    logger.warning("%s result=fail error=%s", log_prefix, err)
+                    return {
+                        "success": False,
+                        "error": err,
+                        "mod_id": mid,
+                        "dependency_mod_id": dep_mid,
+                    }
 
         # Relationship warnings (hint only — never blocks, never auto-enables)
         relationship_warnings: list[dict[str, Any]] = []
@@ -653,6 +729,62 @@ class ModDeployer:
                 from services.importers.archive import cleanup_import_cache
 
                 cleanup_import_cache(cleanup)
+
+    def _dependency_mod_ids_for_deploy(self, mod_id: str) -> list[str]:
+        """Ordered dependency mod_ids (DB relations + metadata.json workspace ids)."""
+        mid = str(mod_id or "").strip()
+        if not mid or not mid.isdigit():
+            return []
+        db = self._database()
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def _push(candidate: str) -> None:
+            cid = str(candidate or "").strip()
+            if not cid or cid == mid or cid in seen:
+                return
+            seen.add(cid)
+            ordered.append(cid)
+
+        try:
+            grouped = db.get_mod_relationships(mid)
+            for item in grouped.get("dependencies") or []:
+                _push(str(item.get("mod_id") or ""))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "dependency relation lookup failed mod_id=%s", mid, exc_info=True
+            )
+
+        source = self.files.find_by_published_id(mid)
+        if source is not None:
+            try:
+                from services.file_ops import read_info_metadata_dict
+
+                data = read_info_metadata_dict(source) or {}
+                raw = data.get("dependencies") or []
+                if isinstance(raw, (list, tuple)):
+                    for entry in raw:
+                        if isinstance(entry, dict):
+                            wid = str(
+                                entry.get("workspace_id")
+                                or entry.get("mod_id")
+                                or entry.get("id")
+                                or ""
+                            ).strip()
+                        else:
+                            wid = str(entry or "").strip()
+                        if not wid:
+                            continue
+                        found = db.find_mod_id_by_workspace_id(wid)
+                        if found:
+                            _push(found)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "dependency metadata lookup failed mod_id=%s",
+                    mid,
+                    exc_info=True,
+                )
+        return ordered
 
     def _deploy_with_context(
         self,

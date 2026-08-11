@@ -2,8 +2,34 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+_UNKNOWN_TITLE_RE = re.compile(
+    r"^Unknown[_\s]?Mod(?:[_\s]*(\d+))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_unknown_mod_title(title: str | None, *, published_file_id: str = "") -> bool:
+    """True when *title* is empty, numeric, or an ``Unknown_Mod_*`` / ``Unknown Mod`` placeholder."""
+    text = str(title or "").strip()
+    if not text:
+        return True
+    if text.isdigit():
+        return True
+    match = _UNKNOWN_TITLE_RE.match(text)
+    if match:
+        return True
+    mid = str(published_file_id or "").strip()
+    if mid and text in {
+        f"Unknown_Mod_{mid}",
+        f"Unknown Mod {mid}",
+        f"Unknown Mod_{mid}",
+    }:
+        return True
+    return False
 
 
 @dataclass
@@ -30,8 +56,12 @@ class ModMetadata:
     offline_page_path: str | None = None
     fetch_error: str | None = None
     custom_notes: str = ""  # user notes stored in .info/mod.json
+    # Optional author / uploader label (Mod.io ``submitted_by``, etc.).
+    author: str = ""
     # Mod-level source platform (canonical JSON key: ``source_type``).
     source_type: str = ""
+    # Portable UI label from JSON ``display_name`` (not the ``display_name`` property).
+    json_display_name: str = ""
 
     @property
     def game_display_name(self) -> str:
@@ -54,19 +84,33 @@ class ModMetadata:
         """
         Human-readable Mod name for UI and folders.
 
-        Never returns a bare numeric ID — falls back to ``Unknown_Mod_<id>``.
+        Prefers JSON ``display_name`` when set to a real name; never returns a
+        bare numeric ID. Placeholder ``Unknown Mod*`` labels fall through to title.
         """
+        custom = (self.json_display_name or "").strip()
+        if custom and not is_unknown_mod_title(
+            custom, published_file_id=str(self.published_file_id or "")
+        ):
+            return custom
         return self.effective_title()
 
     def effective_title(self) -> str:
         """Real title if usable; otherwise ``Unknown_Mod_<published_file_id>``."""
         title = (self.title or "").strip()
-        if title and not title.isdigit():
+        mid = str(self.published_file_id or "")
+        if title and not title.isdigit() and not is_unknown_mod_title(
+            title, published_file_id=mid
+        ):
             return title
         return f"Unknown_Mod_{self.published_file_id}"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        custom = str(data.pop("json_display_name", "") or "").strip()
+        mid = str(self.published_file_id or "")
+        if custom and not is_unknown_mod_title(custom, published_file_id=mid):
+            data["display_name"] = custom
+        return data
 
     @classmethod
     def from_api_response(cls, item: dict[str, Any]) -> ModMetadata:

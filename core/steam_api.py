@@ -36,6 +36,14 @@ DEFAULT_USER_AGENT = (
 )
 NO_PROXY: dict[str, str | None] = {"http": None, "https": None}
 
+# Manual refresh path only (``refresh_details``). Cached ``get_details_batch``
+# keeps ``DEFAULT_TIMEOUT`` and does not use these retries.
+REFRESH_CONNECT_TIMEOUT = 10.0
+REFRESH_READ_TIMEOUT = 30.0
+REFRESH_MAX_ATTEMPTS = 3
+# Backoff after failed attempts 1 / 2 / 3 before the next try (or final return).
+REFRESH_BACKOFF_SEC = (1.0, 3.0, 5.0)
+
 
 class SteamAPIError(Exception):
     """Raised when the Steam Web API returns an unexpected response."""
@@ -123,7 +131,7 @@ class SteamWorkshopClient:
         method: str,
         url: str,
         *,
-        timeout: float | None = None,
+        timeout: float | tuple[float, float] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
         kwargs.setdefault("proxies", NO_PROXY)
@@ -313,6 +321,60 @@ class SteamWorkshopClient:
             )
         return results[0]
 
+    def refresh_details(
+        self,
+        published_file_ids: Sequence[str | int],
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+        scrape_workers: int = 4,
+        enable_scrape_fallback: bool | None = None,
+    ) -> list[ModMetadata]:
+        """
+        Force network re-fetch for the given IDs (ignores SQLite cache hits).
+
+        Manual-refresh path only: connect/read timeouts + up to 3 attempts with
+        backoff (1s / 3s / 5s). Does not change ``get_details_batch`` caching.
+
+        Workshop HTML scrape is off by default here so a single-mod refresh does
+        not fan out into page scrapes (including unrelated concurrent noise).
+        Pass ``enable_scrape_fallback=True`` to restore scrape after API retries.
+        """
+        ids = [str(i).strip() for i in published_file_ids if str(i).strip()]
+        if not ids:
+            return []
+
+        # Refresh defaults to API-only unless the caller explicitly opts in.
+        use_scrape = (
+            False
+            if enable_scrape_fallback is None
+            else bool(enable_scrape_fallback)
+        )
+
+        fetched: dict[str, ModMetadata] = {}
+        total = len(ids)
+        done = 0
+        for chunk in _chunked(ids, self.batch_size):
+            batch = self._request_published_file_details_refresh(list(chunk))
+            if use_scrape:
+                batch = self._parallel_scrape_fallback(
+                    batch, max_workers=scrape_workers
+                )
+            to_store: list[ModMetadata] = []
+            for meta in batch:
+                fetched[meta.published_file_id] = meta
+                if meta.title and not meta.fetch_error:
+                    to_store.append(meta)
+            if to_store:
+                self.db.upsert_mods(to_store)
+            done += len(chunk)
+            if on_progress:
+                on_progress(done, total)
+
+        return [fetched.get(mid) or ModMetadata(
+            published_file_id=mid,
+            fetch_error="Empty response from Steam API",
+        ) for mid in ids]
+
     def get_details_batch(
         self,
         published_file_ids: Sequence[str | int],
@@ -485,20 +547,123 @@ class SteamWorkshopClient:
             metadata.cover_path = str(saved)
         return saved
 
-    def _request_published_file_details(
+    def _request_without_adapter_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout: float | tuple[float, float],
+        **kwargs: Any,
+    ) -> requests.Response:
+        """One-shot HTTP call without urllib3 Retry (manual refresh owns backoff)."""
+        kwargs.setdefault("proxies", NO_PROXY)
+        kwargs["timeout"] = timeout
+        self._throttle()
+        session = requests.Session()
+        session.trust_env = False
+        session.headers.update(dict(self._session.headers))
+        adapter = HTTPAdapter(max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        try:
+            return session.request(method, url, **kwargs)
+        finally:
+            session.close()
+
+    def _request_published_file_details_refresh(
         self, published_file_ids: Sequence[str]
+    ) -> list[ModMetadata]:
+        """
+        GetPublishedFileDetails with connect/read timeouts and 3 attempts.
+
+        Used only by ``refresh_details``. On exhaustion, returns ModMetadata
+        rows with the last visible ``fetch_error`` (no silent swallow).
+        Application-level backoff owns retries (no urllib3 Retry stacking).
+        """
+        ids = [str(fid).strip() for fid in published_file_ids if str(fid).strip()]
+        if not ids:
+            return []
+
+        timeout = (REFRESH_CONNECT_TIMEOUT, REFRESH_READ_TIMEOUT)
+        last_batch: list[ModMetadata] | None = None
+
+        for attempt in range(1, REFRESH_MAX_ATTEMPTS + 1):
+            batch = self._request_published_file_details(
+                ids,
+                timeout=timeout,
+                disable_adapter_retries=True,
+            )
+            last_batch = batch
+            if not _batch_needs_network_retry(batch):
+                if attempt > 1:
+                    logger.info(
+                        "Steam refresh API succeeded on attempt %s/%s for %s id(s)",
+                        attempt,
+                        REFRESH_MAX_ATTEMPTS,
+                        len(ids),
+                    )
+                return batch
+
+            err_sample = next(
+                (m.fetch_error for m in batch if m.fetch_error),
+                "unknown network error",
+            )
+            delay = REFRESH_BACKOFF_SEC[
+                min(attempt - 1, len(REFRESH_BACKOFF_SEC) - 1)
+            ]
+            if attempt >= REFRESH_MAX_ATTEMPTS:
+                logger.error(
+                    "Steam refresh API failed after %s attempts for %s: %s",
+                    REFRESH_MAX_ATTEMPTS,
+                    ",".join(ids),
+                    err_sample,
+                )
+                break
+
+            logger.warning(
+                "Steam refresh API attempt %s/%s failed (%s); retry in %.0fs",
+                attempt,
+                REFRESH_MAX_ATTEMPTS,
+                err_sample,
+                delay,
+            )
+            time.sleep(delay)
+
+        return last_batch or [
+            ModMetadata(
+                published_file_id=fid,
+                fetch_error="Steam API refresh failed",
+            )
+            for fid in ids
+        ]
+
+    def _request_published_file_details(
+        self,
+        published_file_ids: Sequence[str],
+        *,
+        timeout: float | tuple[float, float] | None = None,
+        disable_adapter_retries: bool = False,
     ) -> list[ModMetadata]:
         form: dict[str, str | int] = {"itemcount": len(published_file_ids)}
         for index, file_id in enumerate(published_file_ids):
             form[f"publishedfileids[{index}]"] = file_id
 
+        req_timeout = self.timeout if timeout is None else timeout
         try:
-            response = self._request(
-                "POST",
-                STEAM_PUBLISHED_FILE_DETAILS_URL,
-                data=form,
-                timeout=self.timeout,
-            )
+            if disable_adapter_retries:
+                response = self._request_without_adapter_retries(
+                    "POST",
+                    STEAM_PUBLISHED_FILE_DETAILS_URL,
+                    data=form,
+                    timeout=req_timeout,
+                )
+            else:
+                response = self._request(
+                    "POST",
+                    STEAM_PUBLISHED_FILE_DETAILS_URL,
+                    data=form,
+                    timeout=req_timeout,
+                )
             response.raise_for_status()
             payload = response.json()
         except requests.RequestException as exc:
@@ -553,6 +718,40 @@ class SteamWorkshopClient:
         if remaining > 0:
             time.sleep(remaining)
         self._last_request_at = time.monotonic()
+
+
+def _is_retryable_steam_fetch_error(error: str | None) -> bool:
+    """True for transient transport failures worth refreshing again."""
+    text = str(error or "").lower()
+    if not text:
+        return False
+    needles = (
+        "timeout",
+        "timed out",
+        "connecttimeout",
+        "readtimeout",
+        "connection aborted",
+        "connection reset",
+        "temporarily unavailable",
+        "name or service not known",
+        "failed to resolve",
+        "max retries exceeded",
+        "connectionerror",
+        "sslerror",
+        "proxyerror",
+        "10060",  # Windows WSAETIMEDOUT
+        "10054",  # connection reset
+    )
+    return any(n in text for n in needles)
+
+
+def _batch_needs_network_retry(batch: list[ModMetadata]) -> bool:
+    """Retry when every requested id failed with a transient network error."""
+    if not batch:
+        return True
+    if any(m.title and not m.fetch_error for m in batch):
+        return False
+    return all(_is_retryable_steam_fetch_error(m.fetch_error) for m in batch)
 
 
 def _infer_app_id_from_path(source_path: str | Path) -> int:

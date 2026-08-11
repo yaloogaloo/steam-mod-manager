@@ -518,6 +518,12 @@ QWidget#gameFilterRow {{
     background: transparent;
 }}
 
+QLabel#gameListChevron {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    min-width: 12px;
+}}
+
 QLabel#gameListName {{
     color: {TEXT_BODY};
     font-size: 12px;
@@ -774,12 +780,12 @@ QListWidget#navList {{
     background-color: {BACKGROUND_SIDEBAR};
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 10px;
-    padding: 6px;
+    padding: 4px;
     outline: none;
 }}
 
 QListWidget#navList::item {{
-    padding: 12px 14px;
+    padding: 10px 8px;
     border-radius: 8px;
     margin: 2px 0;
     color: {TEXT_BODY};
@@ -839,14 +845,28 @@ QFrame#detailFooter {{
     border-top: 1px solid {BORDER_DEFAULT};
 }}
 QFrame#detailStatusBanner {{
+    border-radius: 8px;
     background-color: {ACCENT_ERROR_BG};
     border: 1px solid {ACCENT_ERROR_BORDER};
-    border-radius: 8px;
+}}
+QFrame#detailStatusBanner[tone="error"] {{
+    background-color: {ACCENT_ERROR_BG};
+    border: 1px solid {ACCENT_ERROR_BORDER};
+}}
+QFrame#detailStatusBanner[tone="success"] {{
+    background-color: {ACCENT_SUCCESS_BG};
+    border: 1px solid {ACCENT_SUCCESS_BORDER};
 }}
 QLabel#detailStatusBannerBody {{
-    color: {ACCENT_ERROR};
     font-size: 13px;
     line-height: 1.4;
+    color: {ACCENT_ERROR};
+}}
+QFrame#detailStatusBanner[tone="error"] QLabel#detailStatusBannerBody {{
+    color: {ACCENT_ERROR};
+}}
+QFrame#detailStatusBanner[tone="success"] QLabel#detailStatusBannerBody {{
+    color: {ACCENT_SUCCESS};
 }}
 QFrame#detailActionArea {{
     background-color: {BACKGROUND_SECTION};
@@ -863,20 +883,28 @@ QLabel#detailPanelTitle {{
     font-size: 16px;
     font-weight: 600;
 }}
-QToolButton#detailRefreshButton {{
-    background: transparent;
-    border: none;
+QPushButton#detailRefreshButton {{
+    background-color: {BACKGROUND_BUTTON_PRESSED};
+    border: 1px solid {BORDER_STRONG};
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-height: 26px;
     color: {TEXT_SECONDARY};
-    font-size: 14px;
-    padding: 0;
+    font-size: 12px;
 }}
-QToolButton#detailRefreshButton:hover {{
+QPushButton#detailRefreshButton:hover {{
+    background-color: {BACKGROUND_BUTTON};
+    border-color: {ACCENT_PRIMARY};
     color: {TEXT_PRIMARY};
+}}
+QPushButton#detailRefreshButton:disabled {{
+    color: {TEXT_MUTED};
+    border-color: {BORDER_SUBTLE};
 }}
 QLabel#detailMetaLine {{
     color: {TEXT_BODY};
     font-size: 13px;
-    line-height: 1.4;
+    line-height: 1.55;
     padding: 1px 0;
 }}
 QPushButton#detailFlagChip {{
@@ -924,8 +952,9 @@ QPushButton#panelActionButton {{
     background-color: {BACKGROUND_BUTTON_PRESSED};
     border: 1px solid {BORDER_STRONG};
     border-radius: 6px;
-    padding: 8px 10px;
-    min-height: 28px;
+    font-size: 11px;
+    padding: 4px 6px;
+    min-height: 26px;
 }}
 QPushButton#panelActionButton:hover {{
     background-color: {BACKGROUND_BUTTON};
@@ -935,13 +964,31 @@ QPushButton#panelPrimaryButton {{
     background-color: {ACCENT_PRIMARY};
     color: {ACCENT_PRIMARY_ON};
     font-weight: 600;
+    font-size: 11px;
     border: none;
     border-radius: 6px;
-    padding: 8px 12px;
-    min-height: 28px;
+    padding: 4px 6px;
+    min-height: 26px;
 }}
 QPushButton#panelPrimaryButton:hover {{
     background-color: {ACCENT_PRIMARY_HOVER};
+}}
+QPushButton#dependencyPillButton {{
+    background-color: rgba(77, 166, 255, 0.15);
+    color: #4da6ff;
+    border: 1px solid #4da6ff;
+    border-radius: 12px;
+    padding: 4px 12px;
+    font-weight: bold;
+    min-height: 22px;
+}}
+QPushButton#dependencyPillButton:hover {{
+    background-color: rgba(77, 166, 255, 0.3);
+}}
+QPushButton#dependencyPillButton:disabled {{
+    color: {TEXT_MUTED};
+    border-color: {BORDER_SUBTLE};
+    background-color: transparent;
 }}
 QPushButton#panelDangerButton {{
     background-color: {ACCENT_ERROR_BG};

@@ -1,9 +1,9 @@
-"""mod.io offline provider — curl_cffi webpage archive into ``.info/offline/``."""
+"""mod.io offline provider — Playwright SPA render + asset localization."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from core.db_manager import get_db
 from core.mod_platform import (
@@ -18,6 +18,12 @@ from services.archive import OfflinePageArchiver, normalize_page_url
 from services.file_ops import ModFileManager
 from services.importers.materialize import find_managed_mod_path
 from services.offline.base import OfflineProvider, OfflineUpdateResult
+from services.offline.modio_browser_snapshot import (
+    CaptureFunc,
+    ModioSnapshotError,
+    capture_modio_page_content,
+    strip_modio_cookie_banner,
+)
 
 OFFLINE_SUBDIR = "offline"
 
@@ -30,11 +36,16 @@ def _map_modio_error(exc: BaseException) -> str:
         return "网络连接失败"
     if "资源下载失败" in text:
         return "资源下载失败"
-    if "页面访问失败" in text or "http" in low:
+    if (
+        "页面访问失败" in text
+        or "unrendered" in low
+        or "empty_html" in low
+        or "http" in low
+        or isinstance(exc, ModioSnapshotError)
+    ):
         return "mod.io 页面访问失败"
     if text:
-        # Prefer explicit provider wording when the underlying message is generic.
-        if "访问" in text or "fetch" in low or "get" in low:
+        if "访问" in text or "fetch" in low or "get" in low or "playwright" in low:
             return "mod.io 页面访问失败"
         return text
     return "mod.io 页面访问失败"
@@ -47,9 +58,13 @@ class ModioOfflineProvider(OfflineProvider):
     Path::
 
         source_url → normalize (strip #fragment)
-        → OfflinePageArchiver.archive_webpage (curl_cffi chrome131)
-        → index.html + assets/ (via shared rewrite / asset_cache)
+        → Playwright Chromium (networkidle → page.content())
+        → OfflinePageArchiver.archive_rendered_html
+        → index.html + assets/ (shared rewrite / asset_cache)
     """
+
+    def __init__(self, *, capture_func: CaptureFunc | Callable[[str], str] | None = None) -> None:
+        self._capture_func = capture_func
 
     def can_handle(self, mod: Any) -> bool:
         platform = getattr(mod, "platform", None)
@@ -94,10 +109,27 @@ class ModioOfflineProvider(OfflineProvider):
 
         error = ""
         try:
-            # Do not send Steam Workshop cookies to mod.io.
+            if self._capture_func is not None:
+                html_text = str(self._capture_func(source_url) or "")
+            else:
+                html_text = capture_modio_page_content(source_url)
+
+            # Strip cookie consent before asset rewrite / save (mod.io only).
+            html_text = strip_modio_cookie_banner(html_text)
+
+            # Localize CSS / images via shared Steam asset stack (cache + rewrite).
             with OfflinePageArchiver(steam_cookie="") as archiver:
-                index = archiver.archive_webpage(source_url, output_dir)
+                index = archiver.archive_rendered_html(html_text, source_url, output_dir)
             status = OFFLINE_STATUS_ARCHIVED
+
+            # Persist preferred open path so UI does not fall back to Steam layout.
+            try:
+                meta = mgr.load_metadata(path)
+                if meta is not None:
+                    meta.offline_page_path = str(Path(index))
+                    mgr.save_metadata(meta, path)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as exc:  # noqa: BLE001
             status = OFFLINE_STATUS_FAILED
             error = _map_modio_error(exc)

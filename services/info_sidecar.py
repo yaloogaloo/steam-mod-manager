@@ -70,6 +70,8 @@ class InfoSidecar:
     cover_path: str = ""
     published_file_id: str = ""
     category: str = ""
+    # Workspace IDs this Mod depends on (deploy-before list).
+    dependencies: list[str] = field(default_factory=list)
     file_roles: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +83,12 @@ class InfoSidecar:
             for k, v in sorted(roles.items(), key=lambda kv: str(kv[0]).lower())
             if str(k).strip()
         }
+        deps = data.get("dependencies") or []
+        data["dependencies"] = [
+            str(x).strip()
+            for x in deps
+            if str(x or "").strip()
+        ]
         return data
 
     @classmethod
@@ -100,6 +108,21 @@ class InfoSidecar:
                     roles[name] = ROLE_SOURCE
                 else:
                     roles[name] = ROLE_OTHER
+        deps_raw = raw.get("dependencies") or []
+        dependencies: list[str] = []
+        if isinstance(deps_raw, (list, tuple)):
+            for item in deps_raw:
+                if isinstance(item, Mapping):
+                    wid = str(
+                        item.get("workspace_id")
+                        or item.get("mod_id")
+                        or item.get("id")
+                        or ""
+                    ).strip()
+                else:
+                    wid = str(item or "").strip()
+                if wid and wid not in dependencies:
+                    dependencies.append(wid)
         return cls(
             display_name=str(raw.get("display_name") or "").strip(),
             description=str(raw.get("description") or "").strip(),
@@ -118,6 +141,7 @@ class InfoSidecar:
             cover_path=str(raw.get("cover_path") or "").strip(),
             published_file_id=str(raw.get("published_file_id") or "").strip(),
             category=str(raw.get("category") or "").strip(),
+            dependencies=dependencies,
             file_roles=roles,
         )
 
@@ -221,9 +245,20 @@ def build_sidecar_from_db(
     cover_path = ""
     published = str(mod_id)
     category = ""
+    dependencies: list[str] = []
     bundle = None
     if info is not None:
-        display_name = str(info.display_name or info.steam_name or "").strip()
+        # Only the raw user override — never the resolved steam/unknown label.
+        display_name = str(info.user_display_name or "").strip()
+        try:
+            from core.models import is_unknown_mod_title
+
+            if is_unknown_mod_title(
+                display_name, published_file_id=str(info.mod_id or mod_id)
+            ):
+                display_name = ""
+        except Exception:  # noqa: BLE001
+            pass
         description = str(info.custom_description or "").strip()
         source_type = normalize_platform(info.platform)
         url = str(info.source_url or "").strip()
@@ -234,9 +269,34 @@ def build_sidecar_from_db(
         bundle = info.mod_files
         cat_tags = database.get_category_tags(str(mod_id))
         category = cat_tags[0] if cat_tags else ""
+        try:
+            grouped = database.get_mod_relationships(str(mod_id))
+            for item in grouped.get("dependencies") or []:
+                tid = str(item.get("mod_id") or "").strip()
+                if not tid:
+                    continue
+                dep_info = database.get_mod_display_info(tid)
+                wid = (
+                    str(dep_info.workspace_id or "").strip()
+                    if dep_info is not None
+                    else ""
+                ) or tid
+                if wid not in dependencies:
+                    dependencies.append(wid)
+        except Exception:  # noqa: BLE001
+            pass
     if meta is not None:
         if not display_name:
-            display_name = str(meta.effective_title() or "").strip()
+            candidate = str(meta.effective_title() or "").strip()
+            try:
+                from core.models import is_unknown_mod_title
+
+                if not is_unknown_mod_title(
+                    candidate, published_file_id=str(meta.published_file_id or "")
+                ):
+                    display_name = candidate
+            except Exception:  # noqa: BLE001
+                display_name = candidate
         if not description:
             description = str(meta.description or "").strip()
         if not url:
@@ -247,6 +307,16 @@ def build_sidecar_from_db(
             cover_path = str(meta.cover_path or "").strip()
         if meta.published_file_id:
             published = str(meta.published_file_id)
+
+    if managed_path is not None:
+        try:
+            side = load_info_sidecar(managed_path)
+            if side is not None:
+                for wid in side.dependencies:
+                    if wid not in dependencies:
+                        dependencies.append(wid)
+        except Exception:  # noqa: BLE001
+            pass
 
     return InfoSidecar(
         display_name=display_name,
@@ -259,6 +329,7 @@ def build_sidecar_from_db(
         cover_path=cover_path,
         published_file_id=published,
         category=category,
+        dependencies=dependencies,
         file_roles=file_roles_from_bundle(bundle),
     )
 
@@ -359,12 +430,27 @@ def apply_sidecar_to_db(
         pass
 
     existing = database.get_mod_display_info(mid)
+    sidecar_display = str(sidecar.display_name or "").strip()
+    try:
+        from core.models import is_unknown_mod_title
+
+        if is_unknown_mod_title(sidecar_display, published_file_id=mid):
+            sidecar_display = ""
+    except Exception:  # noqa: BLE001
+        pass
+    # Prefer a real user override; never re-stamp Unknown_Mod_* placeholders.
+    existing_user = ""
+    if existing is not None:
+        existing_user = str(existing.user_display_name or "").strip()
+        try:
+            from core.models import is_unknown_mod_title
+
+            if is_unknown_mod_title(existing_user, published_file_id=mid):
+                existing_user = ""
+        except Exception:  # noqa: BLE001
+            pass
     patch: dict[str, Any] = {
-        "display_name": (
-            sidecar.display_name
-            or (existing.display_name if existing else "")
-            or ""
-        ),
+        "display_name": sidecar_display or existing_user or "",
         "custom_description": (
             sidecar.description
             if sidecar.description

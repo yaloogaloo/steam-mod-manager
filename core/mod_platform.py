@@ -280,12 +280,12 @@ def get_available_sources(
     """
     Dynamic source platforms for Import / Edit UI.
 
-    Always includes Steam / Nexus / GitHub / 其它. Appends ``mod.io`` only for
-    Anno 1800 (纪元1800).
+    Always includes Steam / Nexus / GitHub / 其它. For Anno 1800 (纪元1800),
+    ``mod.io`` is prepended and becomes the preferred default source.
     """
     sources = list(BASE_SOURCE_OPTIONS)
     if is_anno_1800_game(game_name, game_id):
-        sources.append((PLATFORM_MODIO, "mod.io"))
+        sources.insert(0, (PLATFORM_MODIO, "mod.io"))
     return sources
 
 

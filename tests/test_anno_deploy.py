@@ -212,3 +212,122 @@ def test_anno_deploy_extracts_zip_preserves_inner_folder(
         Path(f.target).resolve() == (mods_root / inner / "modinfo.json").resolve()
         for f in manifest.files
     )
+
+
+def test_anno_stamps_zip_merges_into_documents(
+    tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blueprint zip with stamps/ → Documents/Anno 1800/stamps (not install/mods)."""
+    import zipfile
+
+    from services.deploy_rules import load_manifest
+    from services.deploy_rules.anno import resolve_anno_stamps_dir
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    library = tmp_path / "library"
+    install = tmp_path / "AnnoInstall"
+    install.mkdir()
+
+    mod = library / "Anno 1800" / "LayoutStamp"
+    mod.mkdir(parents=True)
+    info = mod / INFO_DIR_NAME
+    info.mkdir()
+    with zipfile.ZipFile(mod / "stamp.zip", "w") as zf:
+        zf.writestr("stamps/my_layout/stamp.json", '{"ok":1}')
+        zf.writestr("stamps/my_layout/preview.png", b"PNG")
+    (info / METADATA_FILENAME).write_text(
+        json.dumps(
+            {
+                "published_file_id": "91610",
+                "title": "LayoutStamp",
+                "app_id": ANNO_APP,
+                "game_name": "Anno 1800",
+                "category": "蓝图",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    db.update_game_deploy_config(
+        ANNO_APP,
+        name="Anno 1800",
+        install_path=str(install),
+        deploy_type="folder_copy",
+    )
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="91610",
+            title="LayoutStamp",
+            app_id=ANNO_APP,
+        )
+    )
+
+    result = ModDeployer(library_root=library, db=db).deploy_mod("91610")
+    assert result["success"] is True, result
+
+    stamps = resolve_anno_stamps_dir()
+    assert stamps == fake_home / "Documents" / "Anno 1800" / "stamps"
+    assert (stamps / "my_layout" / "stamp.json").is_file()
+    assert (stamps / "my_layout" / "preview.png").is_file()
+    assert not (install / "mods" / "stamps").exists()
+    assert Path(result["target"]).resolve() == stamps.resolve()
+
+    manifest = load_manifest(mod)
+    assert manifest is not None
+    assert len(manifest.files) == 2
+    assert all(Path(f.target).is_relative_to(stamps.resolve()) for f in manifest.files)
+
+
+def test_anno_stamps_loose_folder_by_structure(
+    tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.deploy_rules.anno import resolve_anno_stamps_dir
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    library = tmp_path / "library"
+    install = tmp_path / "AnnoInstall"
+    install.mkdir()
+
+    mod = library / "Anno 1800" / "LooseStamp"
+    stamps_src = mod / "stamps" / "pack_a"
+    stamps_src.mkdir(parents=True)
+    (stamps_src / "a.a7s").write_text("stamp", encoding="utf-8")
+    info = mod / INFO_DIR_NAME
+    info.mkdir()
+    (info / METADATA_FILENAME).write_text(
+        json.dumps(
+            {
+                "published_file_id": "91611",
+                "title": "LooseStamp",
+                "app_id": ANNO_APP,
+                "game_name": "Anno 1800",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    db.update_game_deploy_config(
+        ANNO_APP,
+        name="Anno 1800",
+        install_path=str(install),
+        deploy_type="folder_copy",
+    )
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="91611",
+            title="LooseStamp",
+            app_id=ANNO_APP,
+        )
+    )
+
+    result = ModDeployer(library_root=library, db=db).deploy_mod("91611")
+    assert result["success"] is True, result
+    stamps = resolve_anno_stamps_dir()
+    assert (stamps / "pack_a" / "a.a7s").is_file()
+    assert not (install / "mods" / "LooseStamp").exists()

@@ -264,23 +264,9 @@ class ModDetailDialog(QDialog):
             self._populate(refresh_offline=False)
 
     def _index_path(self) -> Path | None:
-        raw = str(getattr(self.metadata, "offline_page_path", None) or "").strip()
-        if raw:
-            path = Path(raw).expanduser()
-            if not path.is_absolute():
-                path = self.managed_path / path
-            try:
-                if path.is_file() and path.stat().st_size > 0:
-                    return path.resolve()
-            except OSError:
-                pass
-        index = self.files.ensure_info_dir(self.managed_path) / DEFAULT_INDEX_NAME
-        try:
-            if index.is_file() and index.stat().st_size > 0:
-                return index.resolve()
-        except OSError:
-            pass
-        return None
+        from services.offline.paths import resolve_offline_page
+
+        return resolve_offline_page(self.managed_path)
 
     def _show_cached_offline_state(self) -> None:
         index = self._index_path()
@@ -356,7 +342,7 @@ class ModDetailDialog(QDialog):
 
     def _open_offline(self) -> None:
         # Strict guards — never hand an empty / missing path to the OS browser.
-        raw = str(getattr(self.metadata, "offline_page_path", None) or "").strip()
+        # Canonical resolver only — ignore stale metadata.offline_page_path.
         index = self._index_path()
         if index is None or not str(index).strip():
             tip = "未找到离线页面文件"
@@ -374,9 +360,9 @@ class ModDetailDialog(QDialog):
             btn = getattr(self, "btn_offline", None)
             if btn is not None:
                 QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
-            if not raw:
-                self._start_offline_refresh_if_needed()
+            self._start_offline_refresh_if_needed()
             return
+        self.metadata.offline_page_path = abs_path
         if is_stub_offline_page(abs_path):
             QMessageBox.information(
                 self,

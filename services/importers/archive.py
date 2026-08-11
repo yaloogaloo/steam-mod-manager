@@ -575,7 +575,8 @@ class ArchiveImporter(ModImporter):
         _prog("正在扫描文件...")
         root = find_mod_root(extract_dir)
         if root is None:
-            raise ValueError(EMPTY_ARCHIVE_MSG)
+            # Empty archive → still import as an empty Mod folder (missing content).
+            return extract_dir, extract_dir
         # Import does not validate "is this a Mod" — any files become FileEntry later.
         return root, extract_dir
 
@@ -817,5 +818,12 @@ class ArchiveImporter(ModImporter):
             result.managed_path = str(dest)
         elif dest is not None:
             result.managed_path = str(dest)
+        if dest is not None and dest.is_dir():
+            try:
+                from services.file_ops import apply_missing_content_marker
+
+                apply_missing_content_marker(dest)
+            except Exception:  # noqa: BLE001
+                pass
         if staging_dir is not None:
             cleanup_import_cache(staging_dir)

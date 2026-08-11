@@ -41,6 +41,11 @@ from services.offline.manager import (
     attach_nexus_offline_page,
 )
 from services.offline.modio import ModioOfflineProvider
+from services.offline.paths import (
+    resolve_offline_page,
+    resolve_offline_page_path,
+    offline_page_file_exists,
+)
 from services.offline.nexus_manual import (
     NexusManualOfflineProvider,
     NexusOfflineProvider,
@@ -85,8 +90,11 @@ __all__ = [
     "attach_nexus_offline_html",
     "attach_nexus_offline_page",
     "import_offline_snapshot",
+    "offline_page_file_exists",
     "OfflineProvider",
     "OfflineUpdateResult",
+    "resolve_offline_page",
+    "resolve_offline_page_path",
     "SnapshotResult",
     "SteamOfflineProvider",
     "WebSnapshotDownloader",

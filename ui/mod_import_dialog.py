@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
+import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.sanitize import sanitize_folder_name
 from core.mod_platform import (
     MODIO_ANNO_1800_URL,
     PLATFORM_GITHUB,
@@ -564,7 +567,7 @@ class ModImportDialog(QDialog):
         row.addWidget(pick)
         row.addWidget(clear)
         form.addRow("展示图片（可选）", row)
-        hint = QLabel("支持 png / jpg / jpeg / webp。跳过则使用默认占位图。")
+        hint = QLabel("支持 png / jpg / jpeg / jfif / webp。跳过则使用默认占位图。")
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
         form.addRow("", hint)
@@ -644,7 +647,7 @@ class ModImportDialog(QDialog):
             self,
             "选择展示图片",
             start,
-            "Images (*.png *.jpg *.jpeg *.webp);;All files (*.*)",
+            "Images (*.png *.jpg *.jpeg *.jfif *.webp);;All files (*.*)",
         )
         if chosen:
             set_last_import_directory(chosen)
@@ -678,6 +681,36 @@ class ModImportDialog(QDialog):
             set_last_import_directory(chosen)
             target.setText(chosen)
             self._refresh_batch_mode_ui()
+
+    def _empty_stub_folder(self, title: str = "", ident: str = "") -> str:
+        """Empty payload folder used when the user picked no local path."""
+        raw = str(title or ident or "").strip() or f"Empty_Mod_{uuid.uuid4().hex[:8]}"
+        label = sanitize_folder_name(raw, fallback="Empty_Mod")
+        dest = Path(tempfile.mkdtemp(prefix="smm_empty_import_")) / label
+        dest.mkdir(parents=True, exist_ok=True)
+        return str(dest)
+
+    def _resolve_optional_local_source(
+        self,
+        *,
+        use_archive: bool,
+        archive_paths: list[str],
+        folder_text: str,
+        title: str = "",
+        ident: str = "",
+    ) -> tuple[str, bool, list[str]] | None:
+        """Allow empty path: create a stub folder instead of blocking import."""
+        if use_archive and archive_paths:
+            if not all(is_archive_path(p) for p in archive_paths):
+                QMessageBox.warning(
+                    self, "导入失败", "请选择 .zip / .7z / .rar 文件。"
+                )
+                return None
+            return "; ".join(archive_paths), True, archive_paths
+        source = str(folder_text or "").strip()
+        if not source:
+            source = self._empty_stub_folder(title=title, ident=ident)
+        return source, False, []
 
     @staticmethod
     def _is_batch_folder(folder: str) -> bool:
@@ -823,25 +856,17 @@ class ModImportDialog(QDialog):
                 if use_archive
                 else []
             )
-            source = (
-                "; ".join(archive_paths)
-                if use_archive
-                else self.nexus_folder_edit.text().strip()
+            title = self.nexus_title_edit.text().strip()
+            resolved = self._resolve_optional_local_source(
+                use_archive=use_archive,
+                archive_paths=archive_paths,
+                folder_text=self.nexus_folder_edit.text(),
+                title=title,
+                ident=nexus_id,
             )
-            if not source:
-                QMessageBox.warning(
-                    self,
-                    "导入失败",
-                    "请选择本地文件夹或压缩包。",
-                )
+            if resolved is None:
                 return None
-            if use_archive and (
-                not archive_paths or not all(is_archive_path(p) for p in archive_paths)
-            ):
-                QMessageBox.warning(
-                    self, "导入失败", "请选择 .zip / .7z / .rar 文件。"
-                )
-                return None
+            source, use_archive, archive_paths = resolved
             is_batch_mode = (not use_archive) and self._is_batch_folder(source)
             if is_batch_mode:
                 # Batch: skip shared source link / display name — per-folder identity.
@@ -851,11 +876,7 @@ class ModImportDialog(QDialog):
             return {
                 "nexus_url": nexus_url or raw,
                 "nexus_id": nexus_id,
-                "title": (
-                    ""
-                    if is_batch_mode
-                    else self.nexus_title_edit.text().strip()
-                ),
+                "title": ("" if is_batch_mode else title),
                 "folder": "" if use_archive else source,
                 "source_path": source if use_archive else "",
                 "archive_paths": archive_paths if use_archive else [],
@@ -884,30 +905,21 @@ class ModImportDialog(QDialog):
                 if use_archive
                 else []
             )
-            source = (
-                "; ".join(archive_paths)
-                if use_archive
-                else self.modio_folder_edit.text().strip()
+            title = self.modio_title_edit.text().strip()
+            resolved = self._resolve_optional_local_source(
+                use_archive=use_archive,
+                archive_paths=archive_paths,
+                folder_text=self.modio_folder_edit.text(),
+                title=title,
+                ident=modio_id,
             )
-            if not source:
-                QMessageBox.warning(
-                    self,
-                    "导入失败",
-                    "请选择本地文件夹或压缩包。",
-                )
+            if resolved is None:
                 return None
-            if use_archive and (
-                not archive_paths
-                or not all(is_archive_path(p) for p in archive_paths)
-            ):
-                QMessageBox.warning(
-                    self, "导入失败", "请选择 .zip / .7z / .rar 文件。"
-                )
-                return None
+            source, use_archive, archive_paths = resolved
             return {
                 "modio_url": modio_url,
                 "modio_id": modio_id,
-                "title": self.modio_title_edit.text().strip(),
+                "title": title,
                 "folder": "" if use_archive else source,
                 "source_path": source if use_archive else "",
                 "archive_paths": archive_paths if use_archive else [],
@@ -923,31 +935,22 @@ class ModImportDialog(QDialog):
                 if use_archive
                 else []
             )
-            source = (
-                "; ".join(archive_paths)
-                if use_archive
-                else self.other_folder_edit.text().strip()
+            title = self.other_title_edit.text().strip()
+            resolved = self._resolve_optional_local_source(
+                use_archive=use_archive,
+                archive_paths=archive_paths,
+                folder_text=self.other_folder_edit.text(),
+                title=title,
+                ident="",
             )
-            if not source:
-                QMessageBox.warning(
-                    self,
-                    "导入失败",
-                    "请选择本地文件夹或压缩包。",
-                )
+            if resolved is None:
                 return None
-            if use_archive and (
-                not archive_paths
-                or not all(is_archive_path(p) for p in archive_paths)
-            ):
-                QMessageBox.warning(
-                    self, "导入失败", "请选择 .zip / .7z / .rar 文件。"
-                )
-                return None
+            source, use_archive, archive_paths = resolved
             # URL / offline are fully optional for「其它」.
             return {
                 "source_url": self.other_url_edit.text().strip(),
                 "other_url": self.other_url_edit.text().strip(),
-                "title": self.other_title_edit.text().strip(),
+                "title": title,
                 "folder": "" if use_archive else source,
                 "source_path": source if use_archive else "",
                 "archive_paths": archive_paths if use_archive else [],
@@ -965,25 +968,17 @@ class ModImportDialog(QDialog):
             if use_archive
             else []
         )
-        source = (
-            "; ".join(archive_paths)
-            if use_archive
-            else self.github_folder_edit.text().strip()
+        title = self.github_title_edit.text().strip()
+        resolved = self._resolve_optional_local_source(
+            use_archive=use_archive,
+            archive_paths=archive_paths,
+            folder_text=self.github_folder_edit.text(),
+            title=title,
+            ident="",
         )
-        if not source:
-            QMessageBox.warning(
-                self,
-                "导入失败",
-                "请选择本地文件夹或压缩包。",
-            )
+        if resolved is None:
             return None
-        if use_archive and (
-            not archive_paths or not all(is_archive_path(p) for p in archive_paths)
-        ):
-            QMessageBox.warning(
-                self, "导入失败", "请选择 .zip / .7z / .rar 文件。"
-            )
-            return None
+        source, use_archive, archive_paths = resolved
         is_batch_mode = (not use_archive) and self._is_batch_folder(source)
         # GitHub still requires URL for single-mod imports;「其它」does not.
         if (
@@ -997,9 +992,7 @@ class ModImportDialog(QDialog):
             url = ""
         return {
             "github_url": url,
-            "title": (
-                "" if is_batch_mode else self.github_title_edit.text().strip()
-            ),
+            "title": ("" if is_batch_mode else title),
             "folder": "" if use_archive else source,
             "source_path": source if use_archive else "",
             "archive_paths": archive_paths if use_archive else [],
@@ -1016,26 +1009,23 @@ class ModImportDialog(QDialog):
         assert isinstance(result, ImportResult)
         self._result = result
         self.imported.emit(result)
-        self.status_label.setText("导入完成")
-        if int(result.imported_count or 0) > 1:
-            extra = ""
-            if int(result.skipped_count or 0) > 0:
-                extra = f"\n跳过：{result.skipped_count} 个"
-            QMessageBox.information(
-                self,
-                "批量导入完成",
-                f"成功导入 {result.imported_count} 个 Mod\n"
-                f"平台：{result.platform}{extra}",
-            )
+        count = int(result.imported_count or 0)
+        if count > 1:
+            skipped = int(result.skipped_count or 0)
+            extra = f"，跳过 {skipped} 个" if skipped else ""
+            msg = f"已成功导入 {count} 个 Mod{extra}"
         else:
-            QMessageBox.information(
-                self,
-                "导入成功",
-                f"已导入 {result.title or result.mod_id}\n"
-                f"平台：{result.platform}\n"
-                f"文件：{result.files_count} 个",
-            )
-        self.accept()
+            name = str(result.title or result.mod_id or "").strip()
+            msg = f"已成功导入 {name}" if name else "已成功导入"
+        self.status_label.setText(msg)
+        QTimer.singleShot(2000, self._clear_import_status)
+
+    def _clear_import_status(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            return
+        text = self.status_label.text()
+        if text.startswith("已成功导入") or text == "导入完成":
+            self.status_label.setText("")
 
     def _on_import_err(self, error: str) -> None:
         self.status_label.setText(error)

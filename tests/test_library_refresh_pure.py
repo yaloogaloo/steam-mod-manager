@@ -37,6 +37,75 @@ def test_refresh_source_has_no_side_effect_calls() -> None:
         assert name not in src, f"refresh() must not reference {name}"
 
 
+def test_render_mod_cards_does_not_call_apply_sidecar_to_db() -> None:
+    """Library render path is read-only — no per-mod DB sidecar sync."""
+    src = inspect.getsource(ModLibraryView._render_mod_cards)
+    assert "apply_sidecar_to_db" not in src
+    assert "load_info_sidecar" in src  # read-only overlay still allowed
+
+
+def test_refresh_does_not_invoke_apply_sidecar_to_db(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from core.db_manager import DatabaseManager
+    from core.models import ModMetadata
+    from services.file_ops import METADATA_FILENAME
+
+    DatabaseManager.reset_instance()
+    db = DatabaseManager.instance(tmp_path / "refresh_sidecar.db")
+    lib = tmp_path / "library"
+    folder = lib / "Game" / "ModA"
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True)
+    (info / METADATA_FILENAME).write_text(
+        json.dumps(
+            {
+                "published_file_id": "91001",
+                "title": "ModA",
+                "game_name": "Game",
+            }
+        ),
+        encoding="utf-8",
+    )
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="91001",
+            title="ModA",
+            managed_path=str(folder),
+            game_name="Game",
+        )
+    )
+
+    calls: list[str] = []
+
+    def tracking_apply(*_a, **_k):
+        calls.append("apply")
+        return True
+
+    monkeypatch.setattr(
+        "services.info_sidecar.apply_sidecar_to_db", tracking_apply
+    )
+
+    view = ModLibraryView()
+    view.set_target_root(str(lib))
+    view.refresh()
+    qapp.processEvents()
+    assert calls == []
+    assert len(view._cards) == 1
+
+    # Game switch must also stay read-only.
+    view._set_current_game_context("Game")
+    from services.file_ops import ModFileManager
+
+    view._render_mod_cards(ModFileManager(lib))
+    qapp.processEvents()
+    assert calls == []
+
+    DatabaseManager.reset_instance()
+
+
 def test_refresh_does_not_invoke_backfill_or_migrate(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

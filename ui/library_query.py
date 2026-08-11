@@ -16,7 +16,6 @@ from core.mod_status import (
     CONFLICT_STATUS_WARNING,
     normalize_conflict_status,
 )
-from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 
 FILTER_ALL = "all"
 FILTER_FAVORITE = "favorite"
@@ -30,13 +29,41 @@ FILTER_PLATFORM_ALL = "platform_all"
 FILTER_PLATFORM_STEAM = "platform_steam"
 FILTER_PLATFORM_NEXUS = "platform_nexus"
 FILTER_PLATFORM_GITHUB = "platform_github"
+FILTER_PLATFORM_OTHER = "platform_other"
 FILTER_CATEGORY_ALL = "category_all"
 
 SORT_MTIME = "mtime"
 SORT_NAME = "name"
 
-OFFLINE_INDEX_NAME = "index.html"
-OFFLINE_SNAPSHOT_DIR = "offline"
+
+def resolve_mod_library_title(
+    *,
+    metadata_display_name: str = "",
+    metadata_title: str = "",
+    db_display_name: str = "",
+    db_steam_name: str = "",
+    folder_name: str = "",
+) -> str:
+    """
+    Library card / filter title priority (UI read only)::
+
+        metadata.display_name
+            > DB display_name
+            > DB steam_name / metadata.title
+            > folder name
+    """
+    for candidate in (
+        metadata_display_name,
+        db_display_name,
+        db_steam_name,
+        metadata_title,
+        folder_name,
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return "—"
+
 
 # Status chips (exclusive within group).
 STATUS_FILTER_LABELS: tuple[tuple[str, str], ...] = (
@@ -97,28 +124,9 @@ class ModFilterIndex:
 
 def offline_page_exists(managed_path: Path) -> bool:
     """True when an offline page file exists — ``is_file`` only (no content read)."""
-    root = Path(managed_path)
-    for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-        for relative in (
-            (info_name, OFFLINE_SNAPSHOT_DIR, OFFLINE_INDEX_NAME),
-            (info_name, OFFLINE_INDEX_NAME),
-        ):
-            index = root.joinpath(*relative)
-            try:
-                if index.is_file():
-                    return True
-            except OSError:
-                continue
-        info_dir = root / info_name
-        try:
-            if info_dir.is_dir():
-                for path in info_dir.iterdir():
-                    if path.suffix.lower() in {".mhtml", ".mht", ".html", ".htm"}:
-                        if path.is_file():
-                            return True
-        except OSError:
-            continue
-    return False
+    from services.offline.paths import offline_page_file_exists
+
+    return offline_page_file_exists(managed_path)
 
 
 def folder_mtime(managed_path: Path) -> float:

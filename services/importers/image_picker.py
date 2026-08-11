@@ -15,7 +15,7 @@ from services.file_ops import (
 
 logger = logging.getLogger(__name__)
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".jfif", ".png", ".webp"}
 # Alias used by local_scanner / cleanup — display assets, never Mod packages.
 IMAGE_EXTENSIONS = IMAGE_SUFFIXES | {".gif"}  # gif still excluded from mod_files
 
@@ -31,7 +31,9 @@ def validate_cover_image(path: str | Path) -> Path:
         raise FileNotFoundError(f"封面图片不存在: {candidate}")
     suffix = candidate.suffix.lower()
     if suffix not in IMAGE_SUFFIXES:
-        raise ValueError(f"仅支持 png / jpg / jpeg / webp，收到: {suffix or '(无后缀)'}")
+        raise ValueError(
+            f"仅支持 png / jpg / jpeg / jfif / webp，收到: {suffix or '(无后缀)'}"
+        )
     return candidate.resolve()
 
 
@@ -47,7 +49,7 @@ def suggest_sibling_covers(source: str | Path) -> list[Path]:
     parent = path.parent
     stem = path.stem
     found: list[Path] = []
-    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+    for ext in (".png", ".jpg", ".jpeg", ".jfif", ".webp"):
         candidate = parent / f"{stem}{ext}"
         if candidate.is_file():
             found.append(candidate.resolve())

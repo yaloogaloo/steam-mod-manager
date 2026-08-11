@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,6 +21,90 @@ METADATA_FILENAME = "metadata.json"
 LEGACY_METADATA_FILENAME = "mod.json"
 COVER_BASENAME = "cover"
 LEGACY_COVER_BASENAME = "preview"
+
+_IGNORE_CONTENT_DIRS = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME})
+_ARCHIVE_SUFFIXES = frozenset({".zip", ".7z", ".rar"})
+MISSING_CONTENT_METADATA_KEY = "is_missing_content"
+
+
+def _zip_has_payload(archive_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            return any(
+                bool(name) and not str(name).endswith("/") for name in zf.namelist()
+            )
+    except (OSError, zipfile.BadZipFile):
+        # Unreadable zip → do not mark missing (avoid false positives).
+        return True
+
+
+def is_missing_mod_content(managed_path: str | Path) -> bool:
+    """
+    True when the managed folder has no deployable payload outside ``.info`` / ``info``.
+
+    Empty folders, metadata-only stubs, and trees that only contain empty ``.zip``
+    archives are treated as missing content. Unreadable non-zip archives are
+    treated as having content (conservative).
+    """
+    root = Path(managed_path)
+    if not root.is_dir():
+        return True
+    try:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                parts = path.relative_to(root).parts
+            except ValueError:
+                continue
+            if parts and parts[0] in _IGNORE_CONTENT_DIRS:
+                continue
+            suffix = path.suffix.lower()
+            if suffix in _ARCHIVE_SUFFIXES:
+                if suffix == ".zip" and not _zip_has_payload(path):
+                    continue
+                return False
+            return False
+    except OSError:
+        return True
+    return True
+
+
+def set_is_missing_content(managed_path: str | Path, missing: bool) -> None:
+    """Persist ``is_missing_content`` into ``.info/metadata.json``."""
+    root = Path(managed_path)
+    if not root.is_dir():
+        return
+    data = read_info_metadata_dict(root) or {}
+    data[MISSING_CONTENT_METADATA_KEY] = bool(missing)
+    persist_unified_metadata_dict(root, data)
+
+
+def apply_missing_content_marker(managed_path: str | Path) -> bool:
+    """Detect empty payload, write ``is_missing_content``, return the flag."""
+    missing = is_missing_mod_content(managed_path)
+    set_is_missing_content(managed_path, missing)
+    return missing
+
+
+def clear_missing_content_if_present(managed_path: str | Path) -> bool:
+    """
+    If the managed folder now has payload files, persist ``is_missing_content=False``.
+
+    Returns True when the flag was cleared. Does not mark empty folders as missing.
+    """
+    if is_missing_mod_content(managed_path):
+        return False
+    set_is_missing_content(managed_path, False)
+    return True
+
+
+def read_is_missing_content(managed_path: str | Path) -> bool:
+    """True when metadata flag or filesystem payload check says content is missing."""
+    data = read_info_metadata_dict(managed_path) or {}
+    if data.get(MISSING_CONTENT_METADATA_KEY) is True:
+        return True
+    return is_missing_mod_content(managed_path)
 
 
 class ModFileManager:
@@ -327,7 +412,7 @@ class ModFileManager:
         info = self.info_dir(root)
 
         for basename in (COVER_BASENAME, LEGACY_COVER_BASENAME):
-            for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+            for ext in (".jpg", ".jpeg", ".jfif", ".png", ".webp", ".gif"):
                 candidate = info / f"{basename}{ext}"
                 if candidate.is_file():
                     return candidate
@@ -549,7 +634,10 @@ def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
     from core.mod_platform import parse_metadata_platform
 
     path_str = str(Path(managed_path).expanduser().resolve())
-    title = str(data.get("title") or data.get("display_name") or "")
+    title = str(data.get("title") or "")
+    display_name = str(data.get("display_name") or "").strip()
+    if not title.strip():
+        title = display_name
     description = str(
         data.get("description") or data.get("custom_description") or ""
     )
@@ -574,6 +662,8 @@ def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
         offline_page_path=offline or None,
         fetch_error=data.get("fetch_error"),
         custom_notes=str(data.get("custom_notes") or ""),
+        author=str(data.get("author") or "").strip(),
         source_type=parse_metadata_platform(data),
+        json_display_name=display_name,
     )
     return meta
