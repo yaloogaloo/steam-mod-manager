@@ -75,7 +75,7 @@ def test_open_offline_blocks_empty_path(
 
     panel._open_offline()
     assert opened == []
-    assert any("未找到离线页面文件" in t for t in tips)
+    assert tips == []
 
 
 def test_open_offline_uses_from_local_file(
@@ -109,13 +109,13 @@ def test_open_offline_uses_from_local_file(
     assert Path(opened[0].toLocalFile()).resolve() == index.resolve()
 
 
-def test_materialize_assigns_offline_page_path_from_mhtml(
+def test_materialize_does_not_import_offline_mhtml(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
+    """materialize only excludes sidecar MHTML; attach happens once in ImportWorker."""
     src = tmp_path / "src" / "MyMod"
     src.mkdir(parents=True)
     (src / "pak.bin").write_bytes(b"mod")
-    # Minimal MHTML so import_offline_snapshot can parse it.
     mhtml = src / "page.mhtml"
     mhtml.write_bytes(
         b"From: <saved@localhost>\r\n"
@@ -131,7 +131,6 @@ def test_materialize_assigns_offline_page_path_from_mhtml(
     )
 
     lib = tmp_path / "lib"
-    # Register a stub row so offline status update can succeed.
     from core.mod_platform import PLATFORM_NEXUS
 
     info = db.register_external_mod(
@@ -155,6 +154,6 @@ def test_materialize_assigns_offline_page_path_from_mhtml(
 
     loaded = ModFileManager(lib).load_metadata(dest)
     assert loaded is not None
-    assert loaded.offline_page_path
-    assert Path(loaded.offline_page_path).is_file()
-    assert Path(loaded.offline_page_path).exists()
+    assert not (loaded.offline_page_path or "").strip()
+    assert not (dest / INFO_DIR_NAME / "offline" / "index.html").is_file()
+    assert not (dest / "page.mhtml").exists()

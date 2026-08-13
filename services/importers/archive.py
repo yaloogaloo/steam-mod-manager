@@ -24,6 +24,7 @@ from core.mod_platform import (
     SOURCE_TYPE_OTHER,
     normalize_platform,
 )
+from services.importers.local_scanner import is_history_version_path
 from core.paths import data_dir, project_root
 from services.importers.github import GithubImporter
 from services.importers.importer_base import ImportResult, ModImporter
@@ -216,8 +217,12 @@ def find_mod_root(extract_root: str | Path) -> Path | None:
     candidates: list[tuple[int, int, Path]] = []  # (-score, depth, path)
 
     for path in root.rglob("*"):
+        if is_history_version_path(path):
+            continue
         if path.is_dir() and path.name.lower() == "logicmods":
             parent = path.parent
+            if is_history_version_path(parent):
+                continue
             depth = len(parent.relative_to(root).parts)
             candidates.append((-(_dir_score(parent) + 30), depth, parent))
             continue
@@ -228,6 +233,8 @@ def find_mod_root(extract_root: str | Path) -> Path | None:
         if path.suffix.lower() not in _MOD_FILE_SUFFIXES:
             continue
         parent = path.parent
+        if is_history_version_path(parent):
+            continue
         depth = len(parent.relative_to(root).parts)
         candidates.append((-_dir_score(parent), depth, parent))
 
@@ -271,6 +278,8 @@ def _has_files_outside(root: Path, inner: Path) -> bool:
         return False
     try:
         for path in root_r.rglob("*"):
+            if is_history_version_path(path):
+                continue
             if not path.is_file() or path.name.startswith("."):
                 continue
             try:
@@ -353,6 +362,9 @@ def _extract_zip(src: Path, dest: Path) -> None:
         for info in zf.infolist():
             name = info.filename.replace("\\", "/")
             if not name or name.endswith("/"):
+                continue
+            # 压缩包内「历史版本」路径一律不落盘
+            if is_history_version_path(name):
                 continue
             # Zip-slip guard
             target = (dest / name).resolve()

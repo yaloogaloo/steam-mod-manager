@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -225,6 +226,17 @@ ANNO_1800_NAME_ALIASES = frozenset(
 MODIO_ANNO_1800_URL = "https://mod.io/g/anno-1800"
 MODIO_DEFAULT_URL = "https://mod.io"
 
+# Stardew Valley / 星露谷物语 — no Steam Workshop source.
+STARDEW_VALLEY_APP_IDS = frozenset({413150})
+STARDEW_VALLEY_NAME_ALIASES = frozenset(
+    {
+        "stardew valley",
+        "stardewvalley",
+        "星露谷物语",
+        "星露谷",
+    }
+)
+
 
 def _normalize_game_key(game_name: str | None) -> str:
     text = str(game_name or "").strip().casefold()
@@ -244,6 +256,27 @@ def is_anno_1800_game(game_name: str = "", game_id: int = 0) -> bool:
     if key in aliases:
         return True
     return "anno1800" in key or "纪元1800" in key
+
+
+def is_stardew_valley_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Stardew Valley / 星露谷物语."""
+    try:
+        gid = int(str(game_id or "0").strip() or 0)
+    except ValueError:
+        gid = 0
+    if gid in STARDEW_VALLEY_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    lower = raw.casefold()
+    if "stardew valley" in lower or "stardewvalley" in lower.replace(" ", ""):
+        return True
+    if "星露谷物语" in raw or "星露谷" in raw:
+        return True
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in STARDEW_VALLEY_NAME_ALIASES}
+    return key in aliases
 
 
 # (platform_id, UI label) — base sources every game supports.
@@ -280,13 +313,62 @@ def get_available_sources(
     """
     Dynamic source platforms for Import / Edit UI.
 
-    Always includes Steam / Nexus / GitHub / 其它. For Anno 1800 (纪元1800),
-    ``mod.io`` is prepended and becomes the preferred default source.
+    Always includes Nexus / GitHub / 其它. Steam Workshop is omitted for
+    Stardew Valley (星露谷物语). For Anno 1800, ``mod.io`` is prepended
+    (Steam remains in the list but Import UI hides the radio).
     """
     sources = list(BASE_SOURCE_OPTIONS)
+    if is_stardew_valley_game(game_name, game_id):
+        sources = [(p, label) for p, label in sources if p != PLATFORM_STEAM]
     if is_anno_1800_game(game_name, game_id):
         sources.insert(0, (PLATFORM_MODIO, "mod.io"))
     return sources
+
+
+def corrected_nexus_workspace_id(
+    *,
+    platform: str | None,
+    source_url: str = "",
+    workspace_id: str = "",
+) -> str | None:
+    """
+    If platform is Nexus and ``source_url`` embeds ``/mods/<digits>`` that
+    differs from ``workspace_id``, return the URL id; otherwise ``None``.
+
+    Never raises — bad URL / platform → ``None``.
+    """
+    try:
+        if normalize_platform(platform) != PLATFORM_NEXUS:
+            return None
+        url = str(source_url or "").strip()
+        if not url:
+            return None
+        match = re.search(r"/mods/(\d+)", url.replace("\\", "/"))
+        real_id = match.group(1) if match else _nexus_numeric_id_from_url(url)
+        if not real_id:
+            return None
+        if str(workspace_id or "").strip() == real_id:
+            return None
+        return real_id
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def silent_correct_nexus_workspace_id(mod_id: int | str | None) -> None:
+    """
+    Best-effort Nexus workspace_id wash for refresh loops.
+
+    Never raises, never shows UI — safe inside batch ``for`` bodies.
+    """
+    try:
+        mid = str(mod_id or "").strip()
+        if not mid:
+            return
+        from core.db_manager import get_db
+
+        get_db().correct_nexus_workspace_id_from_url(mid)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def default_source_url_for_platform(

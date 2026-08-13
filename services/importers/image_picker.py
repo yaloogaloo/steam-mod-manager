@@ -127,11 +127,12 @@ def apply_cover_to_mod(
     *,
     mod_id: str | int = "",
     update_db: bool = True,
+    sync_backup: bool = True,
 ) -> str:
     """
     Install cover and return relative ``cover_path`` (``''`` on failure).
 
-    Also updates ``.info/mod.json`` and optionally SQLite ``mods.cover_path``.
+    Also updates ``.info/metadata.json`` and optionally SQLite ``mods.cover_path``.
     """
     dest = Path(managed_path)
     installed = install_cover_file(cover_source, dest)
@@ -143,7 +144,7 @@ def apply_cover_to_mod(
     meta = mgr.load_metadata(dest)
     if meta is not None:
         meta.cover_path = rel
-        mgr.save_metadata(meta, dest)
+        mgr.save_metadata(meta, dest, sync_backup=False)
 
     if update_db and str(mod_id).strip():
         try:
@@ -152,6 +153,13 @@ def apply_cover_to_mod(
             get_db().update_mod_cover_path(mod_id, rel)
         except Exception as exc:  # noqa: BLE001
             logger.debug("update_mod_cover_path failed: %s", exc)
+    if sync_backup:
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            sync_after_metadata_change(mod_id, dest, "cover_change")
+        except Exception:  # noqa: BLE001
+            pass
     return rel
 
 

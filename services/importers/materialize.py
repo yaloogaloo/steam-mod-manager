@@ -119,10 +119,11 @@ def materialize_imported_mod(
     ignore_files: list[Path] = list(copy_ignore or ())
     cover_raw = str(cover_source or "").strip()
     effective_cover: Path | None = Path(cover_raw).expanduser() if cover_raw else None
-    offline_sidecar: Path | None = None
 
     if src is not None and src.is_dir():
         # Auto-extract cover / mhtml sidecars; never raise when missing.
+        # Offline MHTML is ignored from the Mod tree copy here; ImportWorker /
+        # Detail attach it once via attach_nexus_offline_page (single NexusCleaner).
         try:
             from services.importers.directory_batch import extract_directory_sidecars
 
@@ -131,8 +132,6 @@ def materialize_imported_mod(
                 ignore_files.append(path)
             if effective_cover is None and sidecars.cover is not None:
                 effective_cover = sidecars.cover
-            if sidecars.offline_page is not None:
-                offline_sidecar = Path(sidecars.offline_page)
         except Exception:  # noqa: BLE001
             pass
         dest = mgr.copy_mod(
@@ -144,12 +143,14 @@ def materialize_imported_mod(
         dest = mgr.allocate_destination(meta)
         dest.mkdir(parents=True, exist_ok=True)
     meta.managed_path = str(dest)
-    mgr.save_metadata(meta, dest)
+    mgr.save_metadata(meta, dest, sync_backup=False)
 
     if effective_cover is not None:
-        rel = apply_cover_to_mod(dest, effective_cover, mod_id=mid, update_db=True)
+        rel = apply_cover_to_mod(
+            dest, effective_cover, mod_id=mid, update_db=True, sync_backup=False
+        )
         meta.cover_path = rel
-        mgr.save_metadata(meta, dest)
+        mgr.save_metadata(meta, dest, sync_backup=False)
     else:
         try:
             from core.db_manager import get_db
@@ -158,45 +159,11 @@ def materialize_imported_mod(
         except Exception:  # noqa: BLE001
             pass
 
-    # Persist discovered offline page into ``.info/offline/`` and metadata.
-    # Sidecar mhtml is excluded from the Mod tree copy, so this must not be skipped.
-    if offline_sidecar is not None and offline_sidecar.is_file():
-        try:
-            from core.db_manager import get_db
-            from core.mod_platform import (
-                OFFLINE_STATUS_ARCHIVED,
-                PROVIDER_NEXUS_MANUAL_IMPORT,
-            )
-            from services.offline.manual_import import import_offline_snapshot
-            from services.offline.nexus_manual import OFFLINE_SUBDIR
-
-            info_dir = mgr.ensure_info_dir(dest)
-            output_dir = info_dir / OFFLINE_SUBDIR
-            index, _count, _fmt = import_offline_snapshot(
-                offline_sidecar,
-                output_dir,
-                title=name,
-                clean=True,
-            )
-            meta.offline_page_path = str(index)
-            mgr.save_metadata(meta, dest)
-            try:
-                get_db().update_mod_offline_status(
-                    mid,
-                    status=OFFLINE_STATUS_ARCHIVED,
-                    provider=PROVIDER_NEXUS_MANUAL_IMPORT,
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        except Exception:  # noqa: BLE001
-            # Missing / corrupt offline sidecars must never fail Mod import.
-            pass
-
     # Portable snapshot for folder-copy reimport.
     try:
         from services.info_sidecar import write_sidecar_for_mod
 
-        write_sidecar_for_mod(dest, mid)
+        write_sidecar_for_mod(dest, mid, sync_backup=False)
     except Exception:  # noqa: BLE001
         pass
 
@@ -204,7 +171,14 @@ def materialize_imported_mod(
     try:
         from services.file_ops import apply_missing_content_marker
 
-        apply_missing_content_marker(dest)
+        apply_missing_content_marker(dest, sync_backup=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from services.metadata_backup_sync import sync_after_metadata_change
+
+        sync_after_metadata_change(mid, dest, "import")
     except Exception:  # noqa: BLE001
         pass
 

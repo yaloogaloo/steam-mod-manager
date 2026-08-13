@@ -31,7 +31,7 @@ STAMPS_DIR_NAME = "stamps"
 ANNO_DOCS_DIR_NAME = "Anno 1800"
 ENTRY_TYPE_STAMPS = "stamps"
 _ANNO_DEPLOY_TYPE = "anno_1800"
-_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME})
+_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"})
 _BLUEPRINT_CATEGORIES = frozenset(
     {"蓝图", "stamps", "stamp", "blueprint", "blueprints"}
 )

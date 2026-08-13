@@ -10,7 +10,7 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -67,6 +67,7 @@ from core.mod_platform import (
     format_offline_provider,
     is_entry_selected_for_deploy,
     normalize_offline_status,
+    normalize_platform,
     supports_offline_page_download,
 )
 from ui.mod_files_ux import (
@@ -74,12 +75,16 @@ from ui.mod_files_ux import (
     file_badge_kind,
     file_combo_label,
     file_description,
+    file_list_badge,
     file_primary_label,
     file_secondary_label,
-    file_tooltip,
     files_summary_lines,
-    group_file_entries,
     sort_files_for_detail,
+    sort_files_for_nexus_flat,
+)
+from services.importers.local_scanner import (
+    filter_out_history_version_entries,
+    is_history_version_entry,
 )
 from core.mod_status import (
     CONFLICT_STATUS_CONFLICT,
@@ -96,6 +101,8 @@ from ui.platform_labels import (
     format_platform_name,
     get_platform_metadata_labels,
 )
+
+
 from ui.styles import (
     ACCENT_ERROR,
     ACCENT_PRIMARY,
@@ -123,6 +130,67 @@ from ui.styles import (
 )
 from ui.edit_mod_dialog import EditModDialog
 
+
+class ElideLabel(QLabel):
+    """Single-line label: paint elided text; full string only via native tooltip."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        # Ignored: layout may shrink below text sizeHint; Fixed edit stays visible.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.setMinimumWidth(0)
+        self.setFullText(text)
+
+    def setFullText(self, text: str) -> None:
+        self._full_text = str(text or "")
+        try:
+            from ui.popup_trace import log_popup
+
+            log_popup(
+                "ElideLabel.setToolTip",
+                detail=repr(self._full_text[:80]),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        self.setToolTip(self._full_text)
+        # Keep logical text for readers/tests; paintEvent draws ElideRight.
+        super().setText(self._full_text)
+        self.update()
+
+    def fullText(self) -> str:
+        return self._full_text
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        metrics = QFontMetrics(self.font())
+        return QSize(40, metrics.height() + 2)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        metrics = QFontMetrics(self.font())
+        return QSize(0, metrics.height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        metrics = QFontMetrics(self.font())
+        elided = metrics.elidedText(
+            self._full_text, Qt.TextElideMode.ElideRight, max(0, self.width())
+        )
+        color = self.palette().color(self.foregroundRole())
+        painter.setPen(color)
+        align = self.alignment()
+        if not int(align):
+            align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        painter.drawText(self.contentsRect(), int(align), elided)
+
+
+# Back-compat alias used by older call sites / tests.
+_ElidedLabel = ElideLabel
+
+
 COVER_W = 140
 COVER_H = 140
 
@@ -136,18 +204,32 @@ def humanize_deploy_error(error: str) -> str:
     text = (error or "").strip()
     if not text:
         return "未知错误"
+    if text in (
+        "内容目录不存在，无法部署",
+        "Mod 安装目录不存在，请检查游戏设置",
+        "目标目录已存在其他内容，无法部署",
+        "无法写入游戏 Mod 目录，请检查权限",
+        "部署失败：文件复制错误",
+        "部署清单不匹配，无法安全删除部署",
+        "Backup 无效，无法部署",
+        "身份冲突，无法部署",
+        "该 Mod 内容缺失，无法部署",
+    ):
+        return text
     if text == "Target mod directory does not exist" or text.startswith(
         "Target mod directory does not exist"
     ):
-        return "目标部署目录不存在"
+        return "Mod 安装目录不存在，请检查游戏设置"
     if text.startswith("Permission denied"):
-        return "没有写入权限（Permission denied）"
+        return "无法写入游戏 Mod 目录，请检查权限"
     if "请先配置游戏部署目录" in text or (
         "部署目录" in text and "配置" in text
     ):
         return "请先配置游戏部署目录"
     if "源 Mod 目录不存在" in text or "源文件不存在" in text:
-        return "Mod源文件不存在"
+        return "内容目录不存在，无法部署"
+    if text.startswith("复制失败") or "复制失败" in text:
+        return "部署失败：文件复制错误"
     if text == "Unknown deploy error":
         return "未知错误"
     # Preserve archive / extract details (suffix, tool unavailable, etc.).
@@ -250,19 +332,10 @@ def _sanitize_description_html(html: str) -> str:
 
 
 def get_directory_size(path: Path) -> int:
-    """Sum file sizes under *path* (bytes)."""
-    total = 0
-    root = Path(path)
-    if not root.is_dir():
-        return total
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        try:
-            total += p.stat().st_size
-        except OSError:
-            pass
-    return total
+    """Sum file sizes under *path* (bytes), skipping offline/assets/.cache."""
+    from services.dir_size import directory_size
+
+    return directory_size(path)
 
 
 def format_size(size_bytes: int) -> str:
@@ -329,6 +402,7 @@ class ModDetailPanel(QWidget):
     undeploy_requested = Signal(str)
     remove_requested = Signal(str)  # mod_id — library confirms then removes
     offline_page_updated = Signal(object)  # Path managed_path after offline download
+    relocate_completed = Signal(str)  # mod_id after successful path relocate
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -339,6 +413,8 @@ class ModDetailPanel(QWidget):
 
         self._managed_path: Path | None = None
         self._library_root: Path | None = None
+        self._folder_absent = False
+        self._resolved = None
         self._metadata: ModMetadata | None = None
         self._display_info: ModDisplayInfo | None = None
         self._mode = MODE_EMPTY
@@ -383,8 +459,17 @@ class ModDetailPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def show_mod(self, managed_path: str | Path) -> None:
-        """Load local metadata into view mode (no Steam I/O)."""
+    def show_mod(
+        self,
+        managed_path: str | Path | None = None,
+        *,
+        mod_id: str | int | None = None,
+    ) -> None:
+        """Load metadata via the unified resolver (no Steam I/O)."""
+        from ui.popup_trace import log_popup
+        from services.mod_metadata_resolver import resolve_mod_metadata
+
+        log_popup("slot:show_mod", detail=str(mod_id or managed_path or ""))
         self._batch_mod_ids = []
         self._batch_game_name = ""
         self._batch_game_id = 0
@@ -396,40 +481,44 @@ class ModDetailPanel(QWidget):
             self.btn_edit_info.setText("编辑信息")
             self.btn_edit_info.setToolTip("编辑显示名称、介绍与源链接")
             self.btn_edit_info.setEnabled(True)
-        self._managed_path = Path(managed_path)
+
+        resolved = resolve_mod_metadata(mod_id, managed_path)
+        path = Path(managed_path) if managed_path is not None else None
+        if resolved is not None and resolved.managed_path:
+            path = Path(resolved.managed_path)
+        if path is None:
+            self.clear()
+            return
+        self._managed_path = path
         try:
             self._library_root = self._managed_path.parents[1]
         except IndexError:
             self._library_root = self._managed_path.parent
 
-        files = ModFileManager(self._library_root)
-        meta = files.load_metadata(self._managed_path)
-        if meta is None:
+        self._resolved = resolved
+        self._folder_absent = bool(resolved is None or not resolved.folder_present)
+        if resolved is not None:
+            meta = resolved.to_mod_metadata()
+        else:
             meta = ModMetadata(
                 published_file_id=(
-                    self._managed_path.name
-                    if self._managed_path.name.isdigit()
-                    else ""
+                    str(mod_id or "").strip()
+                    or (
+                        self._managed_path.name
+                        if self._managed_path.name.isdigit()
+                        else ""
+                    )
                 ),
                 title=self._managed_path.name,
                 managed_path=str(self._managed_path),
             )
         meta.managed_path = str(self._managed_path)
-        meta.local_path = str(self._managed_path.resolve())
-        files.enrich_title_from_db(meta)
+        meta.local_path = str(self._managed_path)
         self._metadata = meta
 
         self._display_info = None
-        mid = meta.published_file_id
+        mid = str(mod_id or meta.published_file_id or "").strip()
         if str(mid).isdigit():
-            # Restore portable ``.info/metadata.json`` before first paint.
-            try:
-                from services.info_sidecar import apply_sidecar_to_db, load_info_sidecar
-
-                if load_info_sidecar(self._managed_path) is not None:
-                    apply_sidecar_to_db(self._managed_path, mod_id=mid)
-            except Exception:  # noqa: BLE001
-                pass
             try:
                 self._display_info = get_db().get_mod_display_info(mid)
             except Exception:  # noqa: BLE001
@@ -444,6 +533,8 @@ class ModDetailPanel(QWidget):
         """Empty / unselected state."""
         self._managed_path = None
         self._library_root = None
+        self._folder_absent = False
+        self._resolved = None
         self._metadata = None
         self._display_info = None
         self._batch_mod_ids = []
@@ -466,6 +557,12 @@ class ModDetailPanel(QWidget):
         self.btn_undeploy.setEnabled(False)
         if hasattr(self, "btn_download_offline"):
             self.btn_download_offline.setEnabled(False)
+        if hasattr(self, "btn_relocate"):
+            self.btn_relocate.hide()
+            self.btn_relocate.setEnabled(False)
+        if hasattr(self, "backup_status_badge"):
+            self.backup_status_badge.hide()
+            self.backup_status_badge.clear()
         if hasattr(self, "btn_add_dependency"):
             self.btn_add_dependency.setEnabled(False)
         if hasattr(self, "dep_summary_label"):
@@ -682,6 +779,20 @@ class ModDetailPanel(QWidget):
                 "检测到目录路径变化，已中止刷新。显示名称不会重命名文件夹。",
             )
             return
+
+        if self._resolved is not None:
+            name = str(values.get("display_name") or "").strip()
+            if name:
+                self._resolved.display_name = name
+            desc = str(values.get("custom_description") or "").strip()
+            if desc:
+                self._resolved.description = desc
+            url = str(values.get("source_url") or "").strip()
+            if url:
+                self._resolved.source_url = url
+            plat = str(values.get("platform") or "").strip()
+            if plat:
+                self._resolved.platform = plat
 
         self._mode = MODE_VIEW
         self._stack.setCurrentWidget(self._view_page)
@@ -921,6 +1032,16 @@ class ModDetailPanel(QWidget):
         self.header_platform_badge.setObjectName("detailPlatformBadge")
         self.header_platform_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge_row.addWidget(self.header_platform_badge)
+        self.backup_status_badge = QLabel()
+        self.backup_status_badge.setObjectName("detailPlatformBadge")
+        self.backup_status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.backup_status_badge.hide()
+        badge_row.addWidget(self.backup_status_badge)
+        self.size_badge = QLabel()
+        self.size_badge.setObjectName("detailPlatformBadge")
+        self.size_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.size_badge.hide()
+        badge_row.addWidget(self.size_badge)
         self.view_favorite = QLabel()
         self.view_favorite.setObjectName("detailPanelMeta")
         badge_row.addWidget(self.view_favorite)
@@ -1009,6 +1130,12 @@ class ModDetailPanel(QWidget):
         text = str(message or "").strip()
         if not text or not hasattr(self, "_status_banner"):
             return
+        try:
+            from ui.popup_trace import log_popup
+
+            log_popup("detailStatusBanner.show", detail=text[:120])
+        except Exception:  # noqa: BLE001
+            pass
         self._set_status_banner_tone(tone)
         self._status_banner_body.setText(text)
         self._status_banner.show()
@@ -1083,6 +1210,7 @@ class ModDetailPanel(QWidget):
         actions.addWidget(caption)
 
         self.btn_folder = QPushButton("打开目录")
+        self.btn_relocate = QPushButton("重新定位目录")
         self.btn_steam = QPushButton("打开官网")
         self.btn_offline = QPushButton("打开离线页面")
         self.btn_download_offline = QPushButton("导入离线页面")
@@ -1105,12 +1233,14 @@ class ModDetailPanel(QWidget):
         row1.setSpacing(6)
         for btn, tip in (
             (self.btn_folder, "打开本地 Mod 目录"),
+            (self.btn_relocate, "为缺失的 Mod 选择新目录（仅更新路径，不移动文件）"),
             (self.btn_steam, "在浏览器中打开来源网页"),
             (self.btn_offline, "打开已保存的离线页面"),
             (self.btn_download_offline, "导入离线页面"),
         ):
             _style_action(btn, tip)
             row1.addWidget(btn, stretch=1)
+        self.btn_relocate.hide()
         actions.addLayout(row1)
 
         row2 = QHBoxLayout()
@@ -1277,16 +1407,15 @@ class ModDetailPanel(QWidget):
         body.setContentsMargins(10, 10, 10, 10)
         body.setSpacing(6)
 
-        # Title left · actions right (compact header).
+        # Title left · file actions · stretch absorbs leftover (never squeeze buttons).
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
         self._files_section_label = self._section_label("文件")
         title_row.addWidget(self._files_section_label, 0)
-        title_row.addStretch(1)
         self.btn_files_select_all = QPushButton("Select All")
         self.btn_files_main_only = QPushButton("Main Only")
-        self.btn_files_clear_optional = QPushButton("Clear Optional")
+        self.btn_files_clear_optional = QPushButton("Clear")
         self.btn_files_reset_default = QPushButton("Reset")
         for btn in (
             self.btn_files_select_all,
@@ -1295,7 +1424,11 @@ class ModDetailPanel(QWidget):
             self.btn_files_reset_default,
         ):
             btn.setObjectName("detailFilesActionButton")
+            btn.setSizePolicy(
+                QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+            )
             title_row.addWidget(btn, 0)
+        title_row.addStretch(1)
         body.addLayout(title_row)
         self.btn_files_select_all.clicked.connect(self._on_files_select_all)
         self.btn_files_main_only.clicked.connect(self._on_files_main_only)
@@ -1534,6 +1667,7 @@ class ModDetailPanel(QWidget):
         self.tag_conflict_check.toggled.connect(self._on_tag_conflict_toggled)
         self.btn_save_tags.clicked.connect(self._save_user_tags)
         self.btn_folder.clicked.connect(self._open_folder)
+        self.btn_relocate.clicked.connect(self._relocate_mod_folder)
         self.btn_offline.clicked.connect(self._open_offline)
         self.btn_download_offline.clicked.connect(self._download_offline_page)
         self.btn_steam.clicked.connect(self._open_steam)
@@ -1573,7 +1707,7 @@ class ModDetailPanel(QWidget):
         outer.setContentsMargins(10, 8, 10, 10)
         outer.setSpacing(6)
 
-        toggle = QToolButton()
+        toggle = QToolButton(frame)
         toggle.setObjectName("collapsibleSection")
         toggle.setCheckable(True)
         toggle.setChecked(expanded)
@@ -1585,12 +1719,13 @@ class ModDetailPanel(QWidget):
         toggle.setAutoRaise(True)
         outer.addWidget(toggle)
 
-        content = QWidget()
+        content = QWidget(frame)
         body = QVBoxLayout(content)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(6)
-        content.setVisible(expanded)
         outer.addWidget(content)
+        # Visibility only AFTER parenting — setVisible(True) on parentless flashes.
+        content.setVisible(expanded)
 
         def _on_toggled(checked: bool, btn=toggle, box=content) -> None:
             box.setVisible(checked)
@@ -1771,15 +1906,32 @@ class ModDetailPanel(QWidget):
         text = platform_badge_label(key)
         self.header_platform_badge.setText(text)
         # Dynamic platform badge — token-based exception.
-        self.header_platform_badge.setStyleSheet(
+        badge_qss = (
             f"QLabel#detailPlatformBadge {{"
             f"background-color: {bg}; color: {fg};"
             f"border: 1px solid {border}; border-radius: 4px;"
             f"font-size: 11px; font-weight: 600; padding: 2px 8px;"
             f"}}"
         )
+        self.header_platform_badge.setStyleSheet(badge_qss)
         self.header_platform_badge.adjustSize()
         self.header_platform_badge.show()
+        if hasattr(self, "size_badge"):
+            self.size_badge.setStyleSheet(badge_qss)
+
+    def _render_header_size_badge(self, size_text: str = "") -> None:
+        """Mirror platform badge styling; hide when size is unavailable."""
+        if not hasattr(self, "size_badge"):
+            return
+        label = str(size_text or "").strip()
+        if not label:
+            self.size_badge.clear()
+            self.size_badge.hide()
+            return
+        self.size_badge.setText(label)
+        self.size_badge.setToolTip(f"Mod 大小：{label}")
+        self.size_badge.adjustSize()
+        self.size_badge.show()
 
     # ------------------------------------------------------------------
     # Fill / actions
@@ -1788,20 +1940,37 @@ class ModDetailPanel(QWidget):
     def _fill_view(self) -> None:
         meta = self._metadata
         info = self._display_info
+        resolved = getattr(self, "_resolved", None)
         assert meta is not None
 
-        shown = info.display_name if info else meta.display_name
-        steam = info.steam_name if info else (meta.title or "").strip()
+        if resolved is not None:
+            shown = resolved.display_name or meta.display_name
+            steam = resolved.title or shown
+            platform = resolved.platform or PLATFORM_STEAM
+            source_url = resolved.source_url
+            workspace_id = resolved.workspace_id
+            desc_text = resolved.description
+            self._folder_absent = not resolved.folder_present
+        else:
+            shown = info.display_name if info else meta.display_name
+            steam = info.steam_name if info else (meta.title or "").strip()
+            platform = PLATFORM_STEAM
+            source_url = ""
+            workspace_id = ""
+            desc_text = ""
+            if info is not None:
+                platform = info.platform or PLATFORM_STEAM
+                source_url = (info.source_url or "").strip()
+                workspace_id = str(info.workspace_id or "").strip()
+                desc_text = str(info.custom_description or "").strip()
+            if not desc_text:
+                desc_text = str(meta.description or "").strip()
 
-        self._set_header_title(shown)
-
-        platform = PLATFORM_STEAM
-        source_url = ""
         external_id = ""
         files_bundle = None
         if info is not None:
-            platform = info.platform or PLATFORM_STEAM
-            source_url = (info.source_url or "").strip()
+            if not resolved:
+                platform = info.platform or platform
             external_id = (info.external_id or "").strip()
             files_bundle = info.mod_files
         if not source_url and (meta.url or "").strip():
@@ -1809,7 +1978,10 @@ class ModDetailPanel(QWidget):
         if not source_url and platform == PLATFORM_STEAM and meta.published_file_id:
             source_url = meta.workshop_url
 
+        self._set_header_title(shown)
         self._render_header_platform_badge(platform)
+        self._render_header_size_badge("计算中…")
+        self._request_size_badge_async()
 
         labels = get_platform_metadata_labels(platform)
         self._current_platform = str(platform or PLATFORM_STEAM).strip().lower()
@@ -1822,12 +1994,6 @@ class ModDetailPanel(QWidget):
         self.btn_copy_name.setEnabled(bool(name_value))
         self.meta_name_line.setText(f"名称：{name_value or '—'}")
 
-        # 介绍： hide entirely when empty (custom_description or Steam description).
-        desc_text = ""
-        if info is not None:
-            desc_text = str(info.custom_description or "").strip()
-        if not desc_text:
-            desc_text = str(meta.description or "").strip()
         if desc_text:
             self.meta_desc_line.setText(f"介绍：{desc_text}")
         else:
@@ -1853,9 +2019,10 @@ class ModDetailPanel(QWidget):
         platform_name = platform_badge_label(platform)
         self.view_platform.setText(f"{labels.platform}：{format_platform_name(platform)}")
         self.meta_source_line.setText(f"来源：{platform_name}")
-        workspace_id = ""
-        if info is not None:
-            workspace_id = str(info.workspace_id or "").strip()
+        if resolved is None:
+            workspace_id = ""
+            if info is not None:
+                workspace_id = str(info.workspace_id or "").strip()
         self.meta_workspace_line.setText(
             f"Workspace ID: {workspace_id or '—'}"
         )
@@ -1884,16 +2051,10 @@ class ModDetailPanel(QWidget):
 
         # Optional metadata rows (hide when empty).
         author = ""
-        if meta is not None:
+        if resolved is not None:
+            author = str(resolved.author or "").strip()
+        if not author and meta is not None:
             author = str(getattr(meta, "author", "") or "").strip()
-        if not author and self._managed_path is not None:
-            try:
-                from services.file_ops import read_info_metadata_dict
-
-                raw_meta = read_info_metadata_dict(self._managed_path) or {}
-                author = str(raw_meta.get("author") or "").strip()
-            except Exception:  # noqa: BLE001
-                author = ""
         version = ""
         updated = ""
         if info is not None:
@@ -1924,7 +2085,6 @@ class ModDetailPanel(QWidget):
             author=author,
             version=version,
             updated=updated,
-            size_text=self._mod_size_label(),
         )
 
         self._refresh_offline_status_label()
@@ -1958,23 +2118,179 @@ class ModDetailPanel(QWidget):
 
         cover = self._resolve_cover_path()
         self._set_cover(cover)
+        if getattr(self, "_folder_absent", False):
+            self._set_files_section_visible(False)
+            self.view_deploy.setText("⚠ 内容目录不存在")
+            self._apply_tone(self.view_deploy, "warning")
+            self.view_deploy_error.setText("请使用「重新定位目录」选择新的 Mod 文件夹")
+        self._render_backup_status_badge()
         self._refresh_action_buttons()
+
+    def _render_backup_status_badge(self) -> None:
+        """Show backup health only when anomalous (Phase 7 Task 4)."""
+        if not hasattr(self, "backup_status_badge"):
+            return
+        mid = self.current_mod_id()
+        if not mid:
+            self.backup_status_badge.hide()
+            return
+        status = ""
+        try:
+            from core.db_manager import get_db
+
+            row = get_db().get_mod_backup_row(mid)
+            if row is not None:
+                status = str(row.get("backup_status") or "").strip()
+        except Exception:  # noqa: BLE001
+            status = ""
+        # Quiet when complete / empty
+        if status in ("", "complete"):
+            self.backup_status_badge.hide()
+            return
+        if status == "partial":
+            self.backup_status_badge.setText("Backup: ⚠ 缺少封面")
+            self.backup_status_badge.setToolTip("备份不完整（例如缺少封面或离线页）")
+        elif status == "missing":
+            self.backup_status_badge.setText("Backup: ⚠ 缺失")
+            self.backup_status_badge.setToolTip("尚未建立有效 metadata backup")
+        elif status == "invalid":
+            self.backup_status_badge.setText("Backup: ❌ 无效")
+            self.backup_status_badge.setToolTip("Metadata backup 校验失败")
+        else:
+            self.backup_status_badge.setText(f"Backup: {status}")
+            self.backup_status_badge.setToolTip("")
+        self.backup_status_badge.show()
+
+    def _relocate_mod_folder(self) -> None:
+        """Pick a new folder for a missing Mod — path update only."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        from services.library_status import CONTENT_FOLDER_MISSING
+        from services.mod_relocate import relocate_mod_folder
+
+        mid = self.current_mod_id()
+        if not mid:
+            return
+        # Only meaningful when folder is missing
+        content_status = ""
+        try:
+            from core.db_manager import get_db
+            from services.library_status import row_content_status
+
+            brow = get_db().get_mod_backup_row(mid)
+            if brow is not None:
+                content_status = row_content_status(brow)
+        except Exception:  # noqa: BLE001
+            pass
+        if not getattr(self, "_folder_absent", False) and content_status != CONTENT_FOLDER_MISSING:
+            QMessageBox.information(
+                self, "重新定位", "当前 Mod 目录存在，无需重新定位。"
+            )
+            return
+        start = ""
+        if self._library_root is not None:
+            start = str(self._library_root)
+        chosen = QFileDialog.getExistingDirectory(self, "选择 Mod 目录", start)
+        if not chosen:
+            return
+        result = relocate_mod_folder(mid, chosen)
+        if not result.success:
+            QMessageBox.warning(
+                self, "重新定位失败", str(result.error or "身份不匹配")
+            )
+            return
+        QMessageBox.information(
+            self,
+            "重新定位成功",
+            f"已更新路径：\n{result.path}\n匹配方式：{result.matched_by}",
+        )
+        self.relocate_completed.emit(mid)
 
     def _refresh_action_buttons(self) -> None:
         """Enable browse / source / offline actions from runtime paths + metadata."""
         if self._mode != MODE_VIEW or self._batch_mod_ids:
             return
         folder_ok = (
-            self._managed_path is not None and self._managed_path.is_dir()
+            self._managed_path is not None
+            and self._managed_path.is_dir()
+            and not getattr(self, "_folder_absent", False)
         )
         if hasattr(self, "btn_folder"):
             self.btn_folder.setEnabled(folder_ok)
+            if not folder_ok and getattr(self, "_folder_absent", False):
+                self.btn_folder.setToolTip("内容缺失，无法操作")
+        if hasattr(self, "btn_relocate"):
+            show_relocate = bool(
+                getattr(self, "_folder_absent", False) and self.current_mod_id()
+            )
+            self.btn_relocate.setVisible(show_relocate)
+            self.btn_relocate.setEnabled(show_relocate)
         if hasattr(self, "btn_steam"):
             self.btn_steam.setEnabled(bool(self._current_source_url()))
         if hasattr(self, "btn_offline"):
             self.btn_offline.setEnabled(self._has_offline_page())
         if hasattr(self, "btn_edit_info"):
-            self.btn_edit_info.setEnabled(True)
+            self.btn_edit_info.setEnabled(not getattr(self, "_folder_absent", False))
+        if hasattr(self, "btn_refresh_mod"):
+            self.btn_refresh_mod.setEnabled(folder_ok)
+        if hasattr(self, "btn_add_dependency"):
+            mid_ok = bool(self.current_mod_id())
+            self.btn_add_dependency.setEnabled(mid_ok and folder_ok)
+        self._set_files_actions_visible(folder_ok)
+
+    def _request_size_badge_async(self) -> None:
+        """Compute directory size off the UI thread; token guards stale results."""
+        if self._managed_path is None or getattr(self, "_folder_absent", False):
+            self._render_header_size_badge("")
+            return
+        root = Path(self._managed_path)
+        if not root.is_dir():
+            self._render_header_size_badge("")
+            return
+        mid = self.current_mod_id() or ""
+        token = f"{mid}:{root}"
+        self._size_token = token
+
+        from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+
+        class _SizeSignals(QObject):
+            finished = Signal(str, int)
+
+        class _SizeTask(QRunnable):
+            def __init__(self, tok: str, path: Path, signals: _SizeSignals) -> None:
+                super().__init__()
+                self._tok = tok
+                self._path = path
+                self._signals = signals
+
+            def run(self) -> None:  # noqa: D401
+                try:
+                    total = int(get_directory_size(self._path))
+                except Exception:  # noqa: BLE001
+                    total = -1
+                self._signals.finished.emit(self._tok, total)
+
+        # Keep QObject alive until the callback fires.
+        signals = _SizeSignals(self)
+        self._size_signals = signals
+        signals.finished.connect(self._on_size_badge_ready)
+        QThreadPool.globalInstance().start(_SizeTask(token, root, signals))
+
+    def _on_size_badge_ready(self, token: str, total: int) -> None:
+        if str(token) != getattr(self, "_size_token", ""):
+            return
+        if self._mode != MODE_VIEW:
+            return
+        if total < 0:
+            self._render_header_size_badge("")
+            return
+        self._render_header_size_badge(format_size(int(total)))
+
+    def _refresh_size_badge(self) -> None:
+        """Legacy sync path — prefer ``_request_size_badge_async``."""
+        if self._mode != MODE_VIEW:
+            return
+        self._render_header_size_badge(self._mod_size_label())
 
     def _mod_size_label(self) -> str:
         """Formatted size of the managed Mod folder (empty when unknown)."""
@@ -1999,7 +2315,6 @@ class ModDetailPanel(QWidget):
         author: str,
         version: str,
         updated: str,
-        size_text: str = "",
     ) -> None:
         """Rich-text metadata block — bold prefixes, isolated long description."""
         esc = html_module.escape
@@ -2032,25 +2347,14 @@ class ModDetailPanel(QWidget):
             parts.append(_line(f"<b>版本：</b> {esc(version)}"))
         if updated:
             parts.append(_line(f"<b>更新时间：</b> {esc(updated)}"))
-        size_label = str(size_text or "").strip()
-        if size_label:
-            parts.append(_line(f"<b>大小：</b> {esc(size_label)}"))
 
         html_body = _strip_leading_html_blank("".join(parts))
         self.meta_rich_label.setText(html_body)
 
     def _resolve_cover_path(self) -> Path | None:
-        """Prefer explicit cover_path (DB / mod.json); never scan Mod package images."""
-        from services.importers.image_picker import resolve_cover_file
+        from services.mod_metadata_resolver import resolve_cover_path
 
-        cover_ref = ""
-        if self._display_info is not None:
-            cover_ref = str(self._display_info.cover_path or "").strip()
-        if not cover_ref and self._metadata is not None:
-            cover_ref = str(self._metadata.cover_path or "").strip()
-        if self._managed_path is None:
-            return None
-        return resolve_cover_file(self._managed_path, cover_ref)
+        return resolve_cover_path(self.current_mod_id() or None, self._managed_path)
 
     def _change_cover(self) -> None:
         if self._managed_path is None or self._metadata is None:
@@ -2108,7 +2412,7 @@ class ModDetailPanel(QWidget):
         ):
             self.tags_saved.emit(self._managed_path)
 
-        # Multi-select → batch Steam metadata refresh (selected entries only).
+        # Multi-select → batch metadata refresh (all platforms; Nexus id wash silent).
         if self._batch_mod_ids and len(self._batch_mod_ids) > 1:
             self._set_refresh_button_state("running")
             self._start_batch_metadata_refresh()
@@ -2169,15 +2473,20 @@ class ModDetailPanel(QWidget):
             worker.start()
             return
 
-        # GitHub / Nexus / Other: no dedicated metadata API provider — local rescan only.
+        # GitHub / Nexus / Other: local rescan; Nexus workspace_id wash is silent.
         _log.info(
             "No remote metadata provider for platform=%s; local folder rescan only",
             platform or "(empty)",
         )
         try:
+            from core.mod_platform import silent_correct_nexus_workspace_id
             from services.info_sidecar import rescan_mod_folder
 
+            if mid and normalize_platform(platform) == PLATFORM_NEXUS:
+                silent_correct_nexus_workspace_id(mid)
             rescan_mod_folder(self._managed_path, mod_id=mid or None)
+            if mid and normalize_platform(platform) == PLATFORM_NEXUS:
+                silent_correct_nexus_workspace_id(mid)
         except Exception as exc:  # noqa: BLE001
             _log.exception("Local metadata rescan failed: %s", exc)
             self._set_refresh_button_state("failure", detail=str(exc))
@@ -2258,16 +2567,15 @@ class ModDetailPanel(QWidget):
         timer.start(max(400, int(restore_ms)))
 
     def _start_batch_metadata_refresh(self) -> None:
-        from services.metadata_refresh import filter_steam_batch_entries
-
-        entries = filter_steam_batch_entries(self._batch_entries)
+        entries = list(self._batch_entries or [])
+        if not entries:
+            # Fallback: ids only (platform unknown → treat as steam for legacy).
+            entries = [
+                (mid, Path(), getattr(self, "_current_platform", PLATFORM_STEAM) or PLATFORM_STEAM)
+                for mid in (self._batch_mod_ids or [])
+            ]
         if not entries:
             self._set_refresh_button_state("idle")
-            QMessageBox.information(
-                self,
-                "刷新元数据",
-                "所选 Mod 中没有 Steam Workshop 来源，无法批量刷新元数据。",
-            )
             return
 
         from PySide6.QtWidgets import QProgressDialog
@@ -2468,6 +2776,8 @@ class ModDetailPanel(QWidget):
     def _fill_mod_files_list_impl(self, files_bundle) -> None:
         self._clear_mod_files_widgets()
         files = list(files_bundle.files) if files_bundle else []
+        # UI 绝对兜底：剔除「历史版本」漏网缓存
+        files = filter_out_history_version_entries(files)
         platform = str(
             getattr(self, "_current_platform", PLATFORM_STEAM) or PLATFORM_STEAM
         ).strip().lower()
@@ -2493,10 +2803,46 @@ class ModDetailPanel(QWidget):
         show_actions = platform in (PLATFORM_NEXUS, PLATFORM_GITHUB)
         self._set_files_actions_visible(show_actions)
 
-        # Main → Other → Source
-        ordered = sort_files_for_detail(files)
+        mod_source = format_platform_name(platform)
+        is_nexus = (
+            platform == PLATFORM_NEXUS
+            or mod_source == "Nexus Mods"
+            or "nexus" in str(mod_source).lower()
+            or "nexus" in platform
+        )
+        if is_nexus:
+            self._build_nexus_files_list(files)
+        elif platform == PLATFORM_GITHUB or mod_source == "GitHub":
+            self._build_github_tree(sort_files_for_detail(files))
+        else:
+            self._build_github_tree(sort_files_for_detail(files))
+
+    def _build_github_tree(self, files) -> None:
+        """GitHub / default multi-file list — flat checkbox + badge rows."""
         first_widget = None
-        for entry in ordered:
+        for entry in files:
+            if is_history_version_entry(entry):
+                continue
+            if "历史版本" in str(getattr(entry, "name", "") or "") or "历史版本" in str(
+                getattr(entry, "path", "") or ""
+            ):
+                continue
+            row = self._add_mod_file_row(entry)
+            if first_widget is None:
+                first_widget = row
+        if first_widget is not None:
+            self.view_mod_files = first_widget
+
+    def _build_nexus_files_list(self, files) -> None:
+        """Nexus multi-file list — 100% same flat row widget as GitHub."""
+        first_widget = None
+        for entry in sort_files_for_nexus_flat(files):
+            if is_history_version_entry(entry):
+                continue
+            if "历史版本" in str(getattr(entry, "name", "") or "") or "历史版本" in str(
+                getattr(entry, "path", "") or ""
+            ):
+                continue
             row = self._add_mod_file_row(entry)
             if first_widget is None:
                 first_widget = row
@@ -2514,14 +2860,32 @@ class ModDetailPanel(QWidget):
                 btn.setVisible(bool(visible))
 
     _FILES_CHECK_COL_W = 22
-    _FILES_BADGE_COL_W = 40
+    _FILES_BADGE_W = 48
+    _FILES_BADGE_H = 20
 
     def _add_mod_file_row(self, entry) -> QWidget:
-        """Unified row: checkbox | badge/spacer | name | desc? | edit? (grid-aligned)."""
-        kind = file_badge_kind(entry)  # "Main" | "Source" | None
-        tip = file_tooltip(entry)
+        """Unified row: checkbox | badge(48x20) | name | desc? | edit(24x24)."""
+        platform = str(
+            getattr(self, "_current_platform", PLATFORM_STEAM) or PLATFORM_STEAM
+        ).strip().lower()
+        badge_text, badge_style = file_list_badge(entry, platform)
+        is_nexus = platform == PLATFORM_NEXUS
+        is_github_source = (
+            not is_nexus
+            and badge_style == "alt"
+            and str(badge_text or "").casefold() == "source"
+        )
+        show_checkbox = not is_github_source
+        # Nexus: always show edit. GitHub: Other only (no Main/Source edit).
+        if is_nexus:
+            show_edit = True
+        else:
+            show_edit = badge_text is None
         fid = str(entry.id or "")
+        full_name = file_combo_label(entry) or file_primary_label(entry)
 
+        # Build off-screen: never show a parentless row; children always parented
+        # to ``row`` before any polish / visibility. Layout addWidget reparents.
         row = QWidget()
         row.setObjectName("detailFilesRow")
         row.setProperty("file_id", fid)
@@ -2530,76 +2894,124 @@ class ModDetailPanel(QWidget):
             lambda pos, e=entry, w=row: self._on_file_row_context_menu(w, pos, e)
         )
 
-        grid = QGridLayout(row)
-        grid.setContentsMargins(0, 2, 0, 2)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(0)
-        grid.setColumnMinimumWidth(0, self._FILES_CHECK_COL_W)
-        grid.setColumnMinimumWidth(1, self._FILES_BADGE_COL_W)
-        grid.setColumnStretch(2, 1)
+        row_lay = QHBoxLayout(row)
+        row_lay.setContentsMargins(0, 2, 0, 2)
+        row_lay.setSpacing(6)
 
-        # Col 0 — deploy checkbox (fixed width host for alignment).
-        check_host = QWidget()
+        # Checkbox — Fixed (parent before any polish / signal / visibility)
+        check_host = QWidget(row)
         check_host.setFixedWidth(self._FILES_CHECK_COL_W)
+        check_host.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
         check_lay = QHBoxLayout(check_host)
         check_lay.setContentsMargins(0, 0, 0, 0)
         check_lay.setSpacing(0)
-        if kind != "Source":
-            cb = QCheckBox()
+        if show_checkbox:
+            cb = QCheckBox(check_host)
             cb.setObjectName("detailFilesCheckbox")
-            if kind == "Main":
-                # Main: force default checked; honor explicit stored False.
-                stored = getattr(entry, "selected_for_deploy", None)
+            stored = getattr(entry, "selected_for_deploy", None)
+            if is_nexus:
+                if badge_text == "Main":
+                    checked = True if stored is None else bool(stored)
+                else:
+                    checked = False if stored is None else bool(stored)
+            elif badge_style == "main":
                 checked = True if stored is None else bool(stored)
             else:
                 checked = bool(is_entry_selected_for_deploy(entry))
             cb.blockSignals(True)
             cb.setChecked(checked)
             cb.blockSignals(False)
+            cb.setEnabled(True)
+            cb.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, False
+            )
             cb.setProperty("file_id", fid)
-            cb.setToolTip(tip)
+            cb.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
             cb.toggled.connect(
                 lambda checked, file_id=fid: self._on_mod_file_toggled(
                     file_id, checked
                 )
             )
             check_lay.addWidget(cb, 0, Qt.AlignmentFlag.AlignVCenter)
-        grid.addWidget(check_host, 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        row_lay.addWidget(check_host, 0)
 
-        # Col 1 — badge or equal-width spacer (Other).
-        badge_host = QWidget()
-        badge_host.setFixedWidth(self._FILES_BADGE_COL_W)
-        badge_lay = QHBoxLayout(badge_host)
-        badge_lay.setContentsMargins(0, 0, 0, 0)
-        badge_lay.setSpacing(0)
-        if kind in ("Main", "Source"):
-            badge = QLabel(kind)
-            badge.setObjectName(
-                "detailFileBadgeMain" if kind == "Main" else "detailFileBadgeSource"
-            )
-            badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge_lay.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        grid.addWidget(badge_host, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+        # Badge — short display labels; category property keeps full whitelist name
+        display_text = badge_text or ""
+        if display_text == "Miscellaneous":
+            display_text = "Misc"
+        elif display_text == "Optional":
+            display_text = "Opt"
+        badge = QLabel(display_text, row)
+        badge.setFixedSize(38, 18)
+        badge_font = badge.font()
+        badge_font.setPointSize(8)
+        badge_font.setBold(True)
+        badge.setFont(badge_font)
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setWordWrap(False)
+        badge.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+        if badge_text and badge_style:
+            if is_nexus:
+                badge.setObjectName("detailFileCategoryBadge")
+                badge.setProperty("category", str(badge_text))
+            else:
+                badge.setObjectName(
+                    "detailFileBadgeMain"
+                    if badge_style == "main"
+                    else "detailFileBadgeSource"
+                )
+                badge.setProperty("category", "")
+        else:
+            badge.setObjectName("detailFileBadgeSpacer")
+            badge.setProperty("category", "")
+            badge.clear()
+        # Crush QSS padding that would otherwise inflate the badge.
+        badge.setStyleSheet(
+            (badge.styleSheet() or "") + "; padding: 0px; margin: 0px;"
+        )
+        sty = badge.style()
+        if sty is not None:
+            sty.unpolish(badge)
+            sty.polish(badge)
+        row_lay.addWidget(badge, 0)
 
-        # Col 2 — filename (physical name for alignment consistency).
-        name_lab = QLabel(file_combo_label(entry) or file_primary_label(entry))
+        # Filename / desc stretch 3:2 so description keeps readable width
+        name_lab = ElideLabel(full_name, row)
         name_lab.setObjectName("detailFilesPrimary")
-        name_lab.setToolTip(tip)
-        name_lab.setWordWrap(True)
-        grid.addWidget(name_lab, 0, 2, Qt.AlignmentFlag.AlignVCenter)
+        name_lab.setWordWrap(False)
+        name_lab.setToolTip(full_name)
+        name_lab.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        name_lab.setMinimumWidth(0)
+        row_lay.addWidget(name_lab, 3)
 
-        # Col 3 / 4 — Other only: optional desc + pencil edit.
-        if kind is None:
-            desc_text = file_description(entry)
-            if desc_text:
-                desc_lab = QLabel(desc_text)
-                desc_lab.setObjectName("detailFileDesc")
-                desc_lab.setToolTip(desc_text)
-                desc_lab.setWordWrap(True)
-                grid.addWidget(desc_lab, 0, 3, Qt.AlignmentFlag.AlignVCenter)
-            edit_btn = QPushButton("✎")
+        # Description (optional) + edit — Nexus always; GitHub Other only
+        desc_text = file_description(entry) if show_edit else ""
+        if show_edit and desc_text:
+            desc_lab = ElideLabel(desc_text, row)
+            desc_lab.setObjectName("detailFileDesc")
+            desc_lab.setWordWrap(False)
+            desc_lab.setToolTip(desc_text)
+            desc_lab.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            desc_lab.setMinimumWidth(0)
+            row_lay.addWidget(desc_lab, 2)
+        if show_edit:
+            # Parent + layout BEFORE any visibility — never parentless show.
+            edit_btn = QPushButton("✎", row)
             edit_btn.setObjectName("detailFilesEditButton")
             edit_btn.setFixedSize(24, 24)
+            edit_btn.setSizePolicy(
+                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+            )
             edit_btn.setFlat(True)
             edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             edit_btn.setToolTip("编辑该文件的作用说明")
@@ -2608,7 +3020,7 @@ class ModDetailPanel(QWidget):
                     self._on_edit_file_description(file_id, cur)
                 )
             )
-            grid.addWidget(edit_btn, 0, 4, Qt.AlignmentFlag.AlignVCenter)
+            row_lay.addWidget(edit_btn, 0)
 
         self.mod_files_layout.addWidget(row)
         return row
@@ -2617,19 +3029,61 @@ class ModDetailPanel(QWidget):
         fid = str(getattr(entry, "id", "") or "")
         if not fid:
             return
+        platform = str(
+            getattr(self, "_current_platform", PLATFORM_STEAM) or PLATFORM_STEAM
+        ).strip().lower()
+        is_nexus = platform == PLATFORM_NEXUS
         menu = QMenu(row)
-        act_main = menu.addAction("设为 Main (主文件)")
-        act_source = menu.addAction("设为 Source (源码)")
-        act_other = menu.addAction("取消特殊标记 (设为普通文件)")
+        if is_nexus:
+            self._build_nexus_context_menu(menu, entry)
+        else:
+            self._build_github_context_menu(menu, entry)
         chosen = menu.exec(row.mapToGlobal(pos))
         if chosen is None:
             return
-        if chosen is act_main:
-            self._apply_file_badge_role(fid, "Main")
-        elif chosen is act_source:
-            self._apply_file_badge_role(fid, "Source")
-        elif chosen is act_other:
-            self._apply_file_badge_role(fid, None)
+        data = chosen.data()
+        if not isinstance(data, tuple) or len(data) != 2:
+            return
+        kind, value = data
+        if kind == "nexus":
+            self._apply_nexus_category(fid, str(value))
+        elif kind == "github":
+            self._apply_file_badge_role(fid, value)
+
+    def _build_github_context_menu(self, menu: QMenu, entry) -> None:
+        """GitHub / non-Nexus: Main / Source / clear — unchanged semantics."""
+        act_main = menu.addAction("设为 Main (主文件)")
+        act_main.setData(("github", "Main"))
+        act_source = menu.addAction("设为 Source (源码)")
+        act_source.setData(("github", "Source"))
+        act_other = menu.addAction("取消特殊标记 (设为普通文件)")
+        act_other.setData(("github", None))
+
+    def _build_nexus_context_menu(self, menu: QMenu, entry) -> None:
+        """Nexus-only: strict 5-category whitelist actions."""
+        for label, cat in (
+            ("设为 Main (主文件)", "Main"),
+            ("设为 Optional (可选文件)", "Optional"),
+            ("设为 Miscellaneous (杂项)", "Miscellaneous"),
+            ("设为 汉化", "汉化"),
+            ("设为 Other (其他/普通文件)", "Other"),
+        ):
+            act = menu.addAction(label)
+            act.setData(("nexus", cat))
+
+    def _apply_nexus_category(self, file_id: str, category: str) -> None:
+        """Persist Nexus whitelist category, then refresh badge + checkbox."""
+        mid = self.current_mod_id()
+        if not mid or not file_id:
+            return
+        try:
+            ModFilesJsonManager(get_db()).set_nexus_file_category(
+                mid, file_id, category
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "更新文件失败", str(exc))
+            return
+        self._reload_files_after_mutation()
 
     def _apply_file_badge_role(self, file_id: str, kind: str | None) -> None:
         """Assign Main / Source / Other via exclusive role mapping, then refresh."""
@@ -2695,7 +3149,7 @@ class ModDetailPanel(QWidget):
             return
         self._reload_files_after_mutation()
 
-    def _reload_files_after_mutation(self) -> None:
+    def _reload_files_after_mutation(self, *, emit_tags_saved: bool = True) -> None:
         mid = self.current_mod_id()
         if not mid:
             return
@@ -2706,20 +3160,43 @@ class ModDetailPanel(QWidget):
         files_bundle = self._display_info.mod_files if self._display_info else None
         self._fill_mod_files_list(files_bundle)
         self._persist_info_sidecar()
-        if self._managed_path is not None:
+        # File checkbox toggles must stay quiet — tags_saved → show_mod flash/popup.
+        if emit_tags_saved and self._managed_path is not None:
             self.tags_saved.emit(self._managed_path)
 
     def _on_mod_file_toggled(self, file_id: str, checked: bool) -> None:
+        """Persist deploy selection quietly — no toast / tooltip / row rebuild flash."""
+        try:
+            from ui.popup_trace import log_popup
+
+            log_popup(
+                "slot:_on_mod_file_toggled",
+                detail=f"file_id={file_id!r} checked={checked}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         mid = self.current_mod_id()
         if not mid or not file_id:
             return
+        QToolTip.hideText()
         try:
             ModFilesJsonManager(get_db()).set_file_selection(mid, file_id, checked)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "更新文件失败", str(exc))
-            self._fill_view()
+        except Exception:  # noqa: BLE001
+            # Revert checkbox UI from DB without emitting card-refresh signals.
+            self._reload_files_after_mutation(emit_tags_saved=False)
+            QToolTip.hideText()
             return
-        self._reload_files_after_mutation()
+        # Update summary only — do not rebuild rows (avoids QToolTip flash under cursor).
+        try:
+            self._display_info = get_db().get_mod_display_info(mid)
+        except Exception:  # noqa: BLE001
+            pass
+        files_bundle = self._display_info.mod_files if self._display_info else None
+        files = list(files_bundle.files) if files_bundle else []
+        files = filter_out_history_version_entries(files)
+        self._set_files_summary(count_selected(files), len(files))
+        self._persist_info_sidecar()
+        QToolTip.hideText()
 
     def _on_files_select_all(self) -> None:
         mid = self.current_mod_id()
@@ -2727,10 +3204,10 @@ class ModDetailPanel(QWidget):
             return
         try:
             ModFilesJsonManager(get_db()).set_all_selection(mid, True)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "更新文件失败", str(exc))
+        except Exception:  # noqa: BLE001
+            self._reload_files_after_mutation(emit_tags_saved=False)
             return
-        self._reload_files_after_mutation()
+        self._reload_files_after_mutation(emit_tags_saved=False)
 
     def _on_files_main_only(self) -> None:
         mid = self.current_mod_id()
@@ -2738,10 +3215,10 @@ class ModDetailPanel(QWidget):
             return
         try:
             ModFilesJsonManager(get_db()).select_main_only(mid)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "更新文件失败", str(exc))
+        except Exception:  # noqa: BLE001
+            self._reload_files_after_mutation(emit_tags_saved=False)
             return
-        self._reload_files_after_mutation()
+        self._reload_files_after_mutation(emit_tags_saved=False)
 
     def _on_files_clear_optional(self) -> None:
         mid = self.current_mod_id()
@@ -2749,10 +3226,10 @@ class ModDetailPanel(QWidget):
             return
         try:
             ModFilesJsonManager(get_db()).clear_optional_selection(mid)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "更新文件失败", str(exc))
+        except Exception:  # noqa: BLE001
+            self._reload_files_after_mutation(emit_tags_saved=False)
             return
-        self._reload_files_after_mutation()
+        self._reload_files_after_mutation(emit_tags_saved=False)
 
     def _on_files_reset_default(self) -> None:
         mid = self.current_mod_id()
@@ -2760,11 +3237,10 @@ class ModDetailPanel(QWidget):
             return
         try:
             ModFilesJsonManager(get_db()).reset_default_selection(mid)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "更新文件失败", str(exc))
+        except Exception:  # noqa: BLE001
+            self._reload_files_after_mutation(emit_tags_saved=False)
             return
-        self._reload_files_after_mutation()
-
+        self._reload_files_after_mutation(emit_tags_saved=False)
     def set_peer_mods(self, peers) -> None:
         """
         Other library Mods for pickers.
@@ -2847,34 +3323,27 @@ class ModDetailPanel(QWidget):
                     labels.append(title or tid)
             except Exception:  # noqa: BLE001
                 pass
-            if self._managed_path is not None:
-                try:
-                    from services.file_ops import read_info_metadata_dict
-
-                    data = read_info_metadata_dict(self._managed_path) or {}
-                    for entry in data.get("dependencies") or []:
-                        if isinstance(entry, dict):
-                            wid = str(
-                                entry.get("workspace_id")
-                                or entry.get("mod_id")
-                                or ""
-                            ).strip()
-                        else:
-                            wid = str(entry or "").strip()
-                        if wid and wid not in labels:
-                            labels.append(wid)
-                except Exception:  # noqa: BLE001
-                    pass
+            resolved = getattr(self, "_resolved", None)
+            if resolved is not None:
+                for wid in resolved.dependencies or []:
+                    text = str(wid or "").strip()
+                    if text and text not in labels:
+                        labels.append(text)
         if labels:
             self.dep_summary_label.setText("依赖：" + "、".join(labels))
         else:
             self.dep_summary_label.setText("")
         if hasattr(self, "btn_add_dependency"):
-            self.btn_add_dependency.setEnabled(bool(mid and mid.isdigit()))
+            self.btn_add_dependency.setEnabled(
+                bool(mid and mid.isdigit())
+                and not getattr(self, "_folder_absent", False)
+            )
 
     def _on_add_dependency_pill(self) -> None:
         mid = self.current_mod_id()
         if not mid or not mid.isdigit():
+            return
+        if getattr(self, "_folder_absent", False):
             return
         text, ok = QInputDialog.getText(
             self,
@@ -3523,11 +3992,9 @@ class ModDetailPanel(QWidget):
 
     def _iter_offline_index_candidates(self):
         """Yield candidate offline index paths (canonical order)."""
-        if self._managed_path is None:
-            return
-        from services.offline.paths import iter_offline_page_candidates
-
-        yield from iter_offline_page_candidates(self._managed_path)
+        index = self._resolve_offline_page_path()
+        if index is not None:
+            yield index
 
     def _has_offline_page(self) -> bool:
         """Existence check only — does not read HTML content or hit the network."""
@@ -3537,26 +4004,13 @@ class ModDetailPanel(QWidget):
         return self._resolve_offline_page_path()
 
     def _resolve_offline_page_path(self) -> Path | None:
-        """
-        Return an absolute path to an existing offline page file, or None.
+        from services.mod_metadata_resolver import resolve_offline_page
 
-        Uses the canonical resolver only — never trusts stale
-        ``metadata.offline_page_path`` over ``.info/offline/index.html``.
-        """
-        if self._managed_path is None:
-            return None
-        from services.offline.paths import resolve_offline_page
-
-        return resolve_offline_page(self._managed_path)
+        return resolve_offline_page(self.current_mod_id() or None, self._managed_path)
 
     def _show_offline_missing_tooltip(self) -> None:
-        tip = "未找到离线页面文件"
-        btn = getattr(self, "btn_offline", None)
-        if btn is not None:
-            pos = btn.mapToGlobal(btn.rect().center())
-            QToolTip.showText(pos, tip, btn)
-        else:
-            QToolTip.showText(self.mapToGlobal(self.rect().center()), tip, self)
+        # Intentionally silent — never pop floating tip / white toast on click.
+        return
 
     def _on_cover_path_release_requested(self, path_key: str) -> None:
         """Drop detail cover pixmap when this Mod folder is about to rename."""
@@ -3575,25 +4029,42 @@ class ModDetailPanel(QWidget):
         self.cover_label.setPixmap(_placeholder(COVER_W, COVER_H))
 
     def _set_cover(self, path: Path | None) -> None:
-        """Load cover via bytes so Windows does not keep a file lock on the path."""
-        if path and path.is_file():
-            try:
-                data = path.read_bytes()
-            except OSError:
-                data = b""
-            pix = QPixmap()
-            if data and pix.loadFromData(data) and not pix.isNull():
-                scaled = pix.scaled(
-                    COVER_W,
-                    COVER_H,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                x = max(0, (scaled.width() - COVER_W) // 2)
-                y = max(0, (scaled.height() - COVER_H) // 2)
-                self.cover_label.setPixmap(scaled.copy(x, y, COVER_W, COVER_H))
-                return
+        """Show placeholder immediately; decode/scale via CoverLoaderManager."""
         self.cover_label.setPixmap(_placeholder(COVER_W, COVER_H))
+        if path is None or not path.is_file():
+            return
+        from services.cover_loader import CoverLoaderManager
+
+        mid = self.current_mod_id() or "0"
+        token = f"detail:{mid}:{path}"
+        prev = getattr(self, "_cover_token", "") or ""
+        mgr = CoverLoaderManager.instance()
+        if prev and prev != token:
+            mgr.cancel(prev)
+        self._cover_token = token
+        if not getattr(self, "_cover_loader_connected", False):
+            mgr.image_ready.connect(self._on_detail_cover_ready)
+            self._cover_loader_connected = True
+        managed = self._managed_path or path.parent
+        mgr.request(
+            token,
+            managed,
+            cover_ref=str(path),
+            width=COVER_W,
+            height=COVER_H,
+        )
+
+    def _on_detail_cover_ready(self, token: object, image: object) -> None:
+        if str(token) != getattr(self, "_cover_token", ""):
+            return
+        from PySide6.QtGui import QImage
+
+        if not isinstance(image, QImage) or image.isNull():
+            return
+        pix = QPixmap.fromImage(image)
+        if pix.isNull():
+            return
+        self.cover_label.setPixmap(pix)
 
     def _open_folder(self) -> None:
         if self._managed_path is None:
@@ -4102,6 +4573,13 @@ class ModDetailPanel(QWidget):
             self._fill_lifecycle_status()
             self._fill_relationships()
 
+            # Undeploy success also returns success=True — refresh from DB instead
+            # of assuming every success means "deployed".
+            if "removed_files" in result:
+                self.view_deploy_conflict.setText(self._conflict_hint)
+                self._fill_deploy_status_from_db()
+                return
+
             self.view_deploy.setText("[Deploy] 状态：已部署")
             self._apply_tone(self.view_deploy, "success")
             self.view_deploy_error.clear()
@@ -4113,6 +4591,12 @@ class ModDetailPanel(QWidget):
             self.view_deploy_type.setText(f"部署类型：{dtype}" if dtype else "部署类型：—")
 
             deploy_time = str(result.get("deploy_time") or "")
+            if not deploy_time:
+                try:
+                    info = get_db().get_mod_deploy_info(self.current_mod_id())
+                    deploy_time = str(info.deploy_time or "") if info else ""
+                except Exception:  # noqa: BLE001
+                    deploy_time = ""
             self.view_deploy_time.setText(
                 f"部署时间：{deploy_time}" if deploy_time else "部署时间：—"
             )
@@ -4145,11 +4629,71 @@ class ModDetailPanel(QWidget):
 
     def _set_deploy_buttons(self, status: str) -> None:
         mid_ok = bool(self.current_mod_id()) and self._mode == MODE_VIEW
+        folder_ok = not getattr(self, "_folder_absent", False)
         busy = self._deploy_busy
-        deployed = status == DEPLOY_STATUS_DEPLOYED
-        self.btn_deploy.setEnabled(mid_ok and not busy and not deployed)
-        self.btn_redeploy.setEnabled(mid_ok and not busy and deployed)
-        self.btn_undeploy.setEnabled(mid_ok and not busy and deployed)
+        from services.deploy_status import (
+            DEPLOYMENT_CONFLICT,
+            DEPLOYMENT_DEPLOYED,
+            DEPLOYMENT_OUTDATED,
+            deploy_block_reason_for_content_status,
+        )
+        from services.library_status import (
+            CONTENT_BACKUP_INVALID,
+            CONTENT_FOLDER_MISSING,
+            CONTENT_IDENTITY_CONFLICT,
+            row_content_status,
+        )
+
+        content_blocked = False
+        block_tip = ""
+        try:
+            brow = get_db().get_mod_backup_row(self.current_mod_id() or "")
+            cs = row_content_status(brow)
+            block_tip = deploy_block_reason_for_content_status(cs) or ""
+            content_blocked = bool(block_tip) or cs in {
+                CONTENT_FOLDER_MISSING,
+                CONTENT_BACKUP_INVALID,
+                CONTENT_IDENTITY_CONFLICT,
+            }
+        except Exception:  # noqa: BLE001
+            pass
+
+        deployed = status in (DEPLOY_STATUS_DEPLOYED, DEPLOYMENT_DEPLOYED, DEPLOYMENT_OUTDATED)
+        outdated = status == DEPLOYMENT_OUTDATED
+        conflict = status == DEPLOYMENT_CONFLICT
+        # Deploy / redeploy require healthy source content; undeploy only needs
+        # a recorded deployment (target cleanup is independent of source folder).
+        deploy_can = mid_ok and folder_ok and not busy and not content_blocked
+        undeploy_can = mid_ok and not busy
+
+        self.btn_deploy.setEnabled(deploy_can and not deployed and not conflict)
+        self.btn_redeploy.setEnabled(deploy_can and deployed and not conflict)
+        self.btn_undeploy.setEnabled(undeploy_can and deployed and not conflict)
+        self.btn_redeploy.setText("更新部署" if outdated else "重新部署")
+
+        if content_blocked:
+            tip = block_tip or "内容状态异常，无法部署"
+            self.btn_deploy.setToolTip(tip)
+            self.btn_redeploy.setToolTip(tip)
+            if undeploy_can and deployed and not conflict:
+                self.btn_undeploy.setToolTip("删除游戏中的部署（保留库内 Mod）")
+            else:
+                self.btn_undeploy.setToolTip(tip)
+        elif not folder_ok and hasattr(self, "btn_deploy"):
+            self.btn_deploy.setToolTip("内容目录不存在，无法部署")
+            self.btn_redeploy.setToolTip("内容目录不存在，无法部署")
+            if undeploy_can and deployed and not conflict:
+                self.btn_undeploy.setToolTip("删除游戏中的部署（保留库内 Mod）")
+            else:
+                self.btn_undeploy.setToolTip("内容目录不存在，无法部署")
+        elif conflict:
+            tip = "目标目录冲突，无法部署"
+            self.btn_deploy.setToolTip(tip)
+            self.btn_redeploy.setToolTip(tip)
+        else:
+            self.btn_deploy.setToolTip("部署到游戏目录")
+            self.btn_redeploy.setToolTip("更新部署" if outdated else "重新部署")
+            self.btn_undeploy.setToolTip("删除游戏中的部署（保留库内 Mod）")
 
     def _resolve_deploy_type(self, mid: str) -> str:
         # Prefer manifest, then game config
@@ -4203,7 +4747,42 @@ class ModDetailPanel(QWidget):
             else DEPLOY_STATUS_NOT_DEPLOYED
         ) or DEPLOY_STATUS_NOT_DEPLOYED
 
-        if status == DEPLOY_STATUS_DEPLOYED and info is not None:
+        # Prefer Phase 8 runtime deployment_status when Library root is known
+        runtime = status
+        try:
+            from services.deploy_status import (
+                DEPLOYMENT_CONFLICT,
+                DEPLOYMENT_OUTDATED,
+                resolve_deployment_status,
+            )
+
+            if self._library_root is not None:
+                runtime = resolve_deployment_status(
+                    mid,
+                    library_root=self._library_root,
+                    managed_path=self._managed_path,
+                )
+        except Exception:  # noqa: BLE001
+            runtime = status
+
+        if runtime == DEPLOYMENT_OUTDATED and info is not None:
+            self._hide_status_banner()
+            self.view_deploy.setText("[Deploy] 状态：需要更新")
+            self._apply_tone(self.view_deploy, "warning")
+            self.view_deploy_path.setText(
+                f"目标路径：{info.deploy_path}" if info.deploy_path else "目标路径：—"
+            )
+            self.view_deploy_time.setText(
+                f"部署时间：{info.deploy_time}" if info.deploy_time else "部署时间：—"
+            )
+            self.view_deploy_error.clear()
+            status = DEPLOYMENT_OUTDATED
+        elif runtime == DEPLOYMENT_CONFLICT:
+            self.view_deploy.setText("[Deploy] 状态：冲突")
+            self._apply_tone(self.view_deploy, "error")
+            self.view_deploy_error.setText("目标目录已存在其他内容，无法部署")
+            status = DEPLOYMENT_CONFLICT
+        elif status == DEPLOY_STATUS_DEPLOYED and info is not None:
             self._hide_status_banner()
             self.view_deploy.setText("[Deploy] 状态：已部署")
             self._apply_tone(self.view_deploy, "success")

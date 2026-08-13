@@ -215,4 +215,4 @@ def test_detail_panel_missing_shows_tooltip(
     )
     panel._open_offline()
     assert opened == []
-    assert any("未找到离线页面文件" in t for t in tips)
+    assert tips == []

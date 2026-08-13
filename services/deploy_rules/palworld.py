@@ -24,6 +24,7 @@ _IGNORE_DIR_NAMES = frozenset(
         LEGACY_INFO_DIR_NAME,
         "assets",
         "Assets",
+        "历史版本",
     }
 )
 LOGIC_MODS_DIR = "LogicMods"

@@ -220,8 +220,32 @@ class GameDeployView(QWidget):
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
+        """Reload game list from SQLite and keep current selection when possible."""
+        previous = int(self.game_combo.currentData() or 0)
+        if previous <= 0:
+            raw = self.app_id_edit.text().strip()
+            if raw.isdigit():
+                previous = int(raw)
+        self._reload_games(prefer_app_id=previous)
+
+    def select_app_id(self, app_id: int) -> None:
+        """Select a game in the picker (creates editable form when AppID is new)."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return
+        idx = self.game_combo.findData(aid)
+        if idx < 0:
+            self._reload_games(prefer_app_id=aid)
+            idx = self.game_combo.findData(aid)
+        if idx >= 0:
+            self.game_combo.setCurrentIndex(idx)
+            return
+        self.app_id_edit.setText(str(aid))
+        self._load_game(aid)
+
+    def _reload_games(self, *, prefer_app_id: int = 0) -> None:
         """Reload game list from SQLite and keep current AppID if possible."""
-        previous = self.app_id_edit.text().strip()
+        previous = str(prefer_app_id) if prefer_app_id > 0 else self.app_id_edit.text().strip()
         db = self._database()
         games = [g for g in db.list_games() if g.app_id]
 
@@ -234,7 +258,7 @@ class GameDeployView(QWidget):
             self.game_combo.addItem(f"{label}  ({game.app_id})", int(game.app_id))
 
         select_index = 0
-        if previous.isdigit():
+        if previous.isdigit() or (isinstance(previous, str) and str(previous).isdigit()):
             want = int(previous)
             for i in range(self.game_combo.count()):
                 if int(self.game_combo.itemData(i) or 0) == want:
@@ -248,6 +272,9 @@ class GameDeployView(QWidget):
             self._load_game(int(self.game_combo.currentData()))
         elif not previous:
             self._clear_form()
+        elif str(previous).isdigit() and int(previous) > 0:
+            self.app_id_edit.setText(str(int(previous)))
+            self._load_game(int(previous))
 
         self.status_label.setText(f"已加载 {len(games)} 个游戏。")
 

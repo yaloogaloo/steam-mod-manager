@@ -29,6 +29,10 @@ class DeployManifest:
     deploy_time: str
     deploy_type: str
     files: list[ManifestFileEntry] = field(default_factory=list)
+    # Phase 8 optional fields (backward compatible)
+    content_fingerprint: str = ""
+    source_path: str = ""
+    internal_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         files_out: list[dict[str, Any]] = []
@@ -37,12 +41,19 @@ class DeployManifest:
             if f.type:
                 item["type"] = f.type
             files_out.append(item)
-        return {
+        out: dict[str, Any] = {
             "mod_id": self.mod_id,
             "deploy_time": self.deploy_time,
             "deploy_type": self.deploy_type,
             "files": files_out,
         }
+        if self.content_fingerprint:
+            out["content_fingerprint"] = self.content_fingerprint
+        if self.source_path:
+            out["source_path"] = self.source_path
+        if self.internal_id:
+            out["internal_id"] = self.internal_id
+        return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DeployManifest:
@@ -63,6 +74,9 @@ class DeployManifest:
             deploy_time=str(data.get("deploy_time") or ""),
             deploy_type=str(data.get("deploy_type") or ""),
             files=files,
+            content_fingerprint=str(data.get("content_fingerprint") or ""),
+            source_path=str(data.get("source_path") or ""),
+            internal_id=str(data.get("internal_id") or ""),
         )
 
 

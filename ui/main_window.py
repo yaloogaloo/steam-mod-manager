@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -18,12 +19,14 @@ from core.paths import default_mod_library
 
 from .game_deploy_view import GameDeployView
 from .library_view import ALL_GAMES_LABEL, ModLibraryView
+from .startup_lifecycle import StartupLifecycleMixin, log_startup
 from .styles import APP_STYLE
 from .sync_view import SyncCenterView
 from .window_chrome import (
     TITLE_BAR_STYLE,
+    apply_frameless_main_window_flags,
     install_frameless_main_window,
-    polish_top_level_window,
+    on_frameless_main_window_shown,
 )
 
 ORG_NAME = "SteamModManager"
@@ -39,23 +42,45 @@ PAGE_DEPLOY = 2
 _VALID_PAGES = (PAGE_SYNC, PAGE_LIBRARY, PAGE_DEPLOY)
 
 
-class MainWindow(QMainWindow):
+class MainWindow(StartupLifecycleMixin, QMainWindow):
     def __init__(self) -> None:
+        log_startup("MainWindow __init__ start")
         super().__init__()
+        # Flags before any geometry / UI / native HWND — show() must stay last.
+        apply_frameless_main_window_flags(self)
+        log_startup("setWindowFlags done (frameless)")
         self.setWindowTitle("Steam 创意工坊 Mod 本地管理器")
         # Room for nav(128) + game(140) + 4-card Mod grid(~852) + detail(350).
         self.setMinimumSize(QSize(1520, 700))
         self.resize(1600, 820)
+        log_startup(
+            f"resize done size={self.width()}x{self.height()} "
+            f"translucent={self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
+        )
 
         self.settings = QSettings(ORG_NAME, APP_NAME)
         self.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
+        log_startup("stylesheet applied")
         self._build_ui()
-        # Frameless dark chrome — custom title strip replaces the white native bar.
+        log_startup("setCentralWidget + layout built")
+        # Title strip only — flags already applied; no winId before show.
         self._title_bar = install_frameless_main_window(
-            self, title=self.windowTitle()
+            self, title=self.windowTitle(), flags_already_applied=True
         )
-        polish_top_level_window(self)
+        log_startup("install_frameless_main_window done")
         self._restore_settings()
+        self._native_chrome_ready = False
+        log_startup(
+            f"MainWindow __init__ end visible={self.isVisible()} "
+            f"size={self.width()}x{self.height()} state={self.windowState()!r} "
+            f"translucent={self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
+        )
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        StartupLifecycleMixin.showEvent(self, event)
+        if not self._native_chrome_ready:
+            self._native_chrome_ready = True
+            on_frameless_main_window_shown(self)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -102,6 +127,10 @@ class MainWindow(QMainWindow):
         self.sync_view.request_open_library.connect(lambda: self._goto_page(PAGE_LIBRARY))
         self.library_view.filter_changed.connect(self._on_filter_changed)
         self.library_view.request_open_sync.connect(lambda: self._goto_page(PAGE_SYNC))
+        self.library_view.request_open_game_settings.connect(
+            self._on_open_game_settings
+        )
+        self.deploy_view.config_saved.connect(self._on_game_config_saved)
 
         self.stack.addWidget(self.sync_view)
         self.stack.addWidget(self.library_view)
@@ -118,7 +147,8 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(row)
         if row == PAGE_LIBRARY:
             self.library_view.set_target_root(self.sync_view.target_path())
-            self.library_view.refresh()
+            # Soft reload — reuse warm snapshot; Refresh button still forces
+            self.library_view.refresh(force=False)
         elif row == PAGE_DEPLOY:
             self.deploy_view.refresh()
         elif row == PAGE_SYNC:
@@ -127,6 +157,17 @@ class MainWindow(QMainWindow):
 
     def _goto_page(self, index: int) -> None:
         self.nav_list.setCurrentRow(index)
+
+    def _on_open_game_settings(self, app_id: int) -> None:
+        self._goto_page(PAGE_DEPLOY)
+        self.deploy_view.refresh()
+        self.deploy_view.select_app_id(int(app_id or 0))
+
+    def _on_game_config_saved(self, app_id: int) -> None:
+        del app_id
+        # Recalculate Library game header / status after path save
+        if self.stack.currentIndex() == PAGE_LIBRARY:
+            self.library_view.refresh()
 
     def _on_paths_changed(self, workshop: str, target: str) -> None:
         # Workshop path is per-game in SQLite; only persist the shared library root.
@@ -158,7 +199,7 @@ class MainWindow(QMainWindow):
         page = page if page in _VALID_PAGES else PAGE_SYNC
         self.nav_list.setCurrentRow(page)
         if page == PAGE_LIBRARY:
-            self.library_view.refresh()
+            self.library_view.refresh(force=False)
         elif page == PAGE_DEPLOY:
             self.deploy_view.refresh()
         elif page == PAGE_SYNC:
@@ -167,9 +208,40 @@ class MainWindow(QMainWindow):
         geometry = self.settings.value(SETTING_GEOMETRY)
         if geometry is not None:
             self.restoreGeometry(geometry)
+            log_startup(
+                f"restoreGeometry done size={self.width()}x{self.height()} "
+                f"state={self.windowState()!r}"
+            )
+        else:
+            log_startup(
+                f"restoreGeometry skipped (default) size={self.width()}x{self.height()} "
+                f"state={self.windowState()!r}"
+            )
 
         # Lightweight deploy consistency scan (deployed rows only; no auto-fix)
-        QTimer.singleShot(0, self._run_startup_deploy_audit)
+        # Deploy audit after first paints — avoid contending with Library load.
+        QTimer.singleShot(750, self._run_startup_deploy_audit)
+        # Backfill missing metadata backups off the UI thread
+        QTimer.singleShot(0, self._run_startup_backup_rebuild)
+
+    def _run_startup_backup_rebuild(self) -> None:
+        try:
+            from services.library_reconcile import start_reconcile_library_async
+
+            root = getattr(self.library_view, "_target_root", None) or self.sync_view.target_path()
+            start_reconcile_library_async(root)
+            log_startup("reconcile_library scheduled")
+        except Exception as exc:  # noqa: BLE001
+            log_startup(f"reconcile_library skip: {exc}")
+            try:
+                from services.metadata_backup_sync import (
+                    start_rebuild_missing_metadata_backup_async,
+                )
+
+                start_rebuild_missing_metadata_backup_async(root)
+                log_startup("rebuild_missing_metadata_backup fallback scheduled")
+            except Exception as exc2:  # noqa: BLE001
+                log_startup(f"backup rebuild skip: {exc2}")
 
     def _run_startup_deploy_audit(self) -> None:
         try:

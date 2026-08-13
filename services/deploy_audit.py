@@ -126,9 +126,20 @@ def scan_deployed_mods(
         ids = [str(m).strip() for m in mod_ids if str(m).strip().isdigit()]
 
     results: list[DeployAuditResult] = []
+    id_map: dict[str, Path] = {}
+    try:
+        id_map = ModFileManager(root).index_by_published_id()
+    except Exception:  # noqa: BLE001
+        id_map = {}
     for mid in ids:
+        mapped = id_map.get(str(mid))
         results.append(
-            audit_deploy_state(mid, library_root=root, db=database)
+            audit_deploy_state(
+                mid,
+                library_root=root,
+                db=database,
+                managed_path=mapped,
+            )
         )
     return results
 

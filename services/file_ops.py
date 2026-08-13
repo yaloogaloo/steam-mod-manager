@@ -22,7 +22,7 @@ LEGACY_METADATA_FILENAME = "mod.json"
 COVER_BASENAME = "cover"
 LEGACY_COVER_BASENAME = "preview"
 
-_IGNORE_CONTENT_DIRS = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME})
+_IGNORE_CONTENT_DIRS = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"})
 _ARCHIVE_SUFFIXES = frozenset({".zip", ".7z", ".rar"})
 MISSING_CONTENT_METADATA_KEY = "is_missing_content"
 
@@ -50,21 +50,22 @@ def is_missing_mod_content(managed_path: str | Path) -> bool:
     if not root.is_dir():
         return True
     try:
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                parts = path.relative_to(root).parts
-            except ValueError:
-                continue
-            if parts and parts[0] in _IGNORE_CONTENT_DIRS:
-                continue
-            suffix = path.suffix.lower()
-            if suffix in _ARCHIVE_SUFFIXES:
-                if suffix == ".zip" and not _zip_has_payload(path):
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in _IGNORE_CONTENT_DIRS and "历史版本" not in name
+            ]
+            for name in filenames:
+                path = Path(dirpath) / name
+                if "历史版本" in str(path):
                     continue
+                suffix = path.suffix.lower()
+                if suffix in _ARCHIVE_SUFFIXES:
+                    if suffix == ".zip" and not _zip_has_payload(path):
+                        continue
+                    return False
                 return False
-            return False
     except OSError:
         return True
     return True
@@ -80,10 +81,19 @@ def set_is_missing_content(managed_path: str | Path, missing: bool) -> None:
     persist_unified_metadata_dict(root, data)
 
 
-def apply_missing_content_marker(managed_path: str | Path) -> bool:
+def apply_missing_content_marker(
+    managed_path: str | Path,
+    *,
+    sync_backup: bool = True,
+) -> bool:
     """Detect empty payload, write ``is_missing_content``, return the flag."""
     missing = is_missing_mod_content(managed_path)
-    set_is_missing_content(managed_path, missing)
+    root = Path(managed_path)
+    if not root.is_dir():
+        return missing
+    data = read_info_metadata_dict(root) or {}
+    data[MISSING_CONTENT_METADATA_KEY] = bool(missing)
+    persist_unified_metadata_dict(root, data, sync_backup=sync_backup)
     return missing
 
 
@@ -100,11 +110,28 @@ def clear_missing_content_if_present(managed_path: str | Path) -> bool:
 
 
 def read_is_missing_content(managed_path: str | Path) -> bool:
-    """True when metadata flag or filesystem payload check says content is missing."""
-    data = read_info_metadata_dict(managed_path) or {}
-    if data.get(MISSING_CONTENT_METADATA_KEY) is True:
-        return True
-    return is_missing_mod_content(managed_path)
+    """
+    True when the managed folder has no deployable payload.
+
+    Live filesystem content is authoritative. A stale sticky
+    ``is_missing_content=true`` flag (e.g. left over from an empty import
+    before an archive arrived) must not override a real payload — that
+    caused Deploy to falsely report “内容缺失” for Mods that already had
+    files on disk.
+    """
+    if not is_missing_mod_content(managed_path):
+        data = read_info_metadata_dict(managed_path) or {}
+        if data.get(MISSING_CONTENT_METADATA_KEY) is True:
+            try:
+                set_is_missing_content(managed_path, False)
+            except OSError:
+                logger.debug(
+                    "heal stale is_missing_content failed for %s",
+                    managed_path,
+                    exc_info=True,
+                )
+        return False
+    return True
 
 
 class ModFileManager:
@@ -121,6 +148,7 @@ class ModFileManager:
 
     def __init__(self, target_root: str | Path) -> None:
         self.target_root = Path(target_root).expanduser().resolve()
+        self._pub_index: dict[str, Path] | None = None
 
     def ensure_target_root(self) -> Path:
         self.target_root.mkdir(parents=True, exist_ok=True)
@@ -373,8 +401,15 @@ class ModFileManager:
         info.mkdir(parents=True, exist_ok=True)
         return info
 
-    def save_metadata(self, metadata: ModMetadata, managed_path: Path | None = None) -> Path:
-        """Write unified ``.info/metadata.json`` and remove legacy ``mod.json``."""
+    def save_metadata(
+        self,
+        metadata: ModMetadata,
+        managed_path: Path | None = None,
+        *,
+        sync_backup: bool = True,
+        sync_reason: str = "edit",
+    ) -> Path:
+        """Write unified ``.info/metadata.json`` and optionally sync backup."""
         path = Path(managed_path or metadata.managed_path or "")
         if not path:
             raise ValueError("managed_path is required to save metadata")
@@ -391,7 +426,16 @@ class ModFileManager:
             if value in (None, "", {}, []):
                 continue
             merged[key] = value
-        return _write_unified_metadata(info, merged)
+        written = _write_unified_metadata(info, merged)
+        if sync_backup:
+            try:
+                from services.metadata_backup_sync import sync_after_metadata_change
+
+                mid = str(metadata.published_file_id or "").strip() or None
+                sync_after_metadata_change(mid, path, sync_reason)
+            except Exception:  # noqa: BLE001
+                pass
+        return written
 
     def load_metadata(self, managed_path: Path) -> ModMetadata | None:
         data = read_info_metadata_dict(managed_path)
@@ -461,15 +505,29 @@ class ModFileManager:
             mods.extend(self._list_mod_dirs(entry))
         return mods
 
+    def index_by_published_id(self) -> dict[str, Path]:
+        """Build ``published_file_id → managed folder`` once (O(n)), then reuse."""
+        if self._pub_index is not None:
+            return self._pub_index
+        mapping: dict[str, Path] = {}
+        for folder in self.list_managed_mods():
+            mid = ""
+            meta = self.load_metadata(folder)
+            if meta and str(meta.published_file_id or "").strip():
+                mid = str(meta.published_file_id).strip()
+            if not mid.isdigit() and folder.name.isdigit():
+                mid = folder.name
+            if mid.isdigit():
+                mapping[mid] = folder
+        self._pub_index = mapping
+        return mapping
+
     def find_by_published_id(self, published_file_id: str) -> Path | None:
         """Locate an already-managed Mod by ID stored in ``.info/metadata.json``."""
-        for folder in self.list_managed_mods():
-            meta = self.load_metadata(folder)
-            if meta and meta.published_file_id == str(published_file_id):
-                return folder
-            if folder.name == str(published_file_id):
-                return folder
-        return None
+        needle = str(published_file_id or "").strip()
+        if not needle:
+            return None
+        return self.index_by_published_id().get(needle)
 
     def game_name_for_path(self, managed_path: Path) -> str:
         """Infer game folder name from ``…/<game>/<mod>`` layout."""
@@ -511,23 +569,11 @@ def read_info_metadata_dict(managed_path: str | Path) -> dict[str, Any] | None:
     """
     Read ``.info/metadata.json``; fall back to legacy ``mod.json``.
 
-    Returns the parsed dict or ``None``.
+    Returns the parsed dict or ``None``. Uses the process-wide mtime cache.
     """
-    root = Path(managed_path)
-    modern = root / INFO_DIR_NAME
-    legacy = root / LEGACY_INFO_DIR_NAME
-    info = modern if modern.is_dir() else (legacy if legacy.is_dir() else modern)
-    for candidate in ModFileManager._metadata_read_candidates(info):
-        if not candidate.is_file():
-            continue
-        try:
-            data = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to read metadata %s: %s", candidate, exc)
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
+    from services.metadata_cache import load_metadata
+
+    return load_metadata(managed_path)
 
 
 def _remove_legacy_mod_json(info_dir: Path) -> None:
@@ -547,6 +593,12 @@ def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
         encoding="utf-8",
     )
     _remove_legacy_mod_json(info_dir)
+    try:
+        from services.metadata_cache import invalidate_metadata
+
+        invalidate_metadata(info_dir.parent)
+    except Exception:  # noqa: BLE001
+        pass
     return meta_file
 
 
@@ -625,11 +677,25 @@ def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
 def persist_unified_metadata_dict(
     managed_path: str | Path,
     payload: Mapping[str, Any],
+    *,
+    sync_backup: bool = True,
+    sync_reason: str = "edit",
 ) -> Path:
-    """Write ``metadata.json`` at *managed_path* and delete legacy ``mod.json``."""
+    """Write ``metadata.json`` at *managed_path* and optionally sync backup."""
     root = Path(managed_path)
     info = root / INFO_DIR_NAME
-    return _write_unified_metadata(info, payload)
+    written = _write_unified_metadata(info, payload)
+    if sync_backup:
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            mid = str(payload.get("published_file_id") or "").strip() or None
+            sync_after_metadata_change(mid, root, sync_reason)
+        except Exception:  # noqa: BLE001
+            pass
+    return written
+
+
 def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
     from core.mod_platform import parse_metadata_platform
 

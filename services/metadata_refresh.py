@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from core.models import ModMetadata, is_unknown_mod_title
-from core.mod_platform import PLATFORM_STEAM, normalize_platform
+from core.mod_platform import (
+    PLATFORM_MODIO,
+    PLATFORM_NEXUS,
+    PLATFORM_STEAM,
+    normalize_platform,
+    silent_correct_nexus_workspace_id,
+)
 from core.sanitize import unique_destination
 from core.steam_api import SteamWorkshopClient
 from services.file_ops import (
@@ -43,11 +49,11 @@ __all__ = [
     "is_unknown_mod_title",
     "needs_metadata_refresh",
     "prepare_managed_folder_for_rename",
+    "refresh_selected_mods_metadata",
     "refresh_steam_mod_metadata",
     "refresh_steam_mods_metadata",
     "rename_managed_folder_for_title",
     "safe_directory_rename",
-    "test_raw_directory_rename",
 ]
 
 @dataclass
@@ -336,223 +342,6 @@ def prepare_managed_folder_for_rename(managed_path: str | Path) -> None:
             exc_info=True,
         )
         gc.collect()
-
-
-def test_raw_directory_rename(
-    src: str | Path,
-    dst: str | Path | None = None,
-) -> dict[str, Any]:
-    """
-    Minimal isolation experiment: bare ``os.rename`` / ``MoveFileExW`` only.
-
-    Bypasses Mod.io / metadata / cover / Qt / DB / ``safe_directory_rename``.
-    If a rename succeeds, immediately renames back to restore the folder.
-    Does not change production rename logic.
-    """
-    import getpass
-    import stat
-    import sys
-
-    source = Path(src).expanduser()
-    try:
-        source = source.resolve()
-    except OSError:
-        pass
-
-    if dst is None:
-        target = source.parent / f"{source.name}__raw_rename_probe"
-    else:
-        target = Path(dst).expanduser()
-        try:
-            target = target.resolve()
-        except OSError:
-            pass
-
-    parent = source.parent
-
-    def _mode_bits(path: Path) -> str:
-        try:
-            mode = path.stat().st_mode
-            return (
-                f"mode={oct(mode)} "
-                f"W_OK={os.access(str(path), os.W_OK)} "
-                f"R_OK={os.access(str(path), os.R_OK)} "
-                f"isdir={path.is_dir()}"
-            )
-        except OSError as exc:
-            return f"<stat failed: {exc}>"
-
-    children: list[str] = []
-    children_lower: dict[str, list[str]] = {}
-    try:
-        for child in sorted(parent.iterdir(), key=lambda p: p.name.lower()):
-            name = child.name
-            children.append(name)
-            children_lower.setdefault(name.casefold(), []).append(name)
-    except OSError as exc:
-        children = [f"<iterdir failed: {exc}>"]
-
-    case_collisions = {
-        k: v for k, v in children_lower.items() if len(v) > 1
-    }
-    same_name_as_dst = any(c == target.name for c in children)
-    same_name_casefold = [
-        c for c in children if c.casefold() == target.name.casefold()
-    ]
-
-    report: dict[str, Any] = {
-        "user": "",
-        "cwd": "",
-        "src": str(source),
-        "dst": str(target),
-        "src_exists": False,
-        "dst_exists": False,
-        "src_perms": "",
-        "dst_parent_perms": "",
-        "parent_children": children,
-        "same_name_as_dst": same_name_as_dst,
-        "same_name_casefold": same_name_casefold,
-        "case_collisions": case_collisions,
-        "A_os_rename": None,
-        "B_MoveFileExW": None,
-        "classification": "",
-        "note": "",
-    }
-
-    try:
-        report["user"] = getpass.getuser()
-    except Exception as exc:  # noqa: BLE001
-        report["user"] = f"<unknown: {exc}>"
-    report["cwd"] = os.getcwd()
-    report["src_exists"] = source.exists()
-    report["dst_exists"] = target.exists()
-    report["src_perms"] = _mode_bits(source) if source.exists() else "<missing>"
-    report["dst_parent_perms"] = _mode_bits(parent)
-
-    print("=== test_raw_directory_rename ===")
-    print(f"user={report['user']}")
-    print(f"cwd={report['cwd']}")
-    print(f"src={report['src']}")
-    print(f"dst={report['dst']}")
-    print(f"src.exists()={report['src_exists']}")
-    print(f"dst.exists()={report['dst_exists']}")
-    print(f"src perms: {report['src_perms']}")
-    print(f"dst parent perms: {report['dst_parent_perms']}")
-    print("--- parent children ---")
-    for name in children:
-        marker = ""
-        if name == source.name:
-            marker = "  <-- SRC"
-        elif name == target.name:
-            marker = "  <-- DST EXISTS"
-        elif name.casefold() == target.name.casefold():
-            marker = "  <-- DST CASEFOLD MATCH"
-        print(f"  {name!r}{marker}")
-    if case_collisions:
-        print(f"case_collisions={case_collisions}")
-    else:
-        print("case_collisions=(none)")
-    print(f"same_name_as_dst={same_name_as_dst}")
-    print(f"same_name_casefold={same_name_casefold}")
-
-    def _undo(from_path: Path, to_path: Path) -> str:
-        try:
-            os.rename(str(from_path), str(to_path))
-            return "undo_ok via os.rename"
-        except OSError as undo_exc:
-            try:
-                from services.windows_rename import move_directory_movefile_ex
-
-                move_directory_movefile_ex(str(from_path), str(to_path))
-                return "undo_ok via MoveFileExW"
-            except OSError as undo_exc2:
-                return f"UNDO FAILED: {undo_exc!r} / {undo_exc2!r}"
-
-    # --- A: os.rename ---
-    print("--- A: os.rename ---")
-    if not source.exists():
-        report["A_os_rename"] = "SKIP: src missing"
-        print(report["A_os_rename"])
-    elif target.exists():
-        report["A_os_rename"] = "SKIP: dst already exists"
-        print(report["A_os_rename"])
-    else:
-        try:
-            os.rename(str(source), str(target))
-            undo = _undo(target, source)
-            report["A_os_rename"] = f"SUCCESS; {undo}"
-            print(report["A_os_rename"])
-        except OSError as exc:
-            report["A_os_rename"] = f"FAIL: {type(exc).__name__}: {exc!r}"
-            print(report["A_os_rename"])
-
-    # Refresh existence after A (may have undone).
-    src_after_a = source.exists()
-    dst_after_a = target.exists()
-
-    # --- B: MoveFileExW ---
-    print("--- B: MoveFileExW ---")
-    if sys.platform != "win32":
-        report["B_MoveFileExW"] = "SKIP: not Windows"
-        print(report["B_MoveFileExW"])
-    elif not source.exists():
-        report["B_MoveFileExW"] = "SKIP: src missing after A"
-        print(report["B_MoveFileExW"])
-    elif target.exists():
-        report["B_MoveFileExW"] = "SKIP: dst already exists"
-        print(report["B_MoveFileExW"])
-    else:
-        try:
-            from services.windows_rename import move_directory_movefile_ex
-
-            move_directory_movefile_ex(str(source), str(target))
-            undo = _undo(target, source)
-            report["B_MoveFileExW"] = f"SUCCESS; {undo}"
-            print(report["B_MoveFileExW"])
-        except OSError as exc:
-            report["B_MoveFileExW"] = f"FAIL: {type(exc).__name__}: {exc!r}"
-            print(report["B_MoveFileExW"])
-
-    a_ok = isinstance(report["A_os_rename"], str) and report["A_os_rename"].startswith(
-        "SUCCESS"
-    )
-    b_ok = isinstance(report["B_MoveFileExW"], str) and report[
-        "B_MoveFileExW"
-    ].startswith("SUCCESS")
-
-    if a_ok or b_ok:
-        report["classification"] = "C"
-        report["note"] = (
-            "Bare rename succeeded outside Mod.io/metadata/cover/Qt/DB. "
-            "WinError 5 during refresh is likely held by the app business lifecycle."
-        )
-    elif (
-        "FAIL" in str(report["A_os_rename"])
-        or "FAIL" in str(report["B_MoveFileExW"])
-    ):
-        # Distinguish FS vs Python call layer is weak if both fail the same way;
-        # both failing with WinError 5 in a clean process points to A (FS/OS).
-        report["classification"] = "A"
-        report["note"] = (
-            "Bare os.rename and/or MoveFileExW failed with no app business stack. "
-            "Points to Windows filesystem / external lock / path conflict "
-            "(not project lifecycle). If only Python wrappers fail but Explorer "
-            "works, re-check path identity; Explorer success + bare API fail "
-            "still classifies as A (OS/FS), not C."
-        )
-    else:
-        report["classification"] = "unknown"
-        report["note"] = "No conclusive A/B result (skipped)."
-
-    # B layer: only if we somehow prove ctypes/os wiring is wrong while FS is fine.
-    # Not asserted here without a known-good control path.
-    _ = (src_after_a, dst_after_a, stat)  # silence unused in some skips
-
-    print("--- classification ---")
-    print(f"classification={report['classification']}")
-    print(f"note={report['note']}")
-    print("=== end test_raw_directory_rename ===")
-    return report
 
 
 def _ensure_cwd_outside_rename_source(source: Path) -> None:
@@ -897,7 +686,7 @@ def refresh_steam_mod_metadata(
             )
 
         try:
-            mgr.save_metadata(meta, new_path)
+            mgr.save_metadata(meta, new_path, sync_backup=False)
             _persist_cleared_fetch_error(new_path)
             _clear_placeholder_display_name(mid, new_path)
         except OSError as exc:
@@ -911,6 +700,13 @@ def refresh_steam_mod_metadata(
                 error=f"Failed to write metadata.json: {exc}",
                 cover_path=cover_path,
             )
+
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            sync_after_metadata_change(mid, new_path, "refresh")
+        except Exception:  # noqa: BLE001
+            pass
 
         return MetadataRefreshResult(
             mod_id=mid,
@@ -1049,3 +845,126 @@ def filter_steam_batch_entries(
             continue
         out.append((str(mid), Path(path)))
     return out
+
+
+def refresh_selected_mods_metadata(
+    entries: Sequence[tuple[str, Path, str]],
+    *,
+    library_root: str | Path | None = None,
+    max_workers: int = 2,
+    on_progress: MetadataProgress | None = None,
+) -> list[MetadataRefreshResult]:
+    """
+    Batch refresh for mixed platforms (Steam / Nexus / Mod.io / GitHub / 其它).
+
+    Nexus ``workspace_id`` correction runs as a silent per-item wash inside
+    the loop — never raises, never blocks the next mod.
+    """
+    unique: list[tuple[str, Path, str]] = []
+    seen: set[str] = set()
+    for mid_raw, path, plat in entries:
+        mid = str(mid_raw or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        unique.append((mid, Path(path), normalize_platform(plat)))
+
+    total = len(unique)
+    if total == 0:
+        return []
+
+    results: list[MetadataRefreshResult] = []
+    steam_items: list[tuple[str, Path]] = []
+    non_steam: list[tuple[str, Path, str]] = []
+    for mid, path, plat in unique:
+        # Silent Nexus workspace_id wash — always, even when path missing.
+        if plat == PLATFORM_NEXUS:
+            silent_correct_nexus_workspace_id(mid)
+        if plat == PLATFORM_STEAM:
+            steam_items.append((mid, path))
+        else:
+            non_steam.append((mid, path, plat))
+
+    done = 0
+
+    def _report() -> None:
+        if on_progress:
+            on_progress(
+                done,
+                total,
+                f"Refreshing metadata: {done} / {total}",
+            )
+
+    _report()
+
+    for mid, path, plat in non_steam:
+        try:
+            if plat == PLATFORM_NEXUS:
+                # Wash again after any sidecar URL apply inside rescan.
+                silent_correct_nexus_workspace_id(mid)
+            if plat == PLATFORM_MODIO:
+                from services.modio_metadata_refresh import refresh_modio_mod_metadata
+
+                source_url = ""
+                try:
+                    from core.db_manager import get_db
+
+                    info = get_db().get_mod_display_info(mid)
+                    if info is not None:
+                        source_url = str(info.source_url or "").strip()
+                except Exception:  # noqa: BLE001
+                    source_url = ""
+                lib = library_root or (
+                    path.parents[1] if len(path.parts) >= 2 else path.parent
+                )
+                result = refresh_modio_mod_metadata(
+                    mid,
+                    path,
+                    library_root=lib,
+                    source_url=source_url,
+                )
+            else:
+                # Nexus / GitHub / 其它 — local rescan (+ Nexus wash in rescan).
+                from services.info_sidecar import rescan_mod_folder
+
+                if path.parts:
+                    rescan_mod_folder(path, mod_id=mid)
+                if plat == PLATFORM_NEXUS:
+                    silent_correct_nexus_workspace_id(mid)
+                result = MetadataRefreshResult(
+                    mod_id=mid,
+                    success=True,
+                    managed_path=path if path.parts else None,
+                    old_path=path if path.parts else None,
+                )
+            results.append(result)
+        except Exception as exc:  # noqa: BLE001
+            results.append(
+                MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=path if path.parts else None,
+                    old_path=path if path.parts else None,
+                    error=str(exc),
+                )
+            )
+        done += 1
+        _report()
+
+    if steam_items:
+        steam_results = refresh_steam_mods_metadata(
+            steam_items,
+            library_root=library_root,
+            max_workers=max_workers,
+            on_progress=lambda d, _t, msg: on_progress(
+                done + d,
+                total,
+                msg or f"Refreshing metadata: {done + d} / {total}",
+            )
+            if on_progress
+            else None,
+        )
+        results.extend(steam_results)
+
+    by_id = {r.mod_id: r for r in results}
+    return [by_id[mid] for mid, _path, _plat in unique if mid in by_id]

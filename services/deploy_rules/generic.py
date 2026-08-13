@@ -14,14 +14,15 @@ from services.deploy_rules.manifest import (
     remove_empty_parents,
 )
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
+from services.importers.local_scanner import is_skipped_mod_path_part
 
 logger = logging.getLogger(__name__)
 
-_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME})
+_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"})
 
 
 def _deploy_ignore(directory: str, names: list[str]) -> set[str]:
-    return {name for name in names if name in _IGNORE_DIR_NAMES}
+    return {name for name in names if name in _IGNORE_DIR_NAMES or is_skipped_mod_path_part(name)}
 
 
 def _utc_now() -> str:
@@ -41,7 +42,7 @@ def _iter_deployable_files(
             rel_parts = path.relative_to(source).parts
         except ValueError:
             continue
-        if any(part in _IGNORE_DIR_NAMES for part in rel_parts):
+        if any(is_skipped_mod_path_part(part) for part in rel_parts):
             continue
         if not is_rel_path_allowed(source, path, allowed_rel_paths):
             continue

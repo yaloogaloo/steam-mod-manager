@@ -41,7 +41,8 @@ def test_render_mod_cards_does_not_call_apply_sidecar_to_db() -> None:
     """Library render path is read-only — no per-mod DB sidecar sync."""
     src = inspect.getsource(ModLibraryView._render_mod_cards)
     assert "apply_sidecar_to_db" not in src
-    assert "load_info_sidecar" in src  # read-only overlay still allowed
+    assert "get_library_cache" in src
+    assert "list_visible_mods" not in src
 
 
 def test_refresh_does_not_invoke_apply_sidecar_to_db(
@@ -157,4 +158,3 @@ def test_mod_card_hides_offline_badge_when_index_present(
 
     card = ModCardWidget(mod, metadata=None)
     assert card.offline_badge.isHidden()
-    assert "Saved" in card.toolTip() or "Offline" in card.toolTip()

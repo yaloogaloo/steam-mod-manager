@@ -104,6 +104,9 @@ def _file_rows(panel: ModDetailPanel) -> list[QWidget]:
 def _row_primary(row: QWidget) -> str:
     for lab in row.findChildren(QLabel):
         if lab.objectName() == "detailFilesPrimary":
+            full = getattr(lab, "fullText", None)
+            if callable(full):
+                return str(full())
             return lab.text()
     return ""
 
@@ -375,3 +378,328 @@ def test_set_file_role_mapping_exclusive(db: DatabaseManager, tmp_path: Path) ->
     assert files["main"].selected_for_deploy is False
     assert files["src"].file_role == FILE_ROLE_UNKNOWN
     assert files["src"].selected_for_deploy is False
+
+
+def test_nexus_context_menu_sets_category_and_selection(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
+    from core.mod_platform import (
+        FILE_ROLE_NEXUS_OPTIONAL,
+        FILE_ROLE_UNKNOWN,
+        SOURCE_TYPE_NEXUS,
+    )
+    from ui.mod_files_ux import nexus_category_label
+
+    lib = tmp_path / "library"
+    folder = _seed(lib, mid="9202", title="NexusCtx")
+    db.upsert_mod(
+        ModMetadata(published_file_id="9202", title="NexusCtx", managed_path=str(folder))
+    )
+    db.update_mod_platform_info("9202", platform=DB_NEXUS)
+    db.set_mod_files(
+        "9202",
+        ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="f1",
+                    filename="a.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_OPTIONAL,
+                    selected_for_deploy=False,
+                ),
+            ]
+        ),
+    )
+    panel = ModDetailPanel()
+    panel.show_mod(folder)
+    qapp.processEvents()
+
+    from PySide6.QtWidgets import QMenu
+
+    m = QMenu()
+    panel._build_nexus_context_menu(m, None)
+    labels = [a.text() for a in m.actions()]
+    assert labels == [
+        "设为 Main (主文件)",
+        "设为 Optional (可选文件)",
+        "设为 Miscellaneous (杂项)",
+        "设为 汉化",
+        "设为 Other (其他/普通文件)",
+    ]
+    assert all(a.data()[0] == "nexus" for a in m.actions())
+
+    g = QMenu()
+    panel._build_github_context_menu(g, None)
+    assert "设为 Source (源码)" in [a.text() for a in g.actions()]
+    assert "设为 汉化" not in [a.text() for a in g.actions()]
+
+    panel._apply_nexus_category("f1", "汉化")
+    qapp.processEvents()
+    files = {f.id: f for f in ModFileManager(db).get_files("9202")}
+    assert nexus_category_label(files["f1"]) == "汉化"
+    assert files["f1"].selected_for_deploy is False
+    assert files["f1"].metadata.get("category") == "汉化"
+
+    panel._apply_nexus_category("f1", "Main")
+    qapp.processEvents()
+    files = {f.id: f for f in ModFileManager(db).get_files("9202")}
+    assert nexus_category_label(files["f1"]) == "Main"
+    assert files["f1"].selected_for_deploy is True
+
+    panel._apply_nexus_category("f1", "Optional")
+    qapp.processEvents()
+    files = {f.id: f for f in ModFileManager(db).get_files("9202")}
+    assert nexus_category_label(files["f1"]) == "Optional"
+    assert files["f1"].file_role == FILE_ROLE_NEXUS_OPTIONAL
+    assert files["f1"].selected_for_deploy is False
+
+
+def test_nexus_badge_colors_and_edit_visible_for_all(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    from PySide6.QtWidgets import QPushButton
+
+    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
+    from core.mod_platform import (
+        FILE_ROLE_NEXUS_MAIN,
+        FILE_ROLE_UNKNOWN,
+        SOURCE_TYPE_NEXUS,
+    )
+    from ui.styles import PANEL_STYLE
+
+    lib = tmp_path / "library"
+    folder = _seed(lib, mid="9203", title="NexusBadge")
+    db.upsert_mod(
+        ModMetadata(published_file_id="9203", title="NexusBadge", managed_path=str(folder))
+    )
+    db.update_mod_platform_info("9203", platform=DB_NEXUS)
+    db.set_mod_files(
+        "9203",
+        ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="m1",
+                    filename="main.zip",
+                    file_role=FILE_ROLE_NEXUS_MAIN,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_MAIN,
+                    selected_for_deploy=True,
+                    metadata={"category": "Main"},
+                ),
+                ModFileEntry(
+                    id="h1",
+                    filename="ABC_very_long_mod_name_2026_version_chinese_pack.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_OPTIONAL,
+                    selected_for_deploy=False,
+                    metadata={"category": "汉化"},
+                ),
+            ]
+        ),
+    )
+    panel = ModDetailPanel()
+    panel.setStyleSheet(PANEL_STYLE)
+    panel.setFixedWidth(420)
+    panel.show()
+    panel.show_mod(folder)
+    qapp.processEvents()
+
+    by_id = {r.property("file_id"): r for r in _file_rows(panel)}
+    # Force row to the panel content width before geometry asserts.
+    for row in by_id.values():
+        row.setMaximumWidth(380)
+        row.adjustSize()
+    qapp.processEvents()
+    main_badge = next(
+        lab
+        for lab in by_id["m1"].findChildren(QLabel)
+        if lab.objectName() == "detailFileCategoryBadge"
+    )
+    i18n_badge = next(
+        lab
+        for lab in by_id["h1"].findChildren(QLabel)
+        if lab.objectName() == "detailFileCategoryBadge"
+    )
+    assert main_badge.property("category") == "Main"
+    assert i18n_badge.property("category") == "汉化"
+    assert main_badge.width() == 38 and main_badge.height() == 18
+    assert i18n_badge.property("category") != "Main"
+
+    for rid in ("m1", "h1"):
+        row = by_id[rid]
+        edits = row.findChildren(QPushButton, "detailFilesEditButton")
+        assert len(edits) == 1 and not edits[0].isHidden()
+        # Edit button stays inside the row viewport even with long filenames.
+        btn = edits[0]
+        assert btn.parent() is not None
+        assert btn.parent() is row or row.isAncestorOf(btn)
+        assert not btn.isWindow(), "edit button must not be a top-level window"
+        assert btn.geometry().right() <= row.rect().right()
+        assert btn.geometry().left() >= 0
+
+
+def test_nexus_flat_list_badges_main_checked_optional_unchecked(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    from PySide6.QtWidgets import QTreeWidget
+
+    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
+    from core.mod_platform import (
+        FILE_ROLE_NEXUS_MAIN,
+        FILE_ROLE_NEXUS_OPTIONAL,
+        SOURCE_TYPE_NEXUS,
+    )
+
+    lib = tmp_path / "library"
+    folder = _seed(lib, mid="9201", title="NexusMulti")
+    db.upsert_mod(
+        ModMetadata(published_file_id="9201", title="NexusMulti", managed_path=str(folder))
+    )
+    db.update_mod_platform_info("9201", platform=DB_NEXUS)
+    db.set_mod_files(
+        "9201",
+        ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="m1",
+                    filename="main_a.zip",
+                    file_role=FILE_ROLE_NEXUS_MAIN,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_MAIN,
+                    selected_for_deploy=True,
+                ),
+                ModFileEntry(
+                    id="m2",
+                    filename="main_b.zip",
+                    file_role=FILE_ROLE_NEXUS_MAIN,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_MAIN,
+                    selected_for_deploy=True,
+                ),
+                ModFileEntry(
+                    id="o1",
+                    filename="opt.zip",
+                    file_role=FILE_ROLE_NEXUS_OPTIONAL,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_OPTIONAL,
+                    selected_for_deploy=False,
+                ),
+            ]
+        ),
+    )
+
+    panel = ModDetailPanel()
+    panel.show_mod(folder)
+    qapp.processEvents()
+
+    assert not panel._files_section_frame.isHidden()
+    assert panel.mod_files_host.findChild(QTreeWidget, "detailFilesTree") is None
+
+    rows = _file_rows(panel)
+    assert len(rows) == 3
+
+    badges = {
+        lab.text(): lab
+        for lab in panel.mod_files_host.findChildren(QLabel)
+        if lab.objectName() == "detailFileCategoryBadge"
+    }
+    assert "Main" in badges
+    assert badges["Main"].property("category") == "Main"
+    assert "Opt" in badges
+    assert badges["Opt"].property("category") == "Optional"
+    assert badges["Opt"].objectName() != "detailFileBadgeMain"
+
+    # Nexus: every row shows edit button
+    for row in rows:
+        edits = row.findChildren(QPushButton, "detailFilesEditButton")
+        assert edits and not edits[0].isHidden()
+
+    main_rows = [r for r in rows if r.property("file_id") in ("m1", "m2")]
+    opt_row = next(r for r in rows if r.property("file_id") == "o1")
+    assert all(r.findChildren(QCheckBox)[0].isChecked() for r in main_rows)
+    assert not opt_row.findChildren(QCheckBox)[0].isChecked()
+
+    # Filename labels: no wrap + native tooltip = full name
+    for row in rows:
+        for lab in row.findChildren(QLabel):
+            if lab.objectName() == "detailFilesPrimary":
+                assert lab.wordWrap() is False
+                assert lab.toolTip() == lab.fullText()
+
+
+def test_main_checkbox_unlocked_and_toggle_stays_quiet(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Main may be unchecked; toggle must not emit tags_saved (no card flash/popup)."""
+    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
+    from core.mod_platform import (
+        FILE_ROLE_NEXUS_MAIN,
+        FILE_ROLE_NEXUS_OPTIONAL,
+        SOURCE_TYPE_NEXUS,
+    )
+
+    lib = tmp_path / "library"
+    folder = _seed(lib, mid="9210", title="MainUnlock")
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="9210",
+            title="MainUnlock",
+            managed_path=str(folder),
+        )
+    )
+    db.update_mod_platform_info("9210", platform=DB_NEXUS)
+    db.set_mod_files(
+        "9210",
+        ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="m1",
+                    filename="main.zip",
+                    file_role=FILE_ROLE_NEXUS_MAIN,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_MAIN,
+                    selected_for_deploy=True,
+                    metadata={"category": "Main"},
+                ),
+                ModFileEntry(
+                    id="o1",
+                    filename="opt.zip",
+                    file_role=FILE_ROLE_NEXUS_OPTIONAL,
+                    source_type=SOURCE_TYPE_NEXUS,
+                    type=FILE_TYPE_OPTIONAL,
+                    selected_for_deploy=False,
+                    metadata={"category": "Optional"},
+                ),
+            ]
+        ),
+    )
+
+    panel = ModDetailPanel()
+    emitted: list[object] = []
+    panel.tags_saved.connect(lambda p: emitted.append(p))
+    panel.show_mod(folder)
+    qapp.processEvents()
+
+    row = next(r for r in _file_rows(panel) if r.property("file_id") == "m1")
+    cb = row.findChildren(QCheckBox)[0]
+    assert cb.isEnabled()
+    assert cb.isChecked()
+
+    panel._on_mod_file_toggled("m1", False)
+    qapp.processEvents()
+
+    assert emitted == []
+    files = {f.id: f for f in ModFileManager(db).get_files("9210")}
+    assert files["m1"].selected_for_deploy is False
+
+    # Sidecar re-apply / show_mod must not force Main back on.
+    panel.show_mod(folder)
+    qapp.processEvents()
+    files = {f.id: f for f in ModFileManager(db).get_files("9210")}
+    assert files["m1"].selected_for_deploy is False
+    row = next(r for r in _file_rows(panel) if r.property("file_id") == "m1")
+    cb = row.findChildren(QCheckBox)[0]
+    assert cb.isEnabled() and not cb.isChecked()

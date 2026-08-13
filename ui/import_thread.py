@@ -195,13 +195,20 @@ class ImportWorker(QThread):
             result = ModioImporter(db=db).import_mod(
                 source_folder=str(folder),
                 title=folder_title,
-                modio_url=str(params.get("modio_url") or ""),
-                modio_id=str(params.get("modio_id") or ""),
+                modio_url=(
+                    ""
+                    if batch
+                    else str(params.get("modio_url") or "")
+                ),
+                modio_id=(
+                    folder.name if batch else str(params.get("modio_id") or "")
+                ),
                 library_root=self.library_root,
                 game_name=str(params.get("game_name") or ""),
                 app_id=int(params.get("game_id") or params.get("app_id") or 0),
                 context=context,
                 cover_source=cover,
+                is_batch_mode=batch or bool(params.get("is_batch_mode")),
             )
             return result
 
@@ -209,7 +216,13 @@ class ImportWorker(QThread):
             result = OtherImporter(db=db).import_mod(
                 source_folder=str(folder),
                 title=folder_title,
-                source_url=str(params.get("source_url") or params.get("other_url") or ""),
+                source_url=(
+                    ""
+                    if batch
+                    else str(
+                        params.get("source_url") or params.get("other_url") or ""
+                    )
+                ),
                 library_root=self.library_root,
                 game_name=str(params.get("game_name") or ""),
                 app_id=int(params.get("game_id") or params.get("app_id") or 0),
@@ -239,6 +252,7 @@ class ImportWorker(QThread):
             context=context,
             cover_source=cover,
             offline_html_path=offline,
+            is_batch_mode=batch or bool(params.get("is_batch_mode")),
         )
         return self._maybe_attach_nexus_offline(result, offline_html=offline)
 

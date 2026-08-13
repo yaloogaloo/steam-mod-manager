@@ -40,6 +40,11 @@ def format_platform_name(platform: str | None) -> str:
 
 def platform_badge_label(platform: str | None) -> str:
     """Short card badge text (keeps cards narrow)."""
+    key = str(platform or "").strip().lower()
+    if key in {"external", "local", "unknown"}:
+        from services.library_status import source_badge_label
+
+        return source_badge_label(key)
     key = normalize_platform(platform)
     return {
         PLATFORM_STEAM: "Steam",

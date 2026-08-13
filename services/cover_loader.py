@@ -34,26 +34,24 @@ def resolve_cover_path(
     managed_path: str | Path,
     cover_ref: str = "",
 ) -> Path | None:
-    """Resolve a cover file path (disk I/O only — safe off the GUI thread)."""
-    root = Path(managed_path)
+    """Resolve a cover file path via Metadata Resolver (safe off the GUI thread)."""
     ref = str(cover_ref or "").strip()
     if ref:
+        direct = Path(ref)
         try:
-            from services.importers.image_picker import resolve_cover_file
-
-            resolved = resolve_cover_file(root, ref)
-            if resolved is not None:
-                return resolved
-        except Exception:  # noqa: BLE001
-            logger.debug("resolve_cover_file failed for %s", root, exc_info=True)
+            if direct.is_file():
+                return direct.resolve()
+        except OSError:
+            pass
     try:
-        from services.file_ops import ModFileManager
+        from services.mod_metadata_resolver import resolve_cover_path as resolve_meta
 
-        library_root = root.parents[1] if len(root.parts) > 1 else root.parent
-        return ModFileManager(library_root).find_local_cover(root)
+        found = resolve_meta(None, managed_path)
+        if found is not None:
+            return found
     except Exception:  # noqa: BLE001
-        logger.debug("find_local_cover failed for %s", root, exc_info=True)
-        return None
+        logger.debug("metadata resolver cover failed for %s", managed_path, exc_info=True)
+    return None
 
 
 def _path_key(managed_path: str | Path) -> str:
@@ -116,18 +114,25 @@ class CoverLoadTask(QRunnable):
                 if self._cancelled():
                     image = None
                 elif path is not None and path.is_file():
-                    # QImage reads the file; drop reference ASAP after scale.
-                    img = QImage(str(path))
-                    if self._cancelled():
-                        image = None
-                    elif not img.isNull():
-                        image = img.scaled(
-                            self.width,
-                            self.height,
-                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                    del img
+                    from services.cover_cache import get_cover_image, put_cover_image
+
+                    cached = get_cover_image(path, self.width, self.height)
+                    if cached is not None:
+                        image = cached
+                    else:
+                        # QImage reads the file; drop reference ASAP after scale.
+                        img = QImage(str(path))
+                        if self._cancelled():
+                            image = None
+                        elif not img.isNull():
+                            image = img.scaled(
+                                self.width,
+                                self.height,
+                                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                Qt.TransformationMode.SmoothTransformation,
+                            )
+                            put_cover_image(path, self.width, self.height, image)
+                        del img
         except Exception:  # noqa: BLE001
             logger.debug(
                 "cover load failed token=%s path=%s",

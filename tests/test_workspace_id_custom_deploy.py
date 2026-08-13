@@ -69,6 +69,108 @@ def test_nexus_register_workspace_from_url(db: DatabaseManager) -> None:
     assert info.workspace_id == "999"
 
 
+def test_correct_nexus_workspace_id_from_url(db: DatabaseManager) -> None:
+    from core.mod_platform import corrected_nexus_workspace_id
+
+    assert (
+        corrected_nexus_workspace_id(
+            platform=PLATFORM_NEXUS,
+            source_url="https://www.nexusmods.com/stardewvalley/mods/2400",
+            workspace_id="17863499569189047",
+        )
+        == "2400"
+    )
+    assert (
+        corrected_nexus_workspace_id(
+            platform=PLATFORM_NEXUS,
+            source_url="https://www.nexusmods.com/stardewvalley/mods/2400",
+            workspace_id="2400",
+        )
+        is None
+    )
+    assert (
+        corrected_nexus_workspace_id(
+            platform=PLATFORM_GITHUB,
+            source_url="https://www.nexusmods.com/stardewvalley/mods/2400",
+            workspace_id="1",
+        )
+        is None
+    )
+
+    info = db.register_external_mod(
+        platform=PLATFORM_NEXUS,
+        external_id="rand-ext",
+        source_url="https://www.nexusmods.com/stardewvalley/mods/2400",
+        title="Calcifer",
+        app_id=100,
+        game_name="SomeGame",
+    )
+    # Force a wrong/random workspace_id as batch import may have done.
+    with db._lock:  # noqa: SLF001
+        db._conn.execute(  # noqa: SLF001
+            "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
+            ("17863499569189047", int(info.mod_id)),
+        )
+        db._conn.commit()  # noqa: SLF001
+
+    corrected = db.correct_nexus_workspace_id_from_url(info.mod_id)
+    assert corrected == "2400"
+    again = db.get_mod_display_info(info.mod_id)
+    assert again is not None
+    assert again.workspace_id == "2400"
+    assert db.correct_nexus_workspace_id_from_url(info.mod_id) is None
+
+
+def test_batch_refresh_nexus_silent_workspace_wash(
+    tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nexus-only multi-select refresh must not block; wash ids inside the loop."""
+    from services.metadata_refresh import refresh_selected_mods_metadata
+
+    lib = tmp_path / "library"
+    entries: list[tuple[str, Path, str]] = []
+    for nid, bad_wid in (("2400", "1111111111111"), ("34535", "2222222222222")):
+        info = db.register_external_mod(
+            platform=PLATFORM_NEXUS,
+            external_id=f"ext-{nid}",
+            source_url=f"https://www.nexusmods.com/stardewvalley/mods/{nid}",
+            title=f"Mod {nid}",
+            app_id=100,
+            game_name="SomeGame",
+        )
+        with db._lock:  # noqa: SLF001
+            db._conn.execute(  # noqa: SLF001
+                "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
+                (bad_wid, int(info.mod_id)),
+            )
+            db._conn.commit()  # noqa: SLF001
+        folder = lib / "SomeGame" / f"Mod{nid}"
+        folder.mkdir(parents=True)
+        (folder / "mod.txt").write_text("x", encoding="utf-8")
+        entries.append((str(info.mod_id), folder, PLATFORM_NEXUS))
+
+    monkeypatch.setattr(
+        "services.info_sidecar.rescan_mod_folder",
+        lambda *a, **k: None,
+    )
+
+    progress: list[tuple[int, int]] = []
+    results = refresh_selected_mods_metadata(
+        entries,
+        library_root=lib,
+        on_progress=lambda d, t, _m: progress.append((d, t)),
+    )
+    assert len(results) == 2
+    assert all(r.success for r in results)
+    assert progress[-1] == (2, 2)
+
+    for mid, _path, _plat in entries:
+        info = db.get_mod_display_info(mid)
+        assert info is not None
+        # URL trailing digits must replace the random workspace_id.
+        assert info.workspace_id in {"2400", "34535"}
+
+
 def test_github_gets_generated_numeric_workspace(db: DatabaseManager) -> None:
     info = db.register_external_mod(
         platform=PLATFORM_GITHUB,

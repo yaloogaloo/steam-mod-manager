@@ -93,7 +93,11 @@ class NexusImporter(ModImporter):
             ext = url
             url = f"https://www.nexusmods.com/mods/{ext}"
         name = (title or "").strip() or folder.name
-        if not url and ext:
+        is_batch = bool(_kwargs.get("is_batch_mode"))
+        if is_batch:
+            # Batch folder import: never invent source URLs from folder names.
+            url = ""
+        elif not url and ext:
             # Prefer context game name for canonical URL; never invent a library game.
             slug = parse_nexus_game(url) or ctx.game_name.replace(" ", "").lower()
             if slug and slug.lower() != "mods":

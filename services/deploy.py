@@ -34,11 +34,76 @@ from services.deploy_rules import (
     supported_deploy_types,
 )
 from services.deploy_rules.custom import CustomPathStrategy
-from services.file_ops import ModFileManager, read_is_missing_content
+from services.deploy_status import (
+    DEPLOY_BLOCKED_CONTENT_MISSING,
+    DEPLOY_BLOCKED_FOLDER_MISSING,
+    DEPLOY_ERR_COPY,
+    DEPLOY_ERR_MOD_PATH_MISSING,
+    DEPLOY_ERR_PERMISSION,
+    DEPLOY_ERR_TARGET_FOREIGN,
+    DEPLOY_ERR_UNDEPLOY_MISMATCH,
+    classify_folder_copy_target,
+    content_status_for_mod,
+    deploy_block_reason_for_content_status,
+    enrich_manifest_fingerprint,
+    resolve_deployment_status,
+)
+from services.file_ops import (
+    ModFileManager,
+    clear_missing_content_if_present,
+    read_is_missing_content,
+)
+from services.metadata_backup import is_mod_folder_absent
 
 logger = logging.getLogger(__name__)
 
-MISSING_CONTENT_DEPLOY_ERROR = "该 Mod 内容缺失，无法部署"
+MISSING_CONTENT_DEPLOY_ERROR = DEPLOY_BLOCKED_CONTENT_MISSING
+
+
+def _infer_app_id_from_library_context(
+    source: Path,
+    *,
+    db: DatabaseManager,
+    game_name: str = "",
+) -> int:
+    """
+    Resolve ``app_id`` when Mod metadata left it at 0 (common for mod.io stubs).
+
+    Matches ``game_name`` / library parent folder against configured games.
+    Never invents an AppID — returns 0 when no game row matches.
+    """
+    candidates: list[str] = []
+    name = str(game_name or "").strip()
+    if name:
+        candidates.append(name)
+    try:
+        parent = Path(source).parent.name.strip()
+        if parent and parent not in candidates:
+            candidates.append(parent)
+    except OSError:
+        pass
+    if not candidates:
+        return 0
+    try:
+        for game in db.list_games():
+            labels = {
+                str(getattr(game, "name", "") or "").strip(),
+                str(getattr(game, "folder_name", "") or "").strip(),
+                str(getattr(game, "display_name", "") or "").strip(),
+            }
+            labels.discard("")
+            for cand in candidates:
+                if any(label.casefold() == cand.casefold() for label in labels):
+                    aid = int(getattr(game, "app_id", 0) or 0)
+                    if aid > 0:
+                        return aid
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "infer app_id from library context failed source=%s",
+            source,
+            exc_info=True,
+        )
+    return 0
 
 
 def _entry_is_archive_source(entry: Any) -> bool:
@@ -109,7 +174,7 @@ def _iter_plain_managed_files(managed: Path, *, skip_archives: bool) -> list[Pat
     from services.importers.archive import is_archive_path
     from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 
-    skip_dirs = {INFO_DIR_NAME, LEGACY_INFO_DIR_NAME}
+    skip_dirs = {INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"}
     files: list[Path] = []
     for path in managed.rglob("*"):
         if not path.is_file():
@@ -118,7 +183,7 @@ def _iter_plain_managed_files(managed: Path, *, skip_archives: bool) -> list[Pat
             rel_parts = path.relative_to(managed).parts
         except ValueError:
             continue
-        if any(part in skip_dirs for part in rel_parts):
+        if any(part in skip_dirs or part == "历史版本" for part in rel_parts):
             continue
         if skip_archives and is_archive_path(path.name):
             continue
@@ -376,18 +441,32 @@ def _normalize_deploy_error(error: str) -> str:
     if not text:
         return "未知错误"
     low = text.lower()
+    if text in (
+        DEPLOY_BLOCKED_FOLDER_MISSING,
+        DEPLOY_ERR_MOD_PATH_MISSING,
+        DEPLOY_ERR_TARGET_FOREIGN,
+        DEPLOY_ERR_PERMISSION,
+        DEPLOY_ERR_COPY,
+        DEPLOY_ERR_UNDEPLOY_MISMATCH,
+        MISSING_CONTENT_DEPLOY_ERROR,
+    ):
+        return text
+    if "目标目录已存在其他" in text:
+        return DEPLOY_ERR_TARGET_FOREIGN
     if "请先配置游戏部署目录" in text or (
         "mod" in low and "directory" in low and "not" in low
     ):
         if "不存在" in text or "does not exist" in low:
-            return "Target mod directory does not exist"
+            return DEPLOY_ERR_MOD_PATH_MISSING
         return text
+    if "Target mod directory does not exist" in text:
+        return DEPLOY_ERR_MOD_PATH_MISSING
     if "游戏安装目录不存在" in text:
-        return f"Target mod directory does not exist — {text}"
+        return DEPLOY_ERR_MOD_PATH_MISSING
     if "permission denied" in low or ("拒绝" in text and "访问" in text):
-        if text.startswith("Permission denied"):
-            return text
-        return f"Permission denied — {text}"
+        return DEPLOY_ERR_PERMISSION
+    if text.startswith("复制失败") or "复制失败" in text:
+        return DEPLOY_ERR_COPY
     # Keep archive / extract reasons verbatim for the Detail status banner.
     return text
 
@@ -418,6 +497,7 @@ class ModDeployer:
         *,
         require_target_exists: bool = False,
         prepare_archives: bool = True,
+        for_undeploy: bool = False,
     ) -> tuple[DeployContext | None, dict[str, Any] | None, Path | None]:
         mid = str(mod_id).strip()
         if not mid.isdigit():
@@ -431,13 +511,25 @@ class ModDeployer:
         source = self.files.find_by_published_id(mid)
 
         if source is None or not source.is_dir():
-            return None, {
-                "success": False,
-                "error": (
-                    f"源 Mod 目录不存在（库：{self.library_root}，mod_id={mid}）"
-                ),
-                "mod_id": mid,
-            }, None
+            if for_undeploy:
+                lkp = ""
+                try:
+                    row = db.get_mod_backup_row(mid) or {}
+                    lkp = str(row.get("last_known_path") or "").strip()
+                except Exception:  # noqa: BLE001
+                    lkp = ""
+                if lkp:
+                    candidate = Path(lkp)
+                    if candidate.is_dir():
+                        source = candidate
+            if source is None or not source.is_dir():
+                return None, {
+                    "success": False,
+                    "error": (
+                        f"源 Mod 目录不存在（库：{self.library_root}，mod_id={mid}）"
+                    ),
+                    "mod_id": mid,
+                }, None
 
         source = source.resolve()
         fs_meta = self.files.load_metadata(source)
@@ -446,6 +538,30 @@ class ModDeployer:
             app_id = int(db_meta.app_id)
         elif fs_meta and fs_meta.app_id:
             app_id = int(fs_meta.app_id)
+
+        if not app_id:
+            game_name = ""
+            if fs_meta is not None:
+                game_name = str(getattr(fs_meta, "game_name", "") or "").strip()
+            inferred = _infer_app_id_from_library_context(
+                source, db=db, game_name=game_name
+            )
+            if inferred > 0:
+                app_id = inferred
+                try:
+                    db.update_mod_identity_fields(mid, app_id=app_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "persist inferred app_id failed mod_id=%s app_id=%s",
+                        mid,
+                        app_id,
+                        exc_info=True,
+                    )
+                logger.info(
+                    "[DEPLOY] mod_id=%s inferred app_id=%s from library context",
+                    mid,
+                    app_id,
+                )
 
         if not app_id:
             return None, {
@@ -531,7 +647,7 @@ class ModDeployer:
                 if not mod_path.exists():
                     return None, {
                         "success": False,
-                        "error": "Target mod directory does not exist",
+                        "error": "Mod 安装目录不存在，请检查游戏设置",
                         "mod_id": mid,
                     }, None
             if (
@@ -616,6 +732,12 @@ class ModDeployer:
     def _mark_failed(
         self, mid: str, *, app_id: int = 0, error: str = ""
     ) -> None:
+        """
+        Record deployment_status=failed only.
+
+        Never mutates ``content_status`` / ``folder_present`` /
+        ``is_missing_content`` — Deploy failure ≠ content missing.
+        """
         msg = _normalize_deploy_error(error)
         try:
             self._database().update_mod_deploy_status(
@@ -639,6 +761,7 @@ class ModDeployer:
         mod_id: int | str,
         *,
         _deploy_stack: frozenset[str] | None = None,
+        _skip_target_ownership_check: bool = False,
     ) -> dict[str, Any]:
         """Deploy one Mod by Workshop / published file id."""
         mid = str(mod_id).strip()
@@ -653,17 +776,64 @@ class ModDeployer:
                 "mod_id": mid,
             }
 
+        # content_status gates (Phase 8) — separate from deployment_status
+        blocked = deploy_block_reason_for_content_status(
+            content_status_for_mod(mid, db=self._database())
+        )
+        if blocked:
+            logger.warning("%s result=fail error=%s", log_prefix, blocked)
+            return {
+                "success": False,
+                "error": blocked,
+                "mod_id": mid,
+                "folder_missing": blocked == DEPLOY_BLOCKED_FOLDER_MISSING,
+            }
+
         source_for_gate = self.files.find_by_published_id(mid)
-        if source_for_gate is not None and read_is_missing_content(source_for_gate):
+        if source_for_gate is None and is_mod_folder_absent(mid):
             logger.warning(
-                "%s result=fail error=%s", log_prefix, MISSING_CONTENT_DEPLOY_ERROR
+                "%s result=fail error=folder_missing", log_prefix
             )
             return {
                 "success": False,
-                "error": MISSING_CONTENT_DEPLOY_ERROR,
+                "error": DEPLOY_BLOCKED_FOLDER_MISSING,
                 "mod_id": mid,
-                "is_missing_content": True,
+                "folder_missing": True,
             }
+        if source_for_gate is not None and is_mod_folder_absent(mid, source_for_gate):
+            logger.warning(
+                "%s result=fail error=folder_missing", log_prefix
+            )
+            return {
+                "success": False,
+                "error": DEPLOY_BLOCKED_FOLDER_MISSING,
+                "mod_id": mid,
+                "folder_missing": True,
+            }
+        # Content-missing gate uses live filesystem payload. Heal stale sticky
+        # ``is_missing_content`` markers first — Deploy failure must never be
+        # confused with (or cause) content_status=content_missing.
+        if source_for_gate is not None:
+            try:
+                clear_missing_content_if_present(source_for_gate)
+            except OSError:
+                logger.debug(
+                    "%s clear stale missing-content marker failed",
+                    log_prefix,
+                    exc_info=True,
+                )
+            if read_is_missing_content(source_for_gate):
+                logger.warning(
+                    "%s result=fail error=%s",
+                    log_prefix,
+                    MISSING_CONTENT_DEPLOY_ERROR,
+                )
+                return {
+                    "success": False,
+                    "error": MISSING_CONTENT_DEPLOY_ERROR,
+                    "mod_id": mid,
+                    "is_missing_content": True,
+                }
 
         # Absolute order: deploy declared dependencies first, then this Mod.
         stack = set(_deploy_stack or ())
@@ -723,6 +893,7 @@ class ModDeployer:
                 ctx=ctx,
                 early=early,
                 relationship_warnings=relationship_warnings,
+                skip_target_ownership_check=_skip_target_ownership_check,
             )
         finally:
             if cleanup is not None:
@@ -794,6 +965,7 @@ class ModDeployer:
         ctx: DeployContext | None,
         early: dict[str, Any] | None,
         relationship_warnings: list[dict[str, Any]],
+        skip_target_ownership_check: bool = False,
     ) -> dict[str, Any]:
         if early is not None:
             logger.warning("%s result=fail error=%s", log_prefix, early.get("error"))
@@ -832,7 +1004,7 @@ class ModDeployer:
             type(strategy).__name__,
         )
 
-        # Conflict detection (warn only — never blocks deploy)
+        # Conflict detection (warn only for overlapping file claims)
         conflicts_payload: dict[str, Any] | None = None
         planned = strategy.plan(ctx)
         if planned.success and planned.files:
@@ -846,6 +1018,33 @@ class ModDeployer:
                     log_prefix,
                     len(conflicts_payload.get("files") or []),
                 )
+
+        # Phase 8: hard-block folder_copy when target tree is foreign
+        if (
+            not skip_target_ownership_check
+            and not str(ctx.custom_deploy_path or "").strip()
+            and ctx.deploy_type == DEPLOY_TYPE_FOLDER_COPY
+            and planned.success
+        ):
+            mod_path_raw = str(ctx.config.mod_path or "").strip()
+            if mod_path_raw:
+                kind = classify_folder_copy_target(
+                    mod_id=ctx.mod_id,
+                    managed=ctx.library_folder(),
+                    mod_path=mod_path_raw,
+                    library_root=self.library_root,
+                )
+                if kind == "foreign":
+                    error = DEPLOY_ERR_TARGET_FOREIGN
+                    logger.warning("%s result=fail error=%s", log_prefix, error)
+                    self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=error)
+                    return {
+                        "success": False,
+                        "error": error,
+                        "mod_id": ctx.mod_id,
+                        "deploy_type": ctx.deploy_type,
+                        "deployment_status": "conflict",
+                    }
 
         result = strategy.deploy(ctx)
         if not result.success:
@@ -872,6 +1071,11 @@ class ModDeployer:
         assert result.manifest is not None
         manifest_root = ctx.library_folder()
         try:
+            enrich_manifest_fingerprint(
+                result.manifest,
+                source=manifest_root,
+                managed=manifest_root,
+            )
             save_manifest(manifest_root, result.manifest)
         except OSError as exc:
             error = f"文件已复制，但写入部署清单失败：{exc}"
@@ -916,12 +1120,21 @@ class ModDeployer:
             "copied_files": result.copied_files,
             "deploy_type": result.deploy_type,
             "deploy_time": result.deploy_time,
+            "deployment_status": "deployed",
         }
         if conflicts_payload:
             out["conflicts"] = conflicts_payload
         if relationship_warnings:
             out["relationship_warnings"] = relationship_warnings
         return out
+
+    def deployment_status(self, mod_id: int | str) -> str:
+        """Phase 8 runtime deployment_status (not content_status)."""
+        return resolve_deployment_status(
+            mod_id,
+            library_root=self.library_root,
+            db=self._database(),
+        )
 
     def check_conflict_preview(
         self,
@@ -963,20 +1176,9 @@ class ModDeployer:
         log_prefix = f"[UNDEPLOY] mod_id={mid}"
 
         ctx, early, _cleanup = self._resolve_context(
-            mod_id, prepare_archives=False
+            mod_id, prepare_archives=False, for_undeploy=True
         )
         if early is not None:
-            if mid.isdigit() and "源 Mod 目录不存在" in str(early.get("error") or ""):
-                try:
-                    self._database().update_mod_deploy_status(
-                        mid,
-                        deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
-                        deploy_path="",
-                        deploy_time="",
-                        deploy_error="",
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
             logger.warning("%s result=fail error=%s", log_prefix, early.get("error"))
             out = dict(early)
             out["error"] = _normalize_deploy_error(str(early.get("error") or ""))
@@ -993,6 +1195,21 @@ class ModDeployer:
 
         manifest_root = ctx.library_folder()
         manifest = load_manifest(manifest_root)
+        # Phase 8: refuse undeploy when ownership cannot be confirmed
+        if manifest is None:
+            info = self._database().get_mod_deploy_info(mid) if mid.isdigit() else None
+            deploy_path = str(info.deploy_path or "").strip() if info else ""
+            if deploy_path and Path(deploy_path).exists() and any(
+                Path(deploy_path).rglob("*")
+            ):
+                error = DEPLOY_ERR_UNDEPLOY_MISMATCH
+                logger.warning("%s result=fail error=%s", log_prefix, error)
+                return {"success": False, "error": error, "mod_id": mid}
+        elif str(manifest.mod_id or "").strip() not in ("", mid):
+            error = DEPLOY_ERR_UNDEPLOY_MISMATCH
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            return {"success": False, "error": error, "mod_id": mid}
+
         # Manifest from a prior custom deploy still undeploys via CustomPathStrategy.
         if (
             manifest is not None
@@ -1063,4 +1280,4 @@ class ModDeployer:
                 "mod_id": mid,
                 "undeploy": und,
             }
-        return self.deploy_mod(mod_id)
+        return self.deploy_mod(mod_id, _skip_target_ownership_check=True)

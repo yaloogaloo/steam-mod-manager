@@ -153,6 +153,7 @@ def test_deploy_fails_when_source_missing(tmp_path: Path, db: DatabaseManager) -
 def test_redeploy_preserves_unrelated_target_files(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
+    """Phase 8: owned target may be updated; extra non-manifest files stay."""
     library = tmp_path / "mod"
     game_mods = tmp_path / "Mods"
     game_mods.mkdir()
@@ -161,13 +162,14 @@ def test_redeploy_preserves_unrelated_target_files(
     )
     db.update_game_deploy_config(13, name="Game", mod_path=str(game_mods))
 
-    target = game_mods / "ModC"
-    target.mkdir()
-    (target / "user_keep.txt").write_text("keep-me", encoding="utf-8")
-    (target / "file1.txt").write_text("old", encoding="utf-8")
-
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(9005)
+    first = deployer.deploy_mod(9005)
+    assert first["success"] is True
+
+    target = Path(first["target"])
+    (target / "user_keep.txt").write_text("keep-me", encoding="utf-8")
+
+    result = deployer.redeploy_mod(9005)
     assert result["success"] is True
 
     assert (target / "user_keep.txt").read_text(encoding="utf-8") == "keep-me"

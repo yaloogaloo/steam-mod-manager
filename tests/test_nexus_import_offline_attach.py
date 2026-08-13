@@ -53,6 +53,95 @@ def _write_html(path: Path, body: str = "Nexus Offline") -> None:
     )
 
 
+def test_nexus_batch_mhtml_cleaner_runs_once(
+    tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batch folder import must clean MHTML once (no materialize + attach double-clean)."""
+    from services.offline.nexus_cleaner.cleaner import NexusCleaner
+
+    parent = tmp_path / "batch"
+    mod = parent / "ZoomMod"
+    other = parent / "OtherMod"
+    mod.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (mod / "mod.pak").write_bytes(b"pak")
+    (other / "other.pak").write_bytes(b"pak2")
+
+    # Toolbar junk inside an ads shell — removed by a single NexusCleaner pass.
+    junk_html = """<!DOCTYPE html><html><body>
+<h1 class="mod-title">Zoom Mod</h1>
+<div class="mod-description">Good page</div>
+<div class="ads-container">
+1.00 &gt; &lt; &gt;&gt; &lt;&lt; O x1.00
+复制纯链接并附标题
+只复制纯链接
+请请我喝杯咖啡
+</div>
+</body></html>"""
+    mhtml = mod / "page.mhtml"
+    boundary = "----BatchCleanOnce"
+    html_qp = junk_html.replace("=", "=3D")
+    mhtml.write_bytes(
+        f"""From: <saved>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="{boundary}"
+
+--{boundary}
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+{html_qp}
+
+--{boundary}--
+""".encode(
+            "utf-8"
+        )
+    )
+
+    calls = {"n": 0}
+    real_process = NexusCleaner.process_file
+
+    def counting_process(self, mhtml_path, output_dir):
+        calls["n"] += 1
+        return real_process(self, mhtml_path, output_dir)
+
+    monkeypatch.setattr(NexusCleaner, "process_file", counting_process)
+
+    lib = tmp_path / "library"
+    worker = ImportWorker(
+        platform=PLATFORM_NEXUS,
+        library_root=lib,
+        params={
+            "folder": str(parent),
+            "source_path": "",
+            "use_archive": False,
+            "nexus_url": "",
+            "nexus_id": "",
+            "title": "",
+            "cover_source": "",
+            "offline_html_path": "",
+            "offline_clean": True,
+            "is_batch_mode": True,
+            "game_id": 1623730,
+            "game_name": "Palworld",
+            "context": PALWORLD.as_dict(),
+        },
+    )
+    result = worker._do_import()
+    assert result.success, result.error
+    assert result.imported_count == 2
+    assert calls["n"] == 1  # only ZoomMod has MHTML; OtherMod has none
+
+    zoom_dirs = list(lib.rglob("ZoomMod"))
+    assert zoom_dirs
+    index = zoom_dirs[0] / INFO_DIR_NAME / "offline" / "index.html"
+    assert index.is_file()
+    text = index.read_text(encoding="utf-8")
+    assert "Zoom Mod" in text or "Good page" in text
+    assert "复制纯链接并附标题" not in text
+    assert "请请我喝杯咖啡" not in text
+
+
 def test_nexus_import_with_html_attaches_offline(
     tmp_path: Path, db: DatabaseManager
 ) -> None:

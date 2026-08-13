@@ -38,6 +38,7 @@ from core.mod_platform import (
     default_source_url_for_platform,
     get_available_sources,
     is_anno_1800_game,
+    is_stardew_valley_game,
     platform_requires_source_url,
 )
 from services.importers.archive import is_archive_path
@@ -199,11 +200,13 @@ class ModImportDialog(QDialog):
         self._apply_game_platform_rules()
 
     def _apply_game_platform_rules(self) -> None:
-        """Anno 1800 has no Steam Workshop — hide radio and move selection."""
+        """Anno 1800 / Stardew Valley have no Steam Workshop — hide radio."""
         steam_radio = self._platform_radios.get(PLATFORM_STEAM)
         if steam_radio is None:
             return
-        hide_steam = is_anno_1800_game(self.game_name, self.game_id)
+        hide_steam = is_anno_1800_game(
+            self.game_name, self.game_id
+        ) or is_stardew_valley_game(self.game_name, self.game_id)
         steam_radio.setVisible(not hide_steam)
         if hide_steam and (steam_radio.isChecked() or steam_radio.isHidden()):
             # Prefer first non-Steam visible option (mod.io / Nexus / …).

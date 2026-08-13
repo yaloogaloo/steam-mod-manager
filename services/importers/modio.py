@@ -82,7 +82,11 @@ class ModioImporter(ModImporter):
         if not ext:
             ext = folder.name
         name = (title or "").strip() or folder.name
-        if not url:
+        is_batch = bool(_kwargs.get("is_batch_mode"))
+        if is_batch:
+            # Batch folder import: never invent / default source URLs.
+            url = ""
+        elif not url:
             url = default_source_url_for_platform(
                 PLATFORM_MODIO,
                 game_name=ctx.game_name,

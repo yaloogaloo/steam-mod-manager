@@ -158,7 +158,13 @@ def load_info_sidecar(managed_path: str | Path) -> InfoSidecar | None:
     return InfoSidecar.from_dict(data)
 
 
-def save_info_sidecar(managed_path: str | Path, sidecar: InfoSidecar) -> Path:
+def save_info_sidecar(
+    managed_path: str | Path,
+    sidecar: InfoSidecar,
+    *,
+    sync_backup: bool = True,
+    sync_reason: str = "edit",
+) -> Path:
     root = Path(managed_path)
     base = read_info_metadata_dict(root) or {}
     payload = sidecar.to_dict()
@@ -170,7 +176,9 @@ def save_info_sidecar(managed_path: str | Path, sidecar: InfoSidecar) -> Path:
         merged["title"] = sidecar.display_name
     if sidecar.description:
         merged["description"] = sidecar.description
-    return persist_unified_metadata_dict(root, merged)
+    return persist_unified_metadata_dict(
+        root, merged, sync_backup=sync_backup, sync_reason=sync_reason
+    )
 
 
 def _merge_metadata_patch(
@@ -339,6 +347,8 @@ def write_sidecar_for_mod(
     mod_id: int | str | None = None,
     *,
     db=None,
+    sync_backup: bool = True,
+    sync_reason: str = "edit",
 ) -> Path | None:
     """Persist current DB state into ``.info/metadata.json``."""
     root = Path(managed_path)
@@ -353,7 +363,9 @@ def write_sidecar_for_mod(
         return None
     try:
         sidecar = build_sidecar_from_db(mid, root, db=db)
-        return save_info_sidecar(root, sidecar)
+        return save_info_sidecar(
+            root, sidecar, sync_backup=sync_backup, sync_reason=sync_reason
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to write info sidecar for %s: %s", root, exc)
         return None
@@ -383,15 +395,16 @@ def _apply_roles_to_bundle(
         label = roles.get(name, ROLE_OTHER)
         if eid == main_id or label == ROLE_MAIN:
             entry.file_role = main_role
-            entry.set_selection(True)
+            # Role only — never force Main checked (user may uncheck for deploy).
         elif eid == source_id or label == ROLE_SOURCE:
             entry.file_role = source_role
+            # Source is never deployed.
             entry.set_selection(False)
         elif label == ROLE_OTHER:
             kind = _badge_kind(entry)
             if kind in (ROLE_MAIN, ROLE_SOURCE):
                 entry.file_role = FILE_ROLE_UNKNOWN
-                entry.set_selection(False)
+                # Keep existing selection; do not lock checkboxes.
     return bundle
 
 
@@ -626,5 +639,14 @@ def rescan_mod_folder(
             JsonMgr(database).replace_all(mid, bundle)
 
     if mid and mid.isdigit():
-        write_sidecar_for_mod(root, mid, db=database)
+        # Silent Nexus workspace_id wash — never blocks refresh.
+        try:
+            from core.mod_platform import silent_correct_nexus_workspace_id
+
+            silent_correct_nexus_workspace_id(mid)
+        except Exception:  # noqa: BLE001
+            pass
+        write_sidecar_for_mod(
+            root, mid, db=database, sync_backup=True, sync_reason="rescan"
+        )
     return bundle

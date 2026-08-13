@@ -19,7 +19,7 @@ from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 logger = logging.getLogger(__name__)
 
 DEPLOY_TYPE_CUSTOM_PATH = "custom_path"
-_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME})
+_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"})
 
 
 def _utc_now() -> str:

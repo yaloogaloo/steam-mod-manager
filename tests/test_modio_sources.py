@@ -72,6 +72,26 @@ def test_get_available_sources_injects_modio_only_for_anno() -> None:
     assert [p for p, _ in anno_en][0] == PLATFORM_MODIO
 
 
+def test_stardew_sources_omit_steam() -> None:
+    from core.mod_platform import is_stardew_valley_game
+
+    assert is_stardew_valley_game("星露谷物语")
+    assert is_stardew_valley_game("Stardew Valley")
+    assert is_stardew_valley_game(game_id=413150)
+
+    sv = get_available_sources("星露谷物语", 413150)
+    assert PLATFORM_STEAM not in {p for p, _ in sv}
+    assert [p for p, _ in sv] == [
+        PLATFORM_NEXUS,
+        PLATFORM_GITHUB,
+        PLATFORM_OTHER,
+    ]
+    assert PLATFORM_MODIO not in {p for p, _ in sv}
+
+    en = get_available_sources("Stardew Valley", 0)
+    assert PLATFORM_STEAM not in {p for p, _ in en}
+
+
 def test_other_platform_url_optional() -> None:
     assert not platform_requires_source_url(PLATFORM_OTHER)
     assert platform_requires_source_url(PLATFORM_GITHUB)
@@ -144,6 +164,18 @@ def test_import_dialog_steam_visible_for_non_anno(
     )
     assert dlg.radio_steam is not None
     assert not dlg.radio_steam.isHidden()
+    dlg.close()
+
+
+def test_import_dialog_omits_steam_for_stardew(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    dlg = ModImportDialog(
+        tmp_path,
+        game_context={"game_id": 413150, "game_name": "星露谷物语"},
+    )
+    assert PLATFORM_STEAM not in dlg._platform_radios
+    assert dlg.radio_steam is None
     dlg.close()
 
 

@@ -270,6 +270,7 @@ def _download_cover(
             tmp_file,
             mod_id=mod_id,
             update_db=True,
+            sync_backup=False,
         )
     return rel or ""
 
@@ -529,6 +530,12 @@ def refresh_modio_mod_metadata(
             details.name,
             new_path,
         )
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            sync_after_metadata_change(mid, new_path, "refresh")
+        except Exception:  # noqa: BLE001
+            pass
         return MetadataRefreshResult(
             mod_id=mid,
             success=True,

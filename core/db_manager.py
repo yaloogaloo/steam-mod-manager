@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from .mod_platform import (
     SUPPORTED_PLATFORMS,
     ModFileEntry,
     ModFilesBundle,
+    corrected_nexus_workspace_id,
     generate_unique_workspace_id,
     normalize_offline_status,
     normalize_platform,
@@ -184,6 +186,20 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("offline_provider", "TEXT NOT NULL DEFAULT ''"),
     ("offline_updated_at", "TEXT NOT NULL DEFAULT ''"),
     ("cover_path", "TEXT NOT NULL DEFAULT ''"),
+    ("last_known_path", "TEXT NOT NULL DEFAULT ''"),
+    ("folder_present", "INTEGER NOT NULL DEFAULT 1"),
+    ("backup_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("backup_metadata_json", "TEXT NOT NULL DEFAULT ''"),
+    ("backup_cover_path", "TEXT NOT NULL DEFAULT ''"),
+    ("backup_offline_path", "TEXT NOT NULL DEFAULT ''"),
+    ("backup_status", "TEXT NOT NULL DEFAULT ''"),
+    ("backup_last_validate_at", "TEXT NOT NULL DEFAULT ''"),
+    ("internal_id", "TEXT NOT NULL DEFAULT ''"),
+    ("library_status", "TEXT NOT NULL DEFAULT ''"),
+    ("source_type", "TEXT NOT NULL DEFAULT ''"),
+    ("content_status", "TEXT NOT NULL DEFAULT ''"),
+    ("official_metadata_synced", "INTEGER NOT NULL DEFAULT 0"),
+    ("user_override_fields", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 DEPLOY_STATUS_NOT_DEPLOYED = "not_deployed"
@@ -464,9 +480,26 @@ class DatabaseManager:
 
     @classmethod
     def instance(cls, db_path: str | Path | None = None) -> DatabaseManager:
+        """Return the process-wide singleton.
+
+        When *db_path* is given and differs from the open singleton (typical in
+        tests), close and reopen so callers never silently write to the wrong DB.
+        Omitting *db_path* keeps the existing instance (production GUI path).
+        """
         with cls._instance_lock:
             if cls._instance is None:
+                if db_path is None:
+                    test_db = os.environ.get("SMM_TEST_DB", "").strip()
+                    if test_db:
+                        db_path = test_db
                 cls._instance = cls(db_path=db_path)
+                return cls._instance
+            if db_path is not None:
+                requested = Path(db_path).expanduser().resolve()
+                current = Path(cls._instance.db_path).expanduser().resolve()
+                if requested != current:
+                    cls._instance.close()
+                    cls._instance = cls(db_path=db_path)
             return cls._instance
 
     @classmethod
@@ -647,6 +680,46 @@ class DatabaseManager:
             (wid, int(mod_id)),
         )
         return wid
+
+    def correct_nexus_workspace_id_from_url(
+        self, mod_id: int | str
+    ) -> str | None:
+        """
+        Silently overwrite ``workspace_id`` from Nexus ``source_url``
+        ``/mods/<id>`` when mismatched. Never raises — returns ``None`` on
+        any miss / error (safe inside batch refresh loops).
+        """
+        try:
+            mid = int(str(mod_id).strip())
+            now = _utc_now()
+            with self._lock:
+                row = self._conn.execute(
+                    """
+                    SELECT platform, source_url, workspace_id
+                    FROM mods WHERE mod_id = ?
+                    """,
+                    (mid,),
+                ).fetchone()
+                if row is None:
+                    return None
+                new_wid = corrected_nexus_workspace_id(
+                    platform=str(row["platform"] or ""),
+                    source_url=str(row["source_url"] or ""),
+                    workspace_id=str(row["workspace_id"] or ""),
+                )
+                if not new_wid:
+                    return None
+                self._conn.execute(
+                    """
+                    UPDATE mods SET workspace_id = ?, updated_at = ?
+                    WHERE mod_id = ?
+                    """,
+                    (new_wid, now, mid),
+                )
+                self._conn.commit()
+                return new_wid
+        except Exception:  # noqa: BLE001
+            return None
 
     def _ensure_unique_platform_external_index(self) -> None:
         """
@@ -1056,6 +1129,136 @@ class DatabaseManager:
                 return int(NON_STEAM_MOD_ID_BASE)
             return mx + 1
 
+    def find_mod_by_internal_id(self, internal_id: str) -> str | None:
+        key = str(internal_id or "").strip()
+        if not key:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id FROM mods
+                WHERE TRIM(internal_id) = ?
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["mod_id"])
+
+    def find_mod_by_workspace_id(
+        self,
+        workspace_id: str,
+        *,
+        platform: str | None = None,
+    ) -> str | None:
+        key = str(workspace_id or "").strip()
+        if not key:
+            return None
+        plat = normalize_platform(platform) if platform else ""
+        with self._lock:
+            if plat:
+                row = self._conn.execute(
+                    """
+                    SELECT mod_id FROM mods
+                    WHERE TRIM(workspace_id) = ? AND platform = ?
+                    LIMIT 1
+                    """,
+                    (key, plat),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT mod_id FROM mods
+                    WHERE TRIM(workspace_id) = ?
+                    LIMIT 1
+                    """,
+                    (key,),
+                ).fetchone()
+        if row is None:
+            return None
+        return str(row["mod_id"])
+
+    def update_mod_identity_fields(
+        self,
+        mod_id: int | str,
+        *,
+        internal_id: str | None = None,
+        library_status: str | None = None,
+        source_type: str | None = None,
+        content_status: str | None = None,
+        last_known_path: str | None = None,
+        folder_present: bool | None = None,
+        game_name: str | None = None,
+        title: str | None = None,
+        platform: str | None = None,
+        source_url: str | None = None,
+        external_id: str | None = None,
+        workspace_id: str | None = None,
+        app_id: int | None = None,
+        sticky_source: bool = True,
+    ) -> None:
+        """Patch identity / library-status fields used by reconcile."""
+        mid = int(str(mod_id).strip())
+        now = _utc_now()
+        sets: list[str] = ["updated_at = ?"]
+        params: list[Any] = [now]
+        if internal_id is not None:
+            sets.append("internal_id = ?")
+            params.append(str(internal_id or "").strip())
+        if library_status is not None:
+            sets.append("library_status = ?")
+            params.append(str(library_status or "").strip())
+        if content_status is not None:
+            sets.append("content_status = ?")
+            params.append(str(content_status or "").strip())
+        if source_type is not None and str(source_type).strip():
+            src = str(source_type).strip().lower()
+            if sticky_source:
+                sets.append(
+                    "source_type = CASE "
+                    "WHEN TRIM(COALESCE(source_type, '')) = '' THEN ? "
+                    "ELSE source_type END"
+                )
+            else:
+                sets.append("source_type = ?")
+            params.append(src)
+        if last_known_path is not None:
+            sets.append("last_known_path = ?")
+            params.append(str(last_known_path or "").strip())
+        if folder_present is not None:
+            sets.append("folder_present = ?")
+            params.append(1 if folder_present else 0)
+        if game_name is not None:
+            # game_name lives on games join; store via title/app only when needed
+            pass
+        if title is not None and str(title).strip():
+            sets.append("title = COALESCE(NULLIF(TRIM(title), ''), ?)")
+            params.append(str(title).strip())
+        if platform is not None and str(platform).strip():
+            sets.append("platform = ?")
+            params.append(normalize_platform(platform))
+        if source_url is not None:
+            sets.append("source_url = ?")
+            params.append(str(source_url or "").strip())
+        if external_id is not None:
+            sets.append("external_id = ?")
+            params.append(str(external_id or "").strip())
+        if workspace_id is not None:
+            sets.append("workspace_id = ?")
+            params.append(str(workspace_id or "").strip())
+        if app_id is not None and int(app_id) > 0:
+            sets.append("app_id = ?")
+            params.append(int(app_id))
+        params.append(mid)
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            self._conn.execute(
+                f"UPDATE mods SET {', '.join(sets)} WHERE mod_id = ?",
+                tuple(params),
+            )
+            self._conn.commit()
+
     def find_mod_by_external(
         self,
         platform: str,
@@ -1267,7 +1470,20 @@ class DatabaseManager:
             ).fetchone()
         if row is None:
             return ModFilesBundle()
-        return ModFilesBundle.from_json(str(row["mod_files"] or ""))
+        bundle = ModFilesBundle.from_json(str(row["mod_files"] or ""))
+        # 清剿旧缓存：剔除「历史版本」漏网条目并写回
+        from services.importers.local_scanner import (
+            filter_out_history_version_entries,
+        )
+
+        cleaned = filter_out_history_version_entries(bundle.files)
+        if len(cleaned) != len(bundle.files):
+            bundle.files = list(cleaned)
+            try:
+                self.set_mod_files(mid, bundle)
+            except Exception:  # noqa: BLE001
+                pass
+        return bundle
 
     def set_mod_files(
         self,
@@ -1282,6 +1498,9 @@ class DatabaseManager:
             parsed = ModFilesBundle.from_json(bundle)
         else:
             parsed = ModFilesBundle.from_dict(bundle)
+        from services.importers.local_scanner import filter_out_history_version_entries
+
+        parsed.files = list(filter_out_history_version_entries(parsed.files))
         payload = parsed.to_json()
         now = _utc_now()
         with self._lock:
@@ -1373,6 +1592,240 @@ class DatabaseManager:
                 (value, now, mid),
             )
             self._conn.commit()
+
+    def update_mod_backup_snapshot(
+        self,
+        mod_id: int | str,
+        *,
+        last_known_path: str,
+        folder_present: bool,
+        backup_metadata_json: str,
+        backup_cover_path: str = "",
+        backup_offline_path: str = "",
+    ) -> None:
+        """Persist metadata backup fields after ``sync_metadata_backup``."""
+        mid = int(str(mod_id).strip())
+        now = _utc_now()
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            self._conn.execute(
+                """
+                UPDATE mods SET
+                    last_known_path = ?,
+                    folder_present = ?,
+                    backup_updated_at = ?,
+                    backup_metadata_json = ?,
+                    backup_cover_path = ?,
+                    backup_offline_path = ?,
+                    updated_at = ?
+                WHERE mod_id = ?
+                """,
+                (
+                    str(last_known_path or "").strip(),
+                    1 if folder_present else 0,
+                    now,
+                    str(backup_metadata_json or ""),
+                    str(backup_cover_path or "").strip(),
+                    str(backup_offline_path or "").strip(),
+                    now,
+                    mid,
+                ),
+            )
+            self._conn.commit()
+
+    def update_mod_backup_status(
+        self,
+        mod_id: int | str,
+        *,
+        status: str,
+        touch_validate_at: bool = True,
+    ) -> None:
+        """Set ``backup_status`` / optional ``backup_last_validate_at``."""
+        mid = int(str(mod_id).strip())
+        value = str(status or "").strip()
+        now = _utc_now()
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            if touch_validate_at:
+                self._conn.execute(
+                    """
+                    UPDATE mods SET
+                        backup_status = ?,
+                        backup_last_validate_at = ?,
+                        updated_at = ?
+                    WHERE mod_id = ?
+                    """,
+                    (value, now, now, mid),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE mods SET
+                        backup_status = ?,
+                        updated_at = ?
+                    WHERE mod_id = ?
+                    """,
+                    (value, now, mid),
+                )
+            self._conn.commit()
+
+    def set_mod_folder_present(self, mod_id: int | str, *, present: bool) -> None:
+        mid = int(str(mod_id).strip())
+        now = _utc_now()
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            self._conn.execute(
+                """
+                UPDATE mods SET folder_present = ?, updated_at = ?
+                WHERE mod_id = ?
+                """,
+                (1 if present else 0, now, mid),
+            )
+            self._conn.commit()
+
+    def get_mods_backup_rows(
+        self, mod_ids: list[str] | list[int]
+    ) -> dict[str, dict[str, Any]]:
+        """Batch ``get_mod_backup_row`` for snapshot builds (avoids N+1)."""
+        ids: list[int] = []
+        for raw in mod_ids:
+            text = str(raw or "").strip()
+            if text.isdigit():
+                ids.append(int(text))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT mod_id, app_id, last_known_path, folder_present,
+                       backup_updated_at, backup_metadata_json,
+                       backup_cover_path, backup_offline_path,
+                       backup_status, backup_last_validate_at,
+                       offline_status, internal_id, library_status,
+                       source_type, content_status, platform
+                FROM mods WHERE mod_id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            mid = str(row["mod_id"])
+            out[mid] = {str(k): row[k] for k in row.keys()}
+        return out
+
+    def get_mod_backup_row(self, mod_id: int | str) -> dict[str, Any] | None:
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id, app_id, last_known_path, folder_present,
+                       backup_updated_at, backup_metadata_json,
+                       backup_cover_path, backup_offline_path,
+                       backup_status, backup_last_validate_at,
+                       offline_status, internal_id, library_status,
+                       source_type, content_status, platform
+                FROM mods WHERE mod_id = ?
+                """,
+                (mid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {str(k): row[k] for k in row.keys()}
+
+    def get_mod_backup_row_by_path(self, path: str) -> dict[str, Any] | None:
+        key = str(path or "").strip()
+        if not key:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id, app_id, last_known_path, folder_present,
+                       backup_updated_at, backup_metadata_json,
+                       backup_cover_path, backup_offline_path
+                FROM mods
+                WHERE last_known_path = ?
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {str(k): row[k] for k in row.keys()}
+
+    def iter_mod_backup_rows(self) -> list[dict[str, Any]]:
+        """Rows that have ever been backed up (``last_known_path`` or backup JSON)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id, app_id, last_known_path, folder_present,
+                       backup_updated_at, backup_metadata_json,
+                       backup_cover_path, backup_offline_path,
+                       backup_status, library_status, source_type,
+                       content_status, platform
+                FROM mods
+                WHERE TRIM(last_known_path) != ''
+                   OR TRIM(backup_metadata_json) != ''
+                """
+            ).fetchall()
+        return [{str(k): row[k] for k in row.keys()} for row in rows]
+
+    def list_folder_missing_mods(
+        self,
+        *,
+        game_folder: str | None = None,
+        library_root: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Mods with ``folder_present = 0`` and a backup snapshot.
+
+        Optional *game_folder* filters by parent folder name in ``last_known_path``.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id, app_id, last_known_path, folder_present,
+                       backup_updated_at, backup_metadata_json,
+                       backup_cover_path, backup_offline_path
+                FROM mods
+                WHERE folder_present = 0
+                  AND TRIM(backup_metadata_json) != ''
+                ORDER BY mod_id
+                """
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        game_key = str(game_folder or "").strip()
+        root = Path(library_root) if library_root is not None else None
+        for row in rows:
+            item = {str(k): row[k] for k in row.keys()}
+            if not game_key:
+                out.append(item)
+                continue
+            lkp = str(item.get("last_known_path") or "").strip()
+            if not lkp:
+                continue
+            try:
+                rel = Path(lkp).resolve().relative_to(root.resolve()) if root else Path(lkp)
+                parts = rel.parts
+                if parts and parts[0] == game_key:
+                    out.append(item)
+            except (ValueError, OSError):
+                if Path(lkp).parent.name == game_key:
+                    out.append(item)
+        return out
+
+    def count_folder_missing_mods(
+        self,
+        *,
+        game_folder: str | None = None,
+        library_root: str | Path | None = None,
+    ) -> int:
+        return len(
+            self.list_folder_missing_mods(
+                game_folder=game_folder,
+                library_root=library_root,
+            )
+        )
 
     def register_external_mod(
         self,
@@ -2061,6 +2514,11 @@ class DatabaseManager:
                         (custom_deploy_path or "", now, mid),
                     )
                 self._ensure_mod_workspace_id_locked(mid)
+            self._apply_user_override_flags_from_save(
+                mid,
+                display_name=display_name,
+                custom_description=custom_description,
+            )
             self._conn.commit()
             row = self._conn.execute(
                 f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?",
@@ -2068,6 +2526,106 @@ class DatabaseManager:
             ).fetchone()
         assert row is not None
         return _display_info_from_row(row)
+
+    def get_user_override_fields(self, mod_id: int | str) -> dict[str, bool]:
+        from services.metadata_ownership import parse_user_override_fields
+
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_override_fields FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+        if row is None:
+            return {}
+        keys = set(row.keys()) if hasattr(row, "keys") else {"user_override_fields"}
+        raw = str(row["user_override_fields"] or "") if "user_override_fields" in keys else ""
+        return parse_user_override_fields(raw)
+
+    def set_user_override_field(
+        self, mod_id: int | str, field: str, *, overridden: bool = True
+    ) -> None:
+        from services.metadata_ownership import (
+            FIELD_COVER,
+            FIELD_DESCRIPTION,
+            FIELD_DISPLAY_NAME,
+            parse_user_override_fields,
+            serialize_user_override_fields,
+        )
+
+        key = str(field or "").strip()
+        if key not in {FIELD_DISPLAY_NAME, FIELD_DESCRIPTION, FIELD_COVER}:
+            return
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            row = self._conn.execute(
+                "SELECT user_override_fields FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+            current = parse_user_override_fields(
+                str(row["user_override_fields"] or "") if row else ""
+            )
+            if overridden:
+                current[key] = True
+            else:
+                current.pop(key, None)
+            self._conn.execute(
+                """
+                UPDATE mods SET user_override_fields = ?, updated_at = ?
+                WHERE mod_id = ?
+                """,
+                (serialize_user_override_fields(current), _utc_now(), mid),
+            )
+            self._conn.commit()
+
+    def _apply_user_override_flags_from_save(
+        self,
+        mod_id: int,
+        *,
+        display_name: str,
+        custom_description: str,
+    ) -> None:
+        from services.metadata_ownership import (
+            FIELD_DESCRIPTION,
+            FIELD_DISPLAY_NAME,
+            is_placeholder_display_name,
+        )
+
+        if display_name.strip() and not is_placeholder_display_name(
+            display_name, published_file_id=str(mod_id)
+        ):
+            self.set_user_override_field(mod_id, FIELD_DISPLAY_NAME, overridden=True)
+        elif not display_name.strip():
+            self.set_user_override_field(mod_id, FIELD_DISPLAY_NAME, overridden=False)
+        if custom_description.strip():
+            self.set_user_override_field(mod_id, FIELD_DESCRIPTION, overridden=True)
+
+    def is_official_metadata_synced(self, mod_id: int | str) -> bool:
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT official_metadata_synced FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+        if row is None:
+            return False
+        return bool(int(row["official_metadata_synced"] or 0))
+
+    def set_official_metadata_synced(
+        self, mod_id: int | str, synced: bool
+    ) -> None:
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            self._conn.execute(
+                """
+                UPDATE mods SET official_metadata_synced = ?, updated_at = ?
+                WHERE mod_id = ?
+                """,
+                (1 if synced else 0, _utc_now(), mid),
+            )
+            self._conn.commit()
 
     # ------------------------------------------------------------------
     # Mods — deploy status (written by deployer; not by Steam sync)

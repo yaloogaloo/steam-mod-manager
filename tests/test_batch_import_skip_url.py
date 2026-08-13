@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from core.db_manager import DatabaseManager
 from core.mod_platform import PLATFORM_GITHUB, PLATFORM_NEXUS
 from services.importers.github import GithubImporter
+from services.importers.nexus import NexusImporter
 from ui.mod_import_dialog import ModImportDialog
 
 
@@ -94,6 +95,29 @@ def test_collect_params_single_github_still_requires_url(
     params = dlg._collect_params(PLATFORM_GITHUB)
     assert params is None
     assert any("GitHub URL" in w for w in warned)
+
+
+def test_nexus_batch_forces_empty_source_url(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    folder = tmp_path / "Cool_Mod_Name"
+    folder.mkdir()
+    (folder / "a.pak").write_bytes(b"a")
+    lib = tmp_path / "lib"
+    result = NexusImporter(db=db).import_mod(
+        source_folder=folder,
+        title="Cool_Mod_Name",
+        nexus_id="Cool_Mod_Name",
+        nexus_url="",
+        library_root=lib,
+        context={"game_id": 1623730, "game_name": "Palworld"},
+        is_batch_mode=True,
+    )
+    assert result.success
+    assert result.source_url == ""
+    info = db.get_mod_display_info(result.mod_id)
+    assert info is not None
+    assert (info.source_url or "") == ""
 
 
 def test_github_batch_import_without_url(

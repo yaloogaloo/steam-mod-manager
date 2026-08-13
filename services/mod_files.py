@@ -24,6 +24,7 @@ from core.mod_platform import (
     PLATFORM_GITHUB,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
+    SOURCE_TYPE_NEXUS,
     default_selected_for_role,
     new_file_id,
     normalize_file_role,
@@ -166,6 +167,60 @@ class ModFileManager:
         else:
             meta.pop("description", None)
         target.metadata = meta
+        self._database().set_mod_files(mod_id, bundle)
+        return target
+
+    def set_nexus_file_category(
+        self,
+        mod_id: int | str,
+        file_id: str,
+        category: str,
+    ) -> ModFileEntry | None:
+        """
+        Set one Nexus file to a whitelist category and persist.
+
+        Updates ``metadata.category``, ``file_role``, selection (Main → checked;
+        all other categories → unchecked), then saves.
+        """
+        fid = str(file_id or "").strip()
+        if not fid:
+            return None
+        raw_cat = str(category or "").lower()
+        if "main" in raw_cat:
+            cat = "Main"
+        elif "optional" in raw_cat:
+            cat = "Optional"
+        elif "miscellaneous" in raw_cat:
+            cat = "Miscellaneous"
+        elif "汉化" in raw_cat:
+            cat = "汉化"
+        else:
+            cat = "Other"
+        role_map = {
+            "Main": FILE_ROLE_NEXUS_MAIN,
+            "Optional": FILE_ROLE_NEXUS_OPTIONAL,
+            "Miscellaneous": FILE_ROLE_NEXUS_MISC,
+            "汉化": FILE_ROLE_UNKNOWN,
+            "Other": FILE_ROLE_UNKNOWN,
+        }
+        type_map = {
+            "Main": FILE_TYPE_MAIN,
+            "Optional": FILE_TYPE_OPTIONAL,
+            "Miscellaneous": FILE_TYPE_OPTIONAL,
+            "汉化": FILE_TYPE_OPTIONAL,
+            "Other": FILE_TYPE_OPTIONAL,
+        }
+        bundle = self._database().get_mod_files(mod_id)
+        target = bundle.find(fid)
+        if target is None:
+            return None
+        meta = dict(target.metadata or {})
+        meta["category"] = cat
+        target.metadata = meta
+        target.file_role = role_map.get(cat, FILE_ROLE_UNKNOWN)
+        target.type = type_map.get(cat, FILE_TYPE_OPTIONAL)
+        target.source_type = SOURCE_TYPE_NEXUS
+        target.set_selection(cat == "Main")
         self._database().set_mod_files(mod_id, bundle)
         return target
 

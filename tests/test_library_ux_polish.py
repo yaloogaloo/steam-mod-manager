@@ -288,6 +288,14 @@ def test_loading_flag_clears_after_refresh(
     view = ModLibraryView()
     view.set_target_root(str(library))
     assert view.loading_overlay.isHidden()
+    assert view.loading_overlay.testAttribute(
+        Qt.WidgetAttribute.WA_TranslucentBackground
+    )
+    assert "transparent" in (view.loading_overlay.styleSheet() or "")
+    assert view.loading_label.testAttribute(
+        Qt.WidgetAttribute.WA_TranslucentBackground
+    )
+    assert "transparent" in (view.loading_label.styleSheet() or "")
     view.refresh()
     assert view._loading is False
     assert view.loading_overlay.isHidden()

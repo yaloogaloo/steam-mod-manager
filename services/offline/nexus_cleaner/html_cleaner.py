@@ -32,6 +32,28 @@ _LOGIN_TOKENS = (
     "auth_modal",
     "account-popup",
 )
+# Browser-extension / floating injectors saved into MHTML (not Nexus page content).
+_EXTENSION_TOKENS = (
+    "dms-link",
+    "dms-lc",
+    "dmscl",
+    "link-cleaner",
+    "k-support",
+    "rwl-iqxin",
+    "rwl-exempt",
+    "rwl-set",
+    "remove-web-limits",
+    "chrome-extension",
+    "moz-extension",
+    "browser-extension",
+    "crx-",
+)
+_EXTENSION_ATTR_MARKERS = (
+    "chrome-extension://",
+    "moz-extension://",
+    "safari-extension://",
+    "ms-browser-extension://",
+)
 # Keep these even if empty-looking — core Mod reading areas.
 _PRESERVE_TOKENS = (
     "mod-page",
@@ -138,6 +160,103 @@ def _is_empty_shell(node: Tag) -> bool:
     return not _has_meaningful_child(node)
 
 
+def _attr_blob(node: Tag) -> str:
+    if not _is_live(node):
+        return ""
+    parts: list[str] = []
+    for key, val in (node.attrs or {}).items():
+        parts.append(str(key))
+        if isinstance(val, list):
+            parts.extend(str(x) for x in val)
+        else:
+            parts.append(str(val))
+    return " ".join(parts).casefold()
+
+
+def _is_extension_overlay(node: Tag) -> bool:
+    """True for browser-extension injectors (link cleaners, tip jars, unlockers)."""
+    if not _is_live(node) or node.name in {"html", "head", "body"}:
+        return False
+    if _is_preserved(node):
+        return False
+    name = (node.name or "").casefold()
+    tokens = _tokens_of(node)
+    attrs = _attr_blob(node)
+    if _matches_any(tokens, _EXTENSION_TOKENS) or _matches_any(name, _EXTENSION_TOKENS):
+        return True
+    if any(marker in attrs for marker in _EXTENSION_ATTR_MARKERS):
+        return True
+    # Custom elements used only by injectors (e.g. <remove-web-limits-iqxin>).
+    if "-" in name and _matches_any(name, ("web-limits", "iqxin", "extension")):
+        return True
+    return False
+
+
+def _remove_extension_overlays(soup: BeautifulSoup) -> None:
+    """Drop floating extension widgets that browsers save into MHTML."""
+    # Deepest-first so nested panel bits disappear with their root.
+    for node in list(reversed(soup.find_all(True))):
+        if not _is_live(node):
+            continue
+        if _is_extension_overlay(node):
+            node.decompose()
+
+
+def _strip_trailing_extension_text(soup: BeautifulSoup) -> None:
+    """
+    Remove orphan body-tail text clumps left after extension DOM removal.
+
+    Only targets direct body children that look like toolbar residue:
+    no links/images/semantic tags, mostly punctuation / short tokens.
+    """
+    body = soup.body
+    if body is None:
+        return
+    junk_char = re.compile(r"[\d.><xXO︽︾\s|]+")
+    kids = [c for c in list(body.children) if isinstance(c, (Tag, NavigableString))]
+    # Walk from the end; stop once we hit real page content (#app / main / article).
+    for child in reversed(kids):
+        if isinstance(child, NavigableString):
+            text = str(child).strip()
+            if not text:
+                continue
+            if junk_char.fullmatch(text) or len(text) <= 4:
+                child.extract()
+                continue
+            break
+        if not isinstance(child, Tag):
+            continue
+        if child.name in {"main", "article"}:
+            break
+        if child.name in {"img", "picture", "video", "svg", "figure"}:
+            break
+        cid = str(child.get("id") or "").casefold()
+        if cid in {"app", "main", "content", "root"} or cid.startswith("mod"):
+            break
+        if _is_preserved(child):
+            break
+        if _has_media(child):
+            break
+        if child.find(["a", "img", "picture", "video", "h1", "h2", "h3"]):
+            break
+        if child.find(["section", "article", "main", "nav", "header", "footer"]):
+            break
+        text = _visible_text(child)
+        if not text:
+            # Empty non-media shells at the tail can go; keep anything with structure.
+            if child.find(True):
+                break
+            child.decompose()
+            continue
+        # Short toolbar residue without semantic structure.
+        if len(text) < 80 and not child.find("p") and not child.find("ul"):
+            alnum = sum(1 for ch in text if ch.isalnum())
+            if alnum < max(4, len(text) // 3):
+                child.decompose()
+                continue
+        break
+
+
 def clean_html(html_text: str) -> str:
     """
     Strip ads, login chrome, iframes, scripts, and empty dynamic shells.
@@ -154,12 +273,15 @@ def clean_html(html_text: str) -> str:
     for node in list(soup.find_all("iframe")):
         node.decompose()
 
-    # 3) Drop noscript / template chrome often wrapping empty widgets.
+    # 3) Browser-extension overlays (link cleaners / tip jars / unlockers).
+    _remove_extension_overlays(soup)
+
+    # 4) Drop noscript / template chrome often wrapping empty widgets.
     for node in list(soup.find_all(["noscript", "template"])):
         if _is_empty_shell(node) or not _visible_text(node):
             node.decompose()
 
-    # 4) Ads / login containers by class/id tokens.
+    # 5) Ads / login containers by class/id tokens.
     for node in list(soup.find_all(True)):
         if not _is_live(node) or node.name in {"html", "head", "body"}:
             continue
@@ -169,7 +291,7 @@ def clean_html(html_text: str) -> str:
         if _matches_any(tokens, _AD_TOKENS) or _matches_any(tokens, _LOGIN_TOKENS):
             node.decompose()
 
-    # 5) Empty gallery / widget shells (no text, no images).
+    # 6) Empty gallery / widget shells (no text, no images).
     # Walk deepest-first so nested empties collapse outward.
     changed = True
     rounds = 0
@@ -209,6 +331,9 @@ def clean_html(html_text: str) -> str:
                 ):
                     node.decompose()
                     changed = True
+
+    # 7) Trailing body residue after extension DOM removal.
+    _strip_trailing_extension_text(soup)
 
     out = str(soup)
     if not out.lstrip().lower().startswith("<!doctype"):

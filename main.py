@@ -170,32 +170,77 @@ def launch_gui() -> int:
     from core.db_manager import get_db
     from ui.main_window import MainWindow
     from ui.styles import APP_STYLE, apply_dark_palette
+    from PySide6.QtCore import QTimer
+
+    from ui.startup_lifecycle import (
+        dump_startup_surface_audit,
+        log_startup,
+        mark_qapplication_created,
+        reset_startup_timeline,
+    )
     from ui.window_chrome import (
         DarkTitleBarFilter,
         TITLE_BAR_STYLE,
         apply_application_icon,
+        diagnose_and_bind_win32_taskbar_icon,
+        install_syscommand_probe,
     )
 
     # Ensure SQLite schema exists before any sync / UI lookup
     get_db()
 
+    reset_startup_timeline()
     app = QApplication(sys.argv)
+    mark_qapplication_created()
+    from core.debug_config import ui_trace_enabled, performance_log_enabled
+
+    def _boot(msg: str) -> None:
+        if ui_trace_enabled() or performance_log_enabled():
+            print(f"[BOOT] {msg}", flush=True)
+
+    _boot("QApplication ready")
     app.setOrganizationName("SteamModManager")
     app.setApplicationName("WorkshopLibrary")
     app.setStyle("Fusion")
     apply_dark_palette(app)
+    log_startup("apply_dark_palette done")
     apply_application_icon(app)
+    log_startup("apply_application_icon done")
+
+    if ui_trace_enabled():
+        from ui.widget_show_trace import install_widget_show_trace
+
+        install_widget_show_trace(app)
     # App-level sheet so top-level popups (QMenu / QToolTip / combo lists) inherit dark tokens.
     app.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
+    log_startup("app.setStyleSheet done")
 
     # Dark native titlebars + icon for dialogs / message boxes.
     chrome_filter = DarkTitleBarFilter(app)
     app.installEventFilter(chrome_filter)
     # Keep filter alive for the app lifetime.
     app.setProperty("_dark_titlebar_filter", chrome_filter)
+    log_startup("DarkTitleBarFilter installed")
 
+    log_startup("MainWindow construct begin")
+    _boot("before MainWindow")
     window = MainWindow()
+    _boot("MainWindow created")
+    log_startup("MainWindow construct end")
+    if ui_trace_enabled():
+        install_syscommand_probe(app, window)
+    log_startup("about to show()")
+    _boot("before show")
     window.show()
+    _boot("after show")
+    app.processEvents()
+    log_startup(
+        f"show() returned visible={window.isVisible()} "
+        f"size={window.width()}x{window.height()} state={window.windowState()!r}"
+    )
+    dump_startup_surface_audit(window)
+    # Icon diagnose only — must not resize / change flags after show.
+    QTimer.singleShot(0, lambda: diagnose_and_bind_win32_taskbar_icon(window))
     return app.exec()
 
 

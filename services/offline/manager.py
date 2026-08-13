@@ -129,12 +129,30 @@ class OfflineManager:
                 raise ValueError(f"Mod not found: {mid}")
 
         provider = self.get_provider_for_platform(plat)
-        return provider.update_offline_page(
+        result = provider.update_offline_page(
             mid,
             managed_path=managed_path,
             library_root=self.library_root,
             metadata=metadata,
         )
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            dest = Path(managed_path) if managed_path else None
+            if dest is None:
+                index = getattr(result, "index_path", None)
+                if index is not None:
+                    idx = Path(index)
+                    # .info/offline/index.html → mod root; .info/index.html → mod root
+                    if idx.parent.name == "offline":
+                        dest = idx.parent.parent.parent
+                    else:
+                        dest = idx.parent.parent
+            if dest is not None:
+                sync_after_metadata_change(mid, dest, "offline_change")
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
 
 def attach_nexus_offline_page(
@@ -154,13 +172,27 @@ def attach_nexus_offline_page(
     *clean* (default True) runs Nexus MHTML Offline Snapshot Cleaner when the
     source is ``.mhtml`` / ``.mht``.
     """
-    return OfflineManager(library_root=library_root).import_mod_offline_html(
+    result = OfflineManager(library_root=library_root).import_mod_offline_html(
         mod_id,
         page_path,
         managed_path=managed_path,
         platform=PLATFORM_NEXUS,
         clean=clean,
     )
+    try:
+        from services.metadata_backup_sync import sync_after_metadata_change
+
+        dest = Path(managed_path) if managed_path else None
+        if dest is None:
+            index = getattr(result, "index_path", None)
+            if index is not None:
+                idx = Path(index)
+                dest = idx.parent.parent.parent if idx.parent.name == "offline" else idx.parent.parent
+        if dest is not None:
+            sync_after_metadata_change(mod_id, dest, "offline_change")
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 # Backward-compatible alias.

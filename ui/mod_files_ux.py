@@ -156,6 +156,34 @@ def file_badge_kind(entry: Any) -> str | None:
     return None
 
 
+def file_list_badge(
+    entry: Any, platform: str | None = None
+) -> tuple[str | None, str | None]:
+    """
+    Flat-list badge for detail Files rows.
+
+    Returns ``(badge_text, style)`` where *style* is ``\"main\"`` (green) or
+    ``\"alt\"`` (non-main Nexus / GitHub Source), or ``(None, None)`` when no
+    badge (GitHub Other only).
+
+    Nexus: only the 5-category whitelist appears in the badge.
+    """
+    plat = str(platform or "").strip().lower()
+    source = normalize_source_type(getattr(entry, "source_type", None))
+    if plat == PLATFORM_NEXUS or source == SOURCE_TYPE_NEXUS:
+        text = normalize_nexus_category(nexus_raw_category(entry))
+        if text == "Main":
+            return (text, "main")
+        return (text, "alt")
+
+    kind = file_badge_kind(entry)
+    if kind == "Main":
+        return ("Main", "main")
+    if kind == "Source":
+        return ("Source", "alt")
+    return (None, None)
+
+
 def sort_files_for_detail(files: Sequence[Any]) -> list[Any]:
     """Main first → Other middle → Source last (stable by physical filename)."""
 
@@ -170,6 +198,14 @@ def sort_files_for_detail(files: Sequence[Any]) -> list[Any]:
         return (tier, file_combo_label(entry).casefold())
 
     return sorted(list(files or []), key=_key)
+
+
+def sort_files_for_nexus_flat(files: Sequence[Any]) -> list[Any]:
+    """Flatten Nexus category groups: Main → Optional → … (stable within group)."""
+    ordered: list[Any] = []
+    for _cat, entries in group_nexus_file_entries(files):
+        ordered.extend(entries)
+    return ordered
 
 
 def file_description(entry: Any) -> str:
@@ -296,6 +332,111 @@ def file_group_key(entry: Any, platform: str | None) -> str:
 
 def file_group_title(key: str) -> str:
     return _GROUP_TITLES.get(str(key or "").strip(), "Files")
+
+
+# Nexus flat-list badges — strict 5-category whitelist only.
+NEXUS_CATEGORY_MAIN = "Main"
+NEXUS_CATEGORY_OPTIONAL = "Optional"
+NEXUS_CATEGORY_MISC = "Miscellaneous"
+NEXUS_CATEGORY_I18N = "汉化"
+NEXUS_CATEGORY_OTHER = "Other"
+NEXUS_CATEGORY_WHITELIST = (
+    NEXUS_CATEGORY_MAIN,
+    NEXUS_CATEGORY_OPTIONAL,
+    NEXUS_CATEGORY_MISC,
+    NEXUS_CATEGORY_I18N,
+    NEXUS_CATEGORY_OTHER,
+)
+
+_NEXUS_ROLE_RAW = {
+    FILE_ROLE_NEXUS_MAIN: "Main",
+    FILE_ROLE_NEXUS_OPTIONAL: "Optional",
+    FILE_ROLE_NEXUS_MISC: "Miscellaneous",
+    FILE_ROLE_NEXUS_OLD: "Old",
+}
+
+_NEXUS_TREE_CATEGORY = {
+    GROUP_NEXUS_MAIN: "Main",
+    GROUP_NEXUS_OPTIONAL: "Optional",
+    GROUP_NEXUS_MISC: "Miscellaneous",
+    GROUP_NEXUS_OLD: "Old",
+    GROUP_FILES: "Other",
+}
+
+
+def normalize_nexus_category(file_category: str | None) -> str:
+    """
+    Force Nexus category into the 5-name whitelist.
+
+    Anything else (示例 / Old / …) → ``Other``.
+    """
+    raw_cat = str(file_category or "").lower()
+    if "main" in raw_cat:
+        return NEXUS_CATEGORY_MAIN
+    if "optional" in raw_cat:
+        return NEXUS_CATEGORY_OPTIONAL
+    if "miscellaneous" in raw_cat:
+        return NEXUS_CATEGORY_MISC
+    if "汉化" in raw_cat:
+        return NEXUS_CATEGORY_I18N
+    return NEXUS_CATEGORY_OTHER
+
+
+def nexus_raw_category(entry: Any, *, platform: str | None = PLATFORM_NEXUS) -> str:
+    """Raw category hint before whitelist (metadata / folder / role)."""
+    meta = getattr(entry, "metadata", None)
+    if isinstance(meta, dict):
+        for key in ("category", "nexus_category", "category_name"):
+            value = str(meta.get(key) or "").strip()
+            if value:
+                return value
+    path = str(getattr(entry, "path", "") or "").strip().replace("\\", "/")
+    parts = [p for p in path.split("/") if p and p not in {".", ".."}]
+    if len(parts) >= 2:
+        folder = parts[0].strip()
+        if folder and folder not in {".info", "info", "历史版本"}:
+            lower = folder.lower()
+            if not lower.endswith((".zip", ".7z", ".rar")):
+                return folder
+    role = normalize_file_role(getattr(entry, "file_role", None))
+    if role in _NEXUS_ROLE_RAW:
+        return _NEXUS_ROLE_RAW[role]
+    coarse = str(getattr(entry, "type", "") or "").strip()
+    if coarse:
+        return coarse
+    key = file_group_key(entry, platform or PLATFORM_NEXUS)
+    return _NEXUS_TREE_CATEGORY.get(key, "Other")
+
+
+def nexus_category_label(entry: Any, *, platform: str | None = PLATFORM_NEXUS) -> str:
+    """Whitelisted Nexus badge category (Main / Optional / Miscellaneous / 汉化 / Other)."""
+    return normalize_nexus_category(nexus_raw_category(entry, platform=platform))
+
+
+def group_nexus_file_entries(files: Sequence[Any]) -> list[tuple[str, list[Any]]]:
+    """Group Nexus files by whitelisted category (empty groups omitted)."""
+    buckets: dict[str, list[Any]] = {k: [] for k in NEXUS_CATEGORY_WHITELIST}
+    for entry in files or []:
+        cat = nexus_category_label(entry)
+        buckets.setdefault(cat, []).append(entry)
+    return [(name, buckets[name]) for name in NEXUS_CATEGORY_WHITELIST if buckets.get(name)]
+
+
+def is_nexus_main_category(category_name: str) -> bool:
+    """True only for whitelisted ``Main`` (after normalize)."""
+    return normalize_nexus_category(category_name) == NEXUS_CATEGORY_MAIN
+
+
+def nexus_badge_object_name(category: str) -> str:
+    """QSS objectName for Nexus category badges (Main = green)."""
+    cat = normalize_nexus_category(category)
+    return {
+        NEXUS_CATEGORY_MAIN: "detailFileBadgeMain",
+        NEXUS_CATEGORY_OPTIONAL: "detailFileBadgeOptional",
+        NEXUS_CATEGORY_MISC: "detailFileBadgeMisc",
+        NEXUS_CATEGORY_I18N: "detailFileBadgeI18n",
+        NEXUS_CATEGORY_OTHER: "detailFileBadgeOther",
+    }.get(cat, "detailFileBadgeOther")
 
 
 def group_file_entries(

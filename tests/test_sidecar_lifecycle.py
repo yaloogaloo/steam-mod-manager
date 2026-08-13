@@ -73,7 +73,7 @@ def test_write_sidecar_for_mod_updates_json(
     assert side.url == "https://github.com/a/b"
 
 
-def test_detail_show_mod_still_applies_sidecar(
+def test_detail_show_mod_is_readonly_no_sidecar_apply(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     folder = tmp_path / "Game" / "Mod"
@@ -105,14 +105,21 @@ def test_detail_show_mod_still_applies_sidecar(
         return real(managed_path, **kwargs)
 
     monkeypatch.setattr(side_mod, "apply_sidecar_to_db", tracking)
+    sync_calls: list[str] = []
+    monkeypatch.setattr(
+        "services.metadata_backup_sync.sync_after_metadata_change",
+        lambda *_a, **_k: sync_calls.append("sync"),
+    )
 
     panel = ModDetailPanel()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert calls, "detail show_mod must still apply sidecar once"
-    display = db.get_mod_display_info("92002")
-    assert display is not None
-    assert (
-        display.display_name == "Sidecar Title"
-        or display.source_url == "https://example.com/m"
-    )
+    # Phase 3-B: Detail open is pure-read — no sidecar→DB write, no backup sync.
+    assert calls == [], "detail show_mod must not apply sidecar (read-only)"
+    assert sync_calls == [], "detail show_mod must not sync backup"
+    resolved_title = (panel.view_title.text() or "").replace("\u200b", "")
+    assert "Sidecar Title" in resolved_title or panel._resolved is not None
+    panel.close()
+    panel.deleteLater()
+    qapp.processEvents()
+

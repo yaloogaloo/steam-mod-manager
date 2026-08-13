@@ -70,38 +70,53 @@ class OfflinePageWorker(QThread):
 class ModDetailDialog(QDialog):
     """Rich detail view for a single managed Mod."""
 
-    def __init__(self, managed_path: str | Path, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        managed_path: str | Path | None = None,
+        parent: QWidget | None = None,
+        *,
+        mod_id: str | int | None = None,
+    ) -> None:
         super().__init__(parent)
-        self.managed_path = Path(managed_path)
-        self.files = ModFileManager(self.managed_path.parent.parent)
-        # parent.parent is game folder's parent (= library) for …/Game/Mod
-        # Safer: resolve library as managed_path.parents[1] when nested
+        from services.mod_metadata_resolver import resolve_mod_metadata
+
+        self.managed_path = Path(managed_path) if managed_path is not None else Path()
         try:
             self.files = ModFileManager(self.managed_path.parents[1])
         except IndexError:
             self.files = ModFileManager(self.managed_path.parent)
 
-        self.metadata = self.files.load_metadata(self.managed_path) or ModMetadata(
-            published_file_id=self.managed_path.name,
-            title=self.managed_path.name,
-            managed_path=str(self.managed_path),
-        )
+        resolved = resolve_mod_metadata(mod_id, managed_path)
+        self._resolved = resolved
+        if resolved is not None and resolved.managed_path:
+            self.managed_path = Path(resolved.managed_path)
+        if resolved is not None:
+            self.metadata = resolved.to_mod_metadata()
+        else:
+            self.metadata = ModMetadata(
+                published_file_id=(
+                    str(mod_id or "").strip()
+                    or (self.managed_path.name if self.managed_path.name.isdigit() else "")
+                ),
+                title=self.managed_path.name,
+                managed_path=str(self.managed_path),
+            )
         self.metadata.managed_path = str(self.managed_path)
+        self._folder_absent = bool(resolved is None or not resolved.folder_present)
         self._offline_worker: OfflinePageWorker | None = None
         self._display_info = None
         try:
             from core.db_manager import get_db
 
-            if self.metadata.published_file_id.isdigit():
-                self._display_info = get_db().get_mod_display_info(
-                    self.metadata.published_file_id
-                )
+            mid = str(self.metadata.published_file_id or "").strip()
+            if mid.isdigit():
+                self._display_info = get_db().get_mod_display_info(mid)
         except Exception:  # noqa: BLE001
             self._display_info = None
 
         shown = (
-            self._display_info.display_name
-            if self._display_info
+            resolved.display_name
+            if resolved is not None and resolved.display_name
             else self.metadata.display_name
         )
         self.setWindowTitle(f"Mod 详情 — {shown}")
@@ -204,31 +219,41 @@ class ModDetailDialog(QDialog):
     def _populate(self, *, refresh_offline: bool = True) -> None:
         meta = self.metadata
         info = self._display_info
-        shown = info.display_name if info else meta.display_name
-        steam_name = info.steam_name if info else (meta.title or "").strip()
+        resolved = getattr(self, "_resolved", None)
+        if resolved is not None:
+            shown = resolved.display_name or meta.display_name
+            steam_name = resolved.title or (meta.title or "").strip()
+            desc_text = resolved.description
+        else:
+            shown = meta.display_name
+            steam_name = (meta.title or "").strip()
+            desc_text = str(meta.description or "")
         self.title_label.setText(shown)
-        if info and info.user_display_name and steam_name:
+        if steam_name and steam_name != shown:
             self.steam_name_label.setText(f"Steam 原名: {steam_name}")
             self.steam_name_label.show()
         else:
             self.steam_name_label.hide()
         self.id_label.setText(f"Mod ID: {meta.published_file_id}")
-        game = meta.game_name or self.files.game_name_for_path(self.managed_path)
+        game = (
+            (resolved.game_name if resolved is not None else "")
+            or meta.game_name
+            or self.files.game_name_for_path(self.managed_path)
+        )
         app = f" · AppID {meta.app_id}" if meta.app_id else ""
         self.game_label.setText(f"游戏: {game}{app}")
 
-        cover = self.files.find_local_cover(self.managed_path)
+        from services.mod_metadata_resolver import resolve_cover_path
+
+        cover = resolve_cover_path(meta.published_file_id or None, self.managed_path)
         self._set_cover(cover)
 
-        steam_desc = (
-            (info.steam_description if info else "") or (meta.description or "")
-        ).strip()
         custom_desc = (info.custom_description if info else "").strip()
         desc_parts: list[str] = []
         if custom_desc:
             desc_parts.append(f"<b>自定义介绍</b><br>{_html_escape(custom_desc)}")
         desc_parts.append(
-            f"<b>Steam 简介</b><br>{_html_escape(steam_desc or '（暂无官方描述）')}"
+            f"<b>Steam 简介</b><br>{_html_escape((desc_text or '').strip() or '（暂无官方描述）')}"
         )
         self.desc_browser.setHtml(
             f'<div style="color:#c7d5e0;font-family:Segoe UI;font-size:13px;'
@@ -241,9 +266,21 @@ class ModDetailDialog(QDialog):
             notes = meta.custom_notes
         self.notes_edit.setPlainText(notes)
 
+        folder_ok = not getattr(self, "_folder_absent", False) and self.managed_path.is_dir()
+        self.btn_folder.setEnabled(folder_ok)
+        self.btn_edit.setEnabled(folder_ok)
+        self.btn_offline.setEnabled(self._index_path() is not None)
+        source = ""
+        if resolved is not None:
+            source = resolved.source_url
+        if not source:
+            source = str(meta.url or "").strip() or meta.workshop_url
+        self.btn_steam.setEnabled(bool(source))
+
         if refresh_offline:
             self._show_cached_offline_state()
-            self._start_offline_refresh_if_needed()
+            if folder_ok:
+                self._start_offline_refresh_if_needed()
 
     def _open_edit(self) -> None:
         from .mod_edit_dialog import ModEditDialog
@@ -260,13 +297,27 @@ class ModDetailDialog(QDialog):
         dialog = ModEditDialog(mid, steam_name=steam, parent=self)
         if dialog.exec() and dialog.saved_info is not None:
             self._display_info = dialog.saved_info
-            self.setWindowTitle(f"Mod 详情 — {dialog.saved_info.display_name}")
+            from services.mod_metadata_resolver import resolve_mod_metadata
+
+            resolved = resolve_mod_metadata(
+                self.metadata.published_file_id, self.managed_path
+            )
+            self._resolved = resolved
+            if resolved is not None:
+                self.metadata = resolved.to_mod_metadata()
+                self.metadata.managed_path = str(self.managed_path)
+                shown = resolved.display_name
+            else:
+                shown = dialog.saved_info.display_name
+            self.setWindowTitle(f"Mod 详情 — {shown}")
             self._populate(refresh_offline=False)
 
     def _index_path(self) -> Path | None:
-        from services.offline.paths import resolve_offline_page
+        from services.mod_metadata_resolver import resolve_offline_page
 
-        return resolve_offline_page(self.managed_path)
+        return resolve_offline_page(
+            self.metadata.published_file_id or None, self.managed_path
+        )
 
     def _show_cached_offline_state(self) -> None:
         index = self._index_path()
@@ -286,6 +337,8 @@ class ModDetailDialog(QDialog):
 
     def _start_offline_refresh_if_needed(self) -> None:
         """Kick off background archive when the page is missing or a stale stub."""
+        if getattr(self, "_folder_absent", False) or not self.managed_path.is_dir():
+            return
         info = self.files.ensure_info_dir(self.managed_path)
         index = info / DEFAULT_INDEX_NAME
         try:
@@ -325,30 +378,47 @@ class ModDetailDialog(QDialog):
         self.offline_status.setText(f"离线页面更新失败：{message}")
 
     def _set_cover(self, path: Path | None) -> None:
-        if path and path.is_file():
-            pix = QPixmap(str(path))
-            if not pix.isNull():
-                scaled = pix.scaled(
-                    COVER_W,
-                    COVER_H,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                x = max(0, (scaled.width() - COVER_W) // 2)
-                y = max(0, (scaled.height() - COVER_H) // 2)
-                self.cover_label.setPixmap(scaled.copy(x, y, COVER_W, COVER_H))
-                return
+        """Placeholder first; decode via CoverLoaderManager (not UI-thread QPixmap)."""
         self.cover_label.setPixmap(_placeholder(COVER_W, COVER_H))
+        if path is None or not path.is_file():
+            return
+        from services.cover_loader import CoverLoaderManager
+
+        token = f"dialog:{id(self)}:{path}"
+        prev = getattr(self, "_cover_token", "") or ""
+        mgr = CoverLoaderManager.instance()
+        if prev and prev != token:
+            mgr.cancel(prev)
+        self._cover_token = token
+        if not getattr(self, "_cover_loader_connected", False):
+            mgr.image_ready.connect(self._on_dialog_cover_ready)
+            self._cover_loader_connected = True
+        managed = getattr(self, "managed_path", None) or path.parent
+        mgr.request(
+            token,
+            managed,
+            cover_ref=str(path),
+            width=COVER_W,
+            height=COVER_H,
+        )
+
+    def _on_dialog_cover_ready(self, token: object, image: object) -> None:
+        if str(token) != getattr(self, "_cover_token", ""):
+            return
+        from PySide6.QtGui import QImage
+
+        if not isinstance(image, QImage) or image.isNull():
+            return
+        pix = QPixmap.fromImage(image)
+        if not pix.isNull():
+            self.cover_label.setPixmap(pix)
 
     def _open_offline(self) -> None:
         # Strict guards — never hand an empty / missing path to the OS browser.
         # Canonical resolver only — ignore stale metadata.offline_page_path.
         index = self._index_path()
         if index is None or not str(index).strip():
-            tip = "未找到离线页面文件"
-            btn = getattr(self, "btn_offline", None)
-            if btn is not None:
-                QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
+            # No floating tip / white toast — refresh quietly if possible.
             self._start_offline_refresh_if_needed()
             return
         try:
@@ -356,10 +426,6 @@ class ModDetailDialog(QDialog):
         except OSError:
             abs_path = ""
         if not abs_path or not Path(abs_path).exists():
-            tip = "未找到离线页面文件"
-            btn = getattr(self, "btn_offline", None)
-            if btn is not None:
-                QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
             self._start_offline_refresh_if_needed()
             return
         self.metadata.offline_page_path = abs_path
@@ -371,10 +437,7 @@ class ModDetailDialog(QDialog):
             )
         ok = QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
         if not ok:
-            tip = "未找到离线页面文件"
-            btn = getattr(self, "btn_offline", None)
-            if btn is not None:
-                QToolTip.showText(btn.mapToGlobal(btn.rect().center()), tip, btn)
+            return
 
     def _open_folder(self) -> None:
         folder = self.managed_path.resolve()
@@ -389,7 +452,14 @@ class ModDetailDialog(QDialog):
             QMessageBox.warning(self, "打开失败", str(exc))
 
     def _open_steam(self) -> None:
-        webbrowser.open(self.metadata.workshop_url)
+        resolved = getattr(self, "_resolved", None)
+        url = ""
+        if resolved is not None:
+            url = str(resolved.source_url or "").strip()
+        if not url:
+            url = str(self.metadata.url or "").strip() or self.metadata.workshop_url
+        if url:
+            webbrowser.open(url)
 
     def _save_notes(self) -> None:
         mid = self.metadata.published_file_id

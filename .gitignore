@@ -19,6 +19,7 @@ mod/*
 # data/mod_manager.db-*
 # data/headers/
 data/import_cache
+data/mod_backup
 data/asset_cache/
 data/browser_profile/
 # # legacy JSON caches (no longer used)

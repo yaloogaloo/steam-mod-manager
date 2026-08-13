@@ -8,7 +8,7 @@ from pathlib import Path
 from services.importers.image_picker import IMAGE_SUFFIXES
 from services.importers.local_scanner import KNOWN_EXTENSIONS
 
-_SKIP_DIRS = {".info", "info", ".git", "__pycache__", "node_modules", ".vs"}
+_SKIP_DIRS = {".info", "info", ".git", "__pycache__", "node_modules", ".vs", "历史版本"}
 # Structural folders inside a single Mod — not independent Mods.
 _INNER_ONLY = frozenset(
     {
@@ -46,7 +46,10 @@ class DirectorySidecars:
 
 
 def _is_skipped_dir(name: str) -> bool:
-    return name.startswith(".") or name.lower() in _SKIP_DIRS
+    text = str(name or "").strip()
+    if text == "历史版本":
+        return True
+    return text.startswith(".") or text.lower() in {d.lower() for d in _SKIP_DIRS}
 
 
 def _child_dirs(folder: Path) -> list[Path]:
@@ -121,8 +124,12 @@ def _iter_files_shallow(folder: Path, *, max_depth: int = 2) -> list[Path]:
     root = folder.resolve()
     found: list[Path] = []
     try:
+        from services.importers.local_scanner import is_history_version_path
+
         for path in root.rglob("*"):
             if not path.is_file():
+                continue
+            if is_history_version_path(path):
                 continue
             try:
                 rel = path.relative_to(root)

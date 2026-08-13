@@ -31,7 +31,7 @@ MODS_DIR_NAME = "mods"
 ENTRY_TYPE_JAR = "jar"
 ENTRY_TYPE_PREREQ = "prerequisite"
 
-_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME})
+_IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"})
 
 
 def _utc_now() -> str:

@@ -113,11 +113,13 @@ def test_nexus_batch_parent_imports_each_subdir(
                 nexus_id=folder.name,
                 library_root=library,
                 context=ctx,
+                is_batch_mode=True,
             )
         )
 
     assert all(r.success for r in results)
     assert len(results) == 2
+    assert all(r.source_url == "" for r in results)
     managed_a = Path(results[0].managed_path)
     assert (managed_a / "a.pak").is_file()
     assert not (managed_a / "preview.png").exists()

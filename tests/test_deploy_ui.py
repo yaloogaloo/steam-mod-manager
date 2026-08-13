@@ -66,8 +66,12 @@ def _pump(ms: int = 50) -> None:
 
 def test_humanize_deploy_errors() -> None:
     assert humanize_deploy_error("请先配置游戏部署目录") == "请先配置游戏部署目录"
-    assert "源文件" in humanize_deploy_error("源 Mod 目录不存在（库：x）")
-    assert humanize_deploy_error("复制失败：disk full") == "复制失败：disk full"
+    assert humanize_deploy_error("源 Mod 目录不存在（库：x）") == "内容目录不存在，无法部署"
+    assert humanize_deploy_error("复制失败：disk full") == "部署失败：文件复制错误"
+    assert (
+        humanize_deploy_error("Target mod directory does not exist")
+        == "Mod 安装目录不存在，请检查游戏设置"
+    )
 
 
 def test_click_deploy_starts_worker(

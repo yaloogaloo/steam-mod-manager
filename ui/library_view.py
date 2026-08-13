@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -49,7 +50,6 @@ from .library_query import (
     ModFilterIndex,
     filter_and_sort,
     folder_mtime,
-    offline_page_exists,
 )
 from .mod_card import CARD_WIDTH, ModCardWidget
 from .mod_detail_panel import ModDetailPanel
@@ -57,9 +57,9 @@ from .mod_detail_panel import ModDetailPanel
 logger = logging.getLogger(__name__)
 
 ALL_GAMES_LABEL = "全部游戏"
-GAME_PANEL_MIN = 120
-GAME_PANEL_MAX = 180
-GAME_PANEL_WIDTH = 140
+GAME_PANEL_MIN = 140
+GAME_PANEL_MAX = 220
+GAME_PANEL_WIDTH = 168
 DETAIL_PANEL_MIN = 350
 DETAIL_PANEL_PREFERRED = 360
 DETAIL_PANEL_MAX = 420
@@ -84,27 +84,53 @@ EMPTY_GAME = "empty_game"
 EMPTY_SEARCH = "empty_search"
 
 
+def _library_load_sync() -> bool:
+    """Keep ``refresh()`` synchronous under pytest / ``SMM_LIBRARY_SYNC=1``."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    flag = os.environ.get("SMM_LIBRARY_SYNC", "").strip().lower()
+    return flag in {"1", "true", "yes"}
+
+
 class _GameFilterRow(QWidget):
-    """Steam-sidebar row: optional chevron + game name + weak secondary count."""
+    """Sidebar row: GameTreeItem (primary) or CategoryTreeItem (secondary)."""
+
+    KIND_GAME = "game"
+    KIND_CATEGORY = "category"
+    KIND_ALL = "all"
 
     def __init__(
         self,
         name: str,
         count: int,
         *,
+        kind: str = "game",
         show_count: bool = True,
         indent: bool = False,
         expandable: bool = False,
         expanded: bool = False,
+        game_status: str = "",
+        overall_status: str = "",
+        status_tip: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setObjectName("gameFilterRow")
-        self.setMinimumHeight(28)
+        self.kind = str(kind or self.KIND_GAME)
+        if self.kind == self.KIND_CATEGORY:
+            self.setObjectName("CategoryTreeItem")
+        elif self.kind == self.KIND_ALL:
+            self.setObjectName("GameTreeItem")
+        else:
+            self.setObjectName("GameTreeItem")
+        self.setMinimumHeight(30 if self.kind != self.KIND_CATEGORY else 26)
         self.expandable = bool(expandable)
         layout = QHBoxLayout(self)
-        left = 8 + (14 if indent else 0)
-        layout.setContentsMargins(left, 4, 8, 4)
+        # Categories nest under games with modest indent; games stay flush.
+        if self.kind == self.KIND_CATEGORY:
+            left = 22
+        else:
+            left = 8 + (14 if indent else 0)
+        layout.setContentsMargins(left, 3 if self.kind == self.KIND_CATEGORY else 4, 8, 3)
         layout.setSpacing(6)
         self.chevron_label = QLabel("")
         self.chevron_label.setObjectName("gameListChevron")
@@ -114,18 +140,112 @@ class _GameFilterRow(QWidget):
             self.set_expanded(expanded)
         else:
             self.chevron_label.hide()
-        self.name_label = QLabel(name)
-        self.name_label.setObjectName("gameListName")
+
+        self.icon_label = QLabel("")
+        self.icon_label.setObjectName(
+            "categoryTreeIcon" if self.kind == self.KIND_CATEGORY else "gameTreeIcon"
+        )
+        self.icon_label.setFixedWidth(18)
+        layout.addWidget(self.icon_label)
+
+        self.name_label = QLabel("")
+        self.name_label.setObjectName(
+            "categoryTreeName" if self.kind == self.KIND_CATEGORY else "gameTreeName"
+        )
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("gameListStatus")
         self.count_label = QLabel(str(count))
-        self.count_label.setObjectName("gameListCount")
+        self.count_label.setObjectName(
+            "categoryTreeCount" if self.kind == self.KIND_CATEGORY else "gameTreeCount"
+        )
         self.count_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         layout.addWidget(self.name_label, stretch=1)
+        layout.addWidget(self.status_label)
         if show_count:
             layout.addWidget(self.count_label)
         else:
             self.count_label.hide()
+
+        self._base_name = str(name or "")
+        self._overall_status = str(overall_status or "").strip()
+        self._status_tip = str(status_tip or "").strip()
+        self.apply_status(
+            game_status=game_status,
+            overall_status=self._overall_status,
+            status_tip=self._status_tip,
+        )
+
+    def apply_status(
+        self,
+        *,
+        game_status: str = "",
+        overall_status: str = "",
+        status_tip: str = "",
+    ) -> None:
+        from services.game_status import (
+            OVERALL_CONFLICT,
+            OVERALL_HEALTHY,
+            OVERALL_MISSING,
+            OVERALL_WARNING,
+            leading_icon_for_overall,
+        )
+        from services.library_status import GAME_STATUS_MISSING_FOLDER
+
+        overall = str(overall_status or "").strip()
+        if not overall:
+            # Fallback from folder presence alone
+            if str(game_status or "").strip() == GAME_STATUS_MISSING_FOLDER:
+                overall = OVERALL_MISSING
+            else:
+                overall = OVERALL_HEALTHY
+        self._overall_status = overall
+        tip = str(status_tip or "").strip()
+        self._status_tip = tip
+
+        self.name_label.setText(self._base_name)
+        self.icon_label.setText(
+            leading_icon_for_overall(overall, kind=self.kind)
+        )
+
+        if self.kind == self.KIND_CATEGORY:
+            # Keep category quiet; only a small trailing mark when anomalous.
+            if overall in {OVERALL_WARNING, OVERALL_MISSING, OVERALL_CONFLICT}:
+                self.status_label.setText("⚠")
+                self.status_label.setToolTip(tip or "分类内存在异常 Mod")
+                self.status_label.show()
+            else:
+                self.status_label.clear()
+                self.status_label.hide()
+            if tip:
+                self.setToolTip(tip)
+            return
+
+        if self.kind == self.KIND_ALL:
+            self.icon_label.setText("📚")
+            self.status_label.hide()
+            return
+
+        # Game row: leading icon carries status; no extra green check noise.
+        self.status_label.hide()
+        if tip:
+            self.setToolTip(tip)
+            self.icon_label.setToolTip(tip)
+        elif overall == OVERALL_MISSING:
+            miss_tip = "Mod目录不存在\n但备份数据仍存在"
+            self.setToolTip(miss_tip)
+            self.icon_label.setToolTip(miss_tip)
+        else:
+            self.setToolTip("")
+            self.icon_label.setToolTip("")
+
+    def set_game_status(self, game_status: str) -> None:
+        self.apply_status(
+            game_status=game_status,
+            overall_status=self._overall_status,
+            status_tip=self._status_tip,
+        )
 
     def set_expanded(self, expanded: bool) -> None:
         if not self.expandable:
@@ -139,6 +259,7 @@ class ModLibraryView(QWidget):
 
     filter_changed = Signal(str)
     request_open_sync = Signal()  # optional: MainWindow may ignore
+    request_open_game_settings = Signal(int)  # app_id — open Game Deploy page
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -168,6 +289,18 @@ class ModLibraryView(QWidget):
         self._loading = False
         self._deploy_audit: dict[str, object] = {}
         self._splitter_defaults_applied = False
+        self._load_worker = None
+        self._load_gen = 0
+        self._library_snapshot = None
+        self._pending_restore: dict | None = None
+        self._snapshot_dirty = False
+        self._pending_game_status_line = ""
+        self._last_filter_sig: tuple | None = None
+        self._game_list_fp: tuple | None = None
+        self._search_debounce = QTimer(self)
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(150)
+        self._search_debounce.timeout.connect(self._apply_view_filter)
 
         self._build_ui()
 
@@ -208,9 +341,19 @@ class ModLibraryView(QWidget):
         )
         self.refresh_btn.setToolTip("刷新")
         self.refresh_btn.clicked.connect(self.refresh)
+        self.game_settings_btn = QPushButton("游戏设置")
+        self.game_settings_btn.setObjectName("libraryHeaderButton")
+        self.game_settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.game_settings_btn.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
+        )
+        self.game_settings_btn.setToolTip("配置当前游戏的安装目录与 Mod 部署目录")
+        self.game_settings_btn.clicked.connect(self._on_game_settings)
+        self.game_settings_btn.setEnabled(False)
         header.addWidget(self._page_title)
         header.addWidget(self.count_label)
         header.addStretch(1)
+        header.addWidget(self.game_settings_btn)
         header.addWidget(self.import_btn)
         header.addWidget(self.refresh_btn)
         root.addLayout(header)
@@ -279,7 +422,7 @@ class ModLibraryView(QWidget):
         )
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setMinimumHeight(32)
-        self.search_box.textChanged.connect(self._on_search_or_filter_changed)
+        self.search_box.textChanged.connect(self._on_search_text_changed)
         center_layout.addWidget(self.search_box)
 
         # --- Responsive filter toolbar (FlowLayout wraps; chips never compress) ---
@@ -296,7 +439,7 @@ class ModLibraryView(QWidget):
             self._status_bar, margin=0, h_spacing=6, v_spacing=6
         )
         for key, label in STATUS_FILTER_LABELS:
-            btn = self._make_filter_chip(label)
+            btn = self._make_filter_chip(label, parent=self._status_bar)
             btn.setCheckable(True)
             if key == FILTER_ALL:
                 btn.setChecked(True)
@@ -428,6 +571,7 @@ class ModLibraryView(QWidget):
             lambda mid: self._on_deploy_action(mid, "undeploy")
         )
         self.detail_panel.offline_page_updated.connect(self._on_offline_page_updated)
+        self.detail_panel.relocate_completed.connect(self._on_relocate_completed)
         self.splitter.addWidget(self.detail_panel)
 
         # Center absorbs flex; detail keeps min width and may grow (never collapse)
@@ -440,6 +584,11 @@ class ModLibraryView(QWidget):
         # D-7: Empty-state overlay (productized)
         self.empty_overlay = QFrame(self.library_host)
         self.empty_overlay.setObjectName("libraryEmptyOverlay")
+        self.empty_overlay.setFrameShape(QFrame.Shape.NoFrame)
+        self.empty_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, True
+        )
+        self.empty_overlay.setAutoFillBackground(False)
         empty_layout = QVBoxLayout(self.empty_overlay)
         empty_layout.setContentsMargins(24, 32, 24, 32)
         empty_layout.setSpacing(10)
@@ -468,24 +617,44 @@ class ModLibraryView(QWidget):
         # D-8: Loading overlay — center scroll area only (not whole page)
         self.loading_overlay = QFrame(self.scroll.viewport())
         self.loading_overlay.setObjectName("libraryLoadingOverlay")
+        self.loading_overlay.setFrameShape(QFrame.Shape.NoFrame)
+        # Prevent Windows/native palette from painting a solid white slab.
+        self.loading_overlay.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, True
+        )
+        self.loading_overlay.setAutoFillBackground(False)
+        self.loading_overlay.setStyleSheet(
+            "background-color: transparent; border: none;"
+        )
         load_layout = QVBoxLayout(self.loading_overlay)
         load_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_label = QLabel("Loading mods...")
         self.loading_label.setObjectName("libraryLoadingLabel")
         self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.loading_label.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground, True
+        )
+        self.loading_label.setAutoFillBackground(False)
+        self.loading_label.setStyleSheet(
+            "background-color: transparent; border: none;"
+        )
         load_layout.addWidget(self.loading_label)
         self.loading_overlay.hide()
 
     @staticmethod
-    def _make_filter_chip(label: str) -> QPushButton:
+    def _make_filter_chip(label: str, parent: QWidget | None = None) -> QPushButton:
         """Filter chip with Fixed size — FlowLayout wraps instead of compressing."""
-        btn = QPushButton(label)
+        btn = QPushButton(label, parent)
         btn.setObjectName("libraryFilterChip")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         btn.setMinimumHeight(28)
         # sizeHint from text+style; Fixed policy prevents QLayout squeeze.
-        btn.adjustSize()
+        # Only adjustSize when already parented — never map a parentless button.
+        if parent is not None:
+            btn.adjustSize()
+        else:
+            btn.resize(btn.sizeHint())
         return btn
 
     # ------------------------------------------------------------------
@@ -512,43 +681,135 @@ class ModLibraryView(QWidget):
             return ALL_GAMES_LABEL
         return str(key)
 
-    def refresh(self) -> None:
+    def refresh(self, *, force: bool = True) -> None:
         """Reload library listing from disk and rebuild cards (UI-thread safe).
 
         Read + render only — no network, Steam archive, migration, or sync.
         Shows a loading overlay so the window is never silent during work.
+
+        *force*:
+          - ``True`` (Refresh button / import): rebuild snapshot from disk
+          - ``False`` (nav back to Library): reuse warm ``ModLibraryCache`` when present
         """
         scroll = self._capture_scroll()
         keep_path = self._selected_path
         keep_mod_id = (
             self._selected_card._mod_id() if self._selected_card is not None else ""
         )
-        focus_id = keep_mod_id
+        self._pending_restore = {
+            "scroll": scroll,
+            "path": keep_path,
+            "mod_id": keep_mod_id,
+        }
         self._set_loading(True)
+        root = Path(self._target_root)
+        root.mkdir(parents=True, exist_ok=True)
+        # Reconcile syncs backup (sha256/copytree) for every mod — never block
+        # UI / show(). Startup and refresh only schedule the same work async.
+        # Deduped inside start_reconcile_library_async.
+        if force:
+            try:
+                from services.library_reconcile import start_reconcile_library_async
+
+                start_reconcile_library_async(root)
+            except Exception:  # noqa: BLE001
+                logger.debug("start_reconcile_library_async failed", exc_info=True)
+
+        if not force:
+            try:
+                from services.mod_library_cache import get_library_cache
+
+                cache = get_library_cache()
+                snap = cache.peek_snapshot(root)
+                if snap is not None:
+                    self._apply_library_snapshot(snap)
+                    self._finish_library_load()
+                    return
+            except Exception:  # noqa: BLE001
+                logger.debug("soft library cache miss", exc_info=True)
+
+        if _library_load_sync():
+            try:
+                from services.mod_library_cache import get_library_cache
+
+                snapshot = get_library_cache().load_snapshot(root, force=True)
+                self._apply_library_snapshot(snapshot)
+            finally:
+                self._finish_library_load()
+            return
+        self._start_library_worker(root, force=True)
+
+    def _start_library_worker(self, root: Path, *, force: bool = True) -> None:
+        from ui.library_load_thread import LibraryLoadWorker
+
+        old = self._load_worker
+        if old is not None:
+            try:
+                old.loaded.disconnect()
+                old.failed.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            old.requestInterruption()
+            self._load_worker = None
+        self._load_gen += 1
+        gen = self._load_gen
+        worker = LibraryLoadWorker(
+            root, generation=gen, force=force, parent=self
+        )
+        worker.loaded.connect(lambda snap, g=gen: self._on_library_loaded(snap, g))
+        worker.failed.connect(lambda msg, g=gen: self._on_library_failed(msg, g))
+        self._load_worker = worker
+        worker.start()
+
+    def _on_library_loaded(self, snapshot, generation: int) -> None:
+        if int(generation) != self._load_gen:
+            return
         try:
-            root = Path(self._target_root)
-            root.mkdir(parents=True, exist_ok=True)
-            manager = ModFileManager(root)
-
-            previous = self._current_game_filter
-            pending = self._pending_game_filter
-            self._rebuild_game_list(manager, prefer=pending or previous)
-            self._render_mod_cards(manager)
-            self._refresh_category_combo()
-
-            if keep_path is not None:
-                restored = self._card_for_path(keep_path)
-                if restored is not None and not restored.isHidden():
-                    self._select_card(restored, show_panel=True)
-                    focus_id = restored._mod_id() or keep_mod_id
-                else:
-                    self._clear_selection()
-                    self.detail_panel.clear()
-            else:
-                self.detail_panel.clear()
+            self._apply_library_snapshot(snapshot)
         finally:
-            self._set_loading(False)
-            self._restore_scroll_after_layout(scroll, focus_mod_id=focus_id)
+            self._finish_library_load()
+
+    def _on_library_failed(self, message: str, generation: int) -> None:
+        if int(generation) != self._load_gen:
+            return
+        logger.warning("library load failed: %s", message)
+        self._set_loading(False)
+        self._pending_restore = None
+
+    def _apply_library_snapshot(self, snapshot) -> None:
+        self._library_snapshot = snapshot
+        self._snapshot_dirty = False
+        manager = ModFileManager(self._target_root)
+        previous = self._current_game_filter
+        pending = self._pending_game_filter
+        self._rebuild_game_list(manager, prefer=pending or previous, snapshot=snapshot)
+        self._render_mod_cards(manager, force_reload=False)
+        self._refresh_category_combo()
+
+    def _finish_library_load(self) -> None:
+        pending = self._pending_restore or {}
+        keep_path = pending.get("path")
+        keep_mod_id = str(pending.get("mod_id") or "")
+        scroll = int(pending.get("scroll") or 0)
+        focus_id = keep_mod_id
+        if keep_path is not None:
+            restored = self._card_for_path(keep_path)
+            if restored is not None and not restored.isHidden():
+                self._select_card(restored, show_panel=True)
+                focus_id = restored._mod_id() or keep_mod_id
+            else:
+                self._clear_selection()
+                self.detail_panel.clear()
+        else:
+            self.detail_panel.clear()
+        self._set_loading(False)
+        self._restore_scroll_after_layout(scroll, focus_mod_id=focus_id)
+        self._pending_restore = None
+
+    def _mark_card_stale(self, card) -> None:
+        """Drop batched card data so the next paint reads live SQLite."""
+        card._card_data = None
+        self._snapshot_dirty = True
 
     def _capture_scroll(self) -> int:
         return int(self.scroll.verticalScrollBar().value())
@@ -808,15 +1069,13 @@ class ModLibraryView(QWidget):
                 if any(c.casefold() == name.casefold() for c in candidates if c):
                     return int(game.app_id or 0)
             manager = ModFileManager(self._target_root)
-            for folder in manager.list_managed_mods(game_name=name):
-                meta = manager.load_metadata(folder)
-                if meta is not None and int(meta.app_id or 0) > 0:
-                    return int(meta.app_id)
-                mid = str(meta.published_file_id if meta else "").strip()
-                if mid.isdigit():
-                    info = db.get_mod_display_info(mid)
-                    if info is not None and int(info.app_id or 0) > 0:
-                        return int(info.app_id)
+            from services.mod_metadata_resolver import list_visible_mods
+
+            for item in list_visible_mods(
+                manager.target_root, name
+            ):
+                if int(item.app_id or 0) > 0:
+                    return int(item.app_id)
         except Exception:  # noqa: BLE001
             logger.debug("resolve game id failed for %s", name, exc_info=True)
         return 0
@@ -836,6 +1095,74 @@ class ModLibraryView(QWidget):
             self.current_game_id = int(game_id)
         else:
             self.current_game_id = self._resolve_game_id(name) if name else None
+        if hasattr(self, "game_settings_btn"):
+            self.game_settings_btn.setEnabled(bool(self.current_game_id))
+        self._refresh_game_header()
+
+    def _on_game_settings(self) -> None:
+        gid = int(self.current_game_id or 0)
+        if gid <= 0:
+            return
+        self.request_open_game_settings.emit(gid)
+
+    def _lookup_game_status_summary(self, game_folder: str | None):
+        key = str(game_folder or "").strip()
+        if not key:
+            return None
+        snap = self._library_snapshot
+        if snap is None:
+            return None
+        for g in snap.games:
+            if g.folder == key:
+                return getattr(g, "status_summary", None)
+        return None
+
+    def _refresh_game_header(self) -> None:
+        """Reuse existing page title / count labels for game status (no new page)."""
+        from services.game_status import format_status_tooltip, header_status_line
+
+        name = (self.current_game_name or "").strip()
+        if not name:
+            self._page_title.setText("Mod 库")
+            return
+        summary = self._lookup_game_status_summary(name)
+        display = name
+        snap = self._library_snapshot
+        if snap is not None:
+            for g in snap.games:
+                if g.folder == name:
+                    display = str(g.display or name)
+                    break
+        self._page_title.setText(f"🎮 {display}")
+        install_warn = ""
+        try:
+            from services.deploy_status import install_path_missing
+
+            gid = int(self.current_game_id or 0)
+            if gid > 0:
+                cfg = get_db().get_game_deploy_config(gid)
+                if cfg is not None and install_path_missing(cfg.install_path):
+                    install_warn = "⚠ 游戏目录不存在"
+        except Exception:  # noqa: BLE001
+            install_warn = ""
+        if summary is not None:
+            status_line = header_status_line(summary)
+            tip = format_status_tooltip(summary)
+            if install_warn:
+                tip = (tip + "\n" if tip else "") + install_warn
+                status_line = (
+                    f"{install_warn} · {status_line}" if status_line else install_warn
+                )
+            if status_line:
+                self._page_title.setToolTip(tip or status_line)
+            # count_label is updated in _apply_view_filter; stash status for merge
+            self._pending_game_status_line = status_line
+        else:
+            self._pending_game_status_line = install_warn
+            tip = f"库路径：{self._target_root}"
+            if install_warn:
+                tip = install_warn + "\n" + tip
+            self._page_title.setToolTip(tip)
 
     def _on_remove_mod(self, mod_id: str) -> None:
         """Handle DetailPanel remove_requested after user already confirmed."""
@@ -862,8 +1189,23 @@ class ModLibraryView(QWidget):
         path = Path(str(mod_path))
         card = self._card_for_path(path)
         if card is not None:
+            self._mark_card_stale(card)
             card.refresh_display()
             self._refresh_mod_ui(card._mod_id())
+
+    def _on_relocate_completed(self, mod_id: str) -> None:
+        """Full refresh after a successful missing-folder relocate."""
+        mid = str(mod_id or "").strip()
+        self.refresh()
+        if mid:
+            QTimer.singleShot(0, lambda: self._focus_mod_after_relocate(mid))
+
+    def _focus_mod_after_relocate(self, mod_id: str) -> None:
+        mid = str(mod_id or "").strip()
+        for card in self._cards:
+            if card._mod_id() == mid:
+                self.on_mod_selected(card)
+                return
 
     def run_deploy_audit(self) -> None:
         """
@@ -911,11 +1253,13 @@ class ModLibraryView(QWidget):
             btn.setEnabled(not loading)
         if loading:
             # D-8: center viewport only — avoid whole-page cover / flash
+            from ui.popup_trace import log_popup
+
+            log_popup("libraryLoadingOverlay.show")
             vp = self.scroll.viewport()
             self.loading_overlay.setGeometry(vp.rect())
             self.loading_overlay.show()
             self.loading_overlay.raise_()
-            QApplication.processEvents()
         else:
             self.loading_overlay.hide()
 
@@ -935,10 +1279,11 @@ class ModLibraryView(QWidget):
         return sorted(seen, key=lambda p: platform_badge_label(p).casefold())
 
     def _rebuild_platform_filter_bar(self) -> None:
-        """Rebuild platform chips from platforms present in the current Mod list."""
+        """Rebuild source chips from fixed PLATFORM_FILTER_LABELS (+ active extras)."""
+        from ui.library_query import PLATFORM_FILTER_LABELS
         from ui.platform_labels import platform_badge_label
 
-        active_sources = self._collect_active_platform_sources()
+        active_sources = set(self._collect_active_platform_sources())
         current = self._platform_filter
 
         for btn in list(self._platform_buttons.values()):
@@ -954,21 +1299,33 @@ class ModLibraryView(QWidget):
         while self._platform_flow.count():
             self._platform_flow.takeAt(0)
 
-        all_btn = self._make_filter_chip("全部平台")
-        all_btn.setCheckable(True)
-        self._platform_group.addButton(all_btn)
-        self._platform_buttons[FILTER_PLATFORM_ALL] = all_btn
-        self._filter_buttons[FILTER_PLATFORM_ALL] = all_btn
-        self._platform_flow.addWidget(all_btn)
-        all_btn.toggled.connect(
-            lambda checked, k=FILTER_PLATFORM_ALL: self._on_platform_filter_toggled(
-                k, checked
+        for key, label in PLATFORM_FILTER_LABELS:
+            btn = self._make_filter_chip(label, parent=self._platform_bar)
+            btn.setCheckable(True)
+            self._platform_group.addButton(btn)
+            self._platform_buttons[key] = btn
+            self._filter_buttons[key] = btn
+            self._platform_flow.addWidget(btn)
+            btn.toggled.connect(
+                lambda checked, k=key: self._on_platform_filter_toggled(k, checked)
             )
-        )
 
-        for plat in active_sources:
+        # Extra sources seen in library but not in fixed list
+        fixed_tokens = {
+            "steam",
+            "nexus",
+            "modio",
+            "external",
+            "local",
+            "github",
+            "other",
+        }
+        for plat in sorted(active_sources, key=lambda p: platform_badge_label(p).casefold()):
+            token = str(plat or "").strip().lower()
+            if token in fixed_tokens or token in self._platform_buttons:
+                continue
             label = platform_badge_label(plat)
-            btn = self._make_filter_chip(label)
+            btn = self._make_filter_chip(label, parent=self._platform_bar)
             btn.setCheckable(True)
             self._platform_group.addButton(btn)
             self._platform_buttons[plat] = btn
@@ -977,20 +1334,23 @@ class ModLibraryView(QWidget):
                 lambda checked, k=plat: self._on_platform_filter_toggled(k, checked)
             )
 
-        if current == FILTER_PLATFORM_ALL or current not in self._platform_buttons:
-            all_btn.blockSignals(True)
-            all_btn.setChecked(True)
-            all_btn.blockSignals(False)
-            self._platform_filter = FILTER_PLATFORM_ALL
-        else:
-            pick = self._platform_buttons[current]
-            pick.blockSignals(True)
-            pick.setChecked(True)
-            pick.blockSignals(False)
+        all_key = FILTER_PLATFORM_ALL
+        if current not in self._platform_buttons:
+            current = all_key
+            self._platform_filter = all_key
+        pick = self._platform_buttons[current]
+        pick.blockSignals(True)
+        pick.setChecked(True)
+        pick.blockSignals(False)
 
         self._platform_bar.adjustSize()
 
+    def _on_search_text_changed(self, *_args) -> None:
+        """Debounce search typing — avoid layout thrash per keystroke."""
+        self._search_debounce.start()
+
     def _on_search_or_filter_changed(self, *_args) -> None:
+        self._search_debounce.stop()
         self._apply_view_filter()
 
     def _on_status_filter_toggled(self, key: str, checked: bool) -> None:
@@ -1071,8 +1431,8 @@ class ModLibraryView(QWidget):
         display = resolve_mod_library_title(
             metadata_display_name=(meta.json_display_name if meta else "") or "",
             metadata_title=(meta.title if meta else "") or "",
-            db_display_name=db_display,
-            db_steam_name=steam,
+            db_display_name=db_display if folder.is_dir() else "",
+            db_steam_name=steam if folder.is_dir() else "",
             folder_name=folder.name,
         )
         game_name = game_db or game_fs or (meta.game_name if meta else "") or ""
@@ -1109,6 +1469,39 @@ class ModLibraryView(QWidget):
         conflict = (conflict_status in ("conflict", "warning")) or (
             bool(getattr(tag_flags, "conflict", False)) if tag_flags else False
         )
+        if meta is not None and str(getattr(meta, "source_type", "") or "").strip():
+            platform = str(meta.source_type).strip()
+        if meta is not None and str(getattr(meta, "url", "") or "").strip():
+            source_url = str(meta.url).strip()
+        has_offline = False
+        from services.mod_metadata_resolver import resolve_offline_page
+
+        found = resolve_offline_page(mid or None, folder)
+        if found is not None:
+            has_offline = True
+        else:
+            off_ref = (
+                str(getattr(meta, "offline_page_path", "") or "").strip() if meta else ""
+            )
+            if off_ref:
+                try:
+                    has_offline = Path(off_ref).is_file()
+                except OSError:
+                    has_offline = False
+        content_status = ""
+        source_type = str(platform or "")
+        try:
+            from services.library_status import row_content_status, row_source_type
+
+            if mid:
+                brow = get_db().get_mod_backup_row(mid)
+                if brow is not None:
+                    content_status = row_content_status(brow)
+                    sticky = row_source_type(brow)
+                    if sticky and sticky != "unknown":
+                        source_type = sticky
+        except Exception:  # noqa: BLE001
+            pass
         return ModFilterIndex(
             mod_id=mid,
             display_name=display,
@@ -1117,7 +1510,7 @@ class ModLibraryView(QWidget):
             game_name=game_search or game_name,
             favorite=favorite,
             deployed=deployed,
-            has_offline=offline_page_exists(folder),
+            has_offline=has_offline,
             mtime=folder_mtime(folder),
             sort_name=display or steam or folder.name,
             invalid=invalid,
@@ -1130,11 +1523,31 @@ class ModLibraryView(QWidget):
             conflict_status=conflict_status,
             enabled=enabled,
             category_tags=category_tags,
+            content_status=content_status,
+            source_type=source_type,
         )
 
     def _apply_view_filter(self) -> None:
         """Reorder / show-hide cards only — never recreates DetailPanel."""
         detail_id = id(self.detail_panel)
+        query = self.search_box.text()
+        category_key = (
+            self._sidebar_category
+            if self._sidebar_category
+            else self._category_filter
+        )
+        filter_sig = (
+            query,
+            self._status_filter,
+            self._platform_filter,
+            category_key,
+            self._sort_mode,
+            self._current_game_filter or "",
+            len(self._card_entries),
+        )
+        if filter_sig == getattr(self, "_last_filter_sig", None):
+            return
+        self._last_filter_sig = filter_sig
         # Re-parent/show churn collapses scroll range → jumps to bottom without this.
         scroll = self._capture_scroll()
         self.scroll.setUpdatesEnabled(False)
@@ -1149,12 +1562,6 @@ class ModLibraryView(QWidget):
                     continue
                 widget.hide()
 
-            query = self.search_box.text()
-            category_key = (
-                self._sidebar_category
-                if self._sidebar_category
-                else self._category_filter
-            )
             visible_cards = filter_and_sort(
                 self._card_entries,
                 query=query,
@@ -1208,6 +1615,10 @@ class ModLibraryView(QWidget):
                 self._reveal_card(card)
 
             self.count_label.setText(f"{len(visible_cards)} Mods")
+            status_line = str(getattr(self, "_pending_game_status_line", "") or "").strip()
+            if self.current_game_name and status_line:
+                self.count_label.setText(f"{len(visible_cards)} Mods  ·  {status_line}")
+            self._refresh_game_header()
             self.library_layout.invalidate()
             self._sync_library_host_size()
             assert id(self.detail_panel) == detail_id
@@ -1234,6 +1645,16 @@ class ModLibraryView(QWidget):
     # ------------------------------------------------------------------
 
     def on_mod_selected(self, mod_path: object) -> None:
+        from PySide6.QtWidgets import QToolTip
+
+        try:
+            from ui.popup_trace import log_popup
+
+            log_popup("slot:on_mod_selected", detail=str(mod_path))
+        except Exception:  # noqa: BLE001
+            pass
+        # Kill floating tip / toast that Qt pops under the cursor on click.
+        QToolTip.hideText()
         path = Path(str(mod_path))
         card = self._card_for_path(path)
         if card is None or card.isHidden():
@@ -1265,6 +1686,7 @@ class ModLibraryView(QWidget):
         else:
             self._select_card(card, show_panel=True)
             self._last_clicked_index = current_index
+        QToolTip.hideText()
 
     def _visible_cards(self) -> list[ModCardWidget]:
         """Visible mod cards in FlowLayout physical order (filter + sort)."""
@@ -1310,7 +1732,7 @@ class ModLibraryView(QWidget):
             self._selected_card = card
             self._selected_path = card.managed_path
             self._sync_peer_mods_to_panel(exclude=card._mod_id())
-            self.detail_panel.show_mod(card.managed_path)
+            self.detail_panel.show_mod(card.managed_path, mod_id=card._mod_id() or None)
             self._apply_audit_to_panel(card._mod_id())
             return
         # Multi-select: detail shows batch edit + optional offline save.
@@ -1401,6 +1823,8 @@ class ModLibraryView(QWidget):
                 if c is card:
                     self._card_entries[i] = (replace(index, category_tags=cat_text), c)
                     break
+            card._card_data = None
+            self._snapshot_dirty = True
             card.refresh_display()
             if len(targets) == 1 and self._selected_card is card:
                 self.detail_panel._fill_category_tags(mid)
@@ -1455,25 +1879,32 @@ class ModLibraryView(QWidget):
         for card in self._cards:
             mid = card._mod_id()
             if mid in ids:
+                self._mark_card_stale(card)
                 card.refresh_display()
         # Keep multi-select panel state with updated platform label.
         if len(self._selected_cards) > 1:
             self._apply_multi_or_single_panel()
         elif self._selected_card is not None:
-            self.detail_panel.show_mod(self._selected_card.managed_path)
+            self.detail_panel.show_mod(
+                self._selected_card.managed_path,
+                mod_id=self._selected_card._mod_id() or None,
+            )
 
     def _card_for_path(self, path: Path) -> ModCardWidget | None:
         try:
             target = path.resolve()
         except OSError:
             target = path
+        target_s = str(target)
+        raw_s = str(path)
         for card in self._cards:
             try:
                 if card.managed_path.resolve() == target:
                     return card
             except OSError:
-                if card.managed_path == path:
-                    return card
+                pass
+            if str(card.managed_path) in {target_s, raw_s}:
+                return card
         return None
 
     def _rebuild_card_index(
@@ -1498,7 +1929,11 @@ class ModLibraryView(QWidget):
         path = Path(str(mod_path))
         card = self._card_for_path(path)
         manager = ModFileManager(self._target_root)
-        meta = manager.load_metadata(path)
+        from services.mod_metadata_resolver import resolve_mod_metadata
+
+        mid = card._mod_id() if card is not None else ""
+        resolved = resolve_mod_metadata(mid or None, path)
+        meta = resolved.to_mod_metadata() if resolved is not None else None
         if card is None and meta is not None and meta.published_file_id:
             card = self._card_for_mod_id(str(meta.published_file_id))
         if card is not None:
@@ -1520,7 +1955,7 @@ class ModLibraryView(QWidget):
             self._apply_view_filter()
             if self._selected_card is card and not card.isHidden():
                 self._sync_peer_mods_to_panel(exclude=card._mod_id())
-                self.detail_panel.show_mod(path)
+                self.detail_panel.show_mod(path, mod_id=card._mod_id() or None)
 
     # ------------------------------------------------------------------
     # Deploy (QThread — never call ModDeployer on the UI thread)
@@ -1545,6 +1980,8 @@ class ModLibraryView(QWidget):
             parent=self,
             action=action,  # type: ignore[arg-type]
         )
+        # Immediate UI feedback (do not wait for queued deploy_started).
+        self.detail_panel.set_deploy_busy(True, action=action)
         worker.deploy_started.connect(
             lambda a=action: self._on_deploy_started(a),
             Qt.ConnectionType.QueuedConnection,
@@ -1636,9 +2073,13 @@ class ModLibraryView(QWidget):
         for i, (index, card) in enumerate(self._card_entries):
             if card._mod_id() != str(mod_id):
                 continue
+            self._mark_card_stale(card)
             card.refresh_display()
             manager = ModFileManager(self._target_root)
-            meta = manager.load_metadata(card.managed_path) or card.metadata
+            from services.mod_metadata_resolver import resolve_mod_metadata
+
+            resolved = resolve_mod_metadata(mod_id, card.managed_path)
+            meta = resolved.to_mod_metadata() if resolved is not None else card.metadata
             if meta is None:
                 meta = ModMetadata(
                     published_file_id=mod_id,
@@ -1661,7 +2102,9 @@ class ModLibraryView(QWidget):
             if self._selected_card is card and not card.isHidden():
                 if not self.detail_panel._deploy_busy:
                     self._sync_peer_mods_to_panel(exclude=card._mod_id())
-                    self.detail_panel.show_mod(card.managed_path)
+                    self.detail_panel.show_mod(
+                        card.managed_path, mod_id=card._mod_id() or None
+                    )
             self._restore_scroll_after_layout(scroll, focus_mod_id=anchor_id)
             break
         else:
@@ -1675,6 +2118,7 @@ class ModLibraryView(QWidget):
         self,
         manager: ModFileManager,
         prefer: str | None = None,
+        snapshot=None,
     ) -> None:
         """
         Build the game sidebar from SQLite-configured games (primary),
@@ -1684,47 +2128,152 @@ class ModLibraryView(QWidget):
         """
         from core.sanitize import sanitize_folder_name
 
+        snap = snapshot if snapshot is not None else self._library_snapshot
+        game_meta: dict[str, object] = {}
+        if snap is not None:
+            fp = (
+                int(snap.total_count),
+                tuple(
+                    (
+                        str(g.folder),
+                        str(g.display),
+                        int(g.app_id),
+                        int(g.count),
+                        str(getattr(g, "game_status", "") or ""),
+                        str(
+                            getattr(
+                                getattr(g, "status_summary", None),
+                                "overall_status",
+                                "",
+                            )
+                            or ""
+                        ),
+                    )
+                    for g in snap.games
+                ),
+                str(prefer or ""),
+            )
+            if (
+                fp == getattr(self, "_game_list_fp", None)
+                and self.game_list.count() > 0
+            ):
+                self.game_list.blockSignals(True)
+                self._select_preferred_game_row(prefer)
+                self.game_list.blockSignals(False)
+                return
+            self._game_list_fp = fp
+
         self.game_list.blockSignals(True)
         self.game_list.clear()
 
-        total = len(manager.list_managed_mods())
-        self._add_game_list_item(ALL_GAMES_LABEL, total, key="", game_id=0)
+        if snap is not None:
+            total = int(snap.total_count)
+            self._add_game_list_item(ALL_GAMES_LABEL, total, key="", game_id=0)
+            entries: dict[str, tuple[str, int, int, str]] = {}
+            for g in snap.games:
+                entries[g.folder] = (
+                    g.display,
+                    int(g.app_id),
+                    int(g.count),
+                    str(getattr(g, "game_status", "") or "healthy"),
+                )
+                game_meta[g.folder] = g
+        else:
+            from services.mod_metadata_resolver import list_visible_mods
 
-        # key (library folder) -> (display_name, app_id, mod_count)
-        entries: dict[str, tuple[str, int, int]] = {}
+            visible = list_visible_mods(manager.target_root, None)
+            total = len(visible)
+            self._add_game_list_item(ALL_GAMES_LABEL, total, key="", game_id=0)
 
-        try:
-            db_games = [g for g in get_db().list_games() if int(g.app_id or 0) > 0]
-        except Exception:  # noqa: BLE001
-            logger.debug("list_games from DB failed", exc_info=True)
-            db_games = []
+            def _count_for(game_key: str) -> int:
+                n = 0
+                for item in visible:
+                    path = Path(item.managed_path or "")
+                    if path.parent.name == game_key or item.game_name == game_key:
+                        n += 1
+                return n
 
-        for game in db_games:
-            app_id = int(game.app_id)
-            display = (game.display_name or "").strip() or f"App_{app_id}"
-            folder = (game.folder_name or "").strip() or sanitize_folder_name(
-                display, fallback=f"App_{app_id}"
-            )
-            count = len(manager.list_managed_mods(game_name=folder))
-            # Prefer DB identity when the same folder appears twice.
-            entries[folder] = (display, app_id, count)
+            # key (library folder) -> (display_name, app_id, mod_count, game_status)
+            entries = {}
+            from services.library_status import compute_game_status
 
-        # Keep filesystem-only folders (legacy / empty dirs) that are not in DB.
-        for name in manager.list_games():
-            if name in entries:
-                continue
-            count = len(manager.list_managed_mods(game_name=name))
-            entries[name] = (name, 0, count)
+            try:
+                db_games = [g for g in get_db().list_games() if int(g.app_id or 0) > 0]
+            except Exception:  # noqa: BLE001
+                logger.debug("list_games from DB failed", exc_info=True)
+                db_games = []
+
+            for game in db_games:
+                app_id = int(game.app_id)
+                display = (game.display_name or "").strip() or f"App_{app_id}"
+                folder = (game.folder_name or "").strip() or sanitize_folder_name(
+                    display, fallback=f"App_{app_id}"
+                )
+                entries[folder] = (
+                    display,
+                    app_id,
+                    _count_for(folder),
+                    compute_game_status(manager.target_root, folder),
+                )
+
+            # Keep filesystem-only folders (legacy / empty dirs) that are not in DB.
+            for name in manager.list_games():
+                if name in entries:
+                    continue
+                entries[name] = (
+                    name,
+                    0,
+                    _count_for(name),
+                    compute_game_status(manager.target_root, name),
+                )
+
+            for item in visible:
+                key = Path(item.managed_path or "").parent.name or item.game_name
+                if key and key not in entries:
+                    entries[key] = (
+                        key,
+                        int(item.app_id or 0),
+                        _count_for(key),
+                        compute_game_status(manager.target_root, key),
+                    )
+
+        from services.game_status import format_status_tooltip
 
         for key in sorted(entries.keys(), key=str.lower):
-            display, app_id, count = entries[key]
+            packed = entries[key]
+            if len(packed) == 4:
+                display, app_id, count, game_status = packed
+            else:
+                display, app_id, count = packed
+                game_status = "healthy"
             categories: list[str] = []
-            if app_id > 0:
+            summary = None
+            cat_summaries: dict = {}
+            meta = game_meta.get(key)
+            if meta is not None:
+                categories = list(getattr(meta, "categories", []) or [])
+                summary = getattr(meta, "status_summary", None)
+                cat_summaries = dict(getattr(meta, "category_summaries", {}) or {})
+            elif snap is not None:
+                for game_entry in snap.games:
+                    if game_entry.folder == key:
+                        categories = list(game_entry.categories)
+                        summary = getattr(game_entry, "status_summary", None)
+                        cat_summaries = dict(
+                            getattr(game_entry, "category_summaries", {}) or {}
+                        )
+                        break
+            elif app_id > 0:
                 try:
                     categories = list(get_db().list_game_categories(app_id))
                 except Exception:  # noqa: BLE001
                     logger.debug("list_game_categories failed", exc_info=True)
                     categories = []
+            overall = ""
+            tip = ""
+            if summary is not None:
+                overall = str(getattr(summary, "overall_status", "") or "")
+                tip = format_status_tooltip(summary)
             self._add_game_list_item(
                 display,
                 count,
@@ -1732,9 +2281,20 @@ class ModLibraryView(QWidget):
                 game_id=app_id,
                 expandable=bool(categories),
                 expanded=key in self._expanded_games,
+                game_status=game_status,
+                overall_status=overall,
+                status_tip=tip,
             )
             for cat in categories:
                 cat_count = self._count_mods_for_category(key, cat, manager)
+                cat_sum = cat_summaries.get(cat)
+                cat_overall = ""
+                cat_tip = ""
+                if cat_sum is not None:
+                    cat_overall = str(getattr(cat_sum, "overall_status", "") or "")
+                    cat_tip = format_status_tooltip(cat_sum)
+                    if int(getattr(cat_sum, "total_mods", 0) or 0) > 0:
+                        cat_count = max(cat_count, int(cat_sum.total_mods))
                 self._add_game_list_item(
                     cat,
                     cat_count,
@@ -1742,6 +2302,8 @@ class ModLibraryView(QWidget):
                     game_id=app_id,
                     category=cat,
                     indent=True,
+                    overall_status=cat_overall,
+                    status_tip=cat_tip,
                 )
 
         prefer_key = prefer or ""
@@ -1750,6 +2312,20 @@ class ModLibraryView(QWidget):
         prefer_category = self._sidebar_category or ""
         if prefer_category and prefer_key:
             self._expanded_games.add(prefer_key)
+
+        self._select_preferred_game_row(prefer)
+        self._pending_game_filter = None
+        self._sync_category_row_visibility()
+        self.game_list.blockSignals(False)
+
+    def _select_preferred_game_row(self, prefer: str | None) -> None:
+        prefer_key = prefer or ""
+        if prefer_key == ALL_GAMES_LABEL:
+            prefer_key = ""
+        prefer_category = self._sidebar_category or ""
+        if prefer_category and prefer_key:
+            self._expanded_games.add(prefer_key)
+            self._sync_category_row_visibility()
 
         target_row = 0
         for i in range(self.game_list.count()):
@@ -1770,9 +2346,6 @@ class ModLibraryView(QWidget):
         key = (current.data(GAME_ROLE) if current else "") or ""
         gid = int(current.data(GAME_ID_ROLE) or 0) if current else 0
         self._set_current_game_context(key or None, game_id=gid or None)
-        self._pending_game_filter = None
-        self._sync_category_row_visibility()
-        self.game_list.blockSignals(False)
 
     def _count_mods_for_category(
         self,
@@ -1783,12 +2356,25 @@ class ModLibraryView(QWidget):
         label = str(category or "").strip()
         if not game_key or not label:
             return 0
+        snap = self._library_snapshot
+        if snap is not None:
+            count = 0
+            for card in snap.cards:
+                if card.game_folder != game_key:
+                    continue
+                tags = str(card.category_tags or "").split()
+                if tags and tags[0] == label:
+                    count += 1
+            return count
         count = 0
         try:
             db = get_db()
-            for folder in manager.list_managed_mods(game_name=game_key):
-                meta = manager.load_metadata(folder)
-                mid = str(meta.published_file_id or "") if meta else ""
+            from services.mod_metadata_resolver import list_visible_mods
+
+            for item in list_visible_mods(
+                manager.target_root, game_key
+            ):
+                mid = str(item.published_file_id or "")
                 if not mid.isdigit():
                     continue
                 tags = db.get_category_tags(mid)
@@ -1809,6 +2395,9 @@ class ModLibraryView(QWidget):
         indent: bool = False,
         expandable: bool = False,
         expanded: bool = False,
+        game_status: str = "",
+        overall_status: str = "",
+        status_tip: str = "",
     ) -> None:
         """Steam-sidebar row via item widget only (empty item text avoids ghost paint)."""
         # Empty DisplayRole — QListWidgetItem text + setItemWidget stacked = 重影.
@@ -1816,14 +2405,29 @@ class ModLibraryView(QWidget):
         item.setData(GAME_ROLE, key)
         item.setData(GAME_ID_ROLE, int(game_id or 0))
         item.setData(GAME_CATEGORY_ROLE, str(category or ""))
-        item.setToolTip(f"{name}  ·  {count}" if not category else f"{name}  ·  {count}")
+        tip = str(status_tip or "").strip()
+        if not tip:
+            tip = f"{name}  ·  {count}" if not category else f"{name}  ·  {count}"
+            if str(game_status or "").strip() == "missing_folder":
+                tip = f"{tip}\n⚠ Mod目录不存在\n但备份数据仍存在"
+        item.setToolTip(tip)
+        if category:
+            kind = _GameFilterRow.KIND_CATEGORY
+        elif not key:
+            kind = _GameFilterRow.KIND_ALL
+        else:
+            kind = _GameFilterRow.KIND_GAME
         row = _GameFilterRow(
             name,
             count,
+            kind=kind,
             show_count=True,
             indent=indent or bool(category),
             expandable=expandable and not category,
             expanded=expanded,
+            game_status="" if category else game_status,
+            overall_status=overall_status,
+            status_tip=tip,
         )
         item.setSizeHint(row.sizeHint())
         self.game_list.addItem(item)
@@ -1924,7 +2528,10 @@ class ModLibraryView(QWidget):
                 manager = ModFileManager(self._target_root)
                 self._clear_selection()
                 self.detail_panel.clear()
-                self._render_mod_cards(manager)
+                self._render_mod_cards(
+                    manager, force_reload=self._snapshot_dirty
+                )
+                self._snapshot_dirty = False
                 self._sync_library_host_size()
                 self._set_scroll_value(0)
             else:
@@ -1935,74 +2542,53 @@ class ModLibraryView(QWidget):
         manager = ModFileManager(self._target_root)
         self._clear_selection()
         self.detail_panel.clear()
-        self._render_mod_cards(manager)
+        self._render_mod_cards(manager, force_reload=self._snapshot_dirty)
+        self._snapshot_dirty = False
         # Game switch: never keep the previous game's scroll offset / range.
         self._sync_library_host_size()
         self._set_scroll_value(0)
         self.filter_changed.emit(key or ALL_GAMES_LABEL)
 
-    def _render_mod_cards(self, manager: ModFileManager) -> None:
-        self._detach_active_cards()
-        game = self._current_game_filter
-        folders = manager.list_managed_mods(game_name=game)
+    def _render_mod_cards(
+        self, manager: ModFileManager, *, force_reload: bool = True
+    ) -> None:
+        from services.mod_library_cache import (
+            card_data_to_metadata,
+            get_library_cache,
+        )
 
-        if not folders:
+        snapshot = None
+        if not force_reload and self._library_snapshot is not None:
+            try:
+                same = Path(self._library_snapshot.library_root).resolve() == Path(
+                    manager.target_root
+                ).resolve()
+            except OSError:
+                same = str(self._library_snapshot.library_root) == str(
+                    manager.target_root
+                )
+            if same:
+                snapshot = self._library_snapshot
+        if snapshot is None:
+            snapshot = get_library_cache().load_snapshot(
+                manager.target_root, force=force_reload
+            )
+            self._library_snapshot = snapshot
+
+        self._detach_active_cards()
+        self._last_filter_sig = None
+        game = self._current_game_filter
+        rows = list(snapshot.cards)
+        if game:
+            rows = [c for c in rows if c.game_folder == game]
+
+        if not rows:
             self._cards = []
             self._card_entries = []
             self._prune_stale_card_cache(set(), game)
             self._rebuild_platform_filter_bar()
             self._apply_view_filter()
             return
-
-        metas: list[tuple[Path, ModMetadata]] = []
-        mod_ids: list[str] = []
-        for folder in folders:
-            meta = manager.load_metadata(folder)
-            if meta is None:
-                meta = ModMetadata(
-                    published_file_id=folder.name if folder.name.isdigit() else "",
-                    title="",
-                    managed_path=str(folder),
-                )
-            meta.managed_path = str(folder)
-            meta.local_path = str(folder)
-            # Read-only sidecar overlay for display — never sync DB during render.
-            try:
-                from services.info_sidecar import load_info_sidecar
-
-                side = load_info_sidecar(folder)
-                if side is not None:
-                    mid_hint = (
-                        side.published_file_id
-                        or str(meta.published_file_id or "")
-                    )
-                    if side.display_name:
-                        meta.json_display_name = side.display_name
-                    if side.description and not meta.description:
-                        meta.description = side.description
-                    if side.cover_path and not meta.cover_path:
-                        meta.cover_path = side.cover_path
-                    if side.offline_page_path and not meta.offline_page_path:
-                        meta.offline_page_path = side.offline_page_path
-                    if mid_hint.isdigit() and not str(
-                        meta.published_file_id or ""
-                    ).isdigit():
-                        meta.published_file_id = mid_hint
-            except Exception:  # noqa: BLE001
-                pass
-            manager.enrich_title_from_db(meta)
-            metas.append((folder, meta))
-            if str(meta.published_file_id).isdigit():
-                mod_ids.append(str(meta.published_file_id))
-
-        try:
-            fields_map = get_db().get_mods_search_fields(mod_ids)
-        except Exception:  # noqa: BLE001
-            fields_map = {}
-        try:
-            tag_flags_map = get_db().get_mods_tag_flags(mod_ids)
-        except Exception:  # noqa: BLE001
-            tag_flags_map = {}
 
         game_cats: list[str] = []
         try:
@@ -2017,29 +2603,30 @@ class ModLibraryView(QWidget):
         cards: list[ModCardWidget] = []
         entries: list[tuple[ModFilterIndex, ModCardWidget]] = []
 
-        for folder, meta in metas:
-            mid = str(meta.published_file_id or "")
-            key = self._card_cache_key(folder)
+        for data in rows:
+            folder = Path(data.managed_path)
+            meta = card_data_to_metadata(data)
+            mid = str(data.id or "")
+            key = self._card_cache_key(folder, mod_id=mid)
             keep_keys.add(key)
             card = self._card_cache.get(key)
             if card is None:
-                card = ModCardWidget(folder, metadata=meta, parent=self.library_host)
+                card = ModCardWidget(
+                    folder,
+                    metadata=meta,
+                    parent=self.library_host,
+                    card_data=data,
+                )
                 card.hide()
                 self._connect_card_signals(card)
                 self._card_cache[key] = card
                 created += 1
             else:
-                card.rebind(folder, meta)
+                card.rebind(folder, meta, card_data=data)
                 card.hide()
                 reused += 1
             card.set_category_options(game_cats)
-            index = self._build_filter_index(
-                folder,
-                meta,
-                manager,
-                fields_map.get(mid),
-                tag_flags=tag_flags_map.get(mid),
-            )
+            index = self._filter_index_from_card_data(data)
             cards.append(card)
             entries.append((index, card))
 
@@ -2055,8 +2642,46 @@ class ModLibraryView(QWidget):
         self._rebuild_platform_filter_bar()
         self._apply_view_filter()
 
+    def _filter_index_from_card_data(self, data) -> ModFilterIndex:
+        folder_name = Path(data.managed_path).name
+        source_type = str(getattr(data, "source_type", "") or data.platform or "")
+        content_status = str(getattr(data, "content_status", "") or "")
+        return ModFilterIndex(
+            mod_id=str(data.id or ""),
+            display_name=data.title,
+            steam_name=data.steam_name,
+            notes=data.notes,
+            game_name=data.game_name,
+            favorite=data.favorite,
+            deployed=data.deployed,
+            has_offline=data.has_offline,
+            mtime=float(data.updated_time or 0.0),
+            sort_name=data.title or data.steam_name or folder_name,
+            invalid=data.invalid,
+            conflict=data.conflict,
+            tag_values=data.tag_values,
+            platform=data.platform,
+            source_url=data.source_url,
+            external_id=data.external_id,
+            is_invalid=data.invalid,
+            conflict_status=data.conflict_status,
+            enabled=data.enabled,
+            category_tags=data.category_tags,
+            content_status=content_status,
+            source_type=source_type,
+        )
+
     @staticmethod
-    def _card_cache_key(folder: Path) -> str:
+    def _card_cache_key(folder: Path, mod_id: str = "") -> str:
+        mid = str(mod_id or "").strip()
+        try:
+            resolved = Path(folder).resolve()
+            if resolved.is_dir():
+                return str(resolved)
+        except OSError:
+            pass
+        if mid.isdigit():
+            return f"missing:{mid}"
         try:
             return str(Path(folder).resolve())
         except OSError:
@@ -2112,6 +2737,10 @@ class ModLibraryView(QWidget):
             if key in keep_keys:
                 continue
             path = Path(key)
+            if key.startswith("missing:"):
+                if key not in keep_keys:
+                    self._drop_cache_key(key)
+                continue
             if not path.is_dir():
                 self._drop_cache_key(key)
                 continue
@@ -2226,9 +2855,13 @@ class ModLibraryView(QWidget):
         for i, (_idx, card) in enumerate(self._card_entries):
             if card._mod_id() != mid:
                 continue
+            self._mark_card_stale(card)
             card.refresh_display()
             manager = ModFileManager(self._target_root)
-            meta = manager.load_metadata(card.managed_path) or card.metadata
+            from services.mod_metadata_resolver import resolve_mod_metadata
+
+            resolved = resolve_mod_metadata(mid, card.managed_path)
+            meta = resolved.to_mod_metadata() if resolved is not None else card.metadata
             if meta is None:
                 meta = ModMetadata(
                     published_file_id=mid,
@@ -2249,7 +2882,9 @@ class ModLibraryView(QWidget):
             )
             self._apply_view_filter()
             if self._selected_card is card and not card.isHidden():
-                self.detail_panel.show_mod(card.managed_path)
+                self.detail_panel.show_mod(
+                    card.managed_path, mod_id=card._mod_id() or None
+                )
             break
 
     def showEvent(self, event) -> None:  # noqa: N802

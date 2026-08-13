@@ -25,10 +25,18 @@ FILTER_OFFLINE_MISSING = "offline_missing"
 FILTER_INVALID = "invalid"
 FILTER_CONFLICT = "conflict"
 FILTER_DISABLED = "disabled"
+# Lifecycle content_status filters (Phase 7)
+FILTER_CONTENT_MISSING = "content_missing"
+FILTER_FOLDER_MISSING = "folder_missing"
+FILTER_BACKUP_INVALID = "backup_invalid"
+FILTER_IDENTITY_CONFLICT = "identity_conflict"
 FILTER_PLATFORM_ALL = "platform_all"
 FILTER_PLATFORM_STEAM = "platform_steam"
 FILTER_PLATFORM_NEXUS = "platform_nexus"
 FILTER_PLATFORM_GITHUB = "platform_github"
+FILTER_PLATFORM_MODIO = "platform_modio"
+FILTER_PLATFORM_EXTERNAL = "platform_external"
+FILTER_PLATFORM_LOCAL = "platform_local"
 FILTER_PLATFORM_OTHER = "platform_other"
 FILTER_CATEGORY_ALL = "category_all"
 
@@ -65,22 +73,29 @@ def resolve_mod_library_title(
     return "—"
 
 
-# Status chips (exclusive within group).
+# Status chips (exclusive within group) — lifecycle anomaly filters first.
 STATUS_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_ALL, "全部"),
+    (FILTER_CONTENT_MISSING, "⚠ 内容缺失"),
+    (FILTER_FOLDER_MISSING, "⚠ 目录缺失"),
+    (FILTER_IDENTITY_CONFLICT, "❌ 冲突"),
+    (FILTER_BACKUP_INVALID, "⚠ Backup异常"),
     (FILTER_FAVORITE, "收藏"),
     (FILTER_DEPLOYED, "已部署"),
     (FILTER_INVALID, "失效"),
-    (FILTER_CONFLICT, "冲突"),
+    (FILTER_CONFLICT, "关系冲突"),
     (FILTER_DISABLED, "已禁用"),
     (FILTER_OFFLINE_MISSING, "离线页面缺失"),
 )
 
-# Platform chips (exclusive within group) — combine with status.
+# Platform / source chips — sticky source_type values.
 PLATFORM_FILTER_LABELS: tuple[tuple[str, str], ...] = (
-    (FILTER_PLATFORM_ALL, "全部平台"),
+    (FILTER_PLATFORM_ALL, "全部"),
     (FILTER_PLATFORM_STEAM, "Steam"),
     (FILTER_PLATFORM_NEXUS, "Nexus"),
+    (FILTER_PLATFORM_MODIO, "Mod.io"),
+    (FILTER_PLATFORM_EXTERNAL, "External"),
+    (FILTER_PLATFORM_LOCAL, "Local"),
     (FILTER_PLATFORM_GITHUB, "GitHub"),
 )
 
@@ -120,13 +135,17 @@ class ModFilterIndex:
     conflict_status: str = "none"
     enabled: bool = True
     category_tags: str = ""
+    content_status: str = ""
+    source_type: str = ""
 
 
-def offline_page_exists(managed_path: Path) -> bool:
-    """True when an offline page file exists — ``is_file`` only (no content read)."""
-    from services.offline.paths import offline_page_file_exists
+def offline_page_exists(
+    managed_path: Path, *, mod_id: str | int | None = None
+) -> bool:
+    """True when resolver finds an offline page (``.info`` or backup)."""
+    from services.mod_metadata_resolver import resolve_offline_page
 
-    return offline_page_file_exists(managed_path)
+    return resolve_offline_page(mod_id, managed_path) is not None
 
 
 def folder_mtime(managed_path: Path) -> float:
@@ -169,12 +188,20 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
         return not bool(index.has_offline)
     if key == FILTER_INVALID:
         return bool(index.is_invalid or index.invalid)
+    if key == FILTER_CONTENT_MISSING:
+        return str(index.content_status or "").strip() == FILTER_CONTENT_MISSING
+    if key == FILTER_FOLDER_MISSING:
+        return str(index.content_status or "").strip() == FILTER_FOLDER_MISSING
+    if key == FILTER_BACKUP_INVALID:
+        return str(index.content_status or "").strip() == FILTER_BACKUP_INVALID
+    if key == FILTER_IDENTITY_CONFLICT:
+        return str(index.content_status or "").strip() == FILTER_IDENTITY_CONFLICT
     if key == FILTER_CONFLICT:
         status = normalize_conflict_status(index.conflict_status)
         return bool(index.conflict) or status in (
             CONFLICT_STATUS_CONFLICT,
             CONFLICT_STATUS_WARNING,
-        )
+        ) or str(index.content_status or "").strip() == FILTER_IDENTITY_CONFLICT
     if key == FILTER_DISABLED:
         return not bool(index.enabled)
     # Platform keys accidentally passed as status → defer to platform matcher
@@ -183,6 +210,10 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
         FILTER_PLATFORM_STEAM,
         FILTER_PLATFORM_NEXUS,
         FILTER_PLATFORM_GITHUB,
+        FILTER_PLATFORM_MODIO,
+        FILTER_PLATFORM_EXTERNAL,
+        FILTER_PLATFORM_LOCAL,
+        FILTER_PLATFORM_OTHER,
     ):
         return matches_platform_filter(index, key)
     return True
@@ -192,14 +223,28 @@ def matches_platform_filter(index: ModFilterIndex, platform_key: str) -> bool:
     key = platform_key or FILTER_PLATFORM_ALL
     if key in (FILTER_ALL, FILTER_PLATFORM_ALL, ""):
         return True
+    # Prefer sticky source_type when present
+    source = str(index.source_type or "").strip().lower()
+    plat = str(index.platform or "").strip().lower()
+    effective = source if source and source != "unknown" else plat
     legacy = {
-        FILTER_PLATFORM_STEAM: PLATFORM_STEAM,
-        FILTER_PLATFORM_NEXUS: PLATFORM_NEXUS,
-        FILTER_PLATFORM_GITHUB: PLATFORM_GITHUB,
+        FILTER_PLATFORM_STEAM: "steam",
+        FILTER_PLATFORM_NEXUS: "nexus",
+        FILTER_PLATFORM_GITHUB: "github",
+        FILTER_PLATFORM_MODIO: "modio",
+        FILTER_PLATFORM_EXTERNAL: "external",
+        FILTER_PLATFORM_LOCAL: "local",
+        FILTER_PLATFORM_OTHER: "other",
     }
     if key in legacy:
-        return normalize_platform(index.platform) == legacy[key]
-    return normalize_platform(index.platform) == normalize_platform(key)
+        want = legacy[key]
+        if want == "modio":
+            return effective in {"modio", "mod.io", "mod_io"}
+        if want == "local":
+            return effective in {"local", "other", "manual"}
+        return effective == want
+    # Raw platform token (dynamic chip)
+    return effective == str(key).strip().lower()
 
 
 def matches_category_filter(index: ModFilterIndex, category_key: str) -> bool:

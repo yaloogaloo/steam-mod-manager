@@ -8,8 +8,8 @@ from PySide6.QtCore import QThread, Signal
 
 from services.metadata_refresh import (
     MetadataRefreshResult,
+    refresh_selected_mods_metadata,
     refresh_steam_mod_metadata,
-    refresh_steam_mods_metadata,
 )
 
 
@@ -120,7 +120,7 @@ class ModioMetadataRefreshWorker(QThread):
 
 
 class MetadataBatchRefreshWorker(QThread):
-    """Batch Steam metadata refresh with progress ``current / total``."""
+    """Batch metadata refresh (all platforms) with progress ``current / total``."""
 
     refresh_started = Signal()
     progress = Signal(int, int, str)  # done, total, message
@@ -129,14 +129,22 @@ class MetadataBatchRefreshWorker(QThread):
 
     def __init__(
         self,
-        entries: list[tuple[str, Path]],
+        entries: list[tuple[str, Path]] | list[tuple[str, Path, str]],
         *,
         library_root: str | Path | None = None,
         max_workers: int = 2,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.entries = [(str(m), Path(p)) for m, p in entries]
+        normalized: list[tuple[str, Path, str]] = []
+        for item in entries:
+            if len(item) >= 3:
+                mid, path, plat = item[0], item[1], item[2]
+            else:
+                mid, path = item[0], item[1]
+                plat = "steam"
+            normalized.append((str(mid), Path(path), str(plat or "steam")))
+        self.entries = normalized
         self.library_root = Path(library_root) if library_root else None
         self.max_workers = max(1, min(int(max_workers), 2))
 
@@ -145,7 +153,7 @@ class MetadataBatchRefreshWorker(QThread):
 
         self.refresh_started.emit()
         try:
-            results = refresh_steam_mods_metadata(
+            results = refresh_selected_mods_metadata(
                 self.entries,
                 library_root=self.library_root,
                 max_workers=self.max_workers,

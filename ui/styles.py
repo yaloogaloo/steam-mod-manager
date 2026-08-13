@@ -140,11 +140,12 @@ QMenu::separator {{
 }}
 
 QToolTip {{
+    /* No border-radius: on Windows Fusion it punches a white hole behind the tip. */
     background-color: {BACKGROUND_SECTION};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER_DEFAULT};
     padding: 6px 8px;
-    border-radius: 4px;
+    border-radius: 0px;
 }}
 
 QScrollArea {{
@@ -518,21 +519,65 @@ QWidget#gameFilterRow {{
     background: transparent;
 }}
 
+QWidget#GameTreeItem {{
+    background: transparent;
+}}
+
+QWidget#CategoryTreeItem {{
+    background: transparent;
+}}
+
 QLabel#gameListChevron {{
     color: {TEXT_MUTED};
     font-size: 11px;
     min-width: 12px;
 }}
 
+QLabel#gameTreeIcon {{
+    color: {TEXT_BODY};
+    font-size: 12px;
+}}
+
+QLabel#categoryTreeIcon {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+}}
+
+QLabel#gameTreeName,
 QLabel#gameListName {{
     color: {TEXT_BODY};
+    font-size: 13px;
+    font-weight: 600;
+}}
+
+QLabel#categoryTreeName {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    font-weight: 400;
+}}
+
+QLabel#gameTreeCount,
+QLabel#gameListCount {{
+    color: {TEXT_MUTED};
     font-size: 12px;
     font-weight: 500;
 }}
 
-QLabel#gameListCount {{
+QLabel#categoryTreeCount {{
     color: {TEXT_MUTED};
-    font-size: 11px;
+    font-size: 10px;
+    font-weight: 400;
+}}
+
+QLabel#gameListStatus {{
+    color: {ACCENT_WARNING};
+    font-size: 10px;
+    font-weight: 500;
+    padding-left: 2px;
+}}
+
+QWidget#GameTreeItem[overall="conflict"] QLabel#gameTreeIcon {{
+    color: {ACCENT_ERROR};
 }}
 
 QWidget#libraryCenter {{
@@ -745,6 +790,7 @@ QComboBox#librarySortCombo {{
 
 QFrame#libraryEmptyOverlay {{
     background-color: {BACKGROUND_OVERLAY};
+    border: none;
 }}
 
 QLabel#libraryEmptyTitle {{
@@ -767,13 +813,16 @@ QPushButton#libraryEmptyAction:hover {{
 }}
 
 QFrame#libraryLoadingOverlay {{
-    background-color: {BACKGROUND_OVERLAY_LIGHT};
+    background-color: transparent;
+    border: none;
 }}
 
 QLabel#libraryLoadingLabel {{
     color: {ACCENT_PRIMARY};
     font-size: 13px;
     font-weight: 600;
+    background-color: transparent;
+    border: none;
 }}
 
 QListWidget#navList {{
@@ -1085,20 +1134,45 @@ QLabel#detailFilesLegacyHint {{
     font-size: 11px;
 }}
 QLabel#detailFileBadgeMain {{
-    background-color: {ACCENT_SUCCESS};
+    background-color: #3fb950;
     color: #ffffff;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
-    padding: 1px 3px;
+    padding: 0px 3px;
     border-radius: 2px;
 }}
 QLabel#detailFileBadgeSource {{
     background-color: #b8860b;
     color: #ffffff;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
-    padding: 1px 3px;
+    padding: 0px 3px;
     border-radius: 2px;
+}}
+/* Nexus category badges — colors via Qt property; NO default green inherit */
+QLabel#detailFileCategoryBadge {{
+    color: #ffffff;
+    font-size: 8px;
+    font-weight: 700;
+    padding: 0px;
+    margin: 0px;
+    border-radius: 2px;
+    background-color: #4a90d9;
+}}
+QLabel#detailFileCategoryBadge[category="Main"] {{
+    background-color: #3fb950;
+}}
+QLabel#detailFileCategoryBadge[category="Optional"] {{
+    background-color: #d4a017;
+}}
+QLabel#detailFileCategoryBadge[category="Miscellaneous"] {{
+    background-color: #6e6e6e;
+}}
+QLabel#detailFileCategoryBadge[category="汉化"] {{
+    background-color: #d97706;
+}}
+QLabel#detailFileCategoryBadge[category="Other"] {{
+    background-color: #4a90d9;
 }}
 QLabel#detailFileDesc {{
     color: #888888;
@@ -1130,10 +1204,15 @@ QPushButton#detailFilesActionButton {{
     padding: 3px 8px;
     font-size: 11px;
     color: {TEXT_BODY};
+    min-height: 22px;
 }}
 QPushButton#detailFilesActionButton:hover {{
     background-color: {BACKGROUND_BUTTON};
     border-color: {BORDER_STRONG};
+}}
+QLabel#detailFileBadgeSpacer {{
+    background: transparent;
+    border: none;
 }}
 """.strip()
 

@@ -23,6 +23,7 @@ from services.offline.manual_import import (
 )
 from services.offline.manager import attach_nexus_offline_page
 from services.offline.mhtml import rewrite_cid_references, store_mhtml_snapshot
+from services.offline.nexus_cleaner import CLEAN_VERSION
 
 PALWORLD = ImportContext(game_id=1623730, game_name="Palworld")
 
@@ -118,7 +119,7 @@ def test_mhtml_import_writes_index_and_assets(tmp_path: Path) -> None:
     assert meta["provider"] == PROVIDER_NEXUS_MANUAL_IMPORT
     assert meta["source_format"] == "mhtml"
     assert meta["cleaned"] is True
-    assert meta["clean_version"] == "1"
+    assert meta["clean_version"] == CLEAN_VERSION
 
 
 def test_mhtml_image_rewritten_to_assets(tmp_path: Path) -> None:

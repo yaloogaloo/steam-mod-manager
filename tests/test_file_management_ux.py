@@ -17,6 +17,7 @@ from core.mod_platform import (
     FILE_ROLE_NEXUS_OLD,
     FILE_ROLE_NEXUS_OPTIONAL,
     FILE_ROLE_STEAM_CONTENT,
+    FILE_ROLE_UNKNOWN,
     FILE_TYPE_MAIN,
     FILE_TYPE_OPTIONAL,
     FILE_TYPE_PATCH,
@@ -162,6 +163,59 @@ def test_nexus_grouping_order() -> None:
     titles = [t for t, _ in groups]
     assert titles == ["Main Files", "Optional Files", "Misc", "Old"]
     assert file_group_title(GROUP_NEXUS_MISC) == "Misc"
+
+
+def test_nexus_tree_category_grouping_and_main_default() -> None:
+    from ui.mod_files_ux import (
+        group_nexus_file_entries,
+        is_nexus_main_category,
+        nexus_category_label,
+        normalize_nexus_category,
+    )
+
+    files = _nexus_pack()
+    assert nexus_category_label(files[0]) == "Main"
+    assert nexus_category_label(files[1]) == "Optional"
+    assert is_nexus_main_category("Main")
+    assert is_nexus_main_category("MAIN FILES")
+    assert not is_nexus_main_category("Optional")
+
+    # Strict whitelist: junk / Old / 示例 → Other; 汉化 kept
+    assert normalize_nexus_category("示例 pack") == "Other"
+    assert normalize_nexus_category("Old Files") == "Other"
+    assert normalize_nexus_category("汉化") == "汉化"
+    assert normalize_nexus_category("Miscellaneous Files") == "Miscellaneous"
+
+    groups = group_nexus_file_entries(files)
+    titles = [t for t, _ in groups]
+    assert titles[0] == "Main"
+    assert "Optional" in titles
+    assert "Old" not in titles  # Old role → Other
+    assert all(len(entries) >= 1 for _, entries in groups)
+    assert set(titles).issubset(
+        {"Main", "Optional", "Miscellaneous", "汉化", "Other"}
+    )
+
+    dynamic = ModFileEntry(
+        id="d1",
+        filename="a.zip",
+        path="a.zip",
+        source_type=SOURCE_TYPE_NEXUS,
+        file_role=FILE_ROLE_UNKNOWN,
+        metadata={"category": "Miscellaneous"},
+        selected_for_deploy=False,
+    )
+    dynamic2 = ModFileEntry(
+        id="d2",
+        filename="b.zip",
+        path="b.zip",
+        source_type=SOURCE_TYPE_NEXUS,
+        file_role=FILE_ROLE_UNKNOWN,
+        metadata={"category": "Miscellaneous"},
+        selected_for_deploy=False,
+    )
+    misc_groups = dict(group_nexus_file_entries([dynamic, dynamic2]))
+    assert list(misc_groups["Miscellaneous"]) == [dynamic, dynamic2]
 
 
 def test_github_release_and_other_grouping() -> None:

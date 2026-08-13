@@ -127,7 +127,7 @@ class ModioOfflineProvider(OfflineProvider):
                 meta = mgr.load_metadata(path)
                 if meta is not None:
                     meta.offline_page_path = str(Path(index))
-                    mgr.save_metadata(meta, path)
+                    mgr.save_metadata(meta, path, sync_backup=False)
             except Exception:  # noqa: BLE001
                 pass
         except Exception as exc:  # noqa: BLE001
