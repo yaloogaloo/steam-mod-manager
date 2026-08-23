@@ -47,6 +47,17 @@ def parse_nexus_game(nexus_url: str = "") -> str:
     return ""
 
 
+def is_valid_nexus_mod_id(value: str = "") -> bool:
+    """True when *value* is a numeric Nexus Mod ID (not a local folder placeholder)."""
+    return str(value or "").strip().isdigit()
+
+
+def local_nexus_external_id(folder_name: str) -> str:
+    """Internal placeholder external_id for imports without a real Nexus Mod ID."""
+    name = str(folder_name or "").strip() or "unknown"
+    return f"local/{name}"
+
+
 class NexusImporter(ModImporter):
     platform = PLATFORM_NEXUS
 
@@ -87,35 +98,60 @@ class NexusImporter(ModImporter):
 
         url = str(nexus_url or "").strip()
         ext = parse_nexus_id(url, nexus_id)
-        if not ext:
-            ext = folder.name
+        is_batch = bool(_kwargs.get("is_batch_mode"))
         if url.isdigit() and not nexus_id:
             ext = url
             url = f"https://www.nexusmods.com/mods/{ext}"
-        name = (title or "").strip() or folder.name
-        is_batch = bool(_kwargs.get("is_batch_mode"))
         if is_batch:
-            # Batch folder import: never invent source URLs from folder names.
+            # Local/batch: folder name is the temporary identity; never invent URLs.
+            if not ext:
+                ext = folder.name
             url = ""
-        elif not url and ext:
-            # Prefer context game name for canonical URL; never invent a library game.
-            slug = parse_nexus_game(url) or ctx.game_name.replace(" ", "").lower()
-            if slug and slug.lower() != "mods":
-                url = f"https://www.nexusmods.com/{slug}/mods/{ext}"
-            else:
-                url = f"https://www.nexusmods.com/mods/{ext}"
+        else:
+            if not ext and url:
+                ext = parse_nexus_id(url, "")
+            if not url and not is_valid_nexus_mod_id(ext):
+                # No official URL: allow local placeholder only when some id/folder exists.
+                if not ext:
+                    from services.importers.identity_resolve import MISSING_OFFICIAL_IDENTITY
+
+                    return ImportResult(
+                        success=False,
+                        error=MISSING_OFFICIAL_IDENTITY,
+                        platform=self.platform,
+                    )
+                ext = local_nexus_external_id(ext)
+                url = ""
+            elif not is_valid_nexus_mod_id(ext) and url:
+                # URL present but id not numeric — refuse local/ invention.
+                from services.importers.identity_resolve import MISSING_OFFICIAL_IDENTITY
+
+                return ImportResult(
+                    success=False,
+                    error=MISSING_OFFICIAL_IDENTITY,
+                    platform=self.platform,
+                    source_url=url,
+                )
+            elif not url and is_valid_nexus_mod_id(ext):
+                slug = parse_nexus_game(nexus_url) or ctx.game_name.replace(" ", "").lower()
+                if slug and slug.lower() != "mods":
+                    url = f"https://www.nexusmods.com/{slug}/mods/{ext}"
+                else:
+                    url = f"https://www.nexusmods.com/mods/{ext}"
+
+        name = (title or "").strip() or folder.name
 
         db = self._database()
-        existing = db.find_mod_by_external(PLATFORM_NEXUS, ext)
-        if existing is not None:
-            return ImportResult(
-                success=False,
-                error="该Mod已经存在",
-                platform=self.platform,
-                external_id=ext,
-                mod_id=existing.mod_id,
-                source_url=existing.source_url,
-            )
+        from services.importers.duplicate_check import check_import_duplicate
+
+        dup = check_import_duplicate(
+            db,
+            platform=PLATFORM_NEXUS,
+            external_id=ext,
+            source_url=url,
+        )
+        if dup is not None:
+            return dup
 
         bundle = build_nexus_mod_files(
             folder,

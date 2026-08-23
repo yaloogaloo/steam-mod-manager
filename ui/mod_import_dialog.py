@@ -42,7 +42,6 @@ from core.mod_platform import (
     platform_requires_source_url,
 )
 from services.importers.archive import is_archive_path
-from services.importers.directory_batch import discover_mod_directories
 from services.importers.import_settings import (
     resolve_import_start_directory,
     set_last_import_directory,
@@ -715,60 +714,27 @@ class ModImportDialog(QDialog):
             source = self._empty_stub_folder(title=title, ident=ident)
         return source, False, []
 
-    @staticmethod
-    def _is_batch_folder(folder: str) -> bool:
-        """True when *folder* resolves to multiple Mod subdirectories."""
-        text = str(folder or "").strip()
-        if not text:
-            return False
-        path = Path(text).expanduser()
-        if not path.is_dir():
-            return False
-        try:
-            return len(discover_mod_directories(path)) > 1
-        except Exception:  # noqa: BLE001
-            return False
-
     def _refresh_batch_mode_ui(self) -> None:
         """
-        Soft UI hint for batch folder import.
+        This dialog is Single Import only.
 
-        Does not change single-folder / archive validation — only relaxes
-        source-link fields when a multi-Mod parent is selected.
+        Source-link fields stay enabled; Multi Import uses the library
+        「批量导入目录」entry and never this dialog.
         """
-        plat = self.selected_platform()
-        batch = False
-        if plat == PLATFORM_NEXUS and self.nexus_src_folder.isChecked():
-            batch = self._is_batch_folder(self.nexus_folder_edit.text())
-        elif plat == PLATFORM_GITHUB and self.github_src_folder.isChecked():
-            batch = self._is_batch_folder(self.github_folder_edit.text())
-
         if hasattr(self, "nexus_url_edit"):
-            if batch and plat == PLATFORM_NEXUS:
-                self.nexus_url_edit.setPlaceholderText(
-                    "批量导入：可留空（每个子目录独立登记）"
-                )
-                self.nexus_url_edit.setEnabled(False)
-            else:
-                self.nexus_url_edit.setEnabled(True)
-                self.nexus_url_edit.setPlaceholderText(
-                    "https://www.nexusmods.com/palworld/mods/123 或纯数字 ID"
-                )
+            self.nexus_url_edit.setEnabled(True)
+            self.nexus_url_edit.setPlaceholderText(
+                "https://www.nexusmods.com/palworld/mods/123 或纯数字 ID"
+            )
         if hasattr(self, "github_url_edit"):
-            if batch and plat == PLATFORM_GITHUB:
-                self.github_url_edit.setPlaceholderText(
-                    "批量导入：可留空（跳过源链接）"
-                )
-                self.github_url_edit.setEnabled(False)
-            else:
-                self.github_url_edit.setEnabled(True)
-                self.github_url_edit.setPlaceholderText(
-                    "https://github.com/user/project"
-                )
-        if hasattr(self, "nexus_title_edit") and plat == PLATFORM_NEXUS:
-            self.nexus_title_edit.setEnabled(not batch)
-        if hasattr(self, "github_title_edit") and plat == PLATFORM_GITHUB:
-            self.github_title_edit.setEnabled(not batch)
+            self.github_url_edit.setEnabled(True)
+            self.github_url_edit.setPlaceholderText(
+                "https://github.com/user/project"
+            )
+        if hasattr(self, "nexus_title_edit"):
+            self.nexus_title_edit.setEnabled(True)
+        if hasattr(self, "github_title_edit"):
+            self.github_title_edit.setEnabled(True)
 
     def _browse_archive(self, target: QLineEdit) -> None:
         """Nexus / GitHub: multi-select archives as separate FileEntry sources."""
@@ -870,26 +836,18 @@ class ModImportDialog(QDialog):
             if resolved is None:
                 return None
             source, use_archive, archive_paths = resolved
-            is_batch_mode = (not use_archive) and self._is_batch_folder(source)
-            if is_batch_mode:
-                # Batch: skip shared source link / display name — per-folder identity.
-                raw = ""
-                nexus_id = ""
-                nexus_url = ""
             return {
                 "nexus_url": nexus_url or raw,
                 "nexus_id": nexus_id,
-                "title": ("" if is_batch_mode else title),
+                "title": title,
                 "folder": "" if use_archive else source,
                 "source_path": source if use_archive else "",
                 "archive_paths": archive_paths if use_archive else [],
                 "use_archive": use_archive,
                 "cover_source": self._cover_path,
-                "offline_html_path": (
-                    "" if is_batch_mode else self._offline_html_path
-                ),
+                "offline_html_path": self._offline_html_path,
                 "offline_clean": bool(self.offline_clean_check.isChecked()),
-                "is_batch_mode": is_batch_mode,
+                "is_batch_mode": False,
                 **ctx,
             }
         if plat == PLATFORM_MODIO:
@@ -982,26 +940,19 @@ class ModImportDialog(QDialog):
         if resolved is None:
             return None
         source, use_archive, archive_paths = resolved
-        is_batch_mode = (not use_archive) and self._is_batch_folder(source)
         # GitHub still requires URL for single-mod imports;「其它」does not.
-        if (
-            not url
-            and not is_batch_mode
-            and platform_requires_source_url(PLATFORM_GITHUB)
-        ):
+        if not url and platform_requires_source_url(PLATFORM_GITHUB):
             QMessageBox.warning(self, "导入失败", "请填写 GitHub URL。")
             return None
-        if is_batch_mode:
-            url = ""
         return {
             "github_url": url,
-            "title": ("" if is_batch_mode else title),
+            "title": title,
             "folder": "" if use_archive else source,
             "source_path": source if use_archive else "",
             "archive_paths": archive_paths if use_archive else [],
             "use_archive": use_archive,
             "cover_source": self._cover_path,
-            "is_batch_mode": is_batch_mode,
+            "is_batch_mode": False,
             **ctx,
         }
 
@@ -1012,22 +963,32 @@ class ModImportDialog(QDialog):
         assert isinstance(result, ImportResult)
         self._result = result
         self.imported.emit(result)
+        if result.is_duplicate and int(result.imported_count or 0) <= 1:
+            self.status_label.setText("该 Mod 已存在，跳过导入")
+            return
         count = int(result.imported_count or 0)
         if count > 1:
             skipped = int(result.skipped_count or 0)
             extra = f"，跳过 {skipped} 个" if skipped else ""
             msg = f"已成功导入 {count} 个 Mod{extra}"
+        elif count == 0 and int(result.skipped_count or 0) > 0:
+            msg = f"该 Mod 已存在，跳过导入（跳过 {int(result.skipped_count)} 个）"
         else:
             name = str(result.title or result.mod_id or "").strip()
             msg = f"已成功导入 {name}" if name else "已成功导入"
         self.status_label.setText(msg)
-        QTimer.singleShot(2000, self._clear_import_status)
+        # Close dialog immediately on success — library already receives `imported`.
+        self.accept()
 
     def _clear_import_status(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
         text = self.status_label.text()
-        if text.startswith("已成功导入") or text == "导入完成":
+        if (
+            text.startswith("已成功导入")
+            or text.startswith("该 Mod 已存在")
+            or text == "导入完成"
+        ):
             self.status_label.setText("")
 
     def _on_import_err(self, error: str) -> None:

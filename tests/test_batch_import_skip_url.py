@@ -44,11 +44,22 @@ def _batch_parent(tmp_path: Path) -> Path:
     return parent
 
 
-def test_collect_params_batch_skips_github_url(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+def test_collect_params_single_github_does_not_guess_batch(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
+    """Single dialog must not treat a multi-child folder as Batch."""
     del db
     parent = _batch_parent(tmp_path)
+    warned: list[str] = []
+
+    def _warn(*args, **kwargs) -> None:
+        warned.append(str(args[2] if len(args) > 2 else kwargs.get("text") or ""))
+
+    monkeypatch.setattr(
+        "ui.mod_import_dialog.QMessageBox.warning",
+        lambda *args, **kwargs: _warn(*args, **kwargs),
+    )
+
     dlg = ModImportDialog(
         tmp_path / "lib",
         game_context={"game_id": 1623730, "game_name": "Palworld"},
@@ -60,9 +71,8 @@ def test_collect_params_batch_skips_github_url(
     dlg._refresh_batch_mode_ui()
 
     params = dlg._collect_params(PLATFORM_GITHUB)
-    assert params is not None
-    assert params["is_batch_mode"] is True
-    assert params["github_url"] == ""
+    assert params is None
+    assert any("GitHub URL" in w for w in warned)
 
 
 def test_collect_params_single_github_still_requires_url(
@@ -141,7 +151,7 @@ def test_github_batch_import_without_url(
     assert result.source_url == ""
 
 
-def test_nexus_batch_flag_clears_shared_url(
+def test_nexus_single_dialog_keeps_source_url(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     del db
@@ -156,6 +166,5 @@ def test_nexus_batch_flag_clears_shared_url(
     dlg.nexus_url_edit.setText("https://www.nexusmods.com/palworld/mods/999")
     params = dlg._collect_params(PLATFORM_NEXUS)
     assert params is not None
-    assert params["is_batch_mode"] is True
-    assert params["nexus_url"] == ""
-    assert params["nexus_id"] == ""
+    assert params["is_batch_mode"] is False
+    assert params["nexus_url"] == "https://www.nexusmods.com/palworld/mods/999"

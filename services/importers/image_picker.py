@@ -128,6 +128,7 @@ def apply_cover_to_mod(
     mod_id: str | int = "",
     update_db: bool = True,
     sync_backup: bool = True,
+    mark_user_override: bool = True,
 ) -> str:
     """
     Install cover and return relative ``cover_path`` (``''`` on failure).
@@ -149,8 +150,13 @@ def apply_cover_to_mod(
     if update_db and str(mod_id).strip():
         try:
             from core.db_manager import get_db
+            from services.metadata_ownership import FIELD_COVER
 
             get_db().update_mod_cover_path(mod_id, rel)
+            if mark_user_override:
+                get_db().set_user_override_field(
+                    mod_id, FIELD_COVER, overridden=True
+                )
         except Exception as exc:  # noqa: BLE001
             logger.debug("update_mod_cover_path failed: %s", exc)
     if sync_backup:

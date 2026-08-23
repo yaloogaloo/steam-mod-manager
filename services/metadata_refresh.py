@@ -30,6 +30,7 @@ from services.file_ops import (
     COVER_BASENAME,
     INFO_DIR_NAME,
     ModFileManager,
+    persist_unified_metadata_dict,
     read_info_metadata_dict,
 )
 
@@ -120,6 +121,23 @@ def _clear_placeholder_display_name(mod_id: str, managed_path: Path) -> None:
     """
     mid = str(mod_id or "").strip()
     folder = Path(managed_path)
+
+    try:
+        from core.db_manager import get_db
+        from services.metadata_ownership import (
+            FIELD_DISPLAY_NAME,
+            user_has_override,
+        )
+
+        db = get_db()
+        overrides = db.get_user_override_fields(mid)
+        if user_has_override(overrides, FIELD_DISPLAY_NAME):
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "skip placeholder clear (override check) for %s: %s", mid, exc
+        )
+        db = None  # type: ignore[assignment]
 
     # metadata.json
     data = read_info_metadata_dict(folder)
@@ -543,14 +561,49 @@ def refresh_steam_mod_metadata(
     client: SteamWorkshopClient | None = None,
     force: bool = False,
     download_cover: bool = True,
+    allow_official_sync: bool = True,
+    db=None,
 ) -> MetadataRefreshResult:
     """
     Re-fetch Steam Workshop metadata for one managed Mod and persist results.
 
     When *force* is False (default), healthy mods are skipped (Feature 3).
+    When *allow_official_sync* is False or ``official_metadata_synced`` is set,
+    no network I/O is performed.
     """
+    from core.db_manager import get_db
+    from services.metadata_ownership import (
+        FIELD_COVER,
+        FIELD_DESCRIPTION,
+        FIELD_DISPLAY_NAME,
+        merge_official_sidecar_fields,
+        should_apply_official_field,
+    )
+
     mid = str(mod_id).strip()
     folder = Path(managed_path).expanduser().resolve()
+    database = db if db is not None else get_db()
+
+    if not allow_official_sync or database.is_official_metadata_synced(mid):
+        existing = None
+        try:
+            root = Path(library_root) if library_root else (
+                folder.parents[1] if len(folder.parts) >= 2 else folder.parent
+            )
+            existing = ModFileManager(root).load_metadata(folder)
+        except Exception:  # noqa: BLE001
+            existing = None
+        title = (existing.title if existing else "") or folder.name
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=True,
+            skipped=True,
+            managed_path=folder,
+            old_path=folder,
+            title=title,
+            message="已刷新本地状态",
+        )
+
     root = Path(library_root) if library_root else (
         folder.parents[1] if len(folder.parts) >= 2 else folder.parent
     )
@@ -567,6 +620,14 @@ def refresh_steam_mod_metadata(
             old_path=folder,
             title=title,
         )
+
+    overrides = database.get_user_override_fields(mid)
+    display_info = database.get_mod_display_info(mid)
+    local_custom_desc = (
+        str(display_info.custom_description or "").strip()
+        if display_info
+        else ""
+    )
 
     owns_client = client is None
     api = client or SteamWorkshopClient(enable_scrape_fallback=False)
@@ -620,7 +681,14 @@ def refresh_steam_mod_metadata(
         meta = existing or ModMetadata(published_file_id=mid)
         meta.published_file_id = mid
         meta.title = fetched.title.strip()
-        meta.description = fetched.description or meta.description
+        official_description = str(fetched.description or "").strip()
+        if official_description and should_apply_official_field(
+            FIELD_DESCRIPTION,
+            overrides=overrides,
+            local_value=local_custom_desc or str(meta.description or ""),
+            mod_id=mid,
+        ):
+            meta.description = official_description
         meta.preview_url = fetched.preview_url or meta.preview_url
         meta.file_size = fetched.file_size or meta.file_size
         meta.time_created = fetched.time_created or meta.time_created
@@ -632,9 +700,24 @@ def refresh_steam_mod_metadata(
             meta.tags = list(fetched.tags)
         meta.fetch_error = None
 
+        local_cover = (
+            str(display_info.cover_path or "").strip()
+            if display_info
+            else str(meta.cover_path or "")
+        )
+
         # Cover under .info/
         cover_path = ""
-        if download_cover and meta.preview_url:
+        if (
+            download_cover
+            and meta.preview_url
+            and should_apply_official_field(
+                FIELD_COVER,
+                overrides=overrides,
+                local_value=local_cover,
+                mod_id=mid,
+            )
+        ):
             try:
                 info_dir = mgr.ensure_info_dir(folder)
                 with SteamWorkshopClient(
@@ -671,14 +754,32 @@ def refresh_steam_mod_metadata(
 
         meta.managed_path = str(new_path)
         meta.local_path = str(new_path)
-        # Never persist placeholder labels as a user display_name override.
-        meta.json_display_name = ""
+        sidecar_existing = read_info_metadata_dict(new_path) or {}
+        local_display = str(sidecar_existing.get("display_name") or "").strip()
+        if display_info and str(display_info.user_display_name or "").strip():
+            local_display = str(display_info.user_display_name or "").strip()
+        if should_apply_official_field(
+            FIELD_DISPLAY_NAME,
+            overrides=overrides,
+            local_value=local_display,
+            mod_id=mid,
+        ):
+            meta.json_display_name = ""
+        else:
+            meta.json_display_name = local_display
 
         # Upsert Steam title first so sidecar merge / Detail see the real name.
         try:
             from core.db_manager import get_db
 
-            get_db().upsert_mod(meta)
+            upsert_meta = ModMetadata(
+                published_file_id=mid,
+                title=meta.title,
+                description=official_description or meta.description or "",
+                preview_url=meta.preview_url,
+                app_id=meta.app_id,
+            )
+            database.upsert_mod(upsert_meta)
             _clear_placeholder_display_name(mid, new_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -687,6 +788,26 @@ def refresh_steam_mod_metadata(
 
         try:
             mgr.save_metadata(meta, new_path, sync_backup=False)
+            cover_rel = ""
+            if cover_path:
+                from services.importers.image_picker import relative_cover_path
+
+                cover_rel = relative_cover_path(new_path, Path(cover_path))
+            merged_sidecar = merge_official_sidecar_fields(
+                read_info_metadata_dict(new_path) or {},
+                mod_id=mid,
+                overrides=overrides,
+                official_title=meta.title,
+                official_description=meta.description or "",
+                official_preview_url=meta.preview_url or "",
+                cover_rel=cover_rel,
+            )
+            persist_unified_metadata_dict(
+                new_path,
+                merged_sidecar,
+                sync_backup=False,
+                sync_reason="refresh",
+            )
             _persist_cleared_fetch_error(new_path)
             _clear_placeholder_display_name(mid, new_path)
         except OSError as exc:
@@ -795,6 +916,10 @@ def refresh_steam_mods_metadata(
         lib = library_root or (
             path.parents[1] if len(path.parts) >= 2 else path.parent
         )
+        from core.db_manager import get_db
+
+        database = get_db()
+        allow = not database.is_official_metadata_synced(mid)
         return refresh_steam_mod_metadata(
             mid,
             path,
@@ -802,6 +927,8 @@ def refresh_steam_mods_metadata(
             client=None,
             force=True,
             download_cover=download_cover,
+            allow_official_sync=allow,
+            db=database,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -873,18 +1000,11 @@ def refresh_selected_mods_metadata(
     if total == 0:
         return []
 
-    results: list[MetadataRefreshResult] = []
-    steam_items: list[tuple[str, Path]] = []
-    non_steam: list[tuple[str, Path, str]] = []
-    for mid, path, plat in unique:
-        # Silent Nexus workspace_id wash — always, even when path missing.
-        if plat == PLATFORM_NEXUS:
-            silent_correct_nexus_workspace_id(mid)
-        if plat == PLATFORM_STEAM:
-            steam_items.append((mid, path))
-        else:
-            non_steam.append((mid, path, plat))
+    from core.db_manager import get_db
+    from services.mod_refresh import refresh_mod
 
+    database = get_db()
+    results: list[MetadataRefreshResult] = []
     done = 0
 
     def _report() -> None:
@@ -897,46 +1017,31 @@ def refresh_selected_mods_metadata(
 
     _report()
 
-    for mid, path, plat in non_steam:
+    for mid, path, plat in unique:
+        if plat == PLATFORM_NEXUS:
+            silent_correct_nexus_workspace_id(mid)
+        source_url = ""
         try:
+            info = database.get_mod_display_info(mid)
+            if info is not None:
+                source_url = str(info.source_url or "").strip()
+        except Exception:  # noqa: BLE001
+            source_url = ""
+        lib = library_root or (
+            path.parents[1] if len(path.parts) >= 2 else path.parent
+        )
+        try:
+            refresh_result = refresh_mod(
+                mid,
+                path if path.parts else Path("."),
+                platform=plat,
+                library_root=lib,
+                source_url=source_url,
+                db=database,
+            )
+            result = refresh_result.to_metadata_refresh_result()
             if plat == PLATFORM_NEXUS:
-                # Wash again after any sidecar URL apply inside rescan.
                 silent_correct_nexus_workspace_id(mid)
-            if plat == PLATFORM_MODIO:
-                from services.modio_metadata_refresh import refresh_modio_mod_metadata
-
-                source_url = ""
-                try:
-                    from core.db_manager import get_db
-
-                    info = get_db().get_mod_display_info(mid)
-                    if info is not None:
-                        source_url = str(info.source_url or "").strip()
-                except Exception:  # noqa: BLE001
-                    source_url = ""
-                lib = library_root or (
-                    path.parents[1] if len(path.parts) >= 2 else path.parent
-                )
-                result = refresh_modio_mod_metadata(
-                    mid,
-                    path,
-                    library_root=lib,
-                    source_url=source_url,
-                )
-            else:
-                # Nexus / GitHub / 其它 — local rescan (+ Nexus wash in rescan).
-                from services.info_sidecar import rescan_mod_folder
-
-                if path.parts:
-                    rescan_mod_folder(path, mod_id=mid)
-                if plat == PLATFORM_NEXUS:
-                    silent_correct_nexus_workspace_id(mid)
-                result = MetadataRefreshResult(
-                    mod_id=mid,
-                    success=True,
-                    managed_path=path if path.parts else None,
-                    old_path=path if path.parts else None,
-                )
             results.append(result)
         except Exception as exc:  # noqa: BLE001
             results.append(
@@ -950,21 +1055,6 @@ def refresh_selected_mods_metadata(
             )
         done += 1
         _report()
-
-    if steam_items:
-        steam_results = refresh_steam_mods_metadata(
-            steam_items,
-            library_root=library_root,
-            max_workers=max_workers,
-            on_progress=lambda d, _t, msg: on_progress(
-                done + d,
-                total,
-                msg or f"Refreshing metadata: {done + d} / {total}",
-            )
-            if on_progress
-            else None,
-        )
-        results.extend(steam_results)
 
     by_id = {r.mod_id: r for r in results}
     return [by_id[mid] for mid, _path, _plat in unique if mid in by_id]

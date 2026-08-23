@@ -171,6 +171,10 @@ def attach_nexus_offline_page(
 
     *clean* (default True) runs Nexus MHTML Offline Snapshot Cleaner when the
     source is ``.mhtml`` / ``.mht``.
+
+    After the HTML is saved, invokes the Nexus offline metadata scraper to fill
+    any missing metadata fields.  This is the ONLY legitimate call site for the
+    scraper — refresh_mod / reconcile / show_mod MUST NOT call it.
     """
     result = OfflineManager(library_root=library_root).import_mod_offline_html(
         mod_id,
@@ -179,20 +183,80 @@ def attach_nexus_offline_page(
         platform=PLATFORM_NEXUS,
         clean=clean,
     )
+
+    # Resolve the managed Mod folder path.
+    dest: Path | None = Path(managed_path) if managed_path else None
+    if dest is None:
+        index = getattr(result, "index_path", None)
+        if index is not None:
+            idx = Path(index)
+            dest = (
+                idx.parent.parent.parent
+                if idx.parent.name == "offline"
+                else idx.parent.parent
+            )
+
+    # ------------------------------------------------------------------
+    # Nexus Offline Metadata Scraper
+    # Trigger boundary: OFFLINE_HTML_IMPORT only.
+    # MUST NOT be moved to refresh_mod / reconcile / sync / show_mod.
+    # ------------------------------------------------------------------
+    from core.mod_platform import OFFLINE_STATUS_ARCHIVED
+
+    if getattr(result, "status", None) == OFFLINE_STATUS_ARCHIVED and dest is not None:
+        _apply_nexus_offline_metadata(mod_id, dest)
+
     try:
         from services.metadata_backup_sync import sync_after_metadata_change
 
-        dest = Path(managed_path) if managed_path else None
-        if dest is None:
-            index = getattr(result, "index_path", None)
-            if index is not None:
-                idx = Path(index)
-                dest = idx.parent.parent.parent if idx.parent.name == "offline" else idx.parent.parent
         if dest is not None:
             sync_after_metadata_change(mod_id, dest, "offline_change")
     except Exception:  # noqa: BLE001
         pass
     return result
+
+
+def _apply_nexus_offline_metadata(
+    mod_id: str | int,
+    managed_path: Path,
+) -> None:
+    """Parse the saved offline HTML and fill any missing Mod metadata.
+
+    Failures are caught and logged as warnings — the offline HTML import must
+    succeed regardless of scraper errors.
+
+    This helper is intentionally private and called ONLY from
+    ``attach_nexus_offline_page``.  No other code path may call it.
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+
+    from services.offline.nexus_html_parser import (
+        NexusOfflineCandidates,
+        apply_nexus_offline_candidates,
+        parse_nexus_offline_html,
+    )
+
+    index_path = managed_path / ".info" / "offline" / "index.html"
+    if not index_path.is_file():
+        return
+
+    try:
+        candidates: NexusOfflineCandidates = parse_nexus_offline_html(index_path)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("[NEXUS_SCRAPER] parse_nexus_offline_html failed: %s", exc)
+        return
+
+    if not candidates.any_useful():
+        return
+
+    try:
+        apply_nexus_offline_candidates(mod_id, managed_path, candidates)
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "[NEXUS_SCRAPER] apply_nexus_offline_candidates failed: %s", exc
+        )
 
 
 # Backward-compatible alias.

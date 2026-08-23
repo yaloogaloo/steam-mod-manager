@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import CONFLICT_STATUS_CONFLICT, DatabaseManager
 from core.models import ModMetadata
-from ui.mod_detail_panel import ModDetailPanel
+from ui.mod_detail_panel import TAG_TYPE_ABANDONED, ModDetailPanel
 
 
 @pytest.fixture(scope="module")
@@ -90,3 +90,15 @@ def test_flag_chips_toggle_and_reorder(
     st = db.get_mod_status(pub)
     assert st.invalid is False
     assert st.conflict_status != CONFLICT_STATUS_CONFLICT
+
+    assert not panel.btn_tag_abandoned.isHidden()
+    panel.btn_tag_abandoned.setChecked(True)
+    qapp.processEvents()
+    assert any(
+        t.tag_type == TAG_TYPE_ABANDONED for t in db.get_mod_tags(pub)
+    )
+    panel.btn_tag_abandoned.setChecked(False)
+    qapp.processEvents()
+    assert not any(
+        t.tag_type == TAG_TYPE_ABANDONED for t in db.get_mod_tags(pub)
+    )

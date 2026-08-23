@@ -661,6 +661,26 @@ class ArchiveImporter(ModImporter):
         **_kwargs: Any,
     ) -> ImportResult:
         # Steam Workshop archive path unchanged: single extract → folder import.
+        # Duplicate check MUST run before extract / materialize.
+        from core.mod_platform import steam_workshop_url
+        from services.importers.duplicate_check import check_import_duplicate
+
+        mid = str(workshop_id or archives[0].stem or "").strip()
+        if mid.isdigit() or "id=" in mid:
+            probe = mid
+            if not probe.isdigit() and "id=" in probe:
+                probe = probe.split("id=", 1)[-1].split("&", 1)[0].strip()
+            if probe.isdigit():
+                dup = check_import_duplicate(
+                    self._database(),
+                    platform=PLATFORM_STEAM,
+                    workshop_id=probe,
+                    external_id=probe,
+                    source_url=steam_workshop_url(probe),
+                )
+                if dup is not None:
+                    return dup
+
         archive = archives[0]
         extract_dir: Path | None = None
         try:
@@ -717,6 +737,59 @@ class ArchiveImporter(ModImporter):
         source_url: str = "",
         **_kwargs: Any,
     ) -> ImportResult:
+        # Duplicate check MUST run before archive staging / extract.
+        from services.importers.duplicate_check import check_import_duplicate
+
+        db = self._database()
+        if platform == PLATFORM_GITHUB:
+            from services.importers.github import GithubImporter as _Gh
+
+            url = str(github_url or "").strip()
+            if url:
+                repo = _Gh.parse_repo(url)
+                canonical = url if url.startswith("http") else f"https://github.com/{repo}"
+                dup = check_import_duplicate(
+                    db,
+                    platform=PLATFORM_GITHUB,
+                    external_id=repo,
+                    source_url=canonical,
+                )
+                if dup is not None:
+                    return dup
+        elif platform == PLATFORM_MODIO:
+            from services.importers.modio import parse_modio_id
+
+            ext = parse_modio_id(modio_url, modio_id) or str(modio_id or "").strip()
+            dup = check_import_duplicate(
+                db,
+                platform=PLATFORM_MODIO,
+                external_id=ext,
+                source_url=str(modio_url or "").strip(),
+            )
+            if dup is not None:
+                return dup
+        elif platform == PLATFORM_OTHER:
+            url = str(source_url or "").strip()
+            if url:
+                dup = check_import_duplicate(
+                    db,
+                    platform=PLATFORM_OTHER,
+                    source_url=url,
+                )
+                if dup is not None:
+                    return dup
+        else:
+            raw_url = str(nexus_url or "").strip()
+            nid = str(nexus_id or parse_nexus_id(raw_url, "") or "").strip()
+            dup = check_import_duplicate(
+                db,
+                platform=PLATFORM_NEXUS,
+                external_id=nid,
+                source_url=raw_url,
+            )
+            if dup is not None:
+                return dup
+
         staging_dir: Path | None = None
         try:
             staging_dir, specs = stage_archive_sources(
@@ -825,7 +898,8 @@ class ArchiveImporter(ModImporter):
             dest = find_managed_mod_path(library_root, result.mod_id)
         if dest is not None and dest.is_dir() and cover_source:
             apply_cover_to_mod(
-                dest, cover_source, mod_id=result.mod_id, update_db=True
+                dest, cover_source, mod_id=result.mod_id, update_db=True,
+                mark_user_override=False,
             )
             result.managed_path = str(dest)
         elif dest is not None:

@@ -57,16 +57,16 @@ class OtherImporter(ModImporter):
         name = (title or "").strip() or local_key
 
         db = self._database()
-        existing = db.find_mod_by_external(PLATFORM_OTHER, external_id)
-        if existing is not None:
-            return ImportResult(
-                success=False,
-                error="该Mod已经存在",
-                platform=self.platform,
-                external_id=external_id,
-                mod_id=existing.mod_id,
-                source_url=existing.source_url or "",
-            )
+        from services.importers.duplicate_check import check_import_duplicate
+
+        dup = check_import_duplicate(
+            db,
+            platform=PLATFORM_OTHER,
+            external_id=external_id,
+            source_url=url,
+        )
+        if dup is not None:
+            return dup
 
         bundle = build_other_mod_files(
             folder,

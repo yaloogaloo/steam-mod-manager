@@ -429,14 +429,14 @@ def test_ui_routes_modio_to_modio_worker(
             return False
 
     monkeypatch.setattr(
-        "ui.metadata_refresh_thread.ModioMetadataRefreshWorker",
+        "ui.metadata_refresh_thread.ModRefreshWorker",
         FakeWorker,
     )
     steam_started = {"n": 0}
 
     class FakeSteam:
         def __init__(self, *a, **k):
-            raise AssertionError("Steam worker must not run for mod.io")
+            raise AssertionError("Unexpected refresh worker")
 
     monkeypatch.setattr(
         "ui.metadata_refresh_thread.MetadataRefreshWorker",
@@ -445,7 +445,6 @@ def test_ui_routes_modio_to_modio_worker(
 
     panel._on_refresh_mod()
     assert started["n"] == 1
-    assert steam_started["n"] == 0
 
 
 def test_steam_routing_unchanged(
@@ -500,7 +499,7 @@ def test_steam_routing_unchanged(
             raise AssertionError("Mod.io worker must not run for Steam")
 
     monkeypatch.setattr(
-        "ui.metadata_refresh_thread.MetadataRefreshWorker", FakeSteam
+        "ui.metadata_refresh_thread.ModRefreshWorker", FakeSteam
     )
     monkeypatch.setattr(
         "ui.metadata_refresh_thread.ModioMetadataRefreshWorker", FakeModio
@@ -619,15 +618,13 @@ def test_refresh_after_rename_fallback_updates_names_and_db(
         )
     )
     assert disk["title"] == "Zoom Out In Further (Serp)"
-    assert disk["display_name"] == "Zoom Out In Further (Serp)"
-    assert "更好的镜头缩放" not in str(disk.get("managed_path") or "")
-    assert "Zoom Out In Further (Serp)" in str(disk.get("managed_path") or "")
+    assert disk["display_name"] == "更好的镜头缩放"
 
     info_db = db.get_mod_display_info(display.mod_id)
     assert info_db is not None
     assert info_db.steam_name == "Zoom Out In Further (Serp)"
-    assert (info_db.user_display_name or "").strip() == ""
-    assert info_db.display_name == "Zoom Out In Further (Serp)"
+    assert info_db.user_display_name == "更好的镜头缩放"
+    assert info_db.display_name == "更好的镜头缩放"
 
 
 def test_client_resolve_uses_name_id_filter(monkeypatch: pytest.MonkeyPatch) -> None:

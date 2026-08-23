@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from core.db_manager import DatabaseManager
 from ui.library_view import ModLibraryView
@@ -110,3 +110,21 @@ def test_batch_directory_starts_worker_with_is_batch_mode(
     assert captured["params"]["game_id"] == 1623730
     assert str(captured["platform"]).lower() == "nexus"
     assert view._batch_import_worker is not None
+
+
+def test_library_header_has_import_and_refresh_only(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
+) -> None:
+    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
+    db.update_game_deploy_config(1623730, name="Palworld")
+    view = ModLibraryView()
+    qapp.processEvents()
+    assert not hasattr(view, "game_settings_btn")
+    assert not hasattr(view, "request_open_game_settings")
+    buttons = view.findChildren(QPushButton)
+    texts = [b.text() for b in buttons]
+    assert "游戏设置" not in texts
+    assert view.import_btn.text() == "导入 Mod"
+    assert view.refresh_btn.text() == "刷新"
+    assert view.import_btn.objectName() == "libraryHeaderButton"
+    assert view.refresh_btn.objectName() == "libraryHeaderButton"

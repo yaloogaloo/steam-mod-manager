@@ -91,7 +91,6 @@ def test_empty_library_state(
     assert view.empty_action_btn.isVisible() or not view.empty_action_btn.isHidden()
     assert "Import" in view.empty_action_btn.text()
     assert view.path_hint.isHidden()
-    assert view.deploy_audit_banner.isHidden()
 
 
 def test_empty_search_state(
@@ -472,7 +471,13 @@ def test_add_game_category_renders_sidebar_node(
         widget = view.game_list.itemWidget(item)
         if widget is not None:
             labels.append(widget.name_label.text())
-    assert any(label.strip() == "Gameplay" for label in labels)
+    assert not any(label.strip() == "Gameplay" for label in labels)
+    assert not any(
+        view.game_list.itemWidget(view.game_list.item(i)).objectName()
+        == "CategoryTreeItem"
+        for i in range(view.game_list.count())
+        if view.game_list.itemWidget(view.game_list.item(i)) is not None
+    )
     assert not any("├─" in label for label in labels)
 
 
@@ -520,17 +525,9 @@ def test_sidebar_category_filters_mod_list(
     view._on_batch_set_category("Gameplay")
     assert len(view._visible_cards()) == 3
 
-    cat_row = None
-    for i in range(view.game_list.count()):
-        item = view.game_list.item(i)
-        if str(item.data(GAME_CATEGORY_ROLE) or "") == "Gameplay":
-            cat_row = i
-            break
-    assert cat_row is not None
-    # Categories are collapsed by default — expand parent game first.
-    view._expanded_games.add("GameX")
-    view._sync_category_row_visibility()
-    view.game_list.setCurrentRow(cat_row)
+    idx = view.category_combo.findData("Gameplay")
+    assert idx >= 0
+    view.category_combo.setCurrentIndex(idx)
     qapp.processEvents()
 
     filtered = view._visible_cards()

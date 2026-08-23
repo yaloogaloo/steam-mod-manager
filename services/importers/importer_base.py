@@ -72,6 +72,8 @@ class ImportResult:
     source_url: str = ""
     title: str = ""
     error: str = ""
+    # "" | "duplicate" — duplicate is a skip, not a hard failure.
+    status: str = ""
     display: ModDisplayInfo | None = None
     files_count: int = 0
     managed_path: str = ""
@@ -80,6 +82,11 @@ class ImportResult:
     # Multi-directory batch summary (0 / 1 = single-mod import).
     imported_count: int = 0
     skipped_count: int = 0
+    failed_count: int = 0
+
+    @property
+    def is_duplicate(self) -> bool:
+        return str(self.status or "").strip() == "duplicate"
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -89,12 +96,14 @@ class ImportResult:
             "external_id": self.external_id,
             "source_url": self.source_url,
             "title": self.title,
+            "status": self.status,
             "files_count": self.files_count,
             "managed_path": self.managed_path,
             "game_id": self.game_id,
             "game_name": self.game_name,
             "imported_count": self.imported_count,
             "skipped_count": self.skipped_count,
+            "failed_count": self.failed_count,
         }
         if self.error:
             out["error"] = self.error

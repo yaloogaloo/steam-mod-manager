@@ -160,21 +160,32 @@ def _patch_metadata_json(
     name_id: str,
     cover_rel: str = "",
     old_managed_path: Path | None = None,
+    mod_id: str = "",
+    db=None,
 ) -> None:
     """
     Write Mod.io identity fields into ``.info/metadata.json``.
 
-    Mod.io refresh always syncs both ``title`` and ``display_name`` to the
-    official API name so Library / Detail show the refreshed Mod 名称.
+    User-facing fields obey ``user_override_fields``; official ``title`` always updates.
     """
-    data = read_info_metadata_dict(managed_path) or {}
-    data["title"] = title
-    data["display_name"] = title
-    data["description"] = description
+    from core.db_manager import get_db
+    from services.metadata_ownership import merge_official_sidecar_fields
+
+    mid = str(mod_id or "").strip()
+    database = db if db is not None else get_db()
+    overrides = database.get_user_override_fields(mid) if mid else {}
+    data = merge_official_sidecar_fields(
+        read_info_metadata_dict(managed_path) or {},
+        mod_id=mid,
+        overrides=overrides,
+        official_title=title,
+        official_description=description,
+        official_preview_url=preview_url,
+        cover_rel=cover_rel,
+    )
     data["url"] = url
     data["source_url"] = url
     data["source_type"] = PLATFORM_MODIO
-    data["preview_url"] = preview_url
     if author:
         data["author"] = author
     if modio_mod_id > 0:
@@ -184,8 +195,6 @@ def _patch_metadata_json(
     if name_id:
         data["modio_name_id"] = name_id
     data.pop("fetch_error", None)
-    if cover_rel:
-        data["cover_path"] = cover_rel
 
     final = Path(managed_path)
     data["managed_path"] = str(final)
@@ -215,11 +224,16 @@ def _update_modio_db_identity(
     canonical: str,
     preview_url: str,
     modio_mod_id: int,
+    db=None,
 ) -> None:
-    """Persist Mod.io title / urls to SQLite and clear stale user display overrides."""
+    """Persist Mod.io title / urls to SQLite; respect user metadata overrides."""
     from core.db_manager import get_db
+    from services.metadata_ownership import (
+        FIELD_DISPLAY_NAME,
+        should_apply_official_field,
+    )
 
-    db = get_db()
+    database = db if db is not None else get_db()
     ext_value = str(int(modio_mod_id)) if modio_mod_id > 0 else ""
     try:
         kwargs = dict(
@@ -231,9 +245,9 @@ def _update_modio_db_identity(
         )
         if ext_value:
             kwargs["external_id"] = ext_value
-        db.update_mod_platform_info(mid, **kwargs)
+        database.update_mod_platform_info(mid, **kwargs)
     except ValueError:
-        db.update_mod_platform_info(
+        database.update_mod_platform_info(
             mid,
             platform=PLATFORM_MODIO,
             source_url=canonical,
@@ -241,12 +255,18 @@ def _update_modio_db_identity(
             description=description,
             preview_url=preview_url,
         )
-    # Mod.io refresh owns the visible name — clear user override so Detail /
-    # Library pick up mods.title / metadata display_name.
-    try:
-        db.update_mod_user_metadata(mid, {"display_name": ""})
-    except Exception:  # noqa: BLE001
-        logger.debug("clear display_name override skipped for %s", mid, exc_info=True)
+    info = database.get_mod_display_info(mid)
+    local_display = str(info.user_display_name or "").strip() if info else ""
+    if should_apply_official_field(
+        FIELD_DISPLAY_NAME,
+        overrides=database.get_user_override_fields(mid),
+        local_value=local_display,
+        mod_id=mid,
+    ):
+        try:
+            database.update_mod_user_metadata(mid, {"display_name": ""})
+        except Exception:  # noqa: BLE001
+            logger.debug("clear display_name after mod.io sync skipped for %s", mid)
 
 
 def _download_cover(
@@ -271,6 +291,7 @@ def _download_cover(
             mod_id=mod_id,
             update_db=True,
             sync_backup=False,
+            mark_user_override=False,
         )
     return rel or ""
 
@@ -283,12 +304,44 @@ def refresh_modio_mod_metadata(
     client: ModioClient | None = None,
     download_cover: bool = True,
     source_url: str = "",
+    allow_official_sync: bool = True,
+    db=None,
 ) -> MetadataRefreshResult:
     """
     Fetch Mod.io Mod Object and persist name / description / cover / folder rename.
+
+    When *allow_official_sync* is False or ``official_metadata_synced`` is set,
+    no Mod.io network I/O is performed.
     """
+    from core.db_manager import get_db
+    from services.metadata_ownership import (
+        FIELD_COVER,
+        merge_official_sidecar_fields,
+        should_apply_official_field,
+    )
+
     mid = str(mod_id).strip()
     folder = Path(managed_path).expanduser().resolve()
+    database = db if db is not None else get_db()
+
+    if not allow_official_sync or database.is_official_metadata_synced(mid):
+        title = folder.name
+        try:
+            existing = read_info_metadata_dict(folder)
+            if existing:
+                title = str(existing.get("title") or existing.get("display_name") or title)
+        except Exception:  # noqa: BLE001
+            pass
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=True,
+            skipped=True,
+            managed_path=folder,
+            old_path=folder,
+            title=title,
+            message="已刷新本地状态",
+        )
+
     logger.info("Starting Mod.io metadata refresh for mod_id=%s path=%s", mid, folder)
     if not folder.is_dir():
         logger.error("Mod.io refresh aborted: directory missing (%s)", folder)
@@ -335,9 +388,7 @@ def refresh_modio_mod_metadata(
     local_mod_id, local_game_id = _read_local_modio_ids(folder)
     # Numeric external_id from DB can also be the Mod.io mod id.
     try:
-        from core.db_manager import get_db
-
-        info = get_db().get_mod_display_info(mid)
+        info = database.get_mod_display_info(mid)
         if info is not None:
             ext = str(info.external_id or "").strip()
             if ext.isdigit() and local_mod_id <= 0:
@@ -477,6 +528,8 @@ def refresh_modio_mod_metadata(
             name_id=details.name_id or (parts.mod_name_id if parts else ""),
             cover_rel="",
             old_managed_path=folder if renamed else None,
+            mod_id=mid,
+            db=database,
         )
         try:
             _update_modio_db_identity(
@@ -486,33 +539,47 @@ def refresh_modio_mod_metadata(
                 canonical=canonical,
                 preview_url=details.logo_url,
                 modio_mod_id=details.mod_id,
+                db=database,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Mod.io DB update failed for %s: %s", mid, exc)
 
+        overrides = database.get_user_override_fields(mid)
+        display_info = database.get_mod_display_info(mid)
+        local_cover = (
+            str(display_info.cover_path or "").strip() if display_info else ""
+        )
         if download_cover and details.logo_url:
             try:
-                cover_rel = _download_cover(
-                    api, details.logo_url, new_path, mod_id=mid
-                )
-                if cover_rel:
-                    data = read_info_metadata_dict(new_path) or {}
-                    data["cover_path"] = cover_rel
-                    data["preview_url"] = details.logo_url
-                    data["title"] = details.name
-                    data["display_name"] = details.name
-                    (new_path / INFO_DIR_NAME / "metadata.json").write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
+                if should_apply_official_field(
+                    FIELD_COVER,
+                    overrides=overrides,
+                    local_value=local_cover,
+                    mod_id=mid,
+                ):
+                    cover_rel = _download_cover(
+                        api, details.logo_url, new_path, mod_id=mid
                     )
-                    try:
-                        from core.db_manager import get_db
-
-                        get_db().update_mod_cover_path(mid, cover_rel)
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "Mod.io cover path DB update failed for %s", mid
+                    if cover_rel:
+                        merged = merge_official_sidecar_fields(
+                            read_info_metadata_dict(new_path) or {},
+                            mod_id=mid,
+                            overrides=overrides,
+                            official_title=details.name,
+                            official_description=description,
+                            official_preview_url=details.logo_url,
+                            cover_rel=cover_rel,
                         )
+                        (new_path / INFO_DIR_NAME / "metadata.json").write_text(
+                            json.dumps(merged, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        try:
+                            database.update_mod_cover_path(mid, cover_rel)
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Mod.io cover path DB update failed for %s", mid
+                            )
             except ModioAPIError as exc:
                 logger.exception("Mod.io cover refresh failed: %s", exc)
                 cover_err = str(exc)

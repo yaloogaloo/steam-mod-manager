@@ -77,14 +77,18 @@ class SteamImporter(ModImporter):
             resolved_game = ctx.game_name
 
         db = self._database()
-        if db.get_mod_display_info(mid) is not None:
-            return ImportResult(
-                success=False,
-                error="该Mod已经存在",
-                platform=self.platform,
-                external_id=mid,
-                mod_id=mid,
-            )
+        url = steam_workshop_url(mid)
+        from services.importers.duplicate_check import check_import_duplicate
+
+        dup = check_import_duplicate(
+            db,
+            platform=self.platform,
+            workshop_id=mid,
+            external_id=mid,
+            source_url=url,
+        )
+        if dup is not None:
+            return dup
 
         folder = Path(str(source_folder or "")).expanduser() if source_folder else None
         if folder is not None and str(source_folder).strip() and not folder.is_dir():
@@ -94,7 +98,6 @@ class SteamImporter(ModImporter):
                 platform=self.platform,
             )
 
-        url = steam_workshop_url(mid)
         name = (title or "").strip() or f"Unknown_Mod_{mid}"
         db.upsert_mod(
             ModMetadata(

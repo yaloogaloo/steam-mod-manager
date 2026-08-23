@@ -54,6 +54,7 @@ from ui.styles import (
     ACCENT_DISABLED_FG,
     ACCENT_ERROR,
     ACCENT_ERROR_BG,
+    ACCENT_ERROR_BORDER,
     ACCENT_NEUTRAL_BG,
     ACCENT_NEUTRAL_BORDER,
     ACCENT_SUCCESS,
@@ -92,6 +93,7 @@ STATUS_STRIP_HEIGHT = 18
 DEPLOY_DOT_SIZE = 10
 DEPLOY_DOT_BORDER = "#121820"
 OFFLINE_MISSING_LABEL = "Offline"
+TAG_TYPE_ABANDONED = "abandoned"
 
 
 def _line_height(metrics: QFontMetrics) -> int:
@@ -222,23 +224,6 @@ class ModCardWidget(QFrame):
             "}"
         )
 
-        self.missing_badge = QLabel(self.cover_label)
-        self.missing_badge.setObjectName("modMissingContentBadge")
-        self.missing_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.missing_badge.setText("内容缺失")
-        self.missing_badge.hide()
-        self.missing_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.missing_badge.setStyleSheet(
-            "QLabel#modMissingContentBadge {"
-            "background-color: rgba(220, 53, 69, 0.85);"
-            "color: white;"
-            "border-radius: 6px;"
-            "padding: 4px 10px;"
-            "font-weight: bold;"
-            "font-size: 12px;"
-            "}"
-        )
-
         self.platform_badge = QLabel(self.cover_label)
         self.platform_badge.setObjectName("modPlatformBadge")
         self.platform_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -277,8 +262,9 @@ class ModCardWidget(QFrame):
         self.title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.title_label)
 
-        # Status strip: offline-missing only (fixed height for stable grid).
+        # Bottom status row: Offline left, Mod status chips right.
         self.status_strip = QWidget()
+        self.status_strip.setObjectName("modCardStatusStrip")
         self.status_strip.setFixedHeight(STATUS_STRIP_HEIGHT)
         self.status_strip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         strip_layout = QHBoxLayout(self.status_strip)
@@ -290,8 +276,42 @@ class ModCardWidget(QFrame):
         self.offline_badge.setFixedHeight(STATUS_STRIP_HEIGHT)
         self.offline_badge.hide()
         self.offline_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        strip_layout.addWidget(self.offline_badge)
+        strip_layout.addWidget(self.offline_badge, stretch=0)
         strip_layout.addStretch(1)
+
+        self.status_container = QWidget()
+        self.status_container.setObjectName("modCardStatusContainer")
+        self.status_container.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        status_layout = QHBoxLayout(self.status_container)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(3)
+        status_layout.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        def _make_footer_chip(object_name: str) -> QLabel:
+            chip = QLabel(self.status_container)
+            chip.setObjectName(object_name)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setFixedHeight(16)
+            chip.hide()
+            chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            status_layout.addWidget(chip)
+            return chip
+
+        self.missing_badge = _make_footer_chip("modMissingContentBadge")
+        self.missing_badge.setText("内容缺失")
+        self.invalid_badge = _make_footer_chip("modFooterStatusChip")
+        self.disabled_badge = _make_footer_chip("modFooterStatusChip")
+        self.abandoned_badge = _make_footer_chip("modFooterStatusChip")
+        self.favorite_badge = _make_footer_chip("modFooterFavoriteChip")
+        strip_layout.addWidget(
+            self.status_container,
+            stretch=0,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         layout.addWidget(self.status_strip)
 
         margins = layout.contentsMargins()
@@ -520,18 +540,20 @@ class ModCardWidget(QFrame):
     def refresh_display(self) -> None:
         """Reload title / badges / tooltip from local metadata + SQLite."""
         self._apply_titles()
-        self._render_state_badge()
+        self._hide_cover_state_overlay()
         self._render_category_badge()
         self._render_platform_badge()
         self._render_deploy_indicator()
         self._render_offline_badge()
         self._render_relation_badge()
         self._render_missing_content_badge()
+        self._render_footer_status_chips()
         self._render_tooltip()
 
     # Back-compat aliases (older tests / callers).
     def _apply_user_tag_badges(self) -> None:
-        self._render_state_badge()
+        self._hide_cover_state_overlay()
+        self._render_footer_status_chips()
 
     def _apply_platform_badge(self) -> None:
         self._render_platform_badge()
@@ -593,7 +615,6 @@ class ModCardWidget(QFrame):
         info = self._display_info()
         steam_name = ""
         db_display = ""
-        favorite = False
         data = getattr(self, "_card_data", None)
         if data is not None:
             folder_ok = not bool(data.folder_absent)
@@ -603,7 +624,6 @@ class ModCardWidget(QFrame):
             except OSError:
                 folder_ok = False
         if info is not None:
-            favorite = info.favorite
             if folder_ok:
                 steam_name = (info.steam_name or "").strip()
                 db_display = (info.user_display_name or "").strip()
@@ -621,10 +641,12 @@ class ModCardWidget(QFrame):
             folder_name=self.managed_path.name,
         )
 
-        star = "★ " if favorite else ""
-        shown = f"{star}{display}"
+        width = TEXT_WIDTH
+        avail = int(self.title_label.width() or 0)
+        if avail >= 24:
+            width = min(avail, TEXT_WIDTH)
         self.title_label.setText(
-            _elide_to_lines(shown, self.title_label.font(), TEXT_WIDTH, TITLE_LINES)
+            _elide_to_lines(display, self.title_label.font(), width, TITLE_LINES)
         )
         self._cached_display_name = display
         self._cached_steam_name = steam_name
@@ -687,8 +709,8 @@ class ModCardWidget(QFrame):
         self.offline_badge.adjustSize()
         self.offline_badge.show()
 
-    def _render_state_badge(self) -> None:
-        """Cover top-left: Conflict > Invalid > Disabled (mutually exclusive)."""
+    def _overlay_user_flags(self) -> tuple[bool, bool, bool, list[str]]:
+        """Read existing conflict/invalid/disabled flags — display only, no writes."""
         mid = self._mod_id()
         conflict = False
         invalid = False
@@ -696,104 +718,192 @@ class ModCardWidget(QFrame):
         tip_parts: list[str] = []
         data = getattr(self, "_card_data", None)
         if data is not None:
-            conflict = bool(data.conflict)
-            invalid = bool(data.invalid)
-            disabled = not bool(data.enabled)
+            conflict = bool(getattr(data, "conflict", False))
+            invalid = bool(getattr(data, "invalid", False) or getattr(data, "is_invalid", False))
+            disabled = not bool(getattr(data, "enabled", True))
             if conflict:
                 tip_parts.append("存在冲突")
             if invalid:
                 tip_parts.append("已失效")
             if disabled:
                 tip_parts.append("已禁用")
-        elif mid:
+            return conflict, invalid, disabled, tip_parts
+        if not mid:
+            return False, False, False, []
+        try:
+            st = get_db().get_mod_status(mid)
+        except Exception:  # noqa: BLE001
+            st = None
+        try:
+            enabled = get_db().is_mod_enabled(mid)
+        except Exception:  # noqa: BLE001
+            enabled = True
+        disabled = not enabled
+        if st is not None:
+            if st.conflict_status in ("conflict", "warning"):
+                conflict = True
+                tip_parts.append(
+                    "冲突"
+                    + (
+                        f"：{st.conflict_note}"
+                        if (st.conflict_note or "").strip()
+                        else ""
+                    )
+                )
+            if st.invalid:
+                invalid = True
+                tip_parts.append(
+                    "已失效"
+                    + (
+                        f"：{st.invalid_reason}"
+                        if (st.invalid_reason or "").strip()
+                        else ""
+                    )
+                )
+        if not conflict and not invalid:
             try:
-                st = get_db().get_mod_status(mid)
+                flags = get_db().get_mods_tag_flags([mid]).get(mid)
             except Exception:  # noqa: BLE001
-                st = None
-            try:
-                enabled = get_db().is_mod_enabled(mid)
-            except Exception:  # noqa: BLE001
-                enabled = True
-            disabled = not enabled
-            if st is not None:
-                if st.conflict_status in ("conflict", "warning"):
+                flags = None
+            if flags is not None:
+                if flags.conflict:
                     conflict = True
-                    tip_parts.append(
-                        "冲突"
-                        + (
-                            f"：{st.conflict_note}"
-                            if (st.conflict_note or "").strip()
-                            else ""
-                        )
-                    )
-                if st.invalid:
+                    tip_parts.append("存在冲突")
+                if flags.invalid:
                     invalid = True
-                    tip_parts.append(
-                        "已失效"
-                        + (
-                            f"：{st.invalid_reason}"
-                            if (st.invalid_reason or "").strip()
-                            else ""
-                        )
-                    )
-            if not conflict and not invalid:
-                try:
-                    flags = get_db().get_mods_tag_flags([mid]).get(mid)
-                except Exception:  # noqa: BLE001
-                    flags = None
-                if flags is not None:
-                    if flags.conflict:
-                        conflict = True
-                        tip_parts.append("存在冲突")
-                    if flags.invalid:
-                        invalid = True
-                        reason = (flags.invalid_reason or "").strip()
-                        tip_parts.append("已失效" + (f"：{reason}" if reason else ""))
+                    reason = (flags.invalid_reason or "").strip()
+                    tip_parts.append("已失效" + (f"：{reason}" if reason else ""))
+        return conflict, invalid, disabled, tip_parts
 
-        if conflict:
-            text, bg, fg, border = (
-                "Conflict",
-                ACCENT_ERROR_BG,
-                STATE_CONFLICT_FG,
-                STATE_CONFLICT_BORDER,
-            )
-        elif invalid:
-            text, bg, fg, border = (
-                "Invalid",
-                ACCENT_WARNING_BG,
-                STATE_INVALID_FG,
-                STATE_INVALID_BORDER,
-            )
-        elif disabled:
-            text, bg, fg, border = (
-                "Disabled",
-                ACCENT_DISABLED_BG,
-                ACCENT_DISABLED_FG,
-                ACCENT_DISABLED_BORDER,
-            )
-            tip_parts.append("已禁用")
-        else:
-            self.state_badge.hide()
-            self.state_badge.clear()
-            self.state_badge.setToolTip("")
-            return
+    def _hide_cover_state_overlay(self) -> None:
+        """Cover left overlay is Category-only — never Invalid / Disabled."""
+        self.state_badge.hide()
+        self.state_badge.clear()
+        self.state_badge.setToolTip("")
 
-        self.state_badge.setText(text)
-        self.state_badge.setToolTip("\n".join(tip_parts) if tip_parts else text)
-        self.state_badge.setStyleSheet(
-            f"QLabel#modTagBadge {{"
+    def _render_state_badge(self) -> None:
+        """Legacy name: cover overlay stays hidden; flags render in the footer."""
+        self._hide_cover_state_overlay()
+        self._render_footer_status_chips()
+
+    def _style_footer_chip(
+        self,
+        chip: QLabel,
+        *,
+        bg: str,
+        fg: str,
+        border: str,
+        object_name: str,
+    ) -> None:
+        chip.setObjectName(object_name)
+        chip.setStyleSheet(
+            f"QLabel#{object_name} {{"
             f"background-color: {bg}; color: {fg};"
             f"border: 1px solid {border}; border-radius: 3px;"
-            f"font-size: 10px; font-weight: 600; padding: 1px 5px;"
+            f"font-size: 10px; font-weight: 600; padding: 1px 4px;"
             f"}}"
         )
-        self.state_badge.adjustSize()
-        y = 4
-        if self.category_badge.isVisible():
-            y = self.category_badge.y() + self.category_badge.height() + 2
-        self.state_badge.move(4, y)
-        self.state_badge.show()
-        self.state_badge.raise_()
+        chip.adjustSize()
+
+    def _is_abandoned(self) -> bool:
+        data = getattr(self, "_card_data", None)
+        if data is not None and bool(getattr(data, "abandoned", False)):
+            return True
+        mid = self._mod_id()
+        if not mid:
+            return False
+        try:
+            return any(
+                str(tag.tag_type or "") == TAG_TYPE_ABANDONED
+                for tag in get_db().get_mod_tags(mid)
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _render_footer_status_chips(self) -> None:
+        """Bottom status row, right side: invalid / disabled / abandoned / favorite."""
+        _conflict, invalid, disabled, tip_parts = self._overlay_user_flags()
+        invalid_tip = "\n".join(
+            p for p in tip_parts if "失效" in p
+        ) or "已失效"
+        disabled_tip = "已禁用"
+        if invalid:
+            self.invalid_badge.setText("失效")
+            self.invalid_badge.setToolTip(invalid_tip)
+            self._style_footer_chip(
+                self.invalid_badge,
+                bg=ACCENT_WARNING_BG,
+                fg=STATE_INVALID_FG,
+                border=STATE_INVALID_BORDER,
+                object_name="modFooterStatusChip",
+            )
+            self.invalid_badge.show()
+        else:
+            self.invalid_badge.hide()
+            self.invalid_badge.clear()
+            self.invalid_badge.setToolTip("")
+
+        if disabled:
+            self.disabled_badge.setText("停用")
+            self.disabled_badge.setToolTip(disabled_tip)
+            self._style_footer_chip(
+                self.disabled_badge,
+                bg=ACCENT_DISABLED_BG,
+                fg=ACCENT_DISABLED_FG,
+                border=ACCENT_DISABLED_BORDER,
+                object_name="modFooterDisabledChip",
+            )
+            self.disabled_badge.show()
+        else:
+            self.disabled_badge.hide()
+            self.disabled_badge.clear()
+            self.disabled_badge.setToolTip("")
+
+        if self._is_abandoned():
+            self.abandoned_badge.setText("停更")
+            self.abandoned_badge.setToolTip("已标记停更")
+            self._style_footer_chip(
+                self.abandoned_badge,
+                bg=ACCENT_NEUTRAL_BG,
+                fg=TEXT_SECONDARY,
+                border=ACCENT_NEUTRAL_BORDER,
+                object_name="modFooterAbandonedChip",
+            )
+            self.abandoned_badge.show()
+        else:
+            self.abandoned_badge.hide()
+            self.abandoned_badge.clear()
+            self.abandoned_badge.setToolTip("")
+
+        if self._is_favorite():
+            self.favorite_badge.setText("★")
+            self.favorite_badge.setToolTip("已收藏")
+            self._style_footer_chip(
+                self.favorite_badge,
+                bg=ACCENT_WARNING_BG,
+                fg=ACCENT_WARNING,
+                border=ACCENT_WARNING_BORDER,
+                object_name="modFooterFavoriteChip",
+            )
+            self.favorite_badge.show()
+        else:
+            self.favorite_badge.hide()
+            self.favorite_badge.clear()
+            self.favorite_badge.setToolTip("")
+
+        any_chip = any(
+            not chip.isHidden()
+            for chip in (
+                self.missing_badge,
+                self.invalid_badge,
+                self.disabled_badge,
+                self.abandoned_badge,
+                self.favorite_badge,
+            )
+        )
+        self.status_container.setVisible(any_chip)
+        if any_chip:
+            self.status_container.adjustSize()
 
     def _render_category_badge(self) -> None:
         mid = self._mod_id()
@@ -818,11 +928,12 @@ class ModCardWidget(QFrame):
         self.category_badge.raise_()
 
     def _render_missing_content_badge(self) -> None:
-        """Row-2 status badge (under source): healthy / missing / conflict."""
+        """Unified status badge (top-right under source). Silent when healthy."""
         from services.library_status import (
             CONTENT_CONTENT_MISSING,
             CONTENT_FOLDER_MISSING,
             CONTENT_HEALTHY,
+            CONTENT_IDENTITY_CONFLICT,
             content_status_badge_label,
             content_status_badge_tip,
             library_status_to_content_status,
@@ -844,6 +955,17 @@ class ModCardWidget(QFrame):
             missing_payload = False if folder_absent else read_is_missing_content(
                 self.managed_path
             )
+            # Prefer live DB after Detail refresh cleared the snapshot.
+            if mid:
+                try:
+                    from core.db_manager import get_db
+                    from services.library_status import row_content_status
+
+                    brow = get_db().get_mod_backup_row(mid)
+                    if brow is not None:
+                        content_status = str(row_content_status(brow) or "").strip()
+                except Exception:  # noqa: BLE001
+                    content_status = ""
         if not content_status:
             if folder_absent:
                 content_status = CONTENT_FOLDER_MISSING
@@ -852,27 +974,41 @@ class ModCardWidget(QFrame):
             else:
                 content_status = CONTENT_HEALTHY
 
-        status_label = content_status_badge_label(content_status)
-        status_tip = content_status_badge_tip(content_status)
-        if content_status != CONTENT_HEALTHY:
-            status_label = f"⚠ {status_label}"
+        conflict_flag, _, _, conflict_tips = self._overlay_user_flags()
+        if content_status == CONTENT_HEALTHY and not conflict_flag:
+            self.missing_badge.hide()
+            self.missing_badge.clear()
+            self.missing_badge.setToolTip("")
+            return
+
+        if content_status == CONTENT_IDENTITY_CONFLICT or (
+            content_status == CONTENT_HEALTHY and conflict_flag
+        ):
+            status_label = "❌ " + (
+                content_status_badge_label(CONTENT_IDENTITY_CONFLICT)
+                if content_status == CONTENT_IDENTITY_CONFLICT
+                else "冲突"
+            )
+            status_tip = (
+                content_status_badge_tip(CONTENT_IDENTITY_CONFLICT)
+                if content_status == CONTENT_IDENTITY_CONFLICT
+                else ("\n".join(conflict_tips) or "存在冲突")
+            )
+        else:
+            status_label = "⚠ " + content_status_badge_label(content_status)
+            status_tip = content_status_badge_tip(content_status)
 
         self.missing_badge.setText(status_label)
         self.missing_badge.setToolTip(status_tip)
+        self.missing_badge.setStyleSheet(
+            "QLabel#modMissingContentBadge {"
+            f"background-color: {ACCENT_ERROR_BG}; color: {ACCENT_ERROR};"
+            f"border: 1px solid {ACCENT_ERROR_BORDER}; border-radius: 3px;"
+            "font-size: 10px; font-weight: 600; padding: 1px 4px;"
+            "}"
+        )
         self.missing_badge.adjustSize()
-        cover_w = self.cover_label.width() or COVER_WIDTH
-        # Row 2 under platform badge (top-right)
-        x = max(4, cover_w - self.missing_badge.width() - 4)
-        y = 24
-        if hasattr(self, "platform_badge") and self.platform_badge.isVisible():
-            y = self.platform_badge.y() + self.platform_badge.height() + 2
-        self.missing_badge.move(x, y)
-        # Hide "正常" to reduce noise — still available via tooltip on source row
-        if content_status == CONTENT_HEALTHY:
-            self.missing_badge.hide()
-            return
         self.missing_badge.show()
-        self.missing_badge.raise_()
 
     def _render_platform_badge(self) -> None:
         from services.library_status import (
@@ -930,12 +1066,8 @@ class ModCardWidget(QFrame):
         self.platform_badge.raise_()
         if self.category_badge.isVisible():
             self.category_badge.raise_()
-        if self.state_badge.isVisible():
-            self.state_badge.raise_()
         if self.relation_badge.isVisible():
             self.relation_badge.raise_()
-        if hasattr(self, "missing_badge") and self.missing_badge.isVisible():
-            self.missing_badge.raise_()
         if self.deploy_dot.isVisible():
             self.deploy_dot.raise_()
 

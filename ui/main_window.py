@@ -5,8 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
-    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -92,18 +92,8 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
         # ---- Left navigation ----
         nav_width = 128
         nav_wrap = QVBoxLayout()
-        nav_wrap.setSpacing(8)
-        brand = QLabel("Steam Mod\nManager")
-        brand.setObjectName("titleLabel")
-        brand.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        brand.setMaximumWidth(nav_width)
-        nav_wrap.addWidget(brand)
-
-        sub = QLabel("备份 · 整理 · 离线浏览 · 部署")
-        sub.setObjectName("subtitleLabel")
-        sub.setWordWrap(True)
-        sub.setMaximumWidth(nav_width)
-        nav_wrap.addWidget(sub)
+        nav_wrap.setSpacing(4)
+        nav_wrap.setContentsMargins(0, 0, 0, 0)
 
         self.nav_list = QListWidget()
         self.nav_list.setObjectName("navList")
@@ -118,6 +108,9 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
 
         # ---- Stacked pages ----
         self.stack = QStackedWidget()
+        self.stack.setFrameShape(QFrame.Shape.NoFrame)
+        self.stack.setLineWidth(0)
+        self.stack.setContentsMargins(0, 0, 0, 0)
         self.sync_view = SyncCenterView()
         self.library_view = ModLibraryView()
         self.deploy_view = GameDeployView()
@@ -127,9 +120,6 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
         self.sync_view.request_open_library.connect(lambda: self._goto_page(PAGE_LIBRARY))
         self.library_view.filter_changed.connect(self._on_filter_changed)
         self.library_view.request_open_sync.connect(lambda: self._goto_page(PAGE_SYNC))
-        self.library_view.request_open_game_settings.connect(
-            self._on_open_game_settings
-        )
         self.deploy_view.config_saved.connect(self._on_game_config_saved)
 
         self.stack.addWidget(self.sync_view)
@@ -157,11 +147,6 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
 
     def _goto_page(self, index: int) -> None:
         self.nav_list.setCurrentRow(index)
-
-    def _on_open_game_settings(self, app_id: int) -> None:
-        self._goto_page(PAGE_DEPLOY)
-        self.deploy_view.refresh()
-        self.deploy_view.select_app_id(int(app_id or 0))
 
     def _on_game_config_saved(self, app_id: int) -> None:
         del app_id
@@ -218,9 +203,6 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
                 f"state={self.windowState()!r}"
             )
 
-        # Lightweight deploy consistency scan (deployed rows only; no auto-fix)
-        # Deploy audit after first paints — avoid contending with Library load.
-        QTimer.singleShot(750, self._run_startup_deploy_audit)
         # Backfill missing metadata backups off the UI thread
         QTimer.singleShot(0, self._run_startup_backup_rebuild)
 
@@ -242,13 +224,6 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
                 log_startup("rebuild_missing_metadata_backup fallback scheduled")
             except Exception as exc2:  # noqa: BLE001
                 log_startup(f"backup rebuild skip: {exc2}")
-
-    def _run_startup_deploy_audit(self) -> None:
-        try:
-            self.library_view.set_target_root(self.sync_view.target_path())
-            self.library_view.run_deploy_audit()
-        except Exception:  # noqa: BLE001
-            pass
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.settings.setValue(SETTING_TARGET, self.sync_view.target_path())

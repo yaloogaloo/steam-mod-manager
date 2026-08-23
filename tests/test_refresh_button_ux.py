@@ -75,8 +75,9 @@ def test_refresh_button_state_machine(
     qapp.processEvents()
 
     panel._set_refresh_button_state("running")
-    assert "正在刷新" in panel.btn_refresh_mod.text()
+    assert "刷新中" in panel.btn_refresh_mod.text()
     assert panel.btn_refresh_mod.isEnabled() is False
+    assert "正在刷新" in (panel.op_status_label.text() or "")
 
     panel._set_refresh_button_state("success", restore_ms=50)
     assert "已更新" in panel.btn_refresh_mod.text()
@@ -130,12 +131,16 @@ def test_click_sets_running_immediately_and_blocks_duplicate(
             return True
 
     monkeypatch.setattr(
+        "ui.metadata_refresh_thread.ModRefreshWorker",
+        FakeWorker,
+    )
+    monkeypatch.setattr(
         "ui.metadata_refresh_thread.MetadataRefreshWorker",
         FakeWorker,
     )
 
     panel._on_refresh_mod()
-    assert "正在刷新" in panel.btn_refresh_mod.text()
+    assert "刷新中" in panel.btn_refresh_mod.text()
     assert started["n"] == 1
     # Duplicate click while running must be ignored.
     panel._on_refresh_mod()

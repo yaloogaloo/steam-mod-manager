@@ -143,8 +143,9 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
     panel = ModDetailPanel()
     panel.show_mod(result.managed_path)
     qapp.processEvents()
-    assert "Test Workshop Mod" in (panel.view_title.text() or "")
-    assert "Unknown" not in (panel.view_title.text() or "")
+    title_text = (panel.view_title.text() or "").replace("\u200b", "")
+    assert "Test Workshop Mod" in title_text
+    assert "Unknown" not in title_text
 
 
 def test_display_info_ignores_stale_unknown_override_without_refresh(

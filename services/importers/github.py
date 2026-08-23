@@ -92,16 +92,16 @@ class GithubImporter(ModImporter):
             canonical = url if url.startswith("http") else f"https://github.com/{repo}"
 
         db = self._database()
-        existing = db.find_mod_by_external(PLATFORM_GITHUB, external_id)
-        if existing is not None:
-            return ImportResult(
-                success=False,
-                error="该Mod已经存在",
-                platform=self.platform,
-                external_id=external_id,
-                mod_id=existing.mod_id,
-                source_url=existing.source_url,
-            )
+        from services.importers.duplicate_check import check_import_duplicate
+
+        dup = check_import_duplicate(
+            db,
+            platform=PLATFORM_GITHUB,
+            external_id=external_id,
+            source_url=canonical,
+        )
+        if dup is not None:
+            return dup
 
         bundle = build_github_mod_files(
             folder,

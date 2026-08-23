@@ -192,6 +192,7 @@ def test_mod_card_badge_overlay(
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
     mod = tmp_path / "Game" / "BadgeMod"
     (mod / INFO_DIR_NAME).mkdir(parents=True)
+    (mod / "payload.bin").write_bytes(b"ok")
     db.upsert_mod(ModMetadata(published_file_id="4001", title="Badge"))
     db.add_mod_tag("4001", TAG_TYPE_INVALID, "gone")
     db.add_mod_tag("4001", TAG_TYPE_CONFLICT, "")
@@ -199,19 +200,23 @@ def test_mod_card_badge_overlay(
     card = ModCardWidget(
         mod, ModMetadata(published_file_id="4001", title="Badge", managed_path=str(mod))
     )
-    # Priority: conflict (red) over invalid — single overlay badge
-    assert card.tag_badge.text() == "Conflict"
-    assert not card.tag_badge.isHidden()
+    # Conflict is the unified status badge — not the legacy top-left overlay.
+    assert card.tag_badge.isHidden() or "Conflict" not in (card.tag_badge.text() or "")
+    assert "冲突" in (card.missing_badge.text() or "")
+    assert not card.missing_badge.isHidden()
     # Layout height unchanged vs untagged card
     plain = tmp_path / "Game" / "Plain"
     (plain / INFO_DIR_NAME).mkdir(parents=True)
     card_b = ModCardWidget(plain)
     assert card.height() == card_b.height()
 
-    # Invalid alone → orange badge
+    # Invalid alone → footer chip, not cover overlay
     db.remove_mod_tag("4001", TAG_TYPE_CONFLICT)
     card._apply_user_tag_badges()
-    assert card.tag_badge.text() == "Invalid"
+    card._render_missing_content_badge()
+    assert card.tag_badge.isHidden() or not (card.tag_badge.text() or "").strip()
+    assert "失效" in (card.invalid_badge.text() or "")
+    assert not card.invalid_badge.isHidden()
 
 
 def test_deploy_hint_does_not_block(

@@ -55,20 +55,24 @@ class ModRefreshResult:
     official_success: bool = False
     official_synced: bool = False
     provider: MetadataRefreshResult | None = None
+    managed_path: Path | None = None
     message: str = ""
     error: str = ""
 
     def to_metadata_refresh_result(self) -> MetadataRefreshResult:
         """Compat shim for existing Detail panel worker handlers."""
         prov = self.provider
-        path = prov.managed_path if prov and prov.managed_path else None
+        path = (
+            (prov.managed_path if prov and prov.managed_path else None)
+            or self.managed_path
+        )
         return MetadataRefreshResult(
             mod_id=self.mod_id,
             success=self.success,
             skipped=not self.official_attempted and self.success,
             renamed=bool(prov and prov.renamed),
             managed_path=path,
-            old_path=prov.old_path if prov else path,
+            old_path=(prov.old_path if prov and prov.old_path else None) or path,
             title=prov.title if prov else "",
             error=self.error,
             cover_path=prov.cover_path if prov else "",
@@ -242,6 +246,7 @@ def refresh_mod(
             local=local,
             official_attempted=False,
             official_synced=True,
+            managed_path=folder,
             message=msg,
         )
 
@@ -284,6 +289,7 @@ def refresh_mod(
                 local=local,
                 official_attempted=False,
                 official_synced=database.is_official_metadata_synced(mid),
+                managed_path=folder,
                 message="已刷新本地状态",
             )
     except Exception as exc:  # noqa: BLE001
@@ -299,6 +305,7 @@ def refresh_mod(
             official_attempted=True,
             official_success=False,
             official_synced=False,
+            managed_path=folder,
             error=str(exc),
             message="本地状态已刷新，官方信息同步失败",
         )
@@ -323,6 +330,7 @@ def refresh_mod(
             official_success=True,
             official_synced=True,
             provider=provider_result,
+            managed_path=final_path,
             message="已刷新本地状态，并同步官方信息",
         )
 
@@ -340,6 +348,7 @@ def refresh_mod(
         official_success=False,
         official_synced=False,
         provider=provider_result,
+        managed_path=folder,
         error=provider_result.error,
         message="本地状态已刷新，官方信息同步失败",
     )

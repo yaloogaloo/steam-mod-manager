@@ -94,16 +94,16 @@ class ModioImporter(ModImporter):
             ) or MODIO_ANNO_1800_URL
 
         db = self._database()
-        existing = db.find_mod_by_external(PLATFORM_MODIO, ext)
-        if existing is not None:
-            return ImportResult(
-                success=False,
-                error="该Mod已经存在",
-                platform=self.platform,
-                external_id=ext,
-                mod_id=existing.mod_id,
-                source_url=existing.source_url,
-            )
+        from services.importers.duplicate_check import check_import_duplicate
+
+        dup = check_import_duplicate(
+            db,
+            platform=PLATFORM_MODIO,
+            external_id=ext,
+            source_url=url,
+        )
+        if dup is not None:
+            return dup
 
         bundle = build_modio_mod_files(
             folder,

@@ -99,7 +99,7 @@ def test_search_box_ui_present_and_editable(
     assert view.search_box.isClearButtonEnabled()
     assert view.search_box.minimumHeight() >= 32
     assert "搜索" in view.search_box.placeholderText()
-    assert set(view._filter_buttons) >= {"all", "favorite", "deployed", "offline_missing"}
+    assert set(view._filter_buttons) >= {"all", "favorite", "deployed", "anomaly"}
 
 
 def test_card_tooltip_is_simple_title(

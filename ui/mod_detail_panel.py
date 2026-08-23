@@ -53,6 +53,9 @@ from core.db_manager import (
     ModDisplayInfo,
     get_db,
 )
+
+TAG_TYPE_ABANDONED = "abandoned"
+
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
     OFFLINE_STATUS_FAILED,
@@ -419,7 +422,6 @@ class ModDetailPanel(QWidget):
         self._display_info: ModDisplayInfo | None = None
         self._mode = MODE_EMPTY
         self._deploy_busy = False
-        self._audit_hint = ""
         self._conflict_hint = ""
         self._tag_deploy_hint = ""
         self._peer_mods: list[tuple[str, str]] = []
@@ -429,6 +431,7 @@ class ModDetailPanel(QWidget):
         self._metadata_progress_dialog = None
         self._refresh_btn_timer: QTimer | None = None
         self._refresh_btn_state = "idle"
+        self._op_status_timer: QTimer | None = None
         self._current_platform = PLATFORM_STEAM
         self._source_url_value = ""
         self._batch_mod_ids: list[str] = []
@@ -563,10 +566,15 @@ class ModDetailPanel(QWidget):
         if hasattr(self, "backup_status_badge"):
             self.backup_status_badge.hide()
             self.backup_status_badge.clear()
+        if hasattr(self, "view_favorite"):
+            self.view_favorite.hide()
+            self.view_favorite.clear()
+        if hasattr(self, "op_status_label"):
+            self._clear_op_status()
         if hasattr(self, "btn_add_dependency"):
             self.btn_add_dependency.setEnabled(False)
         if hasattr(self, "dep_summary_label"):
-            self.dep_summary_label.setText("")
+            self.dep_summary_label.setText("依赖于 —")
         if hasattr(self, "_files_section_frame"):
             self._files_section_frame.hide()
         self.view_deploy.clear()
@@ -574,9 +582,7 @@ class ModDetailPanel(QWidget):
         self.view_deploy_time.clear()
         self.view_deploy_type.clear()
         self.view_deploy_error.clear()
-        self.view_deploy_audit.clear()
         self.view_deploy_conflict.clear()
-        self._audit_hint = ""
         self._conflict_hint = ""
         self._tag_deploy_hint = ""
         self._peer_mods = []
@@ -1032,21 +1038,21 @@ class ModDetailPanel(QWidget):
         self.header_platform_badge.setObjectName("detailPlatformBadge")
         self.header_platform_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge_row.addWidget(self.header_platform_badge)
-        self.backup_status_badge = QLabel()
-        self.backup_status_badge.setObjectName("detailPlatformBadge")
-        self.backup_status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.backup_status_badge.hide()
-        badge_row.addWidget(self.backup_status_badge)
         self.size_badge = QLabel()
         self.size_badge.setObjectName("detailPlatformBadge")
         self.size_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.size_badge.hide()
         badge_row.addWidget(self.size_badge)
-        self.view_favorite = QLabel()
-        self.view_favorite.setObjectName("detailPanelMeta")
-        badge_row.addWidget(self.view_favorite)
         badge_row.addStretch(1)
         title_col.addLayout(badge_row)
+        # Backup remains in DB / diagnostics — never a metadata-row layout child.
+        self.backup_status_badge = QLabel(header)
+        self.backup_status_badge.hide()
+
+        self.view_favorite = QLabel()
+        self.view_favorite.setObjectName("detailFavoriteLabel")
+        self.view_favorite.hide()
+        title_col.addWidget(self.view_favorite)
 
         title_col.addStretch(1)
 
@@ -1146,6 +1152,54 @@ class ModDetailPanel(QWidget):
             self._set_status_banner_tone("error")
             self._status_banner.hide()
 
+    def _clear_op_status(self) -> None:
+        if getattr(self, "_op_status_timer", None) is not None:
+            try:
+                self._op_status_timer.stop()
+                self._op_status_timer.deleteLater()
+            except RuntimeError:
+                pass
+            self._op_status_timer = None
+        if hasattr(self, "op_status_label"):
+            self.op_status_label.clear()
+            self.op_status_label.setProperty("tone", "")
+            style = self.op_status_label.style()
+            if style is not None:
+                style.unpolish(self.op_status_label)
+                style.polish(self.op_status_label)
+
+    def _set_op_status(
+        self,
+        message: str,
+        *,
+        tone: str = "",
+        auto_clear_ms: int = 0,
+    ) -> None:
+        """Compact footer feedback — fixed height, no layout jump."""
+        if not hasattr(self, "op_status_label"):
+            return
+        if getattr(self, "_op_status_timer", None) is not None:
+            try:
+                self._op_status_timer.stop()
+                self._op_status_timer.deleteLater()
+            except RuntimeError:
+                pass
+            self._op_status_timer = None
+        text = str(message or "").strip()
+        self.op_status_label.setText(text)
+        key = str(tone or "").strip().lower()
+        self.op_status_label.setProperty("tone", key)
+        style = self.op_status_label.style()
+        if style is not None:
+            style.unpolish(self.op_status_label)
+            style.polish(self.op_status_label)
+        if auto_clear_ms > 0 and text:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._clear_op_status)
+            self._op_status_timer = timer
+            timer.start(int(auto_clear_ms))
+
     def _show_deploy_failure_banner(self, reason: str) -> None:
         msg = humanize_deploy_error(str(reason or "").strip() or "未知错误")
         # Never show bare "部署失败" without a reason line.
@@ -1191,8 +1245,18 @@ class ModDetailPanel(QWidget):
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
 
+        self.btn_tag_abandoned = QPushButton("停更")
+        self.btn_tag_abandoned.setObjectName("detailFlagChip")
+        self.btn_tag_abandoned.setCheckable(True)
+        self.btn_tag_abandoned.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tag_abandoned.setToolTip("标记为停更")
+        self.btn_tag_abandoned.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+        )
+
         self._flag_tags_row.addWidget(self.btn_tag_conflict)
         self._flag_tags_row.addWidget(self.btn_tag_invalid)
+        self._flag_tags_row.addWidget(self.btn_tag_abandoned)
         self._flag_tags_row.addStretch(1)
         layout.addLayout(self._flag_tags_row)
         return frame
@@ -1208,6 +1272,16 @@ class ModDetailPanel(QWidget):
         caption = QLabel("操作")
         caption.setObjectName("detailPanelSection")
         actions.addWidget(caption)
+
+        # Fixed-height op feedback — never grows the footer when messages appear.
+        self.op_status_label = QLabel("")
+        self.op_status_label.setObjectName("detailOpStatus")
+        self.op_status_label.setFixedHeight(16)
+        self.op_status_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        actions.addWidget(self.op_status_label)
+        self._op_status_timer: QTimer | None = None
 
         self.btn_folder = QPushButton("打开目录")
         self.btn_relocate = QPushButton("重新定位目录")
@@ -1260,27 +1334,33 @@ class ModDetailPanel(QWidget):
         return self._view_footer
 
     def _build_dependency_pill_section(self) -> QFrame:
-        """Workspace-ID dependency binder — sits between 标记 and 操作."""
+        """Compact dependency block between 标记 and 操作 — no layout growth."""
         frame = QFrame()
-        frame.setObjectName("detailSection")
+        frame.setObjectName("detailDependencyBlock")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(6)
-        dep_row = QHBoxLayout()
-        dep_row.setContentsMargins(0, 0, 0, 0)
-        dep_row.setSpacing(8)
-        self.btn_add_dependency = QPushButton("+ 依赖")
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        title = QLabel("依赖")
+        title.setObjectName("detailPanelSection")
+        head.addWidget(title)
+        head.addStretch(1)
+        self.btn_add_dependency = QPushButton("+ 添加依赖")
         self.btn_add_dependency.setObjectName("dependencyPillButton")
         self.btn_add_dependency.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_add_dependency.setToolTip(
             "绑定依赖 Mod（输入 Workspace ID；部署时先安装依赖）"
         )
-        self.dep_summary_label = QLabel("")
+        head.addWidget(self.btn_add_dependency, stretch=0)
+        layout.addLayout(head)
+
+        self.dep_summary_label = QLabel("依赖于 —")
         self.dep_summary_label.setObjectName("detailPanelMeta")
         self.dep_summary_label.setWordWrap(True)
-        dep_row.addWidget(self.btn_add_dependency, stretch=0)
-        dep_row.addWidget(self.dep_summary_label, stretch=1)
-        layout.addLayout(dep_row)
+        layout.addWidget(self.dep_summary_label)
         return frame
 
     def _build_status_section(self) -> QFrame:
@@ -1319,12 +1399,6 @@ class ModDetailPanel(QWidget):
         self.view_deploy_error.setWordWrap(True)
         self._apply_tone(self.view_deploy_error, "error")
         body.addWidget(self.view_deploy_error)
-
-        self.view_deploy_audit = QLabel()
-        self.view_deploy_audit.setObjectName("detailPanelMeta")
-        self.view_deploy_audit.setWordWrap(True)
-        self._apply_tone(self.view_deploy_audit, "warning")
-        body.addWidget(self.view_deploy_audit)
 
         self.view_deploy_conflict = QLabel()
         self.view_deploy_conflict.setObjectName("detailPanelMeta")
@@ -1697,6 +1771,7 @@ class ModDetailPanel(QWidget):
         # Remove Mod entry removed from UI — keep stub unconnected.
         self.btn_tag_conflict.toggled.connect(self._on_flag_conflict_toggled)
         self.btn_tag_invalid.toggled.connect(self._on_flag_invalid_toggled)
+        self.btn_tag_abandoned.toggled.connect(self._on_flag_abandoned_toggled)
 
     def _make_collapsible_section(
         self, title: str, *, expanded: bool = False
@@ -2126,40 +2201,19 @@ class ModDetailPanel(QWidget):
         self._render_backup_status_badge()
         self._refresh_action_buttons()
 
-    def _render_backup_status_badge(self) -> None:
-        """Show backup health only when anomalous (Phase 7 Task 4)."""
-        if not hasattr(self, "backup_status_badge"):
-            return
-        mid = self.current_mod_id()
-        if not mid:
-            self.backup_status_badge.hide()
-            return
-        status = ""
-        try:
-            from core.db_manager import get_db
+    def _render_content_status_badge(self) -> None:
+        """No-op: content_status is not shown in Detail Header Metadata Row."""
+        badge = getattr(self, "content_status_badge", None)
+        if badge is not None:
+            badge.hide()
+            badge.clear()
 
-            row = get_db().get_mod_backup_row(mid)
-            if row is not None:
-                status = str(row.get("backup_status") or "").strip()
-        except Exception:  # noqa: BLE001
-            status = ""
-        # Quiet when complete / empty
-        if status in ("", "complete"):
-            self.backup_status_badge.hide()
-            return
-        if status == "partial":
-            self.backup_status_badge.setText("Backup: ⚠ 缺少封面")
-            self.backup_status_badge.setToolTip("备份不完整（例如缺少封面或离线页）")
-        elif status == "missing":
-            self.backup_status_badge.setText("Backup: ⚠ 缺失")
-            self.backup_status_badge.setToolTip("尚未建立有效 metadata backup")
-        elif status == "invalid":
-            self.backup_status_badge.setText("Backup: ❌ 无效")
-            self.backup_status_badge.setToolTip("Metadata backup 校验失败")
-        else:
-            self.backup_status_badge.setText(f"Backup: {status}")
-            self.backup_status_badge.setToolTip("")
-        self.backup_status_badge.show()
+    def _render_backup_status_badge(self) -> None:
+        """Keep badge hidden and out of the Source/Size metadata row."""
+        badge = getattr(self, "backup_status_badge", None)
+        if badge is not None:
+            badge.hide()
+            badge.clear()
 
     def _relocate_mod_folder(self) -> None:
         """Pick a new folder for a missing Mod — path update only."""
@@ -2426,77 +2480,28 @@ class ModDetailPanel(QWidget):
 
         _log.info("Selecting metadata provider platform=%s", platform or "(empty)")
 
-        # Steam single-mod: network refresh for *this* id only.
-        # Do not scrape Workshop pages, fetch unrelated mods, or rescan the library.
-        if self._current_platform == PLATFORM_STEAM and mid:
-            from .metadata_refresh_thread import MetadataRefreshWorker
+        from .metadata_refresh_thread import ModRefreshWorker
 
-            _log.info("Using Steam metadata provider")
-            worker = MetadataRefreshWorker(
-                self._managed_path,
-                mod_id=mid,
-                library_root=self._library_root,
-                force=False,
-                parent=self,
-            )
-            worker.refresh_started.connect(self._on_metadata_refresh_started)
-            worker.refresh_finished.connect(self._on_metadata_refresh_finished)
-            worker.refresh_failed.connect(self._on_metadata_refresh_failed)
-            worker.finished.connect(self._on_metadata_worker_finished)
-            self._metadata_worker = worker
-            worker.start()
-            return
+        source_url = ""
+        if self._display_info is not None:
+            source_url = str(self._display_info.source_url or "").strip()
+        if not source_url and self._metadata is not None:
+            source_url = str(self._metadata.url or "").strip()
 
-        # Mod.io: official REST API metadata refresh (not offline archive).
-        if self._current_platform == PLATFORM_MODIO and mid:
-            _log.info("Using Mod.io metadata provider")
-            from .metadata_refresh_thread import ModioMetadataRefreshWorker
-
-            source_url = ""
-            if self._display_info is not None:
-                source_url = str(self._display_info.source_url or "").strip()
-            if not source_url and self._metadata is not None:
-                source_url = str(self._metadata.url or "").strip()
-
-            worker = ModioMetadataRefreshWorker(
-                self._managed_path,
-                mod_id=mid,
-                library_root=self._library_root,
-                source_url=source_url,
-                parent=self,
-            )
-            worker.refresh_started.connect(self._on_metadata_refresh_started)
-            worker.refresh_finished.connect(self._on_metadata_refresh_finished)
-            worker.refresh_failed.connect(self._on_metadata_refresh_failed)
-            worker.finished.connect(self._on_metadata_worker_finished)
-            self._metadata_worker = worker
-            worker.start()
-            return
-
-        # GitHub / Nexus / Other: local rescan; Nexus workspace_id wash is silent.
-        _log.info(
-            "No remote metadata provider for platform=%s; local folder rescan only",
-            platform or "(empty)",
+        worker = ModRefreshWorker(
+            self._managed_path,
+            mod_id=mid,
+            library_root=self._library_root,
+            platform=platform or getattr(self, "_current_platform", "") or "",
+            source_url=source_url,
+            parent=self,
         )
-        try:
-            from core.mod_platform import silent_correct_nexus_workspace_id
-            from services.info_sidecar import rescan_mod_folder
-
-            if mid and normalize_platform(platform) == PLATFORM_NEXUS:
-                silent_correct_nexus_workspace_id(mid)
-            rescan_mod_folder(self._managed_path, mod_id=mid or None)
-            if mid and normalize_platform(platform) == PLATFORM_NEXUS:
-                silent_correct_nexus_workspace_id(mid)
-        except Exception as exc:  # noqa: BLE001
-            _log.exception("Local metadata rescan failed: %s", exc)
-            self._set_refresh_button_state("failure", detail=str(exc))
-            return
-
-        self._recheck_missing_content(self._managed_path)
-        self.show_mod(self._managed_path)
-        if self._managed_path is not None:
-            self.tags_saved.emit(self._managed_path)
-        self._set_refresh_button_state("success")
+        worker.refresh_started.connect(self._on_metadata_refresh_started)
+        worker.refresh_finished.connect(self._on_metadata_refresh_finished)
+        worker.refresh_failed.connect(self._on_metadata_refresh_failed)
+        worker.finished.connect(self._on_metadata_worker_finished)
+        self._metadata_worker = worker
+        worker.start()
 
     def _set_refresh_button_state(
         self,
@@ -2526,14 +2531,15 @@ class ModDetailPanel(QWidget):
         btn = self.btn_refresh_mod
 
         if key == "running":
-            btn.setText("⏳ 正在刷新...")
-            btn.setToolTip("正在刷新元数据，请稍候")
+            btn.setText("刷新中…")
+            btn.setToolTip("正在刷新 Mod 信息，请稍候")
             btn.setEnabled(False)
+            self._set_op_status("◌ 正在刷新 Mod 信息…", tone="warning")
             return
 
         if key == "success":
             btn.setText("✓ 已更新")
-            btn.setToolTip("元数据已更新")
+            btn.setToolTip("Mod 信息已更新")
             btn.setEnabled(False)
             self._schedule_refresh_button_idle(restore_ms)
             return
@@ -2617,9 +2623,16 @@ class ModDetailPanel(QWidget):
 
         if not isinstance(result, MetadataRefreshResult):
             self._set_refresh_button_state("idle")
+            self._clear_op_status()
             return
         path = result.managed_path or self._managed_path
         if path is not None:
+            try:
+                from services.dir_size import invalidate_directory_size
+
+                invalidate_directory_size(path)
+            except Exception:  # noqa: BLE001
+                pass
             self._recheck_missing_content(path)
             self.show_mod(path)
             self.metadata_saved.emit(path)
@@ -2631,15 +2644,18 @@ class ModDetailPanel(QWidget):
             else:
                 self._hide_status_banner()
             self._set_refresh_button_state("success")
+            self._set_op_status("✓ 刷新完成", tone="success", auto_clear_ms=1800)
             return
         self._set_refresh_button_state(
             "failure",
             detail=result.error or "元数据刷新失败",
         )
+        self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
 
     def _on_metadata_refresh_failed(self, error: str) -> None:
         err = (error or "").strip() or "元数据刷新失败"
         self._set_refresh_button_state("failure", detail=err)
+        self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
         if self._managed_path is not None:
             self.show_mod(self._managed_path)
 
@@ -2652,7 +2668,7 @@ class ModDetailPanel(QWidget):
         dlg.setLabelText(message or f"Refreshing metadata:\n{done} / {total}")
         # Keep button in running state with live progress tip.
         if hasattr(self, "btn_refresh_mod"):
-            self.btn_refresh_mod.setText("⏳ 正在刷新...")
+            self.btn_refresh_mod.setText("刷新中…")
             self.btn_refresh_mod.setToolTip(
                 message or f"Refreshing metadata: {done} / {total}"
             )
@@ -3313,26 +3329,32 @@ class ModDetailPanel(QWidget):
         if not hasattr(self, "dep_summary_label"):
             return
         mid = self.current_mod_id()
-        labels: list[str] = []
+        lines: list[str] = []
         if mid and mid.isdigit():
             try:
                 grouped = get_db().get_mod_relationships(mid)
                 for item in grouped.get("dependencies") or []:
                     title = str(item.get("title") or "").strip()
                     tid = str(item.get("mod_id") or "").strip()
-                    labels.append(title or tid)
+                    if title and tid:
+                        lines.append(title)
+                    elif title or tid:
+                        lines.append(title or tid)
             except Exception:  # noqa: BLE001
                 pass
             resolved = getattr(self, "_resolved", None)
             if resolved is not None:
+                known = {ln.split("\n", 1)[0] for ln in lines}
                 for wid in resolved.dependencies or []:
                     text = str(wid or "").strip()
-                    if text and text not in labels:
-                        labels.append(text)
-        if labels:
-            self.dep_summary_label.setText("依赖：" + "、".join(labels))
+                    if text and text not in known and not any(
+                        text in ln for ln in lines
+                    ):
+                        lines.append(text)
+        if lines:
+            self.dep_summary_label.setText("\n".join(lines))
         else:
-            self.dep_summary_label.setText("")
+            self.dep_summary_label.setText("依赖于 —")
         if hasattr(self, "btn_add_dependency"):
             self.btn_add_dependency.setEnabled(
                 bool(mid and mid.isdigit())
@@ -3719,6 +3741,7 @@ class ModDetailPanel(QWidget):
         for btn, checked in (
             (self.btn_tag_conflict, conflict),
             (self.btn_tag_invalid, invalid),
+            (self.btn_tag_abandoned, self._is_abandoned_tagged()),
         ):
             btn.blockSignals(True)
             btn.setChecked(checked)
@@ -3734,12 +3757,20 @@ class ModDetailPanel(QWidget):
                 break
         active = [
             b
-            for b in (self.btn_tag_conflict, self.btn_tag_invalid)
+            for b in (
+                self.btn_tag_conflict,
+                self.btn_tag_invalid,
+                self.btn_tag_abandoned,
+            )
             if b.isChecked()
         ]
         inactive = [
             b
-            for b in (self.btn_tag_conflict, self.btn_tag_invalid)
+            for b in (
+                self.btn_tag_conflict,
+                self.btn_tag_invalid,
+                self.btn_tag_abandoned,
+            )
             if not b.isChecked()
         ]
         for btn in active + inactive:
@@ -3768,6 +3799,37 @@ class ModDetailPanel(QWidget):
         else:
             self._persist_status(invalid=False, invalid_reason="")
         self._reorder_flag_chips()
+
+    def _is_abandoned_tagged(self) -> bool:
+        mid = self.current_mod_id()
+        if not mid or not mid.isdigit():
+            return False
+        try:
+            return any(
+                str(tag.tag_type or "") == TAG_TYPE_ABANDONED
+                for tag in get_db().get_mod_tags(mid)
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _on_flag_abandoned_toggled(self, checked: bool) -> None:
+        mid = self.current_mod_id()
+        if not mid or not mid.isdigit():
+            return
+        try:
+            if checked:
+                get_db().add_mod_tag(mid, TAG_TYPE_ABANDONED, tag_value="")
+            else:
+                get_db().remove_mod_tag(mid, TAG_TYPE_ABANDONED)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "更新停更标记失败", str(exc))
+            self.btn_tag_abandoned.blockSignals(True)
+            self.btn_tag_abandoned.setChecked(not checked)
+            self.btn_tag_abandoned.blockSignals(False)
+            return
+        self._reorder_flag_chips()
+        if self._managed_path is not None:
+            self.tags_saved.emit(self._managed_path)
 
     def _on_toggle_conflict_detail(self, checked: bool) -> None:
         if not checked:
@@ -4086,11 +4148,11 @@ class ModDetailPanel(QWidget):
         batch = bool(self._batch_mod_ids) and len(self._batch_mod_ids) > 1
 
         if busy or self._offline_batch_active:
-            tip = "正在保存..."
-            label = "正在保存..."
+            tip = "正在保存离线页面…"
+            label = "保存中…"
             if not batch and plat == PLATFORM_NEXUS:
-                tip = "正在导入..."
-                label = "正在导入..."
+                tip = "正在导入离线页面…"
+                label = "导入中…"
             self.btn_download_offline.setText(label)
             self.btn_download_offline.setToolTip(tip)
             self.btn_download_offline.setAccessibleName(tip)
@@ -4266,6 +4328,7 @@ class ModDetailPanel(QWidget):
         if not self._offline_batch_active:
             self._refresh_offline_status_label(busy=True)
         self._update_offline_download_button()
+        self._set_op_status("◌ 正在保存离线页面…", tone="warning")
 
     def _on_offline_archive_finished(self, path: str) -> None:
         del path
@@ -4281,8 +4344,7 @@ class ModDetailPanel(QWidget):
         else:
             self._refresh_offline_status_label()
         self._update_offline_download_button()
-        if self._current_platform == PLATFORM_MODIO:
-            QMessageBox.information(self, "离线页面", "离线网页保存成功")
+        self._set_op_status("✓ 离线页面已保存", tone="success", auto_clear_ms=1800)
 
     def _on_offline_archive_failed(self, error: str) -> None:
         err = (error or "").strip() or "保存失败"
@@ -4295,7 +4357,8 @@ class ModDetailPanel(QWidget):
             return
         self.view_offline.setText(f"[Offline] Failed — {err}")
         self._apply_tone(self.view_offline, "error")
-        QMessageBox.warning(self, "离线页面", err)
+        self._show_status_banner(f"离线页面保存失败：\n{err}", tone="error")
+        self._set_op_status("⚠ 离线保存失败", tone="error", auto_clear_ms=2400)
         self._update_offline_download_button()
 
     def _on_offline_archive_thread_finished(self) -> None:
@@ -4489,7 +4552,7 @@ class ModDetailPanel(QWidget):
         self.undeploy_requested.emit(mid)
 
     def set_deploy_busy(self, busy: bool, *, action: str = "deploy") -> None:
-        """Disable deploy buttons while a worker runs."""
+        """Disable deploy buttons while a worker runs; show button + op status."""
         self._deploy_busy = bool(busy)
         if busy:
             label = {
@@ -4498,29 +4561,40 @@ class ModDetailPanel(QWidget):
             }.get(action, "正在部署…")
             self.view_deploy.setText(f"[Deploy] {label}")
             self._apply_tone(self.view_deploy, "warning")
+            # Button-state feedback (anti double-click).
+            self.btn_deploy.setText(
+                "部署中…" if action == "deploy" else "部署"
+            )
+            self.btn_redeploy.setText(
+                "部署中…" if action == "redeploy" else "重新部署"
+            )
+            self.btn_undeploy.setText(
+                "取消中…" if action == "undeploy" else "取消部署"
+            )
             for btn in (self.btn_deploy, self.btn_redeploy, self.btn_undeploy):
                 btn.setEnabled(False)
+            op = {
+                "undeploy": "◌ 正在取消部署",
+                "redeploy": "◌ 正在重新部署",
+            }.get(action, "◌ 正在部署")
+            self._set_op_status(op, tone="warning")
         else:
+            self.btn_deploy.setText("部署")
+            self.btn_undeploy.setText("取消部署")
             self._fill_deploy_status_from_db()
-
-    def set_audit_hint(self, status: str, reason: str = "") -> None:
-        """Show startup / consistency audit (missing / broken) without auto-fix."""
-        if status in ("missing", "broken") and reason:
-            label = "源缺失" if status == "missing" else "部署异常"
-            self._audit_hint = f"一致性：{label} — {reason}"
-        else:
-            self._audit_hint = ""
-        self.view_deploy_audit.setText(self._audit_hint)
 
     def apply_deploy_result(self, result: dict) -> None:
         """Update panel from a DeployWorker result dict (no library rescan)."""
         self._deploy_busy = False
+        self.btn_deploy.setText("部署")
+        self.btn_undeploy.setText("取消部署")
         if not isinstance(result, dict):
             self.view_deploy.setText("[Deploy] 状态：部署失败")
             self._apply_tone(self.view_deploy, "error")
             self.view_deploy_error.setText("原因：未知错误")
             self._show_deploy_failure_banner("未知错误")
             self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
+            self._set_op_status("⚠ 部署失败", tone="error", auto_clear_ms=2400)
             return
 
         conflicts = result.get("conflicts")
@@ -4578,6 +4652,7 @@ class ModDetailPanel(QWidget):
             if "removed_files" in result:
                 self.view_deploy_conflict.setText(self._conflict_hint)
                 self._fill_deploy_status_from_db()
+                self._set_op_status("✓ 已取消部署", tone="success", auto_clear_ms=1800)
                 return
 
             self.view_deploy.setText("[Deploy] 状态：已部署")
@@ -4602,6 +4677,7 @@ class ModDetailPanel(QWidget):
             )
 
             self._set_deploy_buttons(DEPLOY_STATUS_DEPLOYED)
+            self._set_op_status("✓ 部署完成", tone="success", auto_clear_ms=1800)
             return
 
         # Keep the raw error for the banner — humanize preserves archive details.
@@ -4614,9 +4690,12 @@ class ModDetailPanel(QWidget):
         self.view_deploy_path.clear()
         self.view_deploy_time.clear()
         self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
+        self._set_op_status("⚠ 部署失败", tone="error", auto_clear_ms=2400)
 
     def apply_deploy_failure(self, error: str) -> None:
         self._deploy_busy = False
+        self.btn_deploy.setText("部署")
+        self.btn_undeploy.setText("取消部署")
         raw = str(error or "").strip() or "未知错误"
         msg = humanize_deploy_error(raw)
         self.view_deploy.setText("[Deploy] 状态：部署失败")
@@ -4626,6 +4705,7 @@ class ModDetailPanel(QWidget):
         self.view_deploy_path.clear()
         self.view_deploy_time.clear()
         self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
+        self._set_op_status("⚠ 部署失败", tone="error", auto_clear_ms=2400)
 
     def _set_deploy_buttons(self, status: str) -> None:
         mid_ok = bool(self.current_mod_id()) and self._mode == MODE_VIEW
@@ -4729,7 +4809,6 @@ class ModDetailPanel(QWidget):
             self.view_deploy_time.clear()
             self.view_deploy_type.clear()
             self.view_deploy_error.clear()
-            self.view_deploy_audit.setText(self._audit_hint)
             self.view_deploy_conflict.setText(self._conflict_hint)
             self._set_deploy_buttons(DEPLOY_STATUS_NOT_DEPLOYED)
             return
@@ -4809,7 +4888,6 @@ class ModDetailPanel(QWidget):
             self.view_deploy_time.clear()
             self.view_deploy_error.clear()
 
-        self.view_deploy_audit.setText(self._audit_hint)
         self.view_deploy_conflict.setText(self._conflict_hint)
         self._set_deploy_buttons(status)
 

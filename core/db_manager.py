@@ -2590,16 +2590,32 @@ class DatabaseManager:
             FIELD_DESCRIPTION,
             FIELD_DISPLAY_NAME,
             is_placeholder_display_name,
+            parse_user_override_fields,
+            serialize_user_override_fields,
         )
 
+        row = self._conn.execute(
+            "SELECT user_override_fields FROM mods WHERE mod_id = ?",
+            (mod_id,),
+        ).fetchone()
+        current = parse_user_override_fields(
+            str(row["user_override_fields"] or "") if row else ""
+        )
         if display_name.strip() and not is_placeholder_display_name(
-            display_name, published_file_id=str(mod_id)
+            display_name, mod_id=str(mod_id)
         ):
-            self.set_user_override_field(mod_id, FIELD_DISPLAY_NAME, overridden=True)
+            current[FIELD_DISPLAY_NAME] = True
         elif not display_name.strip():
-            self.set_user_override_field(mod_id, FIELD_DISPLAY_NAME, overridden=False)
+            current.pop(FIELD_DISPLAY_NAME, None)
         if custom_description.strip():
-            self.set_user_override_field(mod_id, FIELD_DESCRIPTION, overridden=True)
+            current[FIELD_DESCRIPTION] = True
+        self._conn.execute(
+            """
+            UPDATE mods SET user_override_fields = ?, updated_at = ?
+            WHERE mod_id = ?
+            """,
+            (serialize_user_override_fields(current), _utc_now(), mod_id),
+        )
 
     def is_official_metadata_synced(self, mod_id: int | str) -> bool:
         mid = int(str(mod_id).strip())
@@ -2965,7 +2981,7 @@ class DatabaseManager:
         return [str(r["tag_value"]) for r in rows]
 
     def add_game_category(self, app_id: int | str, name: str) -> bool:
-        """Persist a user-defined category label for one game (sidebar)."""
+        """Persist a user-defined Mod type label for one game."""
         label = str(name or "").strip()
         aid = int(app_id or 0)
         if not label or aid <= 0:
@@ -2999,6 +3015,20 @@ class DatabaseManager:
                 (aid,),
             ).fetchall()
         return [str(r["name"]) for r in rows]
+
+    def delete_game_category(self, app_id: int | str, name: str) -> bool:
+        """Remove a game-defined type label. Does not strip Mod tags."""
+        label = str(name or "").strip()
+        aid = int(app_id or 0)
+        if not label or aid <= 0:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM game_categories WHERE app_id = ? AND name = ?",
+                (aid, label),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) > 0
 
     def set_mod_category(self, mod_id: int | str, category: str) -> None:
         """Replace all category tags with a single label (empty clears)."""

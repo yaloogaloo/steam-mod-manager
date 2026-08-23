@@ -416,9 +416,10 @@ QLabel#titleLabel {{
 }}
 
 QLabel#pageTitle {{
-    font-size: 16px;
+    font-size: 15px;
     font-weight: 600;
     color: {TEXT_PRIMARY};
+    padding: 0;
 }}
 
 QLabel#fieldCaption {{
@@ -535,7 +536,9 @@ QLabel#gameListChevron {{
 
 QLabel#gameTreeIcon {{
     color: {TEXT_BODY};
-    font-size: 12px;
+    font-size: 13px;
+    min-width: 18px;
+    max-width: 18px;
 }}
 
 QLabel#categoryTreeIcon {{
@@ -561,6 +564,7 @@ QLabel#gameListCount {{
     color: {TEXT_MUTED};
     font-size: 12px;
     font-weight: 500;
+    min-width: 28px;
 }}
 
 QLabel#categoryTreeCount {{
@@ -698,7 +702,7 @@ QListWidget#gameList {{
     background-color: {BACKGROUND_SIDEBAR};
     border: none;
     border-radius: 6px;
-    padding: 2px;
+    padding: 4px;
     outline: none;
 }}
 
@@ -715,11 +719,13 @@ QListWidget#gameList::item:selected {{
     border-left: 2px solid {ACCENT_PRIMARY};
 }}
 
+QListWidget#gameList::item:selected QLabel#gameTreeName,
 QListWidget#gameList::item:selected QLabel#gameListName {{
     color: {ACCENT_PRIMARY};
     font-weight: 600;
 }}
 
+QListWidget#gameList::item:selected QLabel#gameTreeCount,
 QListWidget#gameList::item:selected QLabel#gameListCount {{
     color: {TEXT_SECONDARY};
 }}
@@ -889,6 +895,26 @@ QFrame#detailSection {{
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 8px;
 }}
+QFrame#detailDependencyBlock {{
+    background-color: {BACKGROUND_SECTION};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 6px;
+}}
+QLabel#detailOpStatus {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    min-height: 16px;
+    max-height: 16px;
+}}
+QLabel#detailOpStatus[tone="warning"] {{
+    color: {ACCENT_WARNING};
+}}
+QLabel#detailOpStatus[tone="success"] {{
+    color: {ACCENT_SUCCESS};
+}}
+QLabel#detailOpStatus[tone="error"] {{
+    color: {ACCENT_ERROR};
+}}
 QFrame#detailFooter {{
     background-color: {BACKGROUND_PRIMARY};
     border-top: 1px solid {BORDER_DEFAULT};
@@ -992,6 +1018,11 @@ QLabel#detailPanelField {{
 QLabel#detailPanelMeta {{
     color: {TEXT_SECONDARY};
     font-size: 12px;
+}}
+QLabel#detailFavoriteLabel {{
+    color: {ACCENT_WARNING};
+    font-size: 12px;
+    font-weight: 600;
 }}
 QLabel#detailPanelBody {{
     color: {TEXT_BODY};

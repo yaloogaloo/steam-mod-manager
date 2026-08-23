@@ -78,6 +78,7 @@ def test_cards_same_height_short_vs_long_display_name(
     db.is_mod_enabled.return_value = True
     db.get_mods_tag_flags.return_value = {}
     db.get_relationship_counts.return_value = {}
+    db.get_mod_tags.return_value = []
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
 
     card_a = ModCardWidget(

@@ -147,7 +147,12 @@ def materialize_imported_mod(
 
     if effective_cover is not None:
         rel = apply_cover_to_mod(
-            dest, effective_cover, mod_id=mid, update_db=True, sync_backup=False
+            dest,
+            effective_cover,
+            mod_id=mid,
+            update_db=True,
+            sync_backup=False,
+            mark_user_override=False,
         )
         meta.cover_path = rel
         mgr.save_metadata(meta, dest, sync_backup=False)

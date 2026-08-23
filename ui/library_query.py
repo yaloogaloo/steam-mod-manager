@@ -30,6 +30,8 @@ FILTER_CONTENT_MISSING = "content_missing"
 FILTER_FOLDER_MISSING = "folder_missing"
 FILTER_BACKUP_INVALID = "backup_invalid"
 FILTER_IDENTITY_CONFLICT = "identity_conflict"
+# User-facing aggregate (UI only — does not change content_status)
+FILTER_ANOMALY = "anomaly"
 FILTER_PLATFORM_ALL = "platform_all"
 FILTER_PLATFORM_STEAM = "platform_steam"
 FILTER_PLATFORM_NEXUS = "platform_nexus"
@@ -73,31 +75,49 @@ def resolve_mod_library_title(
     return "—"
 
 
-# Status chips (exclusive within group) — lifecycle anomaly filters first.
+# User-facing status chips (Library toolbar). Diagnostic keys stay matchable.
 STATUS_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_ALL, "全部"),
-    (FILTER_CONTENT_MISSING, "⚠ 内容缺失"),
-    (FILTER_FOLDER_MISSING, "⚠ 目录缺失"),
-    (FILTER_IDENTITY_CONFLICT, "❌ 冲突"),
-    (FILTER_BACKUP_INVALID, "⚠ Backup异常"),
-    (FILTER_FAVORITE, "收藏"),
+    (FILTER_CONTENT_MISSING, "内容缺失"),
+    (FILTER_ANOMALY, "异常"),
     (FILTER_DEPLOYED, "已部署"),
-    (FILTER_INVALID, "失效"),
-    (FILTER_CONFLICT, "关系冲突"),
-    (FILTER_DISABLED, "已禁用"),
-    (FILTER_OFFLINE_MISSING, "离线页面缺失"),
+    (FILTER_FAVORITE, "收藏"),
 )
 
-# Platform / source chips — sticky source_type values.
+# Platform / source chips — sticky source_type values (stable display order).
 PLATFORM_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_PLATFORM_ALL, "全部"),
     (FILTER_PLATFORM_STEAM, "Steam"),
     (FILTER_PLATFORM_NEXUS, "Nexus"),
     (FILTER_PLATFORM_MODIO, "Mod.io"),
+    (FILTER_PLATFORM_GITHUB, "GitHub"),
     (FILTER_PLATFORM_EXTERNAL, "External"),
     (FILTER_PLATFORM_LOCAL, "Local"),
-    (FILTER_PLATFORM_GITHUB, "GitHub"),
 )
+
+# content_status values rolled into the user-facing 「异常」 chip.
+# content_missing stays a dedicated chip and is excluded here.
+ANOMALY_CONTENT_STATUSES: frozenset[str] = frozenset(
+    {
+        FILTER_IDENTITY_CONFLICT,
+        FILTER_BACKUP_INVALID,
+        FILTER_FOLDER_MISSING,
+        "metadata_missing",
+    }
+)
+
+_SOURCE_TOKEN_TO_KEY: dict[str, str] = {
+    "steam": FILTER_PLATFORM_STEAM,
+    "nexus": FILTER_PLATFORM_NEXUS,
+    "modio": FILTER_PLATFORM_MODIO,
+    "mod.io": FILTER_PLATFORM_MODIO,
+    "mod_io": FILTER_PLATFORM_MODIO,
+    "github": FILTER_PLATFORM_GITHUB,
+    "external": FILTER_PLATFORM_EXTERNAL,
+    "local": FILTER_PLATFORM_LOCAL,
+    "other": FILTER_PLATFORM_LOCAL,
+    "manual": FILTER_PLATFORM_LOCAL,
+}
 
 # Back-compat flat list (status then platform) for older callers.
 FILTER_LABELS: tuple[tuple[str, str], ...] = (
@@ -196,6 +216,8 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
         return str(index.content_status or "").strip() == FILTER_BACKUP_INVALID
     if key == FILTER_IDENTITY_CONFLICT:
         return str(index.content_status or "").strip() == FILTER_IDENTITY_CONFLICT
+    if key == FILTER_ANOMALY:
+        return index_is_anomaly(index)
     if key == FILTER_CONFLICT:
         status = normalize_conflict_status(index.conflict_status)
         return bool(index.conflict) or status in (
@@ -219,14 +241,100 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
     return True
 
 
+def effective_source_token(index: ModFilterIndex) -> str:
+    """Sticky ``source_type`` when known, else card ``platform``. No disk I/O."""
+    source = str(index.source_type or "").strip().lower()
+    plat = str(index.platform or "").strip().lower()
+    token = source if source and source != "unknown" else plat
+    if token in {"mod.io", "mod_io"}:
+        return "modio"
+    if token in {"other", "manual"}:
+        return "local"
+    return token
+
+
+def index_is_anomaly(index: ModFilterIndex) -> bool:
+    """User-facing 「异常」: conflicts, invalid, backup/folder/metadata issues."""
+    cs = str(index.content_status or "").strip()
+    if cs in ANOMALY_CONTENT_STATUSES:
+        return True
+    if bool(index.is_invalid or index.invalid):
+        return True
+    status = normalize_conflict_status(index.conflict_status)
+    if bool(index.conflict) or status in (
+        CONFLICT_STATUS_CONFLICT,
+        CONFLICT_STATUS_WARNING,
+    ):
+        return True
+    if not bool(index.enabled):
+        return True
+    return False
+
+
+def collect_source_keys(indexes: list[ModFilterIndex]) -> list[str]:
+    """Distinct source chips for the given Mod set (stable order, no scan)."""
+    seen: set[str] = set()
+    extras: set[str] = set()
+    known = set(_SOURCE_TOKEN_TO_KEY.values())
+    for index in indexes:
+        token = effective_source_token(index)
+        if not token or token == "unknown":
+            continue
+        key = _SOURCE_TOKEN_TO_KEY.get(token)
+        if key:
+            seen.add(key)
+        elif token not in known:
+            extras.add(token)
+    ordered = [
+        key
+        for key, _label in PLATFORM_FILTER_LABELS
+        if key != FILTER_PLATFORM_ALL and key in seen
+    ]
+    ordered.extend(sorted(extras, key=str.casefold))
+    return ordered
+
+
+def collect_category_labels(indexes: list[ModFilterIndex]) -> list[str]:
+    """Distinct category tags for the given Mod set (no DB / disk scan)."""
+    tags: set[str] = set()
+    for index in indexes:
+        for part in str(index.category_tags or "").split():
+            label = part.strip()
+            if label:
+                tags.add(label)
+    return sorted(tags, key=str.casefold)
+
+
+def merge_category_labels(*groups: list[str]) -> list[str]:
+    """Stable unique union of game-defined types and used Mod tags."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for group in groups:
+        for raw in group or []:
+            label = str(raw or "").strip()
+            key = label.casefold()
+            if not label or key in seen:
+                continue
+            seen.add(key)
+            out.append(label)
+    return sorted(out, key=str.casefold)
+
+
+def coerce_filter_selection(current: str, available: list[str], *, all_key: str) -> str:
+    """Reset to ``all_key`` when the previous selection is not in the new context."""
+    key = str(current or "").strip() or all_key
+    if key in (all_key, FILTER_ALL, FILTER_CATEGORY_ALL, "全部标签", "全部分类", ""):
+        return all_key
+    if key in available:
+        return key
+    return all_key
+
+
 def matches_platform_filter(index: ModFilterIndex, platform_key: str) -> bool:
     key = platform_key or FILTER_PLATFORM_ALL
     if key in (FILTER_ALL, FILTER_PLATFORM_ALL, ""):
         return True
-    # Prefer sticky source_type when present
-    source = str(index.source_type or "").strip().lower()
-    plat = str(index.platform or "").strip().lower()
-    effective = source if source and source != "unknown" else plat
+    effective = effective_source_token(index)
     legacy = {
         FILTER_PLATFORM_STEAM: "steam",
         FILTER_PLATFORM_NEXUS: "nexus",
@@ -243,13 +351,12 @@ def matches_platform_filter(index: ModFilterIndex, platform_key: str) -> bool:
         if want == "local":
             return effective in {"local", "other", "manual"}
         return effective == want
-    # Raw platform token (dynamic chip)
     return effective == str(key).strip().lower()
 
 
 def matches_category_filter(index: ModFilterIndex, category_key: str) -> bool:
     key = (category_key or FILTER_CATEGORY_ALL).strip()
-    if key in ("", FILTER_ALL, FILTER_CATEGORY_ALL, "全部标签"):
+    if key in ("", FILTER_ALL, FILTER_CATEGORY_ALL, "全部标签", "全部分类"):
         return True
     tags = (index.category_tags or "").casefold().split()
     needle = key.casefold()
