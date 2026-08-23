@@ -590,7 +590,7 @@ class ModDetailPanel(QWidget):
             self.tag_conflict_check.setChecked(False)
         if hasattr(self, "tag_invalid_reason"):
             self.tag_invalid_reason.clear()
-        self._hide_deploy_error_banner()
+        self._hide_status_banner()
         if hasattr(self, "status_reason_edit"):
             self._reset_status_widgets()
         if hasattr(self, "_rel_lists"):
@@ -657,7 +657,7 @@ class ModDetailPanel(QWidget):
             self.view_name_caption.setText(f"已选 {len(ids)} 个 Mod")
         if hasattr(self, "view_source_url"):
             self.view_source_url.setText("—")
-        self._hide_deploy_error_banner()
+        self._hide_status_banner()
 
         for btn in (
             getattr(self, "btn_folder", None),
@@ -912,7 +912,7 @@ class ModDetailPanel(QWidget):
         self._source_url_value = ""
 
         layout.addWidget(self._build_header_section())
-        layout.addWidget(self._build_deploy_error_banner())
+        layout.addWidget(self._build_status_banner())
         layout.addWidget(self._build_metadata_section())
         # Multi-file Mods only — hidden when file count ≤ 1 (see _fill_mod_files_list).
         layout.addWidget(self._build_files_section())
@@ -1089,59 +1089,74 @@ class ModDetailPanel(QWidget):
 
         return header
 
-
-
-    def _build_deploy_error_banner(self) -> QFrame:
-        """Independent deploy-failure banner (not used by refresh)."""
-        self._deploy_error_banner = QFrame()
-        self._deploy_error_banner.setObjectName("detailStatusBanner")
-        self._deploy_error_banner.setProperty("tone", "error")
-        layout = QVBoxLayout(self._deploy_error_banner)
+    def _build_status_banner(self) -> QFrame:
+        """Hidden by default; shown for status messages (success or failure)."""
+        self._status_banner = QFrame()
+        self._status_banner.setObjectName("detailStatusBanner")
+        self._status_banner.setProperty("tone", "error")
+        layout = QVBoxLayout(self._status_banner)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(4)
-        title = QLabel("部署错误")
+        title = QLabel("状态")
         title.setObjectName("detailPanelSection")
         layout.addWidget(title)
-        self._deploy_error_banner_body = QLabel()
-        self._deploy_error_banner_body.setObjectName("detailStatusBannerBody")
-        self._deploy_error_banner_body.setWordWrap(True)
-        self._deploy_error_banner_body.setTextInteractionFlags(
+        self._status_banner_body = QLabel()
+        self._status_banner_body.setObjectName("detailStatusBannerBody")
+        self._status_banner_body.setWordWrap(True)
+        self._status_banner_body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        layout.addWidget(self._deploy_error_banner_body)
-        self._deploy_error_banner.hide()
-        return self._deploy_error_banner
+        layout.addWidget(self._status_banner_body)
+        self._status_banner.hide()
+        return self._status_banner
 
-    def _hide_deploy_error_banner(self) -> None:
-        if hasattr(self, "_deploy_error_banner"):
-            self._deploy_error_banner_body.clear()
-            self._deploy_error_banner.hide()
+    def _set_status_banner_tone(self, tone: str) -> None:
+        """Apply success/error presentation to the shared status banner."""
+        if not hasattr(self, "_status_banner"):
+            return
+        key = str(tone or "error").strip().lower()
+        if key not in {"success", "error"}:
+            key = "error"
+        self._status_banner.setProperty("tone", key)
+        # Qt picks up dynamic property selectors only after re-polish.
+        style = self._status_banner.style()
+        if style is not None:
+            style.unpolish(self._status_banner)
+            style.polish(self._status_banner)
+        self._status_banner.update()
+
+    def _show_status_banner(self, message: str, *, tone: str = "error") -> None:
+        """Show the shared status banner with the correct success/error style."""
+        text = str(message or "").strip()
+        if not text or not hasattr(self, "_status_banner"):
+            return
+        try:
+            from ui.popup_trace import log_popup
+
+            log_popup("detailStatusBanner.show", detail=text[:120])
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_status_banner_tone(tone)
+        self._status_banner_body.setText(text)
+        self._status_banner.show()
+
+    def _hide_status_banner(self) -> None:
+        if hasattr(self, "_status_banner"):
+            self._status_banner_body.clear()
+            self._set_status_banner_tone("error")
+            self._status_banner.hide()
 
     def _show_deploy_failure_banner(self, reason: str) -> None:
-        """Show deploy failure on the dedicated deploy_error_banner only."""
-        if not hasattr(self, "_deploy_error_banner"):
-            return
         msg = humanize_deploy_error(str(reason or "").strip() or "未知错误")
+        # Never show bare "部署失败" without a reason line.
         if msg in ("部署失败。", "部署失败"):
             msg = "未知错误"
+        # Extractor messages are already Chinese UI copy — render as-is.
         if msg.startswith(("部署失败", "解压失败", "RAR 部署失败")):
             body = msg
         else:
             body = f"部署失败：\n{msg}"
-        try:
-            from ui.popup_trace import log_popup
-
-            log_popup("detailDeployErrorBanner.show", detail=body[:120])
-        except Exception:  # noqa: BLE001
-            pass
-        self._deploy_error_banner.setProperty("tone", "error")
-        style = self._deploy_error_banner.style()
-        if style is not None:
-            style.unpolish(self._deploy_error_banner)
-            style.polish(self._deploy_error_banner)
-        self._deploy_error_banner_body.setText(body)
-        self._deploy_error_banner.show()
-
+        self._show_status_banner(body, tone="error")
 
     def _build_flag_tags_section(self) -> QFrame:
         """Conflict / Invalid toggle chips — active chip moves to front."""
@@ -2493,8 +2508,7 @@ class ModDetailPanel(QWidget):
         """
         Visible refresh-button states: idle / running / success / failure.
 
-        *detail* (failure) is shown on the button tooltip only — not the
-        header status banner (duplicate refresh UI removed).
+        *detail* (failure) is shown on the button tooltip only.
         """
         if not hasattr(self, "btn_refresh_mod"):
             return
@@ -2510,6 +2524,7 @@ class ModDetailPanel(QWidget):
         key = str(state or "idle").strip().lower()
         self._refresh_btn_state = key
         btn = self.btn_refresh_mod
+
         if key == "running":
             btn.setText("⏳ 正在刷新...")
             btn.setToolTip("正在刷新元数据，请稍候")
@@ -2609,7 +2624,6 @@ class ModDetailPanel(QWidget):
             self.metadata_saved.emit(path)
             self.tags_saved.emit(path)
         if result.success or result.skipped:
-            # Refresh feedback is button-only; never write the status banner.
             self._set_refresh_button_state("success")
             return
         self._set_refresh_button_state(
@@ -2671,6 +2685,7 @@ class ModDetailPanel(QWidget):
                 restore_ms=2500,
             )
         else:
+            self._hide_status_banner()
             self._set_refresh_button_state("success")
 
     def _on_metadata_batch_failed(self, error: str) -> None:
@@ -4548,7 +4563,7 @@ class ModDetailPanel(QWidget):
         self.view_deploy_conflict.setText(self._conflict_hint)
 
         if result.get("success"):
-            self._hide_deploy_error_banner()
+            self._hide_status_banner()
             self._fill_lifecycle_status()
             self._fill_relationships()
 
@@ -4701,7 +4716,7 @@ class ModDetailPanel(QWidget):
     def _fill_deploy_status_from_db(self) -> None:
         mid = self.current_mod_id()
         if not mid:
-            self._hide_deploy_error_banner()
+            self._hide_status_banner()
             self.view_deploy.setText("[Deploy] 状态：—")
             self._apply_tone(self.view_deploy, "secondary")
             self.view_deploy_path.clear()
@@ -4745,7 +4760,7 @@ class ModDetailPanel(QWidget):
             runtime = status
 
         if runtime == DEPLOYMENT_OUTDATED and info is not None:
-            self._hide_deploy_error_banner()
+            self._hide_status_banner()
             self.view_deploy.setText("[Deploy] 状态：需要更新")
             self._apply_tone(self.view_deploy, "warning")
             self.view_deploy_path.setText(
@@ -4762,7 +4777,7 @@ class ModDetailPanel(QWidget):
             self.view_deploy_error.setText("目标目录已存在其他内容，无法部署")
             status = DEPLOYMENT_CONFLICT
         elif status == DEPLOY_STATUS_DEPLOYED and info is not None:
-            self._hide_deploy_error_banner()
+            self._hide_status_banner()
             self.view_deploy.setText("[Deploy] 状态：已部署")
             self._apply_tone(self.view_deploy, "success")
             self.view_deploy_path.setText(
@@ -4781,7 +4796,7 @@ class ModDetailPanel(QWidget):
             self.view_deploy_error.setText(f"原因：{err}" if err else "原因：—")
             self._show_deploy_failure_banner(err or "未知错误")
         else:
-            self._hide_deploy_error_banner()
+            self._hide_status_banner()
             self.view_deploy.setText("[Deploy] 状态：未部署")
             self._apply_tone(self.view_deploy, "secondary")
             self.view_deploy_path.clear()

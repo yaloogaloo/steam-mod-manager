@@ -1,4 +1,4 @@
-"""Detail panel refresh button UX — refresh must not use any status banner."""
+"""Detail panel refresh button UX — refresh must not use status banner."""
 
 from __future__ import annotations
 
@@ -45,10 +45,10 @@ def _seed(lib: Path, *, mid: str = "3413520661") -> Path:
     return folder
 
 
-def _deploy_banner_text(panel: ModDetailPanel) -> str:
-    if not hasattr(panel, "_deploy_error_banner_body"):
+def _banner_text(panel: ModDetailPanel) -> str:
+    if not hasattr(panel, "_status_banner_body"):
         return ""
-    return str(panel._deploy_error_banner_body.text() or "")
+    return str(panel._status_banner_body.text() or "")
 
 
 def test_refresh_button_is_labeled_push_button(
@@ -68,10 +68,10 @@ def test_refresh_button_is_labeled_push_button(
     assert btn.objectName() == "detailRefreshButton"
 
 
-def test_status_banner_widget_deleted(
+def test_status_banner_hidden_when_opening_detail(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """The redundant refresh status widget (_status_banner) must not exist."""
+    """Opening Detail must not show the refresh status area."""
     lib = tmp_path / "lib"
     folder = _seed(lib)
     db.upsert_mod(
@@ -81,20 +81,18 @@ def test_status_banner_widget_deleted(
     panel.show()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert not hasattr(panel, "_status_banner")
-    assert not hasattr(panel, "_status_banner_body")
-    assert not hasattr(panel, "_show_status_banner")
-    assert not hasattr(panel, "_build_status_banner")
-    # Deploy has its own independent banner; refresh must never touch it.
-    assert hasattr(panel, "_deploy_error_banner")
-    assert panel._deploy_error_banner.isHidden()
-    assert "已刷新" not in _deploy_banner_text(panel)
+    assert hasattr(panel, "_status_banner")
+    assert panel._status_banner.isHidden()
+    body = _banner_text(panel)
+    assert "已刷新" not in body
+    assert "刷新完成" not in body
+    assert "刷新失败" not in body
 
 
-def test_refresh_does_not_touch_deploy_error_banner(
+def test_refresh_does_not_show_status_banner(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
-    """Refresh finished must never write into _deploy_error_banner."""
+    """Refresh finished must never write refresh copy into _status_banner."""
     lib = tmp_path / "lib"
     folder = _seed(lib)
     db.upsert_mod(
@@ -106,11 +104,9 @@ def test_refresh_does_not_touch_deploy_error_banner(
     monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
     qapp.processEvents()
 
-    assert not hasattr(panel, "_status_banner")
-
     panel._set_refresh_button_state("running")
     assert "正在刷新" in panel.btn_refresh_mod.text()
-    assert panel._deploy_error_banner.isHidden()
+    assert panel._status_banner.isHidden()
 
     panel._on_metadata_refresh_finished(
         MetadataRefreshResult(
@@ -124,8 +120,8 @@ def test_refresh_does_not_touch_deploy_error_banner(
     )
     qapp.processEvents()
     assert "已更新" in panel.btn_refresh_mod.text()
-    assert panel._deploy_error_banner.isHidden()
-    body = _deploy_banner_text(panel)
+    assert panel._status_banner.isHidden()
+    body = _banner_text(panel)
     assert "已刷新" not in body
     assert "刷新完成" not in body
     assert "刷新失败" not in body
@@ -133,10 +129,16 @@ def test_refresh_does_not_touch_deploy_error_banner(
     panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
     qapp.processEvents()
     assert "刷新失败" in panel.btn_refresh_mod.text()
-    assert panel._deploy_error_banner.isHidden()
-    body = _deploy_banner_text(panel)
+    assert panel._status_banner.isHidden()
+    body = _banner_text(panel)
     assert "刷新失败" not in body
     assert "已刷新" not in body
+
+    panel._on_metadata_refresh_failed("network timeout")
+    qapp.processEvents()
+    assert "刷新失败" in panel.btn_refresh_mod.text()
+    assert panel._status_banner.isHidden()
+    assert "已刷新" not in _banner_text(panel)
 
 
 def test_refresh_button_state_machine(
@@ -170,8 +172,7 @@ def test_refresh_button_state_machine(
     panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
     assert "刷新失败" in panel.btn_refresh_mod.text()
     assert "timeout" in (panel.btn_refresh_mod.toolTip() or "")
-    assert not hasattr(panel, "_status_banner")
-    assert panel._deploy_error_banner.isHidden()
+    assert panel._status_banner.isHidden()
 
 
 def test_click_sets_running_immediately_and_blocks_duplicate(

@@ -222,6 +222,5 @@ def test_detail_panel_sections_and_footer(
     assert "目录" in (panel.btn_folder.toolTip() or "")
     assert panel.btn_tag_conflict.text() == "冲突"
     assert panel.btn_tag_invalid.text() == "失效"
-    # Redundant refresh status banner deleted; deploy error banner stays hidden.
-    assert not hasattr(panel, "_status_banner")
-    assert panel._deploy_error_banner.isHidden()
+    # Status banner hidden for healthy mods
+    assert panel._status_banner.isHidden()
