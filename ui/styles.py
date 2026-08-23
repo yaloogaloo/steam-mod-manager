@@ -893,30 +893,6 @@ QFrame#detailFooter {{
     background-color: {BACKGROUND_PRIMARY};
     border-top: 1px solid {BORDER_DEFAULT};
 }}
-QFrame#detailStatusBanner {{
-    border-radius: 8px;
-    background-color: {ACCENT_ERROR_BG};
-    border: 1px solid {ACCENT_ERROR_BORDER};
-}}
-QFrame#detailStatusBanner[tone="error"] {{
-    background-color: {ACCENT_ERROR_BG};
-    border: 1px solid {ACCENT_ERROR_BORDER};
-}}
-QFrame#detailStatusBanner[tone="success"] {{
-    background-color: {ACCENT_SUCCESS_BG};
-    border: 1px solid {ACCENT_SUCCESS_BORDER};
-}}
-QLabel#detailStatusBannerBody {{
-    font-size: 13px;
-    line-height: 1.4;
-    color: {ACCENT_ERROR};
-}}
-QFrame#detailStatusBanner[tone="error"] QLabel#detailStatusBannerBody {{
-    color: {ACCENT_ERROR};
-}}
-QFrame#detailStatusBanner[tone="success"] QLabel#detailStatusBannerBody {{
-    color: {ACCENT_SUCCESS};
-}}
 QFrame#detailActionArea {{
     background-color: {BACKGROUND_SECTION};
     border: 1px solid {BORDER_SUBTLE};

@@ -1,4 +1,4 @@
-"""Detail panel metadata refresh button UX states."""
+"""Detail panel metadata refresh button UX — header status banner deleted."""
 
 from __future__ import annotations
 
@@ -62,8 +62,28 @@ def test_refresh_button_is_labeled_push_button(
     assert btn.objectName() == "detailRefreshButton"
 
 
+def test_status_banner_widget_fully_deleted(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Area A (_status_banner / 状态) must not exist on Detail Panel."""
+    lib = tmp_path / "lib"
+    folder = _seed(lib)
+    db.upsert_mod(
+        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
+    )
+    panel = ModDetailPanel()
+    panel.show_mod(folder)
+    qapp.processEvents()
+    assert not hasattr(panel, "_status_banner")
+    assert not hasattr(panel, "_status_banner_body")
+    assert not hasattr(panel, "_build_status_banner")
+    assert not hasattr(panel, "_show_status_banner")
+    assert not hasattr(panel, "_hide_status_banner")
+    assert not hasattr(panel, "_show_deploy_failure_banner")
+
+
 def test_refresh_button_state_machine(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "lib"
     folder = _seed(lib)
@@ -81,7 +101,6 @@ def test_refresh_button_state_machine(
     panel._set_refresh_button_state("success", restore_ms=50)
     assert "已更新" in panel.btn_refresh_mod.text()
 
-    # Wait for idle restore.
     import time
 
     deadline = time.time() + 2.0
@@ -94,8 +113,7 @@ def test_refresh_button_state_machine(
     panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
     assert "刷新失败" in panel.btn_refresh_mod.text()
     assert "timeout" in (panel.btn_refresh_mod.toolTip() or "")
-    # Duplicate header banner must stay hidden for refresh feedback.
-    assert panel._status_banner.isHidden()
+    assert not hasattr(panel, "_status_banner")
 
 
 def test_click_sets_running_immediately_and_blocks_duplicate(
@@ -138,7 +156,6 @@ def test_click_sets_running_immediately_and_blocks_duplicate(
     panel._on_refresh_mod()
     assert "正在刷新" in panel.btn_refresh_mod.text()
     assert started["n"] == 1
-    # Duplicate click while running must be ignored.
     panel._on_refresh_mod()
     assert started["n"] == 1
 
@@ -160,79 +177,28 @@ def test_success_handler_sets_updated_label(
         managed_path=folder,
         old_path=folder,
         title="Shouted Out",
+        message="已刷新本地状态",
     )
     panel._on_metadata_refresh_finished(result)
     assert "已更新" in panel.btn_refresh_mod.text()
+    assert not hasattr(panel, "_status_banner")
 
 
-def test_refresh_does_not_show_duplicate_status_banner(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
-) -> None:
-    """Area A (header status banner) must stay hidden after refresh success/fail."""
-    lib = tmp_path / "lib"
-    folder = _seed(lib)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
-    panel = ModDetailPanel()
-    panel.show()
-    panel.show_mod(folder)
-    monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
-    qapp.processEvents()
-
-    # Test 1 — idle detail: no refresh status banner text.
-    assert panel._status_banner.isHidden()
-    assert "已刷新本地状态" not in (panel._status_banner_body.text() or "")
-
-    # Test 2 — success: button feedback only.
-    panel._on_metadata_refresh_finished(
-        MetadataRefreshResult(
-            mod_id="3413520661",
-            success=True,
-            managed_path=folder,
-            old_path=folder,
-            title="Harborlife",
-            message="已刷新本地状态",
-        )
-    )
-    qapp.processEvents()
-    assert panel._status_banner.isHidden()
-    assert "已刷新本地状态" not in (panel._status_banner_body.text() or "")
-    assert "已更新" in panel.btn_refresh_mod.text()
-
-    # Test 3 — failure: button + tooltip feedback; no header banner.
-    panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
-    qapp.processEvents()
-    assert panel._status_banner.isHidden()
-    assert "刷新失败" not in (panel._status_banner_body.text() or "")
-    assert "刷新失败" in panel.btn_refresh_mod.text()
-    assert "timeout" in (panel.btn_refresh_mod.toolTip() or "")
-
-    # Hard guard: even a direct success-tone write is rejected.
-    panel._show_status_banner("已刷新本地状态", tone="success")
-    qapp.processEvents()
-    assert panel._status_banner.isHidden()
-    assert "已刷新本地状态" not in (panel._status_banner_body.text() or "")
-
-
-def test_status_banner_still_shows_deploy_failure(
+def test_refresh_failure_feedback_on_button_only(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """Deploy failure must still use the header banner (not refresh)."""
     lib = tmp_path / "lib"
     folder = _seed(lib)
     db.upsert_mod(
         ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
     )
     panel = ModDetailPanel()
-    panel.show()
     panel.show_mod(folder)
     qapp.processEvents()
-    panel._show_deploy_failure_banner("目标目录不可写")
-    qapp.processEvents()
-    assert not panel._status_banner.isHidden()
-    assert "部署失败" in (panel._status_banner_body.text() or "")
-
+    panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
+    assert "刷新失败" in panel.btn_refresh_mod.text()
+    assert "timeout" in (panel.btn_refresh_mod.toolTip() or "")
+    assert not hasattr(panel, "_status_banner")
 
 
 def test_refresh_running_feedback_on_button_only(
@@ -248,7 +214,7 @@ def test_refresh_running_feedback_on_button_only(
     qapp.processEvents()
     panel._set_refresh_button_state("running")
     assert "正在刷新" in panel.btn_refresh_mod.text()
-    assert panel._status_banner.isHidden()
+    assert not hasattr(panel, "_status_banner")
 
 
 def test_refresh_clears_missing_content_when_files_exist(
