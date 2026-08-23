@@ -2508,7 +2508,7 @@ class ModDetailPanel(QWidget):
         """
         Visible refresh-button states: idle / running / success / failure.
 
-        *detail* (failure) is shown in the existing status banner.
+        *detail* (failure) is shown on the button tooltip only.
         """
         if not hasattr(self, "btn_refresh_mod"):
             return
@@ -2543,7 +2543,6 @@ class ModDetailPanel(QWidget):
             err = (detail or "").strip() or "元数据刷新失败"
             btn.setToolTip(err)
             btn.setEnabled(False)
-            self._show_status_banner(f"刷新失败：\n{err}", tone="error")
             self._schedule_refresh_button_idle(restore_ms)
             return
 
@@ -2625,11 +2624,6 @@ class ModDetailPanel(QWidget):
             self.metadata_saved.emit(path)
             self.tags_saved.emit(path)
         if result.success or result.skipped:
-            msg = str(getattr(result, "message", "") or "").strip()
-            if msg:
-                self._show_status_banner(msg, tone="success")
-            else:
-                self._hide_status_banner()
             self._set_refresh_button_state("success")
             return
         self._set_refresh_button_state(
