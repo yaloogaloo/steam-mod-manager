@@ -1125,10 +1125,34 @@ class ModDetailPanel(QWidget):
             style.polish(self._status_banner)
         self._status_banner.update()
 
+    @staticmethod
+    def _is_refresh_feedback_message(text: str) -> bool:
+        """True for refresh-result copy that must never use the header banner."""
+        msg = str(text or "").strip()
+        if not msg:
+            return False
+        # Matches ModRefreshResult / metadata refresh UI strings.
+        needles = (
+            "已刷新本地状态",
+            "本地状态已刷新",
+            "刷新失败",
+            "刷新成功",
+            "元数据刷新",
+            "正在刷新",
+            "刷新完成",
+        )
+        return any(n in msg for n in needles)
+
     def _show_status_banner(self, message: str, *, tone: str = "error") -> None:
-        """Show the shared status banner with the correct success/error style."""
+        """Show deploy/error banner only — never refresh success/failure copy."""
         text = str(message or "").strip()
         if not text or not hasattr(self, "_status_banner"):
+            return
+        key = str(tone or "error").strip().lower()
+        # Success tone + refresh strings were the duplicate Area-A UI.
+        # Keep this banner for deploy failures (error) only.
+        if key == "success" or self._is_refresh_feedback_message(text):
+            self._hide_status_banner()
             return
         try:
             from ui.popup_trace import log_popup
@@ -1136,7 +1160,7 @@ class ModDetailPanel(QWidget):
             log_popup("detailStatusBanner.show", detail=text[:120])
         except Exception:  # noqa: BLE001
             pass
-        self._set_status_banner_tone(tone)
+        self._set_status_banner_tone(key if key in {"success", "error"} else "error")
         self._status_banner_body.setText(text)
         self._status_banner.show()
 
@@ -2525,6 +2549,10 @@ class ModDetailPanel(QWidget):
         key = str(state or "idle").strip().lower()
         self._refresh_btn_state = key
         btn = self.btn_refresh_mod
+        # Always clear header status banner on refresh transitions so Area A
+        # (状态 / 已刷新本地状态) cannot linger from an older success write.
+        if key in {"running", "success", "failure"}:
+            self._hide_status_banner()
 
         if key == "running":
             btn.setText("⏳ 正在刷新...")
@@ -2625,10 +2653,12 @@ class ModDetailPanel(QWidget):
             self.metadata_saved.emit(path)
             self.tags_saved.emit(path)
         if result.success or result.skipped:
-            # Refresh outcome is shown on the refresh button only
-            # (header status banner is reserved for deploy / other errors).
+            # Refresh outcome → refresh button only. Never re-show Area A
+            # even if result.message is "已刷新本地状态".
+            self._hide_status_banner()
             self._set_refresh_button_state("success")
             return
+        self._hide_status_banner()
         self._set_refresh_button_state(
             "failure",
             detail=result.error or "元数据刷新失败",

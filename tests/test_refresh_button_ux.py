@@ -208,6 +208,32 @@ def test_refresh_does_not_show_duplicate_status_banner(
     assert "刷新失败" in panel.btn_refresh_mod.text()
     assert "timeout" in (panel.btn_refresh_mod.toolTip() or "")
 
+    # Hard guard: even a direct success-tone write is rejected.
+    panel._show_status_banner("已刷新本地状态", tone="success")
+    qapp.processEvents()
+    assert panel._status_banner.isHidden()
+    assert "已刷新本地状态" not in (panel._status_banner_body.text() or "")
+
+
+def test_status_banner_still_shows_deploy_failure(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Deploy failure must still use the header banner (not refresh)."""
+    lib = tmp_path / "lib"
+    folder = _seed(lib)
+    db.upsert_mod(
+        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
+    )
+    panel = ModDetailPanel()
+    panel.show()
+    panel.show_mod(folder)
+    qapp.processEvents()
+    panel._show_deploy_failure_banner("目标目录不可写")
+    qapp.processEvents()
+    assert not panel._status_banner.isHidden()
+    assert "部署失败" in (panel._status_banner_body.text() or "")
+
+
 
 def test_refresh_running_feedback_on_button_only(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
