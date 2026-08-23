@@ -2453,7 +2453,6 @@ class ModDetailPanel(QWidget):
         key = str(state or "idle").strip().lower()
         self._refresh_btn_state = key
         btn = self.btn_refresh_mod
-
         if key == "running":
             btn.setText("⏳ 正在刷新...")
             btn.setToolTip("正在刷新元数据，请稍候")
@@ -2553,7 +2552,6 @@ class ModDetailPanel(QWidget):
             self.metadata_saved.emit(path)
             self.tags_saved.emit(path)
         if result.success or result.skipped:
-            # Refresh outcome → refresh button only.
             self._set_refresh_button_state("success")
             return
         self._set_refresh_button_state(
