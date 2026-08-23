@@ -1,4 +1,4 @@
-"""Deploy failure status banner (refresh must not reuse it)."""
+"""Independent deploy_error_banner (refresh must not reuse it)."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _mod_folder(root: Path, *, pub_id: str, title: str) -> Path:
     return folder
 
 
-def test_status_banner_hidden_by_default(
+def test_status_banner_deleted_deploy_banner_hidden_by_default(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     folder = _mod_folder(tmp_path, pub_id="95001", title="OkMod")
@@ -65,11 +65,12 @@ def test_status_banner_hidden_by_default(
     panel.show()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert hasattr(panel, "_status_banner")
-    assert panel._status_banner.isHidden()
+    assert not hasattr(panel, "_status_banner")
+    assert hasattr(panel, "_deploy_error_banner")
+    assert panel._deploy_error_banner.isHidden()
 
 
-def test_status_banner_shows_concrete_deploy_failure(
+def test_deploy_error_banner_shows_concrete_deploy_failure(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     folder = _mod_folder(tmp_path, pub_id="95002", title="FailMod")
@@ -87,12 +88,13 @@ def test_status_banner_shows_concrete_deploy_failure(
         }
     )
     qapp.processEvents()
-    assert not panel._status_banner.isHidden()
-    body = panel._status_banner_body.text() or ""
+    assert not hasattr(panel, "_status_banner")
+    assert not panel._deploy_error_banner.isHidden()
+    body = panel._deploy_error_banner_body.text() or ""
     assert "部署失败" in body
     assert ".rar" in body
     assert body.strip() != "部署失败"
-    assert panel._status_banner.property("tone") == "error"
+    assert panel._deploy_error_banner.property("tone") == "error"
     # Refresh copy must never appear on the deploy banner.
     assert "已刷新" not in body
     assert "刷新完成" not in body
@@ -161,7 +163,7 @@ def test_rar_without_tools_reports_reason(
     assert "unrar" in msg.lower()
 
 
-def test_failed_db_status_rehydrates_banner(
+def test_failed_db_status_rehydrates_deploy_error_banner(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     folder = _mod_folder(tmp_path, pub_id="95003", title="PersistFail")
@@ -177,7 +179,8 @@ def test_failed_db_status_rehydrates_banner(
     panel.show()
     panel.show_mod(folder)
     qapp.processEvents()
-    assert not panel._status_banner.isHidden()
-    body = panel._status_banner_body.text() or ""
+    assert not hasattr(panel, "_status_banner")
+    assert not panel._deploy_error_banner.isHidden()
+    body = panel._deploy_error_banner_body.text() or ""
     assert "unrar" in body.lower() or TOOL_UNAVAILABLE_MSG in body
     assert "部署失败" in body
