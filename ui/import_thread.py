@@ -181,12 +181,20 @@ class ImportWorker(QThread):
         if isinstance(resolved, ImportResult):
             return resolved
         assert isinstance(resolved, ImportIdentity)
+        ctx = self._context()
+        app_id = int(
+            self.params.get("game_id")
+            or self.params.get("app_id")
+            or (ctx.game_id if ctx else 0)
+            or 0
+        )
         dup = check_import_duplicate(
             get_db(),
             platform=resolved.platform,
             external_id=resolved.external_id,
             source_url=resolved.source_url,
             workshop_id=resolved.workshop_id,
+            app_id=app_id,
         )
         if dup is not None:
             return dup

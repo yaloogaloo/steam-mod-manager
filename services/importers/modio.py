@@ -101,6 +101,7 @@ class ModioImporter(ModImporter):
             platform=PLATFORM_MODIO,
             external_id=ext,
             source_url=url,
+            app_id=int(ctx.game_id or 0),
         )
         if dup is not None:
             return dup

@@ -7,7 +7,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QCoreApplication, Qt, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +43,7 @@ from .flow_layout import FlowLayout
 from .library_query import (
     FILTER_ALL,
     FILTER_CATEGORY_ALL,
+    FILTER_DEPLOYMENT_RECORD,
     FILTER_PLATFORM_ALL,
     PLATFORM_FILTER_LABELS,
     SORT_LABELS,
@@ -51,6 +53,7 @@ from .library_query import (
     coerce_filter_selection,
     collect_category_labels,
     collect_source_keys,
+    compute_record_relative_status,
     filter_and_sort,
     folder_mtime,
     merge_category_labels,
@@ -317,6 +320,10 @@ class ModLibraryView(QWidget):
         self._pending_game_status_line = ""
         self._last_filter_sig: tuple | None = None
         self._game_list_fp: tuple | None = None
+        # Deployment record is a status filter peer — not a parallel “mode”.
+        self._deployment_record_id: int | None = None
+        self._deployment_record_name: str | None = None
+        self._cached_record_mod_ids: frozenset[str] | None = None
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
         self._search_debounce.setInterval(150)
@@ -436,7 +443,7 @@ class ModLibraryView(QWidget):
         self.search_box.textChanged.connect(self._on_search_text_changed)
         center_layout.addWidget(self.search_box)
 
-        # --- Responsive filter toolbar (FlowLayout wraps; chips never compress) ---
+        # --- Status chips + Deployment Record on one row (no extra height) ---
         self._filter_group = QButtonGroup(self)
         self._filter_group.setExclusive(True)
         self._filter_buttons: dict[str, QPushButton] = {}
@@ -446,11 +453,19 @@ class ModLibraryView(QWidget):
         self._status_bar.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
+        status_row = QHBoxLayout(self._status_bar)
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(8)
+
+        self._status_chips = QWidget(self._status_bar)
+        self._status_chips.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
         status_flow = FlowLayout(
-            self._status_bar, margin=0, h_spacing=6, v_spacing=6
+            self._status_chips, margin=0, h_spacing=6, v_spacing=6
         )
         for key, label in STATUS_FILTER_LABELS:
-            btn = self._make_filter_chip(label, parent=self._status_bar)
+            btn = self._make_filter_chip(label, parent=self._status_chips)
             btn.setCheckable(True)
             if key == FILTER_ALL:
                 btn.setChecked(True)
@@ -460,6 +475,29 @@ class ModLibraryView(QWidget):
                 lambda checked, k=key: self._on_status_filter_toggled(k, checked)
             )
             status_flow.addWidget(btn)
+        status_row.addWidget(self._status_chips, 1)
+
+        self.btn_deployment_record = QToolButton(self._status_bar)
+        self.btn_deployment_record.setObjectName("libraryDeploymentRecordButton")
+        self.btn_deployment_record.setText("💾 部署记录 ▼")
+        self.btn_deployment_record.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        # Entire control opens one Popup (filter + manage) — no split body/arrow/右键.
+        self.btn_deployment_record.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.btn_deployment_record.setToolTip("部署记录筛选与管理")
+        self._deployment_record_menu = QMenu(self.btn_deployment_record)
+        self.btn_deployment_record.setMenu(self._deployment_record_menu)
+        self._deployment_record_menu.aboutToShow.connect(
+            self._rebuild_deployment_record_menu
+        )
+        status_row.addWidget(
+            self.btn_deployment_record,
+            0,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
         center_layout.addWidget(self._status_bar)
 
         self._platform_group = QButtonGroup(self)
@@ -1233,12 +1271,18 @@ class ModLibraryView(QWidget):
         name = (game_name or "").strip() or None
         if name == ALL_GAMES_LABEL:
             name = None
+        prev_game_id = self.current_game_id
         self.current_game_name = name
         self._current_game_filter = name
         if game_id is not None and int(game_id) > 0:
             self.current_game_id = int(game_id)
         else:
             self.current_game_id = self._resolve_game_id(name) if name else None
+        if (
+            self._status_filter == FILTER_DEPLOYMENT_RECORD
+            and prev_game_id != self.current_game_id
+        ):
+            self._set_library_status_filter(FILTER_ALL)
         self._sync_type_manage_buttons()
         self._refresh_game_header()
 
@@ -1445,11 +1489,418 @@ class ModLibraryView(QWidget):
         self._search_debounce.stop()
         self._apply_view_filter()
 
+    def _resolve_record_mod_ids(self) -> frozenset[str] | None:
+        """Load recorded ids only when status filter is DEPLOYMENT_RECORD."""
+        if self._status_filter != FILTER_DEPLOYMENT_RECORD:
+            return None
+        rid = self._deployment_record_id
+        if rid is None:
+            return frozenset()
+        if self._cached_record_mod_ids is not None:
+            return self._cached_record_mod_ids
+        from services import deployment_record as dr
+
+        ids = frozenset(dr.get_record_mod_ids(rid))
+        self._cached_record_mod_ids = ids
+        return ids
+
+    def _sync_record_overlays(self) -> None:
+        """
+        Relative badges exist only while FILTER_DEPLOYMENT_RECORD is active.
+
+        Must run independently of filter_sig early-return, and must clear the
+        card cache (reused widgets), not only current ``_card_entries``.
+        """
+        if self._status_filter != FILTER_DEPLOYMENT_RECORD:
+            self._clear_all_record_overlays()
+            return
+        recorded = self._resolve_record_mod_ids()
+        if recorded is None:
+            self._clear_all_record_overlays()
+            return
+        seen: set[int] = set()
+        for index, card in self._card_entries:
+            card.set_record_relative_status(
+                compute_record_relative_status(index, recorded)
+            )
+            seen.add(id(card))
+        for card in list(getattr(self, "_card_cache", {}).values()):
+            if id(card) not in seen:
+                card.clear_record_overlay()
+
+    def _clear_all_record_overlays(self) -> None:
+        for card in list(getattr(self, "_card_cache", {}).values()):
+            card.clear_record_overlay()
+        for _index, card in self._card_entries:
+            card.clear_record_overlay()
+
+    def _update_deployment_record_button_label(self) -> None:
+        if (
+            self._status_filter == FILTER_DEPLOYMENT_RECORD
+            and self._deployment_record_name
+        ):
+            self.btn_deployment_record.setText(
+                f"💾 {self._deployment_record_name} ▼"
+            )
+        else:
+            self.btn_deployment_record.setText("💾 部署记录 ▼")
+
+    def _set_library_status_filter(
+        self,
+        key: str,
+        *,
+        record_id: int | None = None,
+        record_name: str | None = None,
+    ) -> None:
+        """
+        Single status-filter setter (chips ↔ deployment record are mutually exclusive).
+        """
+        key = str(key or FILTER_ALL).strip() or FILTER_ALL
+        if key == FILTER_DEPLOYMENT_RECORD:
+            rid = int(record_id) if record_id is not None else None
+            if rid is None:
+                return self._set_library_status_filter(FILTER_ALL)
+            self._status_filter = FILTER_DEPLOYMENT_RECORD
+            self._deployment_record_id = rid
+            self._deployment_record_name = (record_name or "").strip() or None
+            self._cached_record_mod_ids = None
+            # Uncheck status chips only (not platform chips sharing _filter_buttons).
+            self._suppress_filter_toggle = True
+            try:
+                self._filter_group.setExclusive(False)
+                for sk, _label in STATUS_FILTER_LABELS:
+                    btn = self._filter_buttons.get(sk)
+                    if btn is not None:
+                        btn.setChecked(False)
+            finally:
+                self._suppress_filter_toggle = False
+        else:
+            self._status_filter = key
+            self._deployment_record_id = None
+            self._deployment_record_name = None
+            self._cached_record_mod_ids = None
+            if not self._filter_group.exclusive():
+                self._filter_group.setExclusive(True)
+            btn = self._filter_buttons.get(key)
+            if btn is not None and not btn.isChecked():
+                self._suppress_filter_toggle = True
+                try:
+                    btn.setChecked(True)
+                finally:
+                    self._suppress_filter_toggle = False
+        self._update_deployment_record_button_label()
+        self._last_filter_sig = None
+        self._apply_view_filter()
+
+    def _current_library_deployed_mod_ids(self) -> list[str]:
+        """Deployed mod ids in the current Library game view (card index)."""
+        from ui.library_query import normalize_record_mod_id
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for index, _card in self._card_entries:
+            if not index.deployed:
+                continue
+            mid = normalize_record_mod_id(index.mod_id)
+            if mid and mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+        return out
+
+    def _snapshot_mod_ids_for_deployment_record(self) -> list[str] | None:
+        """
+        Prefer live Library card index; ``None`` → service uses DB library query.
+
+        Empty ``_card_entries`` means the view has not bound this game yet
+        (tests / early save) — do not snapshot an empty set by mistake.
+        """
+        if not self._card_entries:
+            return None
+        return self._current_library_deployed_mod_ids()
+
+    def _on_save_deployment_record(self) -> None:
+        """Popup: save current deployed set; confirm before same-name overwrite."""
+        from services import deployment_record as dr
+
+        gid = int(self.current_game_id or 0)
+        if gid <= 0:
+            QMessageBox.information(
+                self, "部署记录", "请先选择一个具体游戏再保存部署记录。"
+            )
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "保存当前环境",
+            "记录名称：",
+            text=self._deployment_record_name or "",
+        )
+        if not ok:
+            return
+        label = str(name or "").strip()
+        if not label:
+            QMessageBox.warning(self, "保存部署记录", "名称不能为空。")
+            return
+        existing = dr.find_record_by_name(gid, label)
+        if existing is not None and not self._confirm_overwrite_deployment_record(label):
+            return
+        try:
+            record = dr.create_or_update_record(
+                gid,
+                label,
+                mod_ids=self._snapshot_mod_ids_for_deployment_record(),
+                game_folder=self._current_game_filter,
+                library_root=self._target_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "保存部署记录失败", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "部署记录",
+            f"已保存「{record.name}」（{len(dr.get_record_mod_ids(record.id))} 个 Mod）。",
+        )
+        if (
+            self._status_filter == FILTER_DEPLOYMENT_RECORD
+            and self._deployment_record_id is not None
+            and int(self._deployment_record_id) == int(record.id)
+        ):
+            self._cached_record_mod_ids = None
+            self._last_filter_sig = None
+            self._apply_view_filter()
+
+    def _confirm_overwrite_deployment_record(self, label: str) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle("覆盖记录")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"记录「{label}」已存在")
+        box.setInformativeText("当前操作会覆盖原记录 Mod 集合。\n是否继续？")
+        cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        overwrite = box.addButton("覆盖", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is overwrite
+
+    def _pick_deployment_record_name(self, title: str) -> str | None:
+        """First-level manage action: pick a record by display name (never show id)."""
+        from services import deployment_record as dr
+
+        gid = int(self.current_game_id or 0)
+        if gid <= 0:
+            QMessageBox.information(self, "部署记录", "请先选择一个具体游戏。")
+            return None
+        try:
+            records = dr.list_records(gid)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, title, str(exc))
+            return None
+        if not records:
+            QMessageBox.information(self, title, "暂无记录。")
+            return None
+        names = [rec.name for rec in records]
+        current = self._deployment_record_name or ""
+        start = names.index(current) if current in names else 0
+        chosen, ok = QInputDialog.getItem(
+            self, title, "选择记录：", names, start, False
+        )
+        if not ok:
+            return None
+        label = str(chosen or "").strip()
+        return label or None
+
+    def _rebuild_deployment_record_menu(self) -> None:
+        """Single Popup: filter peers + first-level manage actions."""
+        from services import deployment_record as dr
+
+        menu = self._deployment_record_menu
+        menu.clear()
+
+        hdr = menu.addAction("筛选记录")
+        hdr.setEnabled(False)
+
+        act_all = menu.addAction("全部")
+        act_all.setCheckable(True)
+        act_all.setChecked(self._status_filter == FILTER_ALL)
+        act_all.triggered.connect(
+            lambda: self._set_library_status_filter(FILTER_ALL)
+        )
+
+        gid = int(self.current_game_id or 0)
+        records = []
+        if gid <= 0:
+            empty = menu.addAction("（请先选择游戏）")
+            empty.setEnabled(False)
+        else:
+            try:
+                records = dr.list_records(gid)
+            except Exception:  # noqa: BLE001
+                logger.debug("list_records failed", exc_info=True)
+                records = []
+            if not records:
+                empty = menu.addAction("（暂无记录）")
+                empty.setEnabled(False)
+            else:
+                active_id = self._deployment_record_id
+                for rec in records:
+                    action = menu.addAction(rec.name)
+                    action.setCheckable(True)
+                    action.setChecked(
+                        self._status_filter == FILTER_DEPLOYMENT_RECORD
+                        and active_id is not None
+                        and int(rec.id) == int(active_id)
+                    )
+                    action.triggered.connect(
+                        lambda _c=False, r=rec: self._set_library_status_filter(
+                            FILTER_DEPLOYMENT_RECORD,
+                            record_id=int(r.id),
+                            record_name=r.name,
+                        )
+                    )
+
+        menu.addSeparator()
+        hdr_m = menu.addAction("记录管理")
+        hdr_m.setEnabled(False)
+        menu.addAction("保存当前环境...").triggered.connect(
+            self._on_save_deployment_record
+        )
+        menu.addAction("更新记录...").triggered.connect(
+            self._on_update_deployment_record_clicked
+        )
+        menu.addAction("重命名记录...").triggered.connect(
+            self._on_rename_deployment_record_clicked
+        )
+        menu.addAction("删除记录...").triggered.connect(
+            self._on_delete_deployment_record_clicked
+        )
+
+    def _on_rename_deployment_record_clicked(self) -> None:
+        picked = self._pick_deployment_record_name("重命名记录")
+        if not picked:
+            return
+        from services import deployment_record as dr
+
+        gid = int(self.current_game_id or 0)
+        rec = dr.find_record_by_name(gid, picked)
+        if rec is None:
+            return
+        self._on_rename_deployment_record(int(rec.id), rec.name)
+
+    def _on_update_deployment_record_clicked(self) -> None:
+        picked = self._pick_deployment_record_name("更新记录")
+        if not picked:
+            return
+        self._on_update_deployment_record(picked)
+
+    def _on_delete_deployment_record_clicked(self) -> None:
+        picked = self._pick_deployment_record_name("删除记录")
+        if not picked:
+            return
+        from services import deployment_record as dr
+
+        gid = int(self.current_game_id or 0)
+        rec = dr.find_record_by_name(gid, picked)
+        if rec is None:
+            return
+        self._on_delete_deployment_record(int(rec.id), rec.name)
+
+    def _on_rename_deployment_record(
+        self, record_id: int, current_name: str
+    ) -> None:
+        from services import deployment_record as dr
+
+        name, ok = QInputDialog.getText(
+            self, "重命名部署记录", "新名称：", text=current_name
+        )
+        if not ok:
+            return
+        label = str(name or "").strip()
+        if not label:
+            return
+        gid = int(self.current_game_id or 0)
+        if gid > 0 and label.casefold() != current_name.casefold():
+            clash = dr.find_record_by_name(gid, label)
+            if clash is not None and int(clash.id) != int(record_id):
+                QMessageBox.warning(
+                    self, "重命名失败", f"记录「{label}」已存在。"
+                )
+                return
+        try:
+            record = dr.rename_record(record_id, label)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "重命名失败", str(exc))
+            return
+        if (
+            self._status_filter == FILTER_DEPLOYMENT_RECORD
+            and self._deployment_record_id is not None
+            and int(self._deployment_record_id) == int(record_id)
+        ):
+            self._deployment_record_name = record.name
+            self._update_deployment_record_button_label()
+
+    def _on_update_deployment_record(self, record_name: str) -> None:
+        from services import deployment_record as dr
+
+        gid = int(self.current_game_id or 0)
+        if gid <= 0:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "更新记录",
+            f"使用当前已部署 Mod 更新该记录「{record_name}」？",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            record = dr.create_or_update_record(
+                gid,
+                record_name,
+                mod_ids=self._snapshot_mod_ids_for_deployment_record(),
+                game_folder=self._current_game_filter,
+                library_root=self._target_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "更新失败", str(exc))
+            return
+        if (
+            self._status_filter == FILTER_DEPLOYMENT_RECORD
+            and self._deployment_record_id is not None
+            and int(self._deployment_record_id) == int(record.id)
+        ):
+            self._cached_record_mod_ids = None
+            self._last_filter_sig = None
+            self._apply_view_filter()
+        QMessageBox.information(self, "部署记录", f"已更新「{record.name}」。")
+
+    def _on_delete_deployment_record(
+        self, record_id: int, record_name: str
+    ) -> None:
+        from services import deployment_record as dr
+
+        confirm = QMessageBox.question(
+            self,
+            "删除部署记录",
+            f"删除记录「{record_name}」？\n不会删除 Mod，也不会影响当前部署。",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            dr.delete_record(record_id)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        if (
+            self._status_filter == FILTER_DEPLOYMENT_RECORD
+            and self._deployment_record_id is not None
+            and int(self._deployment_record_id) == int(record_id)
+        ):
+            self._set_library_status_filter(FILTER_ALL)
+
     def _on_status_filter_toggled(self, key: str, checked: bool) -> None:
+        if getattr(self, "_suppress_filter_toggle", False):
+            return
         if not checked:
             return
-        self._status_filter = key
-        self._apply_view_filter()
+        # Selecting a chip clears any deployment-record filter (mutex).
+        self._set_library_status_filter(key)
 
     def _on_platform_filter_toggled(self, key: str, checked: bool) -> None:
         if not checked:
@@ -1710,6 +2161,17 @@ class ModLibraryView(QWidget):
             if self._sidebar_category
             else self._category_filter
         )
+        # Under deployment-record filter, deployed flips must refresh overlays/visibility.
+        recorded_ids = self._resolve_record_mod_ids()
+        deployed_fp = None
+        if self._status_filter == FILTER_DEPLOYMENT_RECORD:
+            deployed_fp = tuple(
+                sorted(
+                    str(index.mod_id)
+                    for index, _card in self._card_entries
+                    if index.deployed
+                )
+            )
         filter_sig = (
             query,
             self._status_filter,
@@ -1718,10 +2180,15 @@ class ModLibraryView(QWidget):
             self._sort_mode,
             self._current_game_filter or "",
             len(self._card_entries),
+            self._deployment_record_id,
+            None if recorded_ids is None else tuple(sorted(recorded_ids)),
+            deployed_fp,
         )
         if filter_sig == getattr(self, "_last_filter_sig", None):
+            self._sync_record_overlays()
             return
         self._last_filter_sig = filter_sig
+        self._sync_record_overlays()
         # Re-parent/show churn collapses scroll range → jumps to bottom without this.
         scroll = self._capture_scroll()
         self.scroll.setUpdatesEnabled(False)
@@ -1743,6 +2210,7 @@ class ModLibraryView(QWidget):
                 platform_key=self._platform_filter,
                 category_key=category_key,
                 sort_mode=self._sort_mode,
+                record_mod_ids=recorded_ids,
             )
 
             if self._selected_card is not None and self._selected_card not in visible_cards:
@@ -2054,6 +2522,8 @@ class ModLibraryView(QWidget):
             if mid in ids:
                 self._mark_card_stale(card)
                 card.refresh_display()
+        # refresh_display clears relative overlay; restore if Record Filter active.
+        self._sync_record_overlays()
         # Keep multi-select panel state with updated platform label.
         if len(self._selected_cards) > 1:
             self._apply_multi_or_single_panel()
@@ -2249,6 +2719,8 @@ class ModLibraryView(QWidget):
             if card._mod_id() != str(mod_id):
                 continue
             self._mark_card_stale(card)
+            if self._status_filter != FILTER_DEPLOYMENT_RECORD:
+                card.clear_record_overlay()
             card.refresh_display()
             manager = ModFileManager(self._target_root)
             from services.mod_metadata_resolver import resolve_mod_metadata
@@ -2863,9 +3335,7 @@ class ModLibraryView(QWidget):
         kind = self._empty_kind
         if kind == EMPTY_SEARCH:
             self.search_box.clear()
-            if FILTER_ALL in self._filter_buttons:
-                self._filter_buttons[FILTER_ALL].setChecked(True)
-            self._status_filter = FILTER_ALL
+            self._set_library_status_filter(FILTER_ALL)
             if FILTER_PLATFORM_ALL in self._platform_buttons:
                 self._platform_buttons[FILTER_PLATFORM_ALL].setChecked(True)
             self._platform_filter = FILTER_PLATFORM_ALL

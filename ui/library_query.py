@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-
 from core.mod_platform import (
     PLATFORM_GITHUB,
     PLATFORM_NEXUS,
@@ -32,6 +31,8 @@ FILTER_BACKUP_INVALID = "backup_invalid"
 FILTER_IDENTITY_CONFLICT = "identity_conflict"
 # User-facing aggregate (UI only — does not change content_status)
 FILTER_ANOMALY = "anomaly"
+# Same rank as 全部/收藏/… — not a separate “record mode”
+FILTER_DEPLOYMENT_RECORD = "deployment_record"
 FILTER_PLATFORM_ALL = "platform_all"
 FILTER_PLATFORM_STEAM = "platform_steam"
 FILTER_PLATFORM_NEXUS = "platform_nexus"
@@ -157,6 +158,114 @@ class ModFilterIndex:
     category_tags: str = ""
     content_status: str = ""
     source_type: str = ""
+
+
+def normalize_record_mod_id(raw: object) -> str:
+    """Canonical mod_id for Record Context (\"001\" → \"1\")."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return str(int(text))
+    return text
+
+
+@dataclass(frozen=True)
+class DeploymentRecordFilterContext:
+    """
+    Snapshot ids for FILTER_DEPLOYMENT_RECORD (data only — not a UI mode).
+
+    Visibility: ``recorded_mod_ids ∪ currently-deployed``.
+    Relative badges are runtime-only; never written to DB.
+    """
+
+    record_id: int
+    recorded_mod_ids: frozenset[str]
+
+    @classmethod
+    def create(
+        cls,
+        record_id: int | str,
+        recorded_mod_ids,
+    ) -> DeploymentRecordFilterContext:
+        ids: set[str] = set()
+        for raw in recorded_mod_ids or ():
+            key = normalize_record_mod_id(raw)
+            if key:
+                ids.add(key)
+        return cls(
+            record_id=int(str(record_id).strip()),
+            recorded_mod_ids=frozenset(ids),
+        )
+
+    def signature(self) -> tuple[int, tuple[str, ...]]:
+        return (self.record_id, tuple(sorted(self.recorded_mod_ids)))
+
+
+@dataclass(frozen=True)
+class RecordRelativeStatus:
+    """
+    Record-vs-deploy comparison — only while FILTER_DEPLOYMENT_RECORD is active.
+
+    Architecture: runtime-only. Never persist to mods / items / snapshot
+    (no extra_deployed, record_missing, or relative_status columns).
+    """
+
+    recorded: bool
+    deployed: bool
+
+    @property
+    def recorded_and_deployed(self) -> bool:
+        return self.recorded and self.deployed
+
+    @property
+    def recorded_not_deployed(self) -> bool:
+        return self.recorded and not self.deployed
+
+    @property
+    def not_recorded_deployed(self) -> bool:
+        return (not self.recorded) and self.deployed
+
+
+RECORD_STATUS_LABEL_MISSING = "记录缺失"
+RECORD_STATUS_LABEL_EXTRA = "额外部署"
+
+
+def record_relative_badge_label(status: RecordRelativeStatus | None) -> str | None:
+    if status is None or status.recorded_and_deployed:
+        return None
+    if status.recorded_not_deployed:
+        return RECORD_STATUS_LABEL_MISSING
+    if status.not_recorded_deployed:
+        return RECORD_STATUS_LABEL_EXTRA
+    return None
+
+
+def matches_record_visibility(
+    index: ModFilterIndex,
+    recorded_mod_ids: frozenset[str] | None,
+) -> bool:
+    """Visible under deployment-record filter: recorded ∪ deployed."""
+    if recorded_mod_ids is None:
+        return False
+    mid = normalize_record_mod_id(index.mod_id)
+    if mid and mid in recorded_mod_ids:
+        return True
+    return bool(index.deployed)
+
+
+def compute_record_relative_status(
+    index: ModFilterIndex,
+    recorded_mod_ids: frozenset[str] | None,
+) -> RecordRelativeStatus | None:
+    """Overlay flags only when a record filter set is active; never load/store in DB."""
+    if recorded_mod_ids is None:
+        return None
+    mid = normalize_record_mod_id(index.mod_id)
+    return RecordRelativeStatus(
+        recorded=bool(mid) and mid in recorded_mod_ids,
+        deployed=bool(index.deployed),
+    )
 
 
 def offline_page_exists(
@@ -378,17 +487,25 @@ def filter_and_sort(
     platform_key: str = FILTER_PLATFORM_ALL,
     category_key: str = FILTER_CATEGORY_ALL,
     sort_mode: str = SORT_MTIME,
+    record_mod_ids: frozenset[str] | None = None,
 ) -> list[object]:
     """
     Filter ``(index, payload)`` pairs and return payloads in sort order.
 
-    Status / platform / category combine (AND) — e.g. Nexus + Gameplay + 冲突.
+    ``FILTER_DEPLOYMENT_RECORD`` is mutually exclusive with other status chips:
+    visibility is ``recorded ∪ deployed`` (via ``record_mod_ids``). Other status
+    keys use ``matches_status_filter`` only — never AND with a record set.
+    Platform / category / search still AND on top.
     """
     matched: list[tuple[ModFilterIndex, object]] = []
+    use_record = filter_key == FILTER_DEPLOYMENT_RECORD
     for index, payload in entries:
-        if not matches_search(index, query):
+        if use_record:
+            if not matches_record_visibility(index, record_mod_ids):
+                continue
+        elif not matches_status_filter(index, filter_key):
             continue
-        if not matches_status_filter(index, filter_key):
+        if not matches_search(index, query):
             continue
         if not matches_platform_filter(index, platform_key):
             continue

@@ -90,6 +90,7 @@ def test_source_url_duplicate(tmp_path: Path, db: DatabaseManager) -> None:
         platform=PLATFORM_NEXUS,
         external_id="99999",
         source_url=url + "?tab=files",
+        app_id=1623730,
     )
     assert dup is not None
     assert dup.is_duplicate

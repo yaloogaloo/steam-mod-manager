@@ -147,6 +147,35 @@ CREATE TABLE IF NOT EXISTS game_categories (
 
 CREATE INDEX IF NOT EXISTS idx_game_categories_app_id
     ON game_categories(app_id);
+
+CREATE TABLE IF NOT EXISTS deployment_records (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id      INTEGER NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    FOREIGN KEY (app_id) REFERENCES games(app_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deployment_records_app_id
+    ON deployment_records(app_id);
+-- Per-game display name uniqueness (user-facing identity).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_deployment_records_app_name
+    ON deployment_records(app_id, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS deployment_record_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id   INTEGER NOT NULL,
+    mod_id      INTEGER NOT NULL,
+    FOREIGN KEY (record_id) REFERENCES deployment_records(id),
+    FOREIGN KEY (mod_id) REFERENCES mods(mod_id),
+    UNIQUE (record_id, mod_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deployment_record_items_record_id
+    ON deployment_record_items(record_id);
+CREATE INDEX IF NOT EXISTS idx_deployment_record_items_mod_id
+    ON deployment_record_items(mod_id);
 """
 
 # Columns added after the initial schema — applied on every startup.
@@ -435,6 +464,26 @@ class ModRelationship:
 
 
 @dataclass(frozen=True)
+class DeploymentRecord:
+    """Named saved Mod set for one game (does not change live deploy state)."""
+
+    id: int
+    app_id: int
+    name: str
+    created_at: str = ""
+    updated_at: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "app_id": self.app_id,
+            "name": self.name,
+            "created_at": self.created_at or "",
+            "updated_at": self.updated_at or "",
+        }
+
+
+@dataclass(frozen=True)
 class ModTagFlags:
     """Compact tag summary for library cards / filters."""
 
@@ -528,6 +577,7 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_mods_workspace_id ON mods(workspace_id)"
             )
             self._ensure_unique_platform_external_index()
+            self._ensure_deployment_record_name_unique()
             # Allow mods.app_id = 0 (unknown) under FOREIGN KEY to games.
             self._conn.execute(
                 """
@@ -723,8 +773,9 @@ class DatabaseManager:
 
     def _ensure_unique_platform_external_index(self) -> None:
         """
-        Enforce UNIQUE(platform, external_id) when the database is clean.
+        Enforce UNIQUE(platform, app_id, external_id) when the database is clean.
 
+        Migrates away from the legacy ``uq_mods_platform_external`` index.
         Duplicate rows are never auto-deleted — only warned. The unique index
         is skipped until duplicates are resolved manually.
         """
@@ -732,23 +783,27 @@ class DatabaseManager:
             str(row[1])
             for row in self._conn.execute("PRAGMA table_info(mods)").fetchall()
         }
-        if "platform" not in cols or "external_id" not in cols:
+        if "platform" not in cols or "external_id" not in cols or "app_id" not in cols:
             return
+
+        self._conn.execute("DROP INDEX IF EXISTS uq_mods_platform_external")
 
         dup_rows = self._conn.execute(
             """
-            SELECT platform, external_id, COUNT(*) AS cnt
+            SELECT platform, app_id, external_id, COUNT(*) AS cnt
             FROM mods
-            GROUP BY platform, external_id
+            WHERE TRIM(COALESCE(external_id, '')) != ''
+            GROUP BY platform, app_id, external_id
             HAVING COUNT(*) > 1
             """
         ).fetchall()
         if dup_rows:
             for row in dup_rows:
                 logger.warning(
-                    "Duplicate mod identity platform=%r external_id=%r count=%s "
-                    "(UNIQUE index not applied; resolve manually)",
+                    "Duplicate mod identity platform=%r app_id=%s external_id=%r "
+                    "count=%s (UNIQUE index not applied; resolve manually)",
                     row["platform"],
+                    row["app_id"],
                     row["external_id"],
                     row["cnt"],
                 )
@@ -759,13 +814,55 @@ class DatabaseManager:
         try:
             self._conn.execute(
                 """
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_mods_platform_external
-                ON mods(platform, external_id)
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_mods_platform_app_external
+                ON mods(platform, app_id, external_id)
                 """
             )
         except sqlite3.IntegrityError as exc:
             logger.warning(
-                "Failed to create uq_mods_platform_external (duplicates remain): %s",
+                "Failed to create uq_mods_platform_app_external (duplicates remain): %s",
+                exc,
+            )
+
+    def _ensure_deployment_record_name_unique(self) -> None:
+        """Ensure UNIQUE(app_id, name) for deployment records (idempotent)."""
+        tables = {
+            str(r[0])
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "deployment_records" not in tables:
+            return
+        dup_rows = self._conn.execute(
+            """
+            SELECT app_id, LOWER(name) AS nkey, COUNT(*) AS cnt
+            FROM deployment_records
+            WHERE TRIM(COALESCE(name, '')) != ''
+            GROUP BY app_id, LOWER(name)
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        if dup_rows:
+            for row in dup_rows:
+                logger.warning(
+                    "Duplicate deployment record name app_id=%s name_key=%r "
+                    "count=%s (UNIQUE index not applied; resolve manually)",
+                    row["app_id"],
+                    row["nkey"],
+                    row["cnt"],
+                )
+            return
+        try:
+            self._conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_deployment_records_app_name
+                ON deployment_records(app_id, name COLLATE NOCASE)
+                """
+            )
+        except sqlite3.IntegrityError as exc:
+            logger.warning(
+                "Failed to create uq_deployment_records_app_name: %s",
                 exc,
             )
 
@@ -1263,20 +1360,23 @@ class DatabaseManager:
         self,
         platform: str,
         external_id: str,
+        *,
+        app_id: int = 0,
     ) -> ModDisplayInfo | None:
-        """Locate a Mod by platform + external reference (Workshop / Nexus / repo)."""
+        """Locate a Mod by platform + game app_id + external reference."""
         plat = normalize_platform(platform)
         ext = str(external_id or "").strip()
         if not ext:
             return None
+        aid = int(app_id or 0)
         with self._lock:
             row = self._conn.execute(
                 f"""
                 SELECT {_MOD_SELECT_COLS} FROM mods
-                WHERE platform = ? AND external_id = ?
+                WHERE platform = ? AND app_id = ? AND external_id = ?
                 LIMIT 1
                 """,
-                (plat, ext),
+                (plat, aid, ext),
             ).fetchone()
         if row is None:
             return None
@@ -1298,7 +1398,7 @@ class DatabaseManager:
         Create or update platform identity fields (never writes ``.info``).
 
         Changing ``platform`` / ``external_id`` is allowed only when the new
-        ``(platform, external_id)`` pair is free (or is this same row).
+        ``(platform, app_id, external_id)`` triple is free (or is this same row).
 
         Optional ``description`` / ``preview_url`` update remote catalog text
         (used by Mod.io refresh; Steam refresh still uses ``upsert_mod``).
@@ -1346,7 +1446,7 @@ class DatabaseManager:
                 else str(row["preview_url"] or "")
             )
 
-            if plat != old_plat or ext != old_ext:
+            if plat != old_plat or ext != old_ext or new_app != int(row["app_id"] or 0):
                 if not ext:
                     raise ValueError(
                         "external_id is required when changing platform identity"
@@ -1354,15 +1454,17 @@ class DatabaseManager:
                 conflict = self._conn.execute(
                     """
                     SELECT mod_id FROM mods
-                    WHERE platform = ? AND external_id = ? AND mod_id != ?
+                    WHERE platform = ? AND app_id = ? AND external_id = ?
+                      AND mod_id != ?
                     LIMIT 1
                     """,
-                    (plat, ext, mid),
+                    (plat, new_app, ext, mid),
                 ).fetchone()
                 if conflict is not None:
                     raise ValueError(
                         f"Mod identity already exists: platform={plat} "
-                        f"external_id={ext} (mod_id={conflict['mod_id']})"
+                        f"app_id={new_app} external_id={ext} "
+                        f"(mod_id={conflict['mod_id']})"
                     )
 
             try:
@@ -1842,12 +1944,12 @@ class DatabaseManager:
         """
         Create (or reuse) a non-Steam / multi-platform Mod row.
 
-        Identity is ``(platform, external_id)``. Steam callers should keep using
+        Identity is ``(platform, app_id, external_id)``. Steam callers should keep using
         ``upsert_mod`` with Workshop ID as ``mod_id``.
 
         Non-Steam platforms require a real ``app_id`` (game context). Platform
         names such as ``GitHub`` / ``Nexus Mods`` are rejected as *game_name*.
-        Uniqueness is enforced by ``uq_mods_platform_external`` when present.
+        Uniqueness is enforced by ``uq_mods_platform_app_external`` when present.
         """
         from services.importers.importer_base import (
             MISSING_GAME_CONTEXT,
@@ -1899,7 +2001,7 @@ class DatabaseManager:
                 )
             return info
 
-        existing = self.find_mod_by_external(plat, ext)
+        existing = self.find_mod_by_external(plat, ext, app_id=resolved_app)
         if existing is not None:
             mid = int(existing.mod_id)
         else:
@@ -1915,7 +2017,7 @@ class DatabaseManager:
                 app_id=resolved_app,
             )
         except (sqlite3.IntegrityError, ValueError):
-            raced = self.find_mod_by_external(plat, ext)
+            raced = self.find_mod_by_external(plat, ext, app_id=resolved_app)
             if raced is None or int(raced.mod_id) == mid:
                 raise
             mid = int(raced.mod_id)
@@ -3030,6 +3132,329 @@ class DatabaseManager:
             self._conn.commit()
             return int(cur.rowcount or 0) > 0
 
+    # ------------------------------------------------------------------
+    # Deployment records (named Mod sets — no deploy side effects)
+    # ------------------------------------------------------------------
+
+    def create_deployment_record(
+        self,
+        app_id: int | str,
+        name: str,
+        mod_ids: Iterable[int | str],
+    ) -> DeploymentRecord:
+        """
+        Insert a named Mod set for ``app_id``.
+
+        Caller must validate that every ``mod_id`` belongs to ``app_id``.
+        Does not read or write ``mods.deploy_status``.
+        """
+        aid = int(app_id)
+        label = str(name or "").strip()
+        if aid <= 0:
+            raise ValueError("app_id must be a positive game id")
+        if not label:
+            raise ValueError("deployment record name must be non-empty")
+        ids = _normalize_mod_id_list(mod_ids)
+        now = _utc_now()
+        with self._lock:
+            game = self._conn.execute(
+                "SELECT app_id FROM games WHERE app_id = ?",
+                (aid,),
+            ).fetchone()
+            if game is None:
+                raise ValueError(f"unknown game app_id={aid}")
+            cur = self._conn.execute(
+                """
+                INSERT INTO deployment_records (app_id, name, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (aid, label, now, now),
+            )
+            record_id = int(cur.lastrowid)
+            if ids:
+                self._conn.executemany(
+                    """
+                    INSERT INTO deployment_record_items (record_id, mod_id)
+                    VALUES (?, ?)
+                    """,
+                    [(record_id, mid) for mid in ids],
+                )
+            self._conn.commit()
+            row = self._conn.execute(
+                """
+                SELECT id, app_id, name, created_at, updated_at
+                FROM deployment_records WHERE id = ?
+                """,
+                (record_id,),
+            ).fetchone()
+        assert row is not None
+        return _deployment_record_from_row(row)
+
+    def list_deployment_records(self, app_id: int | str) -> list[DeploymentRecord]:
+        """All deployment records for one game (newest updated first)."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, app_id, name, created_at, updated_at
+                FROM deployment_records
+                WHERE app_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (aid,),
+            ).fetchall()
+        return [_deployment_record_from_row(r) for r in rows]
+
+    def get_deployment_record(self, record_id: int | str) -> DeploymentRecord | None:
+        """Return one record by primary key, or None."""
+        rid = int(str(record_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, app_id, name, created_at, updated_at
+                FROM deployment_records WHERE id = ?
+                """,
+                (rid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _deployment_record_from_row(row)
+
+    def find_deployment_record_by_name(
+        self, app_id: int | str, name: str
+    ) -> DeploymentRecord | None:
+        """Find a record by per-game display name (case-insensitive)."""
+        aid = int(app_id or 0)
+        label = str(name or "").strip()
+        if aid <= 0 or not label:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, app_id, name, created_at, updated_at
+                FROM deployment_records
+                WHERE app_id = ? AND name = ? COLLATE NOCASE
+                LIMIT 1
+                """,
+                (aid, label),
+            ).fetchone()
+        if row is None:
+            return None
+        return _deployment_record_from_row(row)
+
+    def get_deployment_record_mod_ids(self, record_id: int | str) -> set[str]:
+        """Mod ID set stored in a deployment record (for Filter Context)."""
+        rid = int(str(record_id).strip())
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id FROM deployment_record_items
+                WHERE record_id = ?
+                ORDER BY mod_id
+                """,
+                (rid,),
+            ).fetchall()
+        # Normalize numeric ids so \"001\" and 1 compare equal in Filter Context.
+        out: set[str] = set()
+        for r in rows:
+            raw = str(r["mod_id"] or "").strip()
+            if raw.isdigit():
+                out.add(str(int(raw)))
+            elif raw:
+                out.add(raw)
+        return out
+
+    def update_deployment_record(
+        self,
+        record_id: int | str,
+        *,
+        name: str | None = None,
+        mod_ids: Iterable[int | str] | None = None,
+    ) -> DeploymentRecord:
+        """
+        Rename and/or replace the Mod set for an existing record.
+
+        Passing ``mod_ids`` replaces all items. Does not touch live deploy state.
+        Renames must not collide with another record for the same ``app_id``.
+        """
+        rid = int(str(record_id).strip())
+        now = _utc_now()
+        with self._lock:
+            existing = self._conn.execute(
+                """
+                SELECT id, app_id, name, created_at, updated_at
+                FROM deployment_records WHERE id = ?
+                """,
+                (rid,),
+            ).fetchone()
+            if existing is None:
+                raise LookupError(f"deployment record not found: {rid}")
+            new_name = (
+                str(existing["name"] or "")
+                if name is None
+                else str(name).strip()
+            )
+            if not new_name:
+                raise ValueError("deployment record name must be non-empty")
+            if name is not None:
+                clash = self._conn.execute(
+                    """
+                    SELECT id FROM deployment_records
+                    WHERE app_id = ? AND name = ? COLLATE NOCASE AND id != ?
+                    LIMIT 1
+                    """,
+                    (int(existing["app_id"]), new_name, rid),
+                ).fetchone()
+                if clash is not None:
+                    raise ValueError(
+                        f"deployment record name already exists for this game: {new_name!r}"
+                    )
+            self._conn.execute(
+                """
+                UPDATE deployment_records
+                SET name = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (new_name, now, rid),
+            )
+            if mod_ids is not None:
+                ids = _normalize_mod_id_list(mod_ids)
+                self._conn.execute(
+                    "DELETE FROM deployment_record_items WHERE record_id = ?",
+                    (rid,),
+                )
+                if ids:
+                    self._conn.executemany(
+                        """
+                        INSERT INTO deployment_record_items (record_id, mod_id)
+                        VALUES (?, ?)
+                        """,
+                        [(rid, mid) for mid in ids],
+                    )
+            self._conn.commit()
+            row = self._conn.execute(
+                """
+                SELECT id, app_id, name, created_at, updated_at
+                FROM deployment_records WHERE id = ?
+                """,
+                (rid,),
+            ).fetchone()
+        assert row is not None
+        return _deployment_record_from_row(row)
+
+    def delete_deployment_record(self, record_id: int | str) -> bool:
+        """
+        Delete a record and its items.
+
+        Does not delete ``mods`` rows or change ``deploy_status``.
+        """
+        rid = int(str(record_id).strip())
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM deployment_record_items WHERE record_id = ?",
+                (rid,),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM deployment_records WHERE id = ?",
+                (rid,),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) > 0
+
+    def list_deployed_mod_ids_for_app(self, app_id: int | str) -> list[str]:
+        """Mod IDs with ``deploy_status=deployed`` for one game (read-only)."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id FROM mods
+                WHERE app_id = ? AND deploy_status = ?
+                ORDER BY mod_id
+                """,
+                (aid, DEPLOY_STATUS_DEPLOYED),
+            ).fetchall()
+        return [str(r["mod_id"]) for r in rows]
+
+    def list_deployed_mod_ids_for_library_game(
+        self,
+        app_id: int | str,
+        *,
+        game_folder: str | None = None,
+        library_root: str | Path | None = None,
+    ) -> list[str]:
+        """
+        Deployed Mod IDs as the Library shows them for one game.
+
+        Matches Library card membership (folder under the game directory), not
+        ``mods.app_id``. Mods with ``app_id=0`` under the game folder are included.
+
+        Fallback: when ``last_known_path`` is empty, still include rows whose
+        ``app_id`` equals the game (legacy / test rows without a path).
+        """
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return []
+        folder = str(game_folder or "").strip()
+        if not folder:
+            game = self.get_game(aid)
+            if game is not None:
+                folder = str(game.folder_name or "").strip() or sanitize_folder_name(
+                    game.name, fallback=f"App_{aid}"
+                )
+        root = Path(library_root) if library_root is not None else None
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id, app_id, last_known_path FROM mods
+                WHERE deploy_status = ?
+                ORDER BY mod_id
+                """,
+                (DEPLOY_STATUS_DEPLOYED,),
+            ).fetchall()
+        out: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            mid = str(row["mod_id"] or "").strip()
+            if not mid:
+                continue
+            if mid.isdigit():
+                mid = str(int(mid))
+            lkp = str(row["last_known_path"] or "").strip()
+            include = False
+            if folder and lkp and _last_known_path_in_game_folder(
+                lkp, folder, library_root=root
+            ):
+                include = True
+            elif not lkp and int(row["app_id"] or 0) == aid:
+                # Path-less rows: keep Steam-bound / unit-test mods.
+                include = True
+            if include and mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+        return out
+
+    def get_mods_app_ids(
+        self, mod_ids: Iterable[int | str]
+    ) -> dict[str, int]:
+        """Map ``mod_id`` → ``app_id`` for the given ids (missing ids omitted)."""
+        ids = _normalize_mod_id_list(mod_ids)
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT mod_id, app_id FROM mods
+                WHERE mod_id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+        return {str(r["mod_id"]): int(r["app_id"] or 0) for r in rows}
+
     def set_mod_category(self, mod_id: int | str, category: str) -> None:
         """Replace all category tags with a single label (empty clears)."""
         label = str(category or "").strip()
@@ -3062,6 +3487,10 @@ class DatabaseManager:
                 WHERE source_mod_id = ? OR target_mod_id = ?
                 """,
                 (mid, mid),
+            )
+            self._conn.execute(
+                "DELETE FROM deployment_record_items WHERE mod_id = ?",
+                (mid,),
             )
             cur = self._conn.execute("DELETE FROM mods WHERE mod_id = ?", (mid,))
             self._conn.commit()
@@ -3535,7 +3964,7 @@ class DatabaseManager:
         mid = int(mod_id)
         is_steam_range = mid > 0 and mid < NON_STEAM_MOD_ID_BASE
         # Always set a unique provisional external_id (= mod_id text) so
-        # UNIQUE(platform, external_id) is not violated by empty stubs.
+        # UNIQUE(platform, app_id, external_id) is not violated by empty stubs.
         self._conn.execute(
             """
             INSERT INTO mods (
@@ -3556,6 +3985,60 @@ class DatabaseManager:
                 now,
             ),
         )
+
+
+def _normalize_mod_id_list(mod_ids: Iterable[int | str]) -> list[int]:
+    """Deduped positive integer mod ids preserving first-seen order."""
+    seen: set[int] = set()
+    out: list[int] = []
+    for raw in mod_ids or ():
+        text = str(raw).strip()
+        if not text.isdigit():
+            raise ValueError(f"invalid mod_id: {raw!r}")
+        mid = int(text)
+        if mid <= 0:
+            raise ValueError(f"invalid mod_id: {raw!r}")
+        if mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+    return out
+
+
+def _last_known_path_in_game_folder(
+    last_known_path: str,
+    game_folder: str,
+    *,
+    library_root: Path | None = None,
+) -> bool:
+    """True when ``…/<game_folder>/<mod>`` matches Library game membership."""
+    folder = str(game_folder or "").strip()
+    lkp = str(last_known_path or "").strip()
+    if not folder or not lkp:
+        return False
+    path = Path(lkp)
+    try:
+        if library_root is not None:
+            rel = path.resolve().relative_to(Path(library_root).resolve())
+            parts = rel.parts
+            return bool(parts) and parts[0] == folder
+    except (ValueError, OSError):
+        pass
+    try:
+        parts = path.parts
+    except Exception:  # noqa: BLE001
+        return path.parent.name == folder
+    return folder in parts
+
+
+def _deployment_record_from_row(row: sqlite3.Row) -> DeploymentRecord:
+    return DeploymentRecord(
+        id=int(row["id"]),
+        app_id=int(row["app_id"]),
+        name=str(row["name"] or ""),
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+    )
 
 
 def _game_from_row(row: sqlite3.Row) -> GameInfo:

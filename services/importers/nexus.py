@@ -149,6 +149,7 @@ class NexusImporter(ModImporter):
             platform=PLATFORM_NEXUS,
             external_id=ext,
             source_url=url,
+            app_id=int(app_id or ctx.game_id or 0),
         )
         if dup is not None:
             return dup

@@ -135,7 +135,7 @@ def test_github_register(db: DatabaseManager) -> None:
     )
     assert info.platform == PLATFORM_GITHUB
     assert info.external_id == "owner/repo"
-    found = db.find_mod_by_external(PLATFORM_GITHUB, "owner/repo")
+    found = db.find_mod_by_external(PLATFORM_GITHUB, "owner/repo", app_id=1623730)
     assert found is not None
     assert found.mod_id == info.mod_id
 

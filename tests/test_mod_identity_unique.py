@@ -1,4 +1,4 @@
-"""Mod identity uniqueness: (platform, external_id) UNIQUE + register guards."""
+"""Mod identity uniqueness: (platform, app_id, external_id) UNIQUE + register guards."""
 
 from __future__ import annotations
 
@@ -24,6 +24,12 @@ def db(tmp_path: Path) -> DatabaseManager:
     manager.upsert_game(
         GameInfo(app_id=1623730, name="Palworld", folder_name="Palworld")
     )
+    manager.upsert_game(
+        GameInfo(app_id=413150, name="Stardew Valley", folder_name="Stardew Valley")
+    )
+    manager.upsert_game(
+        GameInfo(app_id=990001, name="Baldurs Gate 3", folder_name="Baldurs Gate 3")
+    )
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -32,12 +38,13 @@ def db(tmp_path: Path) -> DatabaseManager:
 def test_unique_index_created(db: DatabaseManager) -> None:
     rows = db._conn.execute("PRAGMA index_list(mods)").fetchall()
     names = {str(r["name"]) for r in rows}
-    assert "uq_mods_platform_external" in names
+    assert "uq_mods_platform_app_external" in names
+    assert "uq_mods_platform_external" not in names
     info = db._conn.execute(
-        "PRAGMA index_info(uq_mods_platform_external)"
+        "PRAGMA index_info(uq_mods_platform_app_external)"
     ).fetchall()
     cols = [str(r["name"]) for r in info]
-    assert cols == ["platform", "external_id"]
+    assert cols == ["platform", "app_id", "external_id"]
 
 
 def test_same_nexus_id_twice_reuses_row(db: DatabaseManager) -> None:
@@ -60,10 +67,39 @@ def test_same_nexus_id_twice_reuses_row(db: DatabaseManager) -> None:
     assert first.mod_id == second.mod_id
     assert second.steam_name == "Pal Analyzer v2"
     count = db._conn.execute(
-        "SELECT COUNT(*) AS c FROM mods WHERE platform=? AND external_id=?",
-        (PLATFORM_NEXUS, "336"),
+        """
+        SELECT COUNT(*) AS c FROM mods
+        WHERE platform=? AND app_id=? AND external_id=?
+        """,
+        (PLATFORM_NEXUS, 1623730, "336"),
     ).fetchone()["c"]
     assert int(count) == 1
+
+
+def test_same_nexus_id_different_games_coexist(db: DatabaseManager) -> None:
+    stardew = db.register_external_mod(
+        platform=PLATFORM_NEXUS,
+        external_id="6183",
+        source_url="https://www.nexusmods.com/stardewvalley/mods/6183",
+        title="Train Station",
+        app_id=413150,
+        game_name="Stardew Valley",
+    )
+    bg3 = db.register_external_mod(
+        platform=PLATFORM_NEXUS,
+        external_id="6183",
+        source_url="https://www.nexusmods.com/baldursgate3/mods/6183",
+        title="Sit This One Out 2",
+        app_id=990001,
+        game_name="Baldurs Gate 3",
+    )
+    assert stardew.mod_id != bg3.mod_id
+    assert db.find_mod_by_external(PLATFORM_NEXUS, "6183", app_id=413150) is not None
+    assert db.find_mod_by_external(PLATFORM_NEXUS, "6183", app_id=990001) is not None
+    assert (
+        db.find_mod_by_external(PLATFORM_NEXUS, "6183", app_id=413150).mod_id
+        == stardew.mod_id
+    )
 
 
 def test_concurrent_double_insert_recovers(db: DatabaseManager) -> None:
@@ -95,20 +131,17 @@ def test_concurrent_double_insert_recovers(db: DatabaseManager) -> None:
             app_id=1623730,
         )
 
-    # register_external_mod recovers via find + Integrity/ValueError path
     calls = {"n": 0}
     real_find = db.find_mod_by_external
 
-    def flaky_find(platform: str, external_id: str):
+    def flaky_find(platform: str, external_id: str, *, app_id: int = 0):
         calls["n"] += 1
-        # First lookup (pre-insert) pretends missing; later lookups succeed.
         if calls["n"] == 1:
             return None
-        return real_find(platform, external_id)
+        return real_find(platform, external_id, app_id=app_id)
 
     db.find_mod_by_external = flaky_find  # type: ignore[method-assign]
     try:
-        # Force a fresh allocate path while identity already exists under `a`
         result = db.register_external_mod(
             platform=PLATFORM_NEXUS,
             external_id="999",
@@ -122,8 +155,11 @@ def test_concurrent_double_insert_recovers(db: DatabaseManager) -> None:
 
     assert result.mod_id == str(a)
     count = db._conn.execute(
-        "SELECT COUNT(*) AS c FROM mods WHERE platform=? AND external_id=?",
-        (PLATFORM_NEXUS, "999"),
+        """
+        SELECT COUNT(*) AS c FROM mods
+        WHERE platform=? AND app_id=? AND external_id=?
+        """,
+        (PLATFORM_NEXUS, 1623730, "999"),
     ).fetchone()["c"]
     assert int(count) == 1
 
@@ -168,7 +204,6 @@ def test_forbid_non_steam_low_mod_id(db: DatabaseManager) -> None:
             game_name="Palworld",
             mod_id=12345,
         )
-    # Explicit high id still allowed
     ok = db.register_external_mod(
         platform=PLATFORM_NEXUS,
         external_id="78",
@@ -201,7 +236,6 @@ def test_update_platform_identity_conflict(db: DatabaseManager) -> None:
             platform=PLATFORM_NEXUS,
             external_id="1",
         )
-    # Unchanged identity still ok
     again = db.update_mod_platform_info(
         a.mod_id,
         platform=PLATFORM_NEXUS,
@@ -211,7 +245,9 @@ def test_update_platform_identity_conflict(db: DatabaseManager) -> None:
     assert again.steam_name == "A2"
 
 
-def test_duplicate_warning_skips_unique_index(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_duplicate_warning_skips_unique_index(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     import logging
     import sqlite3
 
@@ -242,8 +278,8 @@ def test_duplicate_warning_skips_unique_index(tmp_path: Path, caplog: pytest.Log
         );
         INSERT INTO mods(mod_id, app_id, title, platform, external_id, updated_at)
         VALUES
-          (9000000000000000, 0, 'A', 'nexus', 'dup', 't'),
-          (9000000000000001, 0, 'B', 'nexus', 'dup', 't');
+          (9000000000000000, 1623730, 'A', 'nexus', 'dup', 't'),
+          (9000000000000001, 1623730, 'B', 'nexus', 'dup', 't');
         """
     )
     conn.commit()
@@ -257,6 +293,6 @@ def test_duplicate_warning_skips_unique_index(tmp_path: Path, caplog: pytest.Log
         str(r["name"])
         for r in manager._conn.execute("PRAGMA index_list(mods)").fetchall()
     }
-    assert "uq_mods_platform_external" not in names
+    assert "uq_mods_platform_app_external" not in names
     manager.close()
     DatabaseManager.reset_instance()

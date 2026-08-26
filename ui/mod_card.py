@@ -171,6 +171,7 @@ class ModCardWidget(QFrame):
         self.managed_path = Path(managed_path)
         self.metadata = metadata
         self._card_data = card_data
+        self._record_relative = None
         self._selected = False
         self._category_options: list[str] = []
         self.setFixedWidth(CARD_WIDTH)
@@ -303,6 +304,7 @@ class ModCardWidget(QFrame):
 
         self.missing_badge = _make_footer_chip("modMissingContentBadge")
         self.missing_badge.setText("内容缺失")
+        self.record_badge = _make_footer_chip("modRecordStatusChip")
         self.invalid_badge = _make_footer_chip("modFooterStatusChip")
         self.disabled_badge = _make_footer_chip("modFooterStatusChip")
         self.abandoned_badge = _make_footer_chip("modFooterStatusChip")
@@ -401,6 +403,7 @@ class ModCardWidget(QFrame):
         self.metadata = metadata
         if card_data is not None:
             self._card_data = card_data
+        self.clear_record_overlay()
         self.refresh_display()
         if cover_changed:
             self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
@@ -541,6 +544,9 @@ class ModCardWidget(QFrame):
 
     def refresh_display(self) -> None:
         """Reload title / badges / tooltip from local metadata + SQLite."""
+        # Never inherit another mod's relative overlay across refreshes.
+        # Library re-applies overlays only while FILTER_DEPLOYMENT_RECORD.
+        self.clear_record_overlay()
         self._apply_titles()
         self._hide_cover_state_overlay()
         self._render_category_badge()
@@ -549,8 +555,24 @@ class ModCardWidget(QFrame):
         self._render_offline_badge()
         self._render_relation_badge()
         self._render_missing_content_badge()
+        self._render_record_badge()
         self._render_footer_status_chips()
         self._render_tooltip()
+
+    def clear_record_overlay(self) -> None:
+        """Drop memory-only relative flags; hide badge. Never writes DB."""
+        self._record_relative = None
+        self._render_record_badge()
+        self._sync_status_container_visibility()
+
+    def set_record_relative_status(self, status) -> None:
+        """Memory-only overlay; ``None`` clears (non-record filters)."""
+        if status is None:
+            self.clear_record_overlay()
+            return
+        self._record_relative = status
+        self._render_record_badge()
+        self._sync_status_container_visibility()
 
     # Back-compat aliases (older tests / callers).
     def _apply_user_tag_badges(self) -> None:
@@ -897,6 +919,7 @@ class ModCardWidget(QFrame):
             not chip.isHidden()
             for chip in (
                 self.missing_badge,
+                self.record_badge,
                 self.invalid_badge,
                 self.disabled_badge,
                 self.abandoned_badge,
@@ -906,6 +929,64 @@ class ModCardWidget(QFrame):
         self.status_container.setVisible(any_chip)
         if any_chip:
             self.status_container.adjustSize()
+
+    def _sync_status_container_visibility(self) -> None:
+        """Show footer chip row when any chip is visible."""
+        any_chip = any(
+            not chip.isHidden()
+            for chip in (
+                self.missing_badge,
+                self.record_badge,
+                self.invalid_badge,
+                self.disabled_badge,
+                self.abandoned_badge,
+                self.favorite_badge,
+            )
+        )
+        self.status_container.setVisible(any_chip)
+        if any_chip:
+            self.status_container.adjustSize()
+
+    def _render_record_badge(self) -> None:
+        """Record Context overlay — hidden outside record mode."""
+        from ui.library_query import (
+            RECORD_STATUS_LABEL_EXTRA,
+            RECORD_STATUS_LABEL_MISSING,
+            record_relative_badge_label,
+        )
+
+        label = record_relative_badge_label(getattr(self, "_record_relative", None))
+        if not label:
+            self.record_badge.hide()
+            self.record_badge.clear()
+            self.record_badge.setToolTip("")
+            return
+        self.record_badge.setText(label)
+        if label == RECORD_STATUS_LABEL_MISSING:
+            self.record_badge.setToolTip("已记录但当前未部署")
+            self._style_footer_chip(
+                self.record_badge,
+                bg=ACCENT_WARNING_BG,
+                fg=ACCENT_WARNING,
+                border=ACCENT_WARNING_BORDER,
+                object_name="modRecordStatusChip",
+            )
+        elif label == RECORD_STATUS_LABEL_EXTRA:
+            self.record_badge.setToolTip("当前已部署但不在本记录中")
+            self._style_footer_chip(
+                self.record_badge,
+                bg=ACCENT_ERROR_BG,
+                fg=ACCENT_ERROR,
+                border=ACCENT_ERROR_BORDER,
+                object_name="modRecordStatusChip",
+            )
+        else:
+            self.record_badge.hide()
+            self.record_badge.clear()
+            self.record_badge.setToolTip("")
+            return
+        self.record_badge.adjustSize()
+        self.record_badge.show()
 
     def _render_category_badge(self) -> None:
         mid = self._mod_id()

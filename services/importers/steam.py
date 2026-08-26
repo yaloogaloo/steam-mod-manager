@@ -86,6 +86,7 @@ class SteamImporter(ModImporter):
             workshop_id=mid,
             external_id=mid,
             source_url=url,
+            app_id=int(resolved_app_id or 0),
         )
         if dup is not None:
             return dup

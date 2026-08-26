@@ -677,6 +677,7 @@ class ArchiveImporter(ModImporter):
                     workshop_id=probe,
                     external_id=probe,
                     source_url=steam_workshop_url(probe),
+                    app_id=int(app_id or 0),
                 )
                 if dup is not None:
                     return dup
@@ -753,6 +754,7 @@ class ArchiveImporter(ModImporter):
                     platform=PLATFORM_GITHUB,
                     external_id=repo,
                     source_url=canonical,
+                    app_id=int(app_id or 0),
                 )
                 if dup is not None:
                     return dup
@@ -765,6 +767,7 @@ class ArchiveImporter(ModImporter):
                 platform=PLATFORM_MODIO,
                 external_id=ext,
                 source_url=str(modio_url or "").strip(),
+                app_id=int(app_id or 0),
             )
             if dup is not None:
                 return dup
@@ -775,6 +778,7 @@ class ArchiveImporter(ModImporter):
                     db,
                     platform=PLATFORM_OTHER,
                     source_url=url,
+                    app_id=int(app_id or 0),
                 )
                 if dup is not None:
                     return dup
@@ -786,6 +790,7 @@ class ArchiveImporter(ModImporter):
                 platform=PLATFORM_NEXUS,
                 external_id=nid,
                 source_url=raw_url,
+                app_id=int(app_id or 0),
             )
             if dup is not None:
                 return dup

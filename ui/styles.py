@@ -706,6 +706,25 @@ QListWidget#gameList {{
     outline: none;
 }}
 
+QToolButton#libraryDeploymentRecordButton {{
+    background-color: {BACKGROUND_SECTION};
+    color: {TEXT_BODY};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+}}
+
+QToolButton#libraryDeploymentRecordButton:hover {{
+    border-color: {ACCENT_PRIMARY};
+    color: {ACCENT_PRIMARY};
+}}
+
+QToolButton#libraryDeploymentRecordButton::menu-button {{
+    border: none;
+    width: 0px;
+}}
+
 QListWidget#gameList::item {{
     padding: 2px 0;
     border-radius: 6px;

@@ -75,9 +75,14 @@ def resolve_existing_mod_id(data: dict[str, Any] | None) -> str:
         _text(payload.get("source_type") or payload.get("platform"))
     )
     external = _text(payload.get("external_id"))
+    app_id = 0
+    try:
+        app_id = int(payload.get("app_id") or 0)
+    except (TypeError, ValueError):
+        app_id = 0
     if platform and external:
         try:
-            info = db.find_mod_by_external(platform, external)
+            info = db.find_mod_by_external(platform, external, app_id=app_id)
             if info is not None and str(info.mod_id).isdigit():
                 return str(info.mod_id)
         except Exception:  # noqa: BLE001

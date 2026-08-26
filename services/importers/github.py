@@ -99,6 +99,7 @@ class GithubImporter(ModImporter):
             platform=PLATFORM_GITHUB,
             external_id=external_id,
             source_url=canonical,
+            app_id=int(ctx.game_id or 0),
         )
         if dup is not None:
             return dup
