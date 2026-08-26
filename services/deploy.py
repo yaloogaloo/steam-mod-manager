@@ -24,7 +24,9 @@ from services.deploy_rules import (
     DEPLOY_TYPE_FOLDER_COPY,
     DEPLOY_TYPE_PALWORLD_PAK,
     DEPLOY_TYPE_SLAY_THE_SPIRE,
+    DEPLOY_TYPE_STARDEW_VALLEY,
     PALWORLD_APP_ID,
+    STARDEW_VALLEY_APP_ID,
     DeployContext,
     delete_manifest,
     get_strategy,
@@ -229,11 +231,33 @@ def collect_deploy_archives(
     return archives
 
 
+def _preserve_extract_layout_for_mod(
+    mod_id: int | str,
+    *,
+    db: DatabaseManager | None = None,
+) -> bool:
+    """
+    True when archive extract must keep wrapper folders (Stardew SMAPI).
+
+    Generic ``find_mod_root`` strips a single outer folder, which would break
+    Stardew case-2 / multi-mod layout detection via ``manifest.json``.
+    """
+    try:
+        mid = str(mod_id).strip()
+        database = db if db is not None else get_db()
+        meta = database.get_mod(mid) if mid.isdigit() else None
+        app_id = int(getattr(meta, "app_id", 0) or 0) if meta else 0
+    except Exception:  # noqa: BLE001
+        return False
+    return app_id == STARDEW_VALLEY_APP_ID
+
+
 def _build_extracted_deploy_content(
     managed: Path,
     archive_paths: list[Path],
     *,
     include_other_plain: bool,
+    preserve_extract_layout: bool = False,
 ) -> tuple[Path, Path]:
     """Extract archives (+ optional loose files) into a temp deploy payload."""
     from services.importers.archive import (
@@ -251,7 +275,10 @@ def _build_extracted_deploy_content(
             extract_dir = extract_archive(
                 archive, dest_dir=stage / f"ex_{uuid.uuid4().hex[:8]}"
             )
-            root = find_mod_root(extract_dir) or extract_dir
+            if preserve_extract_layout:
+                root = extract_dir
+            else:
+                root = find_mod_root(extract_dir) or extract_dir
             _merge_tree(root, content)
         if include_other_plain:
             for path in _iter_plain_managed_files(managed, skip_archives=True):
@@ -298,12 +325,16 @@ def prepare_deploy_content(
 
     database = db if db is not None else get_db()
     managed = Path(managed_source)
+    preserve_layout = _preserve_extract_layout_for_mod(mod_id, db=database)
     bundle = database.get_mod_files(mod_id)
     if not bundle.files:
         sniffed = _sniff_managed_archives(managed)
         if sniffed:
             content, stage = _build_extracted_deploy_content(
-                managed, sniffed, include_other_plain=True
+                managed,
+                sniffed,
+                include_other_plain=True,
+                preserve_extract_layout=preserve_layout,
             )
             return content, None, stage
         return managed, None, None
@@ -319,7 +350,10 @@ def prepare_deploy_content(
         sniffed = _sniff_managed_archives(managed)
         if sniffed:
             content, stage = _build_extracted_deploy_content(
-                managed, sniffed, include_other_plain=True
+                managed,
+                sniffed,
+                include_other_plain=True,
+                preserve_extract_layout=preserve_layout,
             )
             return content, None, stage
         return managed, None, None
@@ -347,7 +381,10 @@ def prepare_deploy_content(
                 cleanup_import_cache(stage)
                 return managed, None, None
             extract_dir = extract_archive(archive, dest_dir=stage / f"ex_{uuid.uuid4().hex[:8]}")
-            root = find_mod_root(extract_dir) or extract_dir
+            if preserve_layout:
+                root = extract_dir
+            else:
+                root = find_mod_root(extract_dir) or extract_dir
             _merge_tree(root, content)
 
         for entry in plain_entries:
@@ -637,6 +674,14 @@ class ModDeployer:
                     return None, {
                         "success": False,
                         "error": "请先配置游戏安装目录",
+                        "mod_id": mid,
+                    }, None
+            # Stardew Valley: SMAPI mods land under configured Mods (mod_path).
+            if deploy_type == DEPLOY_TYPE_STARDEW_VALLEY:
+                if not str(cfg.mod_path or "").strip():
+                    return None, {
+                        "success": False,
+                        "error": "请先配置游戏部署目录",
                         "mod_id": mid,
                     }, None
             if (

@@ -467,10 +467,12 @@ class ModCardWidget(QFrame):
         menu.addSeparator()
 
         cat_menu = menu.addMenu("设置分类")
-        act_clear = cat_menu.addAction("（未分类）")
-        act_clear.triggered.connect(
-            lambda: self.set_category_requested.emit("")
-        )
+        # Virtual fallback so the submenu is never empty when no categories exist.
+        if not self._category_options:
+            act_clear = cat_menu.addAction("（未分类）")
+            act_clear.triggered.connect(
+                lambda: self.set_category_requested.emit("")
+            )
         seen: set[str] = set()
         for label in self._category_options:
             if not label or label in seen:

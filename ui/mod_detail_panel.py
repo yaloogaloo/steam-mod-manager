@@ -2549,7 +2549,6 @@ class ModDetailPanel(QWidget):
             err = (detail or "").strip() or "元数据刷新失败"
             btn.setToolTip(err)
             btn.setEnabled(False)
-            self._show_status_banner(f"刷新失败：\n{err}", tone="error")
             self._schedule_refresh_button_idle(restore_ms)
             return
 
@@ -2638,11 +2637,6 @@ class ModDetailPanel(QWidget):
             self.metadata_saved.emit(path)
             self.tags_saved.emit(path)
         if result.success or result.skipped:
-            msg = str(getattr(result, "message", "") or "").strip()
-            if msg:
-                self._show_status_banner(msg, tone="success")
-            else:
-                self._hide_status_banner()
             self._set_refresh_button_state("success")
             self._set_op_status("✓ 刷新完成", tone="success", auto_clear_ms=1800)
             return
@@ -2707,7 +2701,6 @@ class ModDetailPanel(QWidget):
                 restore_ms=2500,
             )
         else:
-            self._hide_status_banner()
             self._set_refresh_button_state("success")
 
     def _on_metadata_batch_failed(self, error: str) -> None:

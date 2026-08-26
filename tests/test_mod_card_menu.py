@@ -60,6 +60,13 @@ def _visible_toplevel_menus() -> list[QMenu]:
     ]
 
 
+def _category_submenu_labels(menu: QMenu) -> list[str]:
+    cat_action = next(a for a in menu.actions() if a.text() == "设置分类")
+    cat_menu = cat_action.menu()
+    assert cat_menu is not None
+    return [a.text() for a in cat_menu.actions() if not a.isSeparator()]
+
+
 def test_context_menu_parent_is_card(qapp: QApplication, tmp_path: Path) -> None:
     mod = tmp_path / "Game" / "MenuMod"
     (mod / ".info").mkdir(parents=True)
@@ -81,6 +88,32 @@ def test_context_menu_parent_is_card(qapp: QApplication, tmp_path: Path) -> None
         "收藏",
         "设置分类",
     ]
+    menu.deleteLater()
+    qapp.processEvents()
+
+
+def test_set_category_menu_shows_uncategorized_when_no_categories(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    mod = tmp_path / "Game" / "NoCats"
+    (mod / ".info").mkdir(parents=True)
+    card = ModCardWidget(mod, parent=None)
+    card.set_category_options([])
+    menu = card._build_context_menu()
+    assert _category_submenu_labels(menu) == ["（未分类）"]
+    menu.deleteLater()
+    qapp.processEvents()
+
+
+def test_set_category_menu_hides_uncategorized_when_categories_exist(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    mod = tmp_path / "Game" / "HasCats"
+    (mod / ".info").mkdir(parents=True)
+    card = ModCardWidget(mod, parent=None)
+    card.set_category_options(["游戏增强", "美化", "工具"])
+    menu = card._build_context_menu()
+    assert _category_submenu_labels(menu) == ["游戏增强", "美化", "工具"]
     menu.deleteLater()
     qapp.processEvents()
 
