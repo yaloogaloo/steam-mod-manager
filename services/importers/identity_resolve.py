@@ -224,3 +224,51 @@ def require_identity_for_write(
         external_id=str(identity.external_id or ""),
         source_url=str(identity.source_url or ""),
     )
+
+
+def apply_directory_import_identity(
+    identity: ImportIdentity,
+    *,
+    folder: str | Path,
+    platform: str = "",
+) -> ImportIdentity:
+    """
+    Unify directory-import identity for batch and single flows.
+
+    Priority:
+      1. Official ID / URL already on *identity* (unchanged)
+      2. Else use ``folder.name`` as ``external_id`` (and Steam workshop id
+         when the folder name is numeric) — same key batch mode already uses
+
+    Archives / non-directory imports must not call this helper.
+    Does not invent platform URLs.
+    """
+    plat = normalize_platform(platform or identity.platform)
+    out = ImportIdentity(
+        platform=plat,
+        external_id=str(identity.external_id or "").strip(),
+        source_url=str(identity.source_url or "").strip(),
+        workshop_id=str(identity.workshop_id or "").strip(),
+        title=str(identity.title or "").strip(),
+    )
+    folder_name = Path(folder).name.strip()
+    if not folder_name:
+        return out
+
+    # Priority 1 — keep resolved official identity.
+    if out.has_official_identity():
+        return out
+
+    # Priority 2 — directory name as external identity (matches batch).
+    # Overwrite non-official ids (e.g. parent-folder params leaked into batch).
+    if plat == PLATFORM_STEAM:
+        if folder_name.isdigit():
+            from core.mod_platform import steam_workshop_url
+
+            out.workshop_id = folder_name
+            out.external_id = folder_name
+            out.source_url = steam_workshop_url(folder_name)
+        return out
+
+    out.external_id = folder_name
+    return out

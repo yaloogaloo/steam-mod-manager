@@ -87,7 +87,7 @@ def test_steam_empty_bundle_deploy_unchanged(tmp_path: Path, db: DatabaseManager
 
     mod = library / "SomeGame" / "SteamMod"
     mod.mkdir(parents=True)
-    (mod / "content.pak").write_bytes(b"PAK")
+    (mod / "content.dll").write_bytes(b"MZ")
     info = mod / INFO_DIR_NAME
     info.mkdir()
     (info / METADATA_FILENAME).write_text(
@@ -99,4 +99,4 @@ def test_steam_empty_bundle_deploy_unchanged(tmp_path: Path, db: DatabaseManager
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("8802")
     assert result["success"] is True, result
-    assert (install_mods / "SteamMod" / "content.pak").is_file()
+    assert (install_mods / "SteamMod" / "content.dll").is_file()

@@ -329,6 +329,51 @@ def install_path_missing(install_path: str | None) -> bool:
     return not Path(raw).expanduser().is_dir()
 
 
+def resolve_game_install_path(
+    *,
+    mod_id: str | int | None = None,
+    app_id: int | str | None = None,
+    db: DatabaseManager | None = None,
+) -> str:
+    """
+    Resolve ``games.install_path`` for a Mod.
+
+    Flow (no game-name / AppID special cases):
+      known app_id / mod.app_id → games row → install_path
+
+    Returns ``""`` when the game cannot be resolved or install_path is unset.
+    """
+    database = db if db is not None else get_db()
+    aid = 0
+    try:
+        aid = int(app_id or 0)
+    except (TypeError, ValueError):
+        aid = 0
+
+    mid = str(mod_id or "").strip()
+    if not aid and mid.isdigit():
+        try:
+            info = database.get_mod_display_info(mid)
+        except Exception:  # noqa: BLE001
+            info = None
+        if info is not None:
+            try:
+                aid = int(info.app_id or 0)
+            except (TypeError, ValueError):
+                aid = 0
+
+    if not aid:
+        return ""
+
+    try:
+        cfg = database.get_game_deploy_config(aid)
+    except Exception:  # noqa: BLE001
+        return ""
+    if cfg is None:
+        return ""
+    return str(cfg.install_path or "").strip()
+
+
 def enrich_manifest_fingerprint(
     manifest: DeployManifest,
     *,

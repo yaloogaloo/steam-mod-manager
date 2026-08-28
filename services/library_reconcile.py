@@ -85,16 +85,15 @@ def _folder_has_metadata(folder: Path) -> bool:
     return False
 
 
-def _folder_missing_content(folder: Path) -> bool:
-    try:
-        for child in folder.iterdir():
-            if child.name in {INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, ".cache"}:
-                continue
-            if child.is_file() or child.is_dir():
-                return False
-    except OSError:
-        return True
-    return True
+def _folder_missing_content(
+    folder: Path,
+    *,
+    mod_id: str | None = None,
+    db=None,
+) -> bool:
+    from services.local_file_index import has_local_mod_payload
+
+    return not has_local_mod_payload(folder, mod_id=mod_id, db=db)
 
 
 def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult:
@@ -144,11 +143,17 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
 
         prev = db.get_mod_backup_row(mod_id)
         prev_path = str((prev or {}).get("last_known_path") or "").strip()
-        renamed = bool(prev_path and Path(prev_path) != folder)
-        if renamed and prev_path and Path(prev_path).is_dir() and Path(prev_path) != folder:
-            pass
-        elif renamed:
+        from services.path_lifecycle import detect_path_drift
+
+        drift = detect_path_drift(mod_id, folder, db=db)
+        renamed = drift is not None and drift.success
+        if renamed:
             result.renamed += 1
+        elif prev_path and Path(prev_path) != folder:
+            if prev_path and Path(prev_path).is_dir() and Path(prev_path) != folder:
+                pass
+            else:
+                result.renamed += 1
 
         title = str(payload.get("title") or payload.get("display_name") or folder.name)
         payload_source = str(
@@ -342,6 +347,18 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                     )
     except Exception as exc:  # noqa: BLE001
         logger.warning("orphan backup scan failed: %s", exc)
+
+    # Recover interrupted deploy transactions (backup_done / prepared leftovers).
+    try:
+        from services.deploy import ModDeployer
+
+        recovery = ModDeployer(library_root=root, db=db).recover_stale_deploy_transactions()
+        if recovery:
+            logger.info(
+                "reconcile_library deploy-txn recovery count=%s", len(recovery)
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("deploy transaction recovery failed: %s", exc)
 
     logger.info(
         "reconcile_library done scanned=%s synced=%s imported=%s missing=%s "

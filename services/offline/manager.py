@@ -118,15 +118,31 @@ class OfflineManager:
         """
         mid = str(mod_id).strip()
         info = self.db.get_mod_display_info(mid)
-        plat = normalize_platform(
-            platform
-            if platform is not None
-            else (info.platform if info is not None else PLATFORM_STEAM)
-        )
+        if info is not None:
+            plat = normalize_platform(info.platform)
+        else:
+            plat = normalize_platform(
+                platform if platform is not None else PLATFORM_STEAM
+            )
         if info is None and plat != PLATFORM_STEAM:
             # Steam can still archive from filesystem metadata alone.
             if plat in (PLATFORM_NEXUS, PLATFORM_GITHUB, PLATFORM_MODIO):
                 raise ValueError(f"Mod not found: {mid}")
+
+        if managed_path is not None and mid.isdigit():
+            from services.path_lifecycle import resolve_managed_folder
+
+            resolved = resolve_managed_folder(
+                mid,
+                hint_path=managed_path,
+                db=self.db,
+            )
+            if resolved.path is not None and resolved.path.is_dir():
+                managed_path = resolved.path
+            else:
+                healed = resolve_managed_folder(mid, db=self.db)
+                if healed.path is not None and healed.path.is_dir():
+                    managed_path = healed.path
 
         provider = self.get_provider_for_platform(plat)
         result = provider.update_offline_page(

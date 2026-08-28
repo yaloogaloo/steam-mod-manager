@@ -13,7 +13,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.db_manager import PLATFORM_GITHUB, PLATFORM_NEXUS, PLATFORM_STEAM, DatabaseManager
-from core.mod_platform import PLATFORM_OTHER
+from core.mod_platform import PLATFORM_MODIO, PLATFORM_OTHER
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, ModFileManager
 from services.offline.base import OfflineUpdateResult
@@ -277,3 +277,113 @@ def test_worker_routes_platforms_via_manager(
     w2 = OfflineArchiveWorker(folder, platform=PLATFORM_GITHUB, published_file_id="2")
     w2.run()
     assert seen == [PLATFORM_STEAM, PLATFORM_GITHUB]
+
+
+def test_modio_button_runs_full_ui_chain(
+    qapp: QApplication,
+    tmp_path: Path,
+    db: DatabaseManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Detail panel click → worker → manager → mod.io provider (capture mocked)."""
+    lib = tmp_path / "library"
+    url = "https://mod.io/g/baldursgate3/m/weightless-consumables"
+    folder = lib / "Game" / "Weightless Consumables"
+    info_dir = folder / INFO_DIR_NAME
+    info_dir.mkdir(parents=True)
+    info = db.register_external_mod(
+        platform=PLATFORM_MODIO,
+        external_id="weightless-consumables",
+        source_url=url,
+        title="Weightless Consumables",
+        app_id=1086940,
+        game_name="Baldur's Gate 3",
+    )
+    mid = str(info.mod_id)
+    import json
+    import zipfile
+
+    (info_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "published_file_id": mid,
+                "title": "Weightless Consumables",
+                "url": url,
+                "source_url": url,
+                "source_type": "modio",
+                "modio_name_id": "weightless-consumables",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with zipfile.ZipFile(folder / "payload.zip", "w") as zf:
+        zf.writestr("mod.txt", "x")
+    db.update_mod_identity_fields(mid, last_known_path=str(folder.resolve()))
+
+    captured_urls: list[str] = []
+    html = (
+        "<!DOCTYPE html><html><head><title>Weightless Consumables - mod.io</title></head>"
+        '<body><div id="root"><h1>Weightless Consumables</h1>'
+        '<section class="description"><p>Lightweight items.</p></section>'
+        "<button>Subscribe</button></div></body></html>"
+    )
+
+    from services.offline.modio import ModioOfflineProvider
+
+    monkeypatch.setattr(
+        "services.offline.manager.ModioOfflineProvider",
+        lambda *a, **k: ModioOfflineProvider(
+            capture_func=lambda u: captured_urls.append(u) or html
+        ),
+    )
+    from services import archive as archive_mod
+
+    monkeypatch.setattr(archive_mod, "_get_archive_proxy", lambda: None)
+    monkeypatch.setattr(archive_mod, "_get_steam_cookie", lambda: None)
+    cache_root = tmp_path / "asset_cache"
+    cache_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(archive_mod, "asset_cache_dir", lambda: cache_root)
+    archive_mod.reset_asset_cache_stats()
+
+    def fake_asset_get(self, asset_url, kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "text/css"}
+        resp.raise_for_status = MagicMock()
+        resp.iter_content = MagicMock(return_value=[b"body{}"])
+        resp.close = MagicMock()
+        resp.content = b"body{}"
+        return resp
+
+    from services.archive import OfflinePageArchiver
+
+    monkeypatch.setattr(OfflinePageArchiver, "_perform_asset_get", fake_asset_get)
+    monkeypatch.setattr(
+        OfflinePageArchiver,
+        "_perform_get",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no html fetch")),
+    )
+    monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
+    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+
+    panel = ModDetailPanel()
+    panel.show_mod(folder, mod_id=mid)
+    qapp.processEvents()
+    assert panel._current_platform == PLATFORM_MODIO
+    assert "保存离线页面" in (panel.btn_download_offline.toolTip() or "")
+
+    panel._download_offline_page()
+    for _ in range(80):
+        qapp.processEvents()
+        if panel._offline_worker is None or not panel._offline_worker.isRunning():
+            break
+        import time
+
+        time.sleep(0.02)
+
+    assert captured_urls == [url]
+    assert panel._has_offline_page()
+    index = folder / INFO_DIR_NAME / "offline" / "index.html"
+    assert index.is_file()
+    assert "Weightless Consumables" in index.read_text(encoding="utf-8")

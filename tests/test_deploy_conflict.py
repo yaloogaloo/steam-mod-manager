@@ -12,7 +12,7 @@ from core.mod_status import CONFLICT_STATUS_CONFLICT
 from core.models import ModMetadata
 from services.conflict import ConflictDetector
 from services.deploy import ModDeployer
-from services.deploy_rules.base import StrategyResult
+from services.deploy_rules.base import DeployContext, StrategyResult
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestFileEntry,
@@ -48,7 +48,9 @@ def _seed_mod(library: Path, mod_id: str) -> Path:
     return folder
 
 
-def test_check_conflict_preview_warns(tmp_path: Path, db: DatabaseManager) -> None:
+def test_check_conflict_preview_reports_conflict(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "dest" / "same.pak").resolve())
     a = _seed_mod(library, "501")
@@ -65,8 +67,9 @@ def test_check_conflict_preview_warns(tmp_path: Path, db: DatabaseManager) -> No
     preview = deployer.check_conflict_preview("502", [shared])
     assert preview is not None
     assert preview["conflict"] is True
-    assert preview["status"] == "warning"
+    assert preview["status"] == "conflict"
     assert preview["files"][0]["existing_mod"] == "501"
+    assert preview["conflicts"][0]["type"] == "FILE_OVERWRITE"
 
 
 def test_preview_none_when_free(tmp_path: Path, db: DatabaseManager) -> None:
@@ -155,24 +158,30 @@ def test_post_deploy_runs_check_all(
             return result
 
     monkeypatch.setattr(
+        "services.deploy.resolve_strategy", lambda ctx: FakeStrategy()
+    )
+    monkeypatch.setattr(
         "services.deploy.get_strategy", lambda *a, **k: FakeStrategy()
     )
 
     cfg = db.get_game_deploy_config(1)
     assert cfg is not None
 
-    class Ctx:
-        mod_id = "602"
-        app_id = 1
-        source = b
-        deploy_type = DEPLOY_TYPE_FOLDER_COPY
-        config = cfg
-        allowed_rel_paths = None
+    ctx = DeployContext(
+        mod_id="602",
+        app_id=1,
+        source=b,
+        deploy_type=DEPLOY_TYPE_FOLDER_COPY,
+        config=cfg,
+        allowed_rel_paths=None,
+        managed_path=b,
+        custom_deploy_path="",
+    )
 
     monkeypatch.setattr(
         ModDeployer,
         "_resolve_context",
-        lambda self, mid, require_target_exists=False: (Ctx(), None),
+        lambda self, mid, **kwargs: (ctx, None, None),
     )
 
     deployer = ModDeployer(library_root=library, db=db)

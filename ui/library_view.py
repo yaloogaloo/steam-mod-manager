@@ -2091,11 +2091,23 @@ class ModLibraryView(QWidget):
         invalid = is_invalid or (
             bool(getattr(tag_flags, "invalid", False)) if tag_flags else False
         )
-        conflict = (conflict_status in ("conflict", "warning")) or (
+        conflict = (conflict_status == "conflict") or (
             bool(getattr(tag_flags, "conflict", False)) if tag_flags else False
         )
-        if meta is not None and str(getattr(meta, "source_type", "") or "").strip():
-            platform = str(meta.source_type).strip()
+        from services.platform_identity import resolve_display_platform
+
+        meta_plat = ""
+        if meta is not None:
+            meta_plat = str(getattr(meta, "source_type", "") or "").strip()
+        db_plat = ""
+        if db_fields is not None:
+            db_plat = str(getattr(db_fields, "platform", "") or "").strip()
+        else:
+            db_plat = str(platform or "").strip()
+        platform = resolve_display_platform(
+            db_platform=db_plat,
+            metadata_platform=meta_plat,
+        )
         if meta is not None and str(getattr(meta, "url", "") or "").strip():
             source_url = str(meta.url).strip()
         has_offline = False
@@ -2114,7 +2126,7 @@ class ModLibraryView(QWidget):
                 except OSError:
                     has_offline = False
         content_status = ""
-        source_type = str(platform or "")
+        source_type = ""
         try:
             from services.library_status import row_content_status, row_source_type
 
@@ -2374,7 +2386,12 @@ class ModLibraryView(QWidget):
             self._selected_card = card
             self._selected_path = card.managed_path
             self._sync_peer_mods_to_panel(exclude=card._mod_id())
-            self.detail_panel.show_mod(card.managed_path, mod_id=card._mod_id() or None)
+            self.detail_panel.show_mod(
+                card.managed_path,
+                mod_id=card._mod_id() or None,
+                game_id=int(self.current_game_id or 0),
+                game_name=str(self.current_game_name or "").strip(),
+            )
             return
         # Multi-select: detail shows batch edit + optional offline save.
         self._selected_card = cards[-1]
@@ -2531,6 +2548,8 @@ class ModLibraryView(QWidget):
             self.detail_panel.show_mod(
                 self._selected_card.managed_path,
                 mod_id=self._selected_card._mod_id() or None,
+                game_id=int(self.current_game_id or 0),
+                game_name=str(self.current_game_name or "").strip(),
             )
 
     def _card_for_path(self, path: Path) -> ModCardWidget | None:
@@ -2600,7 +2619,12 @@ class ModLibraryView(QWidget):
             self._apply_view_filter()
             if self._selected_card is card and not card.isHidden():
                 self._sync_peer_mods_to_panel(exclude=card._mod_id())
-                self.detail_panel.show_mod(path, mod_id=card._mod_id() or None)
+                self.detail_panel.show_mod(
+                    path,
+                    mod_id=card._mod_id() or None,
+                    game_id=int(self.current_game_id or 0),
+                    game_name=str(self.current_game_name or "").strip(),
+                )
 
     # ------------------------------------------------------------------
     # Deploy (QThread — never call ModDeployer on the UI thread)
@@ -2750,7 +2774,10 @@ class ModLibraryView(QWidget):
                 if not self.detail_panel._deploy_busy:
                     self._sync_peer_mods_to_panel(exclude=card._mod_id())
                     self.detail_panel.show_mod(
-                        card.managed_path, mod_id=card._mod_id() or None
+                        card.managed_path,
+                        mod_id=card._mod_id() or None,
+                        game_id=int(self.current_game_id or 0),
+                        game_name=str(self.current_game_name or "").strip(),
                     )
             self._restore_scroll_after_layout(scroll, focus_mod_id=anchor_id)
             break
@@ -3186,7 +3213,7 @@ class ModLibraryView(QWidget):
 
     def _filter_index_from_card_data(self, data) -> ModFilterIndex:
         folder_name = Path(data.managed_path).name
-        source_type = str(getattr(data, "source_type", "") or data.platform or "")
+        source_type = str(getattr(data, "source_type", "") or "")
         content_status = str(getattr(data, "content_status", "") or "")
         return ModFilterIndex(
             mod_id=str(data.id or ""),
@@ -3423,7 +3450,10 @@ class ModLibraryView(QWidget):
             self._apply_view_filter()
             if self._selected_card is card and not card.isHidden():
                 self.detail_panel.show_mod(
-                    card.managed_path, mod_id=card._mod_id() or None
+                    card.managed_path,
+                    mod_id=card._mod_id() or None,
+                    game_id=int(self.current_game_id or 0),
+                    game_name=str(self.current_game_name or "").strip(),
                 )
             break
 

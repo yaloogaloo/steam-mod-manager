@@ -38,7 +38,7 @@ def _idx(
         mtime=1.0,
         sort_name=f"Mod {mod_id}",
         invalid=is_invalid,
-        conflict=conflict_status in ("conflict", "warning"),
+        conflict=bool(conflict_status == "conflict"),
         platform=platform,
         is_invalid=is_invalid,
         conflict_status=conflict_status,
@@ -57,7 +57,7 @@ def test_conflict_status_filter() -> None:
     w = _idx(mod_id="2", conflict_status="warning")
     n = _idx(mod_id="3", conflict_status="none")
     assert matches_status_filter(c, FILTER_CONFLICT)
-    assert matches_status_filter(w, FILTER_CONFLICT)
+    assert not matches_status_filter(w, FILTER_CONFLICT)
     assert not matches_status_filter(n, FILTER_CONFLICT)
 
 

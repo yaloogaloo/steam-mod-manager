@@ -1,15 +1,16 @@
-PySide6>=6.6.0
-requests>=2.31.0
-# SOCKS proxy support for requests (Mod.io API / Sync Center socks5://…)
+# Steam Mod Manager runtime dependencies (GUI + CLI).
+# Install: python -m pip install -r requirements.txt
+
+PySide6==6.11.2
+requests>=2.31.0,<3
 PySocks>=1.7.1
-curl_cffi>=0.7.0
-beautifulsoup4>=4.12.0
-# Preferred HTML parser for OfflinePageArchiver / scraper (falls back to html.parser)
+curl_cffi>=0.16.0,<1
+beautifulsoup4>=4.12.0,<5
 lxml>=5.0.0
-pywebcopy>=7.0.2
-# Nexus/GitHub offline snapshot fallback (Cloudflare / JS challenge)
 playwright>=1.40.0
-# Nexus .7z extract fallback when system 7-Zip is absent
 py7zr>=0.21.0
-# Nexus .rar extract fallback (uses UnRAR/7z backends when present)
 rarfile>=4.2
+psutil>=5.9.0
+
+# Optional dev/test:
+# pytest>=9.0

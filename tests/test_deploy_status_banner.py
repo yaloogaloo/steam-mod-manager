@@ -15,6 +15,7 @@ from core.db_manager import DEPLOY_STATUS_FAILED, DatabaseManager
 from core.models import ModMetadata
 from services.importers.archive import (
     TOOL_UNAVAILABLE_MSG,
+    RAR_TOOL_UNAVAILABLE_MSG,
     UNSUPPORTED_FMT_MSG,
     configure_rarfile_unrar_tool,
     extract_archive,
@@ -142,7 +143,7 @@ def test_rar_without_tools_reports_reason(
     )
 
     def _boom(*_a, **_k):
-        raise RuntimeError(TOOL_UNAVAILABLE_MSG)
+        raise RuntimeError(RAR_TOOL_UNAVAILABLE_MSG)
 
     monkeypatch.setattr(
         "services.importers.archive._extract_rar_with_rarfile", _boom
@@ -150,8 +151,8 @@ def test_rar_without_tools_reports_reason(
     with pytest.raises(RuntimeError) as exc:
         extract_archive(rar, dest_dir=tmp_path / "out")
     msg = str(exc.value)
-    assert msg == TOOL_UNAVAILABLE_MSG
-    assert "unrar" in msg.lower()
+    assert msg == RAR_TOOL_UNAVAILABLE_MSG
+    assert "unrar" in msg.lower() or "UnRAR" in msg
 
 
 def test_failed_db_status_rehydrates_banner(
@@ -162,7 +163,7 @@ def test_failed_db_status_rehydrates_banner(
     db.update_mod_deploy_status(
         "95003",
         deploy_status=DEPLOY_STATUS_FAILED,
-        deploy_error=TOOL_UNAVAILABLE_MSG,
+        deploy_error=RAR_TOOL_UNAVAILABLE_MSG,
         deploy_path="",
         deploy_time="",
     )
@@ -172,5 +173,5 @@ def test_failed_db_status_rehydrates_banner(
     qapp.processEvents()
     assert not panel._status_banner.isHidden()
     body = panel._status_banner_body.text()
-    assert "unrar" in body.lower()
-    assert TOOL_UNAVAILABLE_MSG in body
+    assert "UnRAR" in body or "unrar" in body.lower()
+    assert RAR_TOOL_UNAVAILABLE_MSG in body

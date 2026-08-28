@@ -17,7 +17,6 @@ from services.deploy import ModDeployer
 from services.deploy_status import (
     DEPLOY_BLOCKED_BACKUP_INVALID,
     DEPLOY_BLOCKED_FOLDER_MISSING,
-    DEPLOY_ERR_TARGET_FOREIGN,
     DEPLOYMENT_DEPLOYED,
     DEPLOYMENT_NOT_DEPLOYED,
     DEPLOYMENT_OUTDATED,
@@ -182,6 +181,7 @@ def test_case4_redeploy_updates_and_clears_outdated(
 
 
 def test_case5_foreign_target_is_conflict(tmp_path: Path, db: DatabaseManager) -> None:
+    """Unowned target payload is overwritten with backup (no hard block)."""
     library = tmp_path / "library"
     _install, mods = _setup_game(db, tmp_path)
     mod_dir = _make_mod(library)
@@ -189,13 +189,19 @@ def test_case5_foreign_target_is_conflict(tmp_path: Path, db: DatabaseManager) -
     foreign = mods / "TestMod"
     foreign.mkdir(parents=True)
     (foreign / "other.txt").write_text("not ours", encoding="utf-8")
+    # Same relative path as the Mod payload → will be backed up + overwritten
+    (foreign / "file1.txt").write_text("vanilla", encoding="utf-8")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("91001")
-    assert result["success"] is False
-    assert result["error"] == DEPLOY_ERR_TARGET_FOREIGN
-    assert result.get("deployment_status") == "conflict"
+    assert result["success"] is True
     assert (foreign / "other.txt").read_text(encoding="utf-8") == "not ours"
-    assert not (foreign / "file1.txt").exists()
+    assert (foreign / "file1.txt").read_text(encoding="utf-8") != "vanilla"
+
+    und = ModDeployer(library_root=library, db=db).undeploy_mod("91001")
+    assert und["success"] is True
+    # Planned overwrite restored; unrelated foreign file kept
+    assert (foreign / "file1.txt").read_text(encoding="utf-8") == "vanilla"
+    assert (foreign / "other.txt").read_text(encoding="utf-8") == "not ours"
 
 
 def test_case6_undeploy_removes_target_keeps_library(

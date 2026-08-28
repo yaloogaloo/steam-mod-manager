@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
 
 from core.sanitize import sanitize_folder_name
 from core.mod_platform import (
-    MODIO_ANNO_1800_URL,
     PLATFORM_GITHUB,
     PLATFORM_MODIO,
     PLATFORM_NEXUS,
@@ -38,7 +37,7 @@ from core.mod_platform import (
     default_source_url_for_platform,
     get_available_sources,
     is_anno_1800_game,
-    is_stardew_valley_game,
+    omits_steam_workshop_source,
     platform_requires_source_url,
 )
 from services.importers.archive import is_archive_path
@@ -62,7 +61,7 @@ class ModImportDialog(QDialog):
     Import one Mod from a game-aware source list into DB + managed library.
 
     Supports local folder or zip/7z/rar. Heavy work runs on :class:`ImportWorker`.
-    Source radios come from :func:`get_available_sources` (mod.io only for Anno 1800).
+    Source radios come from :func:`get_available_sources` (mod.io for Anno / BG3).
     """
 
     imported = Signal(object)  # ImportResult
@@ -196,16 +195,27 @@ class ModImportDialog(QDialog):
         self.game_id = int(self.game_context.get("game_id") or 0)
         self.game_name = str(self.game_context.get("game_name") or "").strip()
         self.game_context_label.setText(self.game_name or "—")
+        self._refresh_modio_url_placeholder()
         self._apply_game_platform_rules()
 
+    def _refresh_modio_url_placeholder(self) -> None:
+        if not hasattr(self, "modio_url_edit"):
+            return
+        default_url = default_source_url_for_platform(
+            PLATFORM_MODIO,
+            game_name=self.game_name,
+            game_id=self.game_id,
+        )
+        self.modio_url_edit.setPlaceholderText(f"可选；留空则使用 {default_url}")
+
     def _apply_game_platform_rules(self) -> None:
-        """Anno 1800 / Stardew Valley have no Steam Workshop — hide radio."""
+        """Hide Steam Workshop for games without it (Anno / Stardew / BG3 / CP2077)."""
         steam_radio = self._platform_radios.get(PLATFORM_STEAM)
         if steam_radio is None:
             return
         hide_steam = is_anno_1800_game(
             self.game_name, self.game_id
-        ) or is_stardew_valley_game(self.game_name, self.game_id)
+        ) or omits_steam_workshop_source(self.game_name, self.game_id)
         steam_radio.setVisible(not hide_steam)
         if hide_steam and (steam_radio.isChecked() or steam_radio.isHidden()):
             # Prefer first non-Steam visible option (mod.io / Nexus / …).
@@ -438,9 +448,7 @@ class ModImportDialog(QDialog):
         form = QFormLayout(page)
         form.setSpacing(10)
         self.modio_url_edit = QLineEdit()
-        self.modio_url_edit.setPlaceholderText(
-            f"可选；留空则使用 {MODIO_ANNO_1800_URL}"
-        )
+        self._refresh_modio_url_placeholder()
         form.addRow("mod.io URL / ID", self.modio_url_edit)
         self.modio_title_edit = QLineEdit()
         self.modio_title_edit.setPlaceholderText("可选：显示名称")

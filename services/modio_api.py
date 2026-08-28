@@ -31,6 +31,20 @@ _USER_AGENT = (
 )
 
 
+def game_scoped_api_base(game_id: int | str) -> str:
+    """
+    Per-game Mod.io API host used by many titles (``g-{id}.modapi.io``).
+
+    Some games resolve in the global catalog (``api.mod.io``) but expose Mod
+    Objects only on the game-scoped host. Callers should fall back here when
+    the global host returns HTTP 404 for ``games/{id}/…`` resources.
+    """
+    gid = int(game_id or 0)
+    if gid <= 0:
+        raise ValueError("game_id must be positive")
+    return f"https://g-{gid}.modapi.io/v1"
+
+
 def _resolve_proxies(
     proxies: Mapping[str, str | None] | None = None,
     *,
@@ -422,6 +436,60 @@ class ModioClient:
         except ValueError as exc:
             raise ModioAPIError(f"Mod.io API 返回了无效 JSON: {exc}") from exc
 
+    def _get_with_base(
+        self,
+        base_url: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Issue ``_get`` against a temporary API base URL."""
+        previous = self.base_url
+        try:
+            self.base_url = str(base_url or "").rstrip("/") or previous
+            return self._get(path, params=params)
+        finally:
+            self.base_url = previous
+
+    def _get_game_resource(
+        self,
+        game_id: int,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """
+        Fetch a ``games/{id}/…`` resource, falling back to the game-scoped host.
+
+        Global ``api.mod.io`` can list a game by ``name_id`` while still returning
+        HTTP 404 for that game's Mod Objects. Retrying on
+        ``https://g-{game_id}.modapi.io/v1`` is the portable fix for those titles.
+        """
+        gid = int(game_id or 0)
+        try:
+            return self._get(path, params=params)
+        except ModioAPIError as exc:
+            if exc.status_code != 404 or gid <= 0:
+                raise
+            scoped = game_scoped_api_base(gid)
+            if self.base_url.rstrip("/") == scoped.rstrip("/"):
+                raise
+            logger.info(
+                "Mod.io global host 404 for game_id=%s; retrying scoped host %s",
+                gid,
+                scoped,
+            )
+            try:
+                return self._get_with_base(scoped, path, params=params)
+            except ModioAPIError as scoped_exc:
+                if scoped_exc.status_code == 404:
+                    raise ModioAPIError(
+                        "Mod.io 未找到该游戏/Mod（全局与游戏专属 API 均返回 404）。"
+                        "请确认链接正确，或检查 API Key 是否有权访问该游戏。",
+                        status_code=404,
+                    ) from scoped_exc
+                raise
+
     def resolve_game_id(self, game_slug: str) -> int:
         slug = str(game_slug or "").strip()
         if not slug:
@@ -443,7 +511,10 @@ class ModioClient:
         return game_id
 
     def get_mod(self, game_id: int, mod_id: int) -> ModioModDetails:
-        payload = self._get(f"games/{int(game_id)}/mods/{int(mod_id)}")
+        gid = int(game_id)
+        payload = self._get_game_resource(
+            gid, f"games/{gid}/mods/{int(mod_id)}"
+        )
         if not isinstance(payload, dict):
             raise ModioAPIError("Mod.io Get Mod 返回格式无效")
         details = map_mod_object(payload)
@@ -455,10 +526,12 @@ class ModioClient:
         slug = str(name_id or "").strip()
         if not slug:
             raise ModioAPIError("Mod.io name_id 为空")
+        gid = int(game_id)
         if slug.isdigit():
-            return self.get_mod(game_id, int(slug))
-        payload = self._get(
-            f"games/{int(game_id)}/mods",
+            return self.get_mod(gid, int(slug))
+        payload = self._get_game_resource(
+            gid,
+            f"games/{gid}/mods",
             params={"name_id": slug, "limit": 5},
         )
         rows = payload.get("data") if isinstance(payload, dict) else None

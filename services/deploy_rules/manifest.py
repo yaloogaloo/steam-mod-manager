@@ -4,15 +4,62 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "deploy_manifest.json"
+
+_prune_tls = threading.local()
+
+
+@contextmanager
+def prune_protection(protected: Iterable[Path] | None) -> Iterator[None]:
+    """Push extra roots that ``remove_empty_parents`` must never delete."""
+    prev = getattr(_prune_tls, "protected", None)
+    merged: list[Path] = list(prev or [])
+    for raw in protected or ():
+        merged.append(Path(raw))
+    _prune_tls.protected = merged
+    try:
+        yield
+    finally:
+        _prune_tls.protected = prev
+
+
+@dataclass
+class ManifestBackupInfo:
+    """Pre-overwrite original file saved under ``.info/backups/``."""
+
+    path: str
+    hash: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "hash": self.hash,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> ManifestBackupInfo | None:
+        if not isinstance(data, Mapping):
+            return None
+        path = str(data.get("path") or "").strip()
+        if not path:
+            return None
+        return cls(
+            path=path,
+            hash=str(data.get("hash") or ""),
+            created_at=str(data.get("created_at") or ""),
+        )
 
 
 @dataclass
@@ -21,6 +68,10 @@ class ManifestFileEntry:
     target: str
     # "pak" | "folder_copy" — empty for legacy manifests
     type: str = ""
+    # None = target did not exist before deploy (or legacy manifest)
+    backup: ManifestBackupInfo | None = None
+    # Optional audit field (backward compatible — omitted when empty)
+    source_hash: str = ""
 
 
 @dataclass
@@ -37,9 +88,16 @@ class DeployManifest:
     def to_dict(self) -> dict[str, Any]:
         files_out: list[dict[str, Any]] = []
         for f in self.files:
-            item = {"source": f.source, "target": f.target}
+            item: dict[str, Any] = {"source": f.source, "target": f.target}
             if f.type:
                 item["type"] = f.type
+            if f.source_hash:
+                item["source_hash"] = f.source_hash
+            # Explicit null when no pre-existing file (new schema); omit for empty legacy
+            if f.backup is not None:
+                item["backup"] = f.backup.to_dict()
+            else:
+                item["backup"] = None
             files_out.append(item)
         out: dict[str, Any] = {
             "mod_id": self.mod_id,
@@ -65,9 +123,16 @@ class DeployManifest:
             src = str(item.get("source") or "")
             tgt = str(item.get("target") or "")
             entry_type = str(item.get("type") or "")
+            backup = ManifestBackupInfo.from_dict(item.get("backup"))
             if src or tgt:
                 files.append(
-                    ManifestFileEntry(source=src, target=tgt, type=entry_type)
+                    ManifestFileEntry(
+                        source=src,
+                        target=tgt,
+                        type=entry_type,
+                        backup=backup,
+                        source_hash=str(item.get("source_hash") or ""),
+                    )
                 )
         return cls(
             mod_id=str(data.get("mod_id") or ""),
@@ -92,7 +157,17 @@ def manifest_path_for(managed_path: Path) -> Path:
     return modern
 
 
-def load_manifest(managed_path: Path) -> DeployManifest | None:
+def load_manifest(
+    managed_path: Path,
+    *,
+    expected_mod_id: str | None = None,
+) -> DeployManifest | None:
+    """
+    Load ``deploy_manifest.json`` for a managed Mod folder.
+
+    When *expected_mod_id* is set, refuse manifests that claim a different
+    ``mod_id`` (returns ``None`` after logging — caller must not undeploy).
+    """
     path = manifest_path_for(managed_path)
     if not path.is_file():
         return None
@@ -103,7 +178,19 @@ def load_manifest(managed_path: Path) -> DeployManifest | None:
         return None
     if not isinstance(data, dict):
         return None
-    return DeployManifest.from_dict(data)
+    manifest = DeployManifest.from_dict(data)
+    if expected_mod_id is not None:
+        mid = str(expected_mod_id or "").strip()
+        claimed = str(manifest.mod_id or "").strip()
+        if mid and claimed and claimed != mid:
+            logger.error(
+                "manifest mod_id pollution refused path=%s expected=%s claimed=%s",
+                path,
+                mid,
+                claimed,
+            )
+            return None
+    return manifest
 
 
 def save_manifest(managed_path: Path, manifest: DeployManifest) -> Path:
@@ -126,15 +213,34 @@ def delete_manifest(managed_path: Path) -> None:
             logger.warning("Failed to remove manifest %s: %s", path, exc)
 
 
-def remove_empty_parents(path: Path, *, stop_at: Path) -> None:
+def remove_empty_parents(
+    path: Path,
+    *,
+    stop_at: Path,
+    protected: Iterable[Path] | None = None,
+) -> None:
     """
     Remove empty directories upward from *path*, stopping at *stop_at*
-    (never deletes *stop_at* itself).
+    (never deletes *stop_at* itself or any *protected* root).
     """
     try:
         stop = stop_at.resolve()
     except OSError:
         return
+
+    protected_resolved: set[Path] = {stop}
+    tls_protected = getattr(_prune_tls, "protected", None) or ()
+    for raw in list(protected or ()) + list(tls_protected):
+        try:
+            protected_resolved.add(Path(raw).resolve())
+        except OSError:
+            continue
+    # Never prune filesystem / drive roots
+    try:
+        if stop.anchor:
+            protected_resolved.add(Path(stop.anchor))
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         current = path.resolve()
@@ -149,7 +255,14 @@ def remove_empty_parents(path: Path, *, stop_at: Path) -> None:
             cur = current.resolve()
         except OSError:
             break
+        if cur in protected_resolved:
+            break
         if cur == stop:
+            break
+        try:
+            if cur.anchor and cur == Path(cur.anchor):
+                break
+        except Exception:  # noqa: BLE001
             break
         try:
             if not cur.is_relative_to(stop):

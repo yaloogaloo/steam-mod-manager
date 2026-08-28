@@ -944,12 +944,12 @@ class TestNexusImporterNoFakeUrl:
         )
         assert result.success
         assert result.source_url == ""
-        assert result.external_id == "local/Empty Mod f20722b2"
+        assert result.external_id == "Empty Mod f20722b2"
         assert "nexusmods.com" not in (result.source_url or "")
         info = db.get_mod_display_info(result.mod_id)
         assert info is not None
         assert (info.source_url or "") == ""
-        assert info.external_id == "local/Empty Mod f20722b2"
+        assert info.external_id == "Empty Mod f20722b2"
 
     def test_import_plus_real_html_e2e(self, tmp_path: Path, db: DatabaseManager) -> None:
         """Case A: import mod without Nexus ID, then attach real offline HTML."""

@@ -18,7 +18,6 @@ from ui.library_query import (
     FILTER_FOLDER_MISSING,
     FILTER_IDENTITY_CONFLICT,
     FILTER_PLATFORM_ALL,
-    FILTER_PLATFORM_EXTERNAL,
     FILTER_PLATFORM_GITHUB,
     FILTER_PLATFORM_MODIO,
     FILTER_PLATFORM_NEXUS,
@@ -70,23 +69,27 @@ def _idx(
 
 def test_case1_sources_are_game_scoped() -> None:
     game_a = [
-        _idx(mod_id="a1", source_type="steam"),
-        _idx(mod_id="a2", source_type="github"),
+        _idx(mod_id="a1", platform="steam", source_type="external"),
+        _idx(mod_id="a2", platform="github", source_type="external"),
     ]
     game_b = [
-        _idx(mod_id="b1", source_type="modio"),
-        _idx(mod_id="b2", source_type="external"),
+        _idx(mod_id="b1", platform="modio", source_type="external"),
+        _idx(mod_id="b2", platform="nexus", source_type="external"),
     ]
     assert collect_source_keys(game_a) == [
         FILTER_PLATFORM_STEAM,
         FILTER_PLATFORM_GITHUB,
     ]
     assert collect_source_keys(game_b) == [
+        FILTER_PLATFORM_NEXUS,
         FILTER_PLATFORM_MODIO,
-        FILTER_PLATFORM_EXTERNAL,
     ]
     assert FILTER_PLATFORM_STEAM not in collect_source_keys(game_b)
     assert FILTER_PLATFORM_MODIO not in collect_source_keys(game_a)
+    # Provenance-only rows must not invent an External platform chip
+    assert "platform_external" not in collect_source_keys(
+        [_idx(mod_id="x", platform="", source_type="external")]
+    )
 
 
 def test_case2_categories_are_game_scoped() -> None:
@@ -104,7 +107,7 @@ def test_case2_categories_are_game_scoped() -> None:
 
 
 def test_case3_switch_game_resets_missing_filters() -> None:
-    sources_b = [FILTER_PLATFORM_MODIO, FILTER_PLATFORM_EXTERNAL]
+    sources_b = [FILTER_PLATFORM_MODIO, FILTER_PLATFORM_GITHUB]
     cats_b = ["建筑", "地图"]
     assert (
         coerce_filter_selection(
@@ -200,11 +203,13 @@ def test_case5_game_rows_share_layout(
     del app
 
 
-def test_case6_source_category_helpers_do_not_scan() -> None:
+def test_case6_source_category_helpers_do_not_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import services.mod_metadata_resolver as resolver
 
     spy = MagicMock(side_effect=AssertionError("must not scan disk"))
-    resolver.list_visible_mods = spy  # type: ignore[method-assign]
+    monkeypatch.setattr(resolver, "list_visible_mods", spy)
     collect_source_keys([_idx(source_type="steam"), _idx(source_type="nexus")])
     collect_category_labels([_idx(category_tags="美化")])
     spy.assert_not_called()
@@ -370,7 +375,7 @@ def test_source_resets_when_unavailable_for_game() -> None:
     view = ModLibraryView()
     view._platform_filter = FILTER_PLATFORM_STEAM
     view._rebuild_platform_filter_bar(
-        [FILTER_PLATFORM_MODIO, FILTER_PLATFORM_EXTERNAL]
+        [FILTER_PLATFORM_MODIO, FILTER_PLATFORM_GITHUB]
     )
     assert view._platform_filter == FILTER_PLATFORM_ALL
     assert not view._source_row.isHidden()

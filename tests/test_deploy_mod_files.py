@@ -36,8 +36,8 @@ def test_disabled_files_not_deployed(db: DatabaseManager, tmp_path: Path) -> Non
 
     mod = library / "SomeGame" / "Multi"
     mod.mkdir(parents=True)
-    (mod / "main.pak").write_bytes(b"MAIN")
-    (mod / "hat.pak").write_bytes(b"HAT")
+    (mod / "main.bin").write_bytes(b"MAIN")
+    (mod / "hat.bin").write_bytes(b"HAT")
     info = mod / INFO_DIR_NAME
     info.mkdir()
     (info / METADATA_FILENAME).write_text(
@@ -56,15 +56,15 @@ def test_disabled_files_not_deployed(db: DatabaseManager, tmp_path: Path) -> Non
             files=[
                 ModFileEntry(
                     name="Main File",
-                    filename="main.pak",
-                    path="main.pak",
+                    filename="main.bin",
+                    path="main.bin",
                     type=FILE_TYPE_MAIN,
                     enabled=True,
                 ),
                 ModFileEntry(
                     name="Optional Hat",
-                    filename="hat.pak",
-                    path="hat.pak",
+                    filename="hat.bin",
+                    path="hat.bin",
                     type=FILE_TYPE_OPTIONAL,
                     enabled=False,
                 ),
@@ -74,12 +74,12 @@ def test_disabled_files_not_deployed(db: DatabaseManager, tmp_path: Path) -> Non
 
     allowed = resolve_deploy_sources("8001", mod, db=db)
     assert allowed is not None
-    assert "main.pak" in allowed
-    assert "hat.pak" not in allowed
+    assert "main.bin" in allowed
+    assert "hat.bin" not in allowed
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("8001")
     assert result["success"] is True, result
 
     dest = install_mods / "Multi"
-    assert (dest / "main.pak").is_file()
-    assert not (dest / "hat.pak").exists()
+    assert (dest / "main.bin").is_file()
+    assert not (dest / "hat.bin").exists()

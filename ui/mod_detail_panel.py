@@ -437,6 +437,9 @@ class ModDetailPanel(QWidget):
         self._batch_mod_ids: list[str] = []
         self._batch_game_name = ""
         self._batch_game_id = 0
+        # Library game context for single-mod view (fallback when mods.app_id is 0).
+        self._context_game_id = 0
+        self._context_game_name = ""
         # (mod_id, managed_path, platform) for multi-select offline save
         self._batch_entries: list[tuple[str, Path, str]] = []
         self._offline_batch_queue: list[tuple[str, Path, str]] = []
@@ -467,6 +470,8 @@ class ModDetailPanel(QWidget):
         managed_path: str | Path | None = None,
         *,
         mod_id: str | int | None = None,
+        game_id: int | str | None = None,
+        game_name: str = "",
     ) -> None:
         """Load metadata via the unified resolver (no Steam I/O)."""
         from ui.popup_trace import log_popup
@@ -476,6 +481,11 @@ class ModDetailPanel(QWidget):
         self._batch_mod_ids = []
         self._batch_game_name = ""
         self._batch_game_id = 0
+        try:
+            self._context_game_id = int(game_id or 0)
+        except (TypeError, ValueError):
+            self._context_game_id = 0
+        self._context_game_name = str(game_name or "").strip()
         self._batch_entries = []
         self._offline_batch_queue = []
         self._offline_batch_active = False
@@ -543,6 +553,8 @@ class ModDetailPanel(QWidget):
         self._batch_mod_ids = []
         self._batch_game_name = ""
         self._batch_game_id = 0
+        self._context_game_id = 0
+        self._context_game_name = ""
         self._batch_entries = []
         self._offline_batch_queue = []
         self._offline_batch_active = False
@@ -710,7 +722,12 @@ class ModDetailPanel(QWidget):
             return
         meta = self._metadata
         info = self._display_info
-        mid = str(meta.published_file_id)
+        # Prefer the Mod ID used to load display_info (workspace / published id).
+        mid = ""
+        if info is not None:
+            mid = str(info.mod_id or "").strip()
+        if not mid:
+            mid = str(self.current_mod_id() or meta.published_file_id or "").strip()
         steam = ""
         if info:
             steam = info.steam_name
@@ -718,22 +735,33 @@ class ModDetailPanel(QWidget):
             steam = (meta.title or "").strip()
         managed_before = Path(self._managed_path)
 
-        game_id = int(info.app_id) if info else 0
+        # mod → game: display_info.app_id → metadata.app_id → library context
+        game_id = 0
+        if info is not None:
+            try:
+                game_id = int(info.app_id or 0)
+            except (TypeError, ValueError):
+                game_id = 0
+        if not game_id and meta is not None:
+            try:
+                game_id = int(meta.app_id or 0)
+            except (TypeError, ValueError):
+                game_id = 0
+        if not game_id:
+            game_id = int(self._context_game_id or 0)
+
+        from services.deploy_status import resolve_game_install_path
+
+        game_install_path = resolve_game_install_path(mod_id=mid, app_id=game_id)
+
         game_name = str(meta.game_name or "").strip() if meta else ""
+        if not game_name:
+            game_name = str(self._context_game_name or "").strip()
         if not game_name and game_id:
             try:
                 game = get_db().get_game(game_id)
                 if game is not None:
                     game_name = str(game.name or "").strip()
-            except Exception:  # noqa: BLE001
-                pass
-
-        game_root = ""
-        if game_id:
-            try:
-                cfg = get_db().get_game_deploy_config(game_id)
-                if cfg is not None:
-                    game_root = str(cfg.install_path or "").strip()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -747,7 +775,7 @@ class ModDetailPanel(QWidget):
             platform=self._current_platform,
             game_name=game_name,
             game_id=game_id,
-            game_root=game_root,
+            game_install_path=game_install_path,
             custom_deploy_path=(
                 info.custom_deploy_path if info else ""
             ),
@@ -1953,9 +1981,12 @@ class ModDetailPanel(QWidget):
         self._elide_header_title()
 
     def _render_header_platform_badge(self, platform: str) -> None:
-        from ui.platform_labels import platform_badge_label
+        from services.platform_identity import (
+            format_platform_label,
+            resolve_display_platform,
+        )
 
-        key = str(platform or PLATFORM_STEAM).strip().lower()
+        key = resolve_display_platform(db_platform=platform)
         styles = {
             PLATFORM_STEAM: (PLATFORM_STEAM_BG, PLATFORM_STEAM_FG, PLATFORM_STEAM_BORDER),
             PLATFORM_NEXUS: (PLATFORM_NEXUS_BG, PLATFORM_NEXUS_FG, PLATFORM_NEXUS_BORDER),
@@ -1978,7 +2009,7 @@ class ModDetailPanel(QWidget):
         bg, fg, border = styles.get(
             key, (BACKGROUND_BUTTON_PRESSED, TEXT_SECONDARY, BORDER_STRONG)
         )
-        text = platform_badge_label(key)
+        text = format_platform_label(key)
         self.header_platform_badge.setText(text)
         # Dynamic platform badge — token-based exception.
         badge_qss = (
@@ -2018,10 +2049,16 @@ class ModDetailPanel(QWidget):
         resolved = getattr(self, "_resolved", None)
         assert meta is not None
 
+        from services.platform_identity import (
+            format_platform_label,
+            resolve_display_platform,
+        )
+
+        db_platform = ""
         if resolved is not None:
             shown = resolved.display_name or meta.display_name
             steam = resolved.title or shown
-            platform = resolved.platform or PLATFORM_STEAM
+            db_platform = str(resolved.platform or "").strip()
             source_url = resolved.source_url
             workspace_id = resolved.workspace_id
             desc_text = resolved.description
@@ -2029,12 +2066,11 @@ class ModDetailPanel(QWidget):
         else:
             shown = info.display_name if info else meta.display_name
             steam = info.steam_name if info else (meta.title or "").strip()
-            platform = PLATFORM_STEAM
             source_url = ""
             workspace_id = ""
             desc_text = ""
             if info is not None:
-                platform = info.platform or PLATFORM_STEAM
+                db_platform = str(info.platform or "").strip()
                 source_url = (info.source_url or "").strip()
                 workspace_id = str(info.workspace_id or "").strip()
                 desc_text = str(info.custom_description or "").strip()
@@ -2044,10 +2080,16 @@ class ModDetailPanel(QWidget):
         external_id = ""
         files_bundle = None
         if info is not None:
-            if not resolved:
-                platform = info.platform or platform
+            if not db_platform:
+                db_platform = str(info.platform or "").strip()
             external_id = (info.external_id or "").strip()
             files_bundle = info.mod_files
+        # ModMetadata.source_type is the JSON store-platform key, not mods.source_type
+        meta_platform = str(getattr(meta, "source_type", "") or "").strip()
+        platform = resolve_display_platform(
+            db_platform=db_platform,
+            metadata_platform=meta_platform,
+        )
         if not source_url and (meta.url or "").strip():
             source_url = str(meta.url).strip()
         if not source_url and platform == PLATFORM_STEAM and meta.published_file_id:
@@ -2089,9 +2131,7 @@ class ModDetailPanel(QWidget):
         self.btn_copy_id.setEnabled(bool(id_value))
         self.btn_header_copy_id.setEnabled(bool(id_value))
 
-        from ui.platform_labels import platform_badge_label
-
-        platform_name = platform_badge_label(platform)
+        platform_name = format_platform_label(platform)
         self.view_platform.setText(f"{labels.platform}：{format_platform_name(platform)}")
         self.meta_source_line.setText(f"来源：{platform_name}")
         if resolved is None:
@@ -2619,12 +2659,19 @@ class ModDetailPanel(QWidget):
 
     def _on_metadata_refresh_finished(self, result: object) -> None:
         from services.metadata_refresh import MetadataRefreshResult
+        from services.path_lifecycle import resolve_managed_folder
 
         if not isinstance(result, MetadataRefreshResult):
             self._set_refresh_button_state("idle")
             self._clear_op_status()
             return
-        path = result.managed_path or self._managed_path
+        mid = self.current_mod_id()
+        resolved = resolve_managed_folder(mid, hint_path=result.managed_path) if mid else None
+        path = (
+            (resolved.path if resolved and resolved.path else None)
+            or result.managed_path
+            or self._managed_path
+        )
         if path is not None:
             try:
                 from services.dir_size import invalidate_directory_size
@@ -2650,8 +2697,16 @@ class ModDetailPanel(QWidget):
         err = (error or "").strip() or "元数据刷新失败"
         self._set_refresh_button_state("failure", detail=err)
         self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
-        if self._managed_path is not None:
-            self.show_mod(self._managed_path)
+        from services.path_lifecycle import resolve_managed_folder
+
+        mid = self.current_mod_id()
+        resolved = resolve_managed_folder(mid, hint_path=self._managed_path) if mid else None
+        heal_path = (
+            (resolved.path if resolved and resolved.path else None)
+            or self._managed_path
+        )
+        if heal_path is not None:
+            self.show_mod(heal_path)
 
     def _on_metadata_batch_progress(self, done: int, total: int, message: str) -> None:
         dlg = self._metadata_progress_dialog
@@ -3619,18 +3674,20 @@ class ModDetailPanel(QWidget):
         }
         conflict_text = conflict_map.get(st.conflict_status, st.conflict_status)
         self.status_conflict_label.setText(f"[Conflict] {conflict_text}")
-        has_conflict = st.conflict_status in (
-            CONFLICT_STATUS_CONFLICT,
-            CONFLICT_STATUS_WARNING,
-        )
-        self._apply_tone(
-            self.status_conflict_label, "error" if has_conflict else "secondary"
-        )
+        # Red conflict badge only for FILE_OVERWRITE / hard conflict — not warning
+        has_conflict = st.conflict_status == CONFLICT_STATUS_CONFLICT
+        if has_conflict:
+            conflict_tone = "error"
+        elif st.conflict_status == CONFLICT_STATUS_WARNING:
+            conflict_tone = "warning"
+        else:
+            conflict_tone = "secondary"
+        self._apply_tone(self.status_conflict_label, conflict_tone)
         # Prefer invalid_reason when invalid; else conflict_note
         reason = ""
         if invalid:
             reason = st.invalid_reason or ""
-        elif has_conflict:
+        elif has_conflict or st.conflict_status == CONFLICT_STATUS_WARNING:
             reason = st.conflict_note or st.invalid_reason or ""
         else:
             reason = st.invalid_reason or st.conflict_note or ""
@@ -3727,10 +3784,7 @@ class ModDetailPanel(QWidget):
         invalid = bool(info.is_invalid) if info is not None else False
         conflict = False
         if info is not None:
-            conflict = info.conflict_status in (
-                CONFLICT_STATUS_CONFLICT,
-                CONFLICT_STATUS_WARNING,
-            )
+            conflict = info.conflict_status == CONFLICT_STATUS_CONFLICT
         for btn, checked in (
             (self.btn_tag_conflict, conflict),
             (self.btn_tag_invalid, invalid),
@@ -4595,9 +4649,10 @@ class ModDetailPanel(QWidget):
             files = conflicts.get("files") or []
             entries = conflicts.get("conflicts") or []
             status = str(conflicts.get("status") or "")
-            is_conflict = bool(conflicts.get("conflict")) or status in (
-                CONFLICT_STATUS_WARNING,
-                CONFLICT_STATUS_CONFLICT,
+            # File-claim conflicts only (payload.conflict or hard status). Soft
+            # ``warning`` alone must not surface as 文件冲突.
+            is_conflict = bool(conflicts.get("conflict")) or (
+                status == CONFLICT_STATUS_CONFLICT
             )
             if is_conflict and (files or entries):
                 n = len(files) if files else len(entries)

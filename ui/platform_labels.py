@@ -26,33 +26,33 @@ class PlatformMetadataLabels:
     badge: str
 
 
+def platform_badge_label(platform: str | None) -> str:
+    """Short card badge text (keeps cards narrow)."""
+    from services.platform_identity import format_platform_label
+
+    return format_platform_label(platform)
+
+
 def format_platform_name(platform: str | None) -> str:
     """Human-readable platform name for detail / clipboard."""
+    from services.platform_identity import format_platform_label, normalize_platform
+    from core.mod_platform import (
+        PLATFORM_GITHUB,
+        PLATFORM_MODIO,
+        PLATFORM_NEXUS,
+        PLATFORM_OTHER,
+        PLATFORM_STEAM,
+    )
+
     key = normalize_platform(platform)
+    # Detail uses longer Steam label
     return {
         PLATFORM_STEAM: "Steam Workshop",
         PLATFORM_NEXUS: "Nexus Mods",
         PLATFORM_GITHUB: "GitHub",
         PLATFORM_MODIO: "mod.io",
         PLATFORM_OTHER: "其它",
-    }.get(key, key)
-
-
-def platform_badge_label(platform: str | None) -> str:
-    """Short card badge text (keeps cards narrow)."""
-    key = str(platform or "").strip().lower()
-    if key in {"external", "local", "unknown"}:
-        from services.library_status import source_badge_label
-
-        return source_badge_label(key)
-    key = normalize_platform(platform)
-    return {
-        PLATFORM_STEAM: "Steam",
-        PLATFORM_NEXUS: "Nexus",
-        PLATFORM_GITHUB: "GitHub",
-        PLATFORM_MODIO: "mod.io",
-        PLATFORM_OTHER: "其它",
-    }.get(key, key.title() or "Mod")
+    }.get(key, format_platform_label(key))
 
 
 def get_platform_metadata_labels(platform: str | None) -> PlatformMetadataLabels:

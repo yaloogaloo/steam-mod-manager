@@ -28,6 +28,10 @@ from services.metadata_refresh import (
     prepare_managed_folder_for_rename,
     safe_directory_rename,
 )
+from services.path_lifecycle import (
+    PathLifecycleStage,
+    record_filesystem_rename,
+)
 from services.modio_api import (
     ModioAPIError,
     ModioClient,
@@ -77,6 +81,19 @@ def _logo_suffix(url: str) -> str:
     return ".jpg"
 
 
+def _is_same_managed_directory(source: Path, target: Path) -> bool:
+    """True when *source* and *target* are the same directory (Windows case-fold safe)."""
+    try:
+        if source.resolve() == target.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        return source.is_dir() and target.exists() and source.samefile(target)
+    except OSError:
+        return False
+
+
 def rename_modio_folder_for_title(
     managed_path: str | Path,
     new_title: str,
@@ -88,6 +105,9 @@ def rename_modio_folder_for_title(
 
     On name collision with a *different* existing directory, raises
     ``FileExistsError`` (no overwrite / no unique suffix).
+
+    Case-only differences on case-insensitive filesystems (Windows) are treated
+    as the same directory — no rename, no error — so metadata refresh can proceed.
     """
     folder = Path(managed_path).expanduser().resolve()
     if not folder.is_dir():
@@ -101,6 +121,15 @@ def rename_modio_folder_for_title(
         return folder, False
 
     target = (folder.parent / desired).resolve()
+    # Windows: ``polyamoryfixes`` vs ``PolyamoryFixes`` resolve to the same dir.
+    if _is_same_managed_directory(folder, target):
+        logger.info(
+            "Mod.io folder rename skipped (same directory / case-only): %s -> %s",
+            folder.name,
+            desired,
+        )
+        return folder, False
+
     diag = collect_directory_rename_diagnostics(folder, target)
     logger.info(
         "Mod.io folder rename: src=%s target=%s target_exists=%s "
@@ -119,7 +148,7 @@ def rename_modio_folder_for_title(
         diag.get("process_cwd"),
         diag.get("cwd_under_source"),
     )
-    if diag.get("target_exists"):
+    if diag.get("target_exists") and not _is_same_managed_directory(folder, target):
         raise FileExistsError(
             f"目录已存在，无法重命名为「{desired}」：{target}"
         )
@@ -321,8 +350,11 @@ def refresh_modio_mod_metadata(
     )
 
     mid = str(mod_id).strip()
-    folder = Path(managed_path).expanduser().resolve()
     database = db if db is not None else get_db()
+
+    from services.path_lifecycle import resolve_refresh_folder
+
+    folder = resolve_refresh_folder(mid, managed_path, db=database)
 
     if not allow_official_sync or database.is_official_metadata_synced(mid):
         title = folder.name
@@ -342,7 +374,9 @@ def refresh_modio_mod_metadata(
             message="已刷新本地状态",
         )
 
-    logger.info("Starting Mod.io metadata refresh for mod_id=%s path=%s", mid, folder)
+    logger.info(
+        "Starting Mod.io metadata refresh for mod_id=%s path=%s", mid, folder
+    )
     if not folder.is_dir():
         logger.error("Mod.io refresh aborted: directory missing (%s)", folder)
         return MetadataRefreshResult(
@@ -350,8 +384,10 @@ def refresh_modio_mod_metadata(
             success=False,
             managed_path=folder,
             old_path=folder,
-            error=f"Mod 目录不存在: {folder}",
+            error=f"[PATH_INVALID] Mod 目录不存在: {folder}",
         )
+
+    folder = folder.resolve()
 
     root = Path(library_root) if library_root else (
         folder.parents[1] if len(folder.parts) >= 2 else folder.parent
@@ -365,6 +401,15 @@ def refresh_modio_mod_metadata(
         display_info_source_url=source_url,
     )
     parts = parse_modio_url(url) if url else None
+    logger.info(
+        "Mod.io refresh identity: mod_id=%s platform=%s url=%r "
+        "parsed_game=%r parsed_name_id=%r",
+        mid,
+        PLATFORM_MODIO,
+        (url or "")[:240],
+        parts.game_slug if parts else None,
+        parts.mod_name_id if parts else None,
+    )
     if parts is None:
         logger.error(
             "Mod.io refresh aborted: invalid URL (raw=%r)",
@@ -375,15 +420,9 @@ def refresh_modio_mod_metadata(
             success=False,
             managed_path=folder,
             old_path=folder,
-            error="Mod.io URL 无效。请在编辑信息中填写类似 "
-            "https://mod.io/g/anno-1800/m/harborlife 的官方链接。",
+            error="[API_PARSE] Mod.io URL 无效。请在编辑信息中填写类似 "
+            "https://mod.io/g/<game>/m/<mod-name> 的官方链接。",
         )
-
-    logger.info(
-        "Parsed Mod.io URL: game=%s mod=%s",
-        parts.game_slug,
-        parts.mod_name_id,
-    )
 
     local_mod_id, local_game_id = _read_local_modio_ids(folder)
     # Numeric external_id from DB can also be the Mod.io mod id.
@@ -396,6 +435,14 @@ def refresh_modio_mod_metadata(
             if not url and info.source_url:
                 url = info.source_url
                 parts = parse_modio_url(url) or parts
+            logger.info(
+                "Mod.io refresh DB identity: external_id=%r workspace_id=%r "
+                "local_modio_mod_id=%s local_modio_game_id=%s",
+                ext,
+                getattr(info, "workspace_id", ""),
+                local_mod_id,
+                local_game_id,
+            )
     except Exception:  # noqa: BLE001
         logger.exception("Mod.io refresh: failed reading local DB identity")
         info = None
@@ -404,6 +451,13 @@ def refresh_modio_mod_metadata(
     api = client or ModioClient()
     try:
         try:
+            logger.info(
+                "Mod.io resolve_mod: game_slug=%r name_id=%r game_id=%s mod_id=%s",
+                parts.game_slug if parts else "",
+                parts.mod_name_id if parts else "",
+                local_game_id,
+                local_mod_id,
+            )
             details = api.resolve_mod(
                 game_slug=parts.game_slug if parts else "",
                 mod_name_id=parts.mod_name_id if parts else "",
@@ -417,8 +471,20 @@ def refresh_modio_mod_metadata(
                 success=False,
                 managed_path=folder,
                 old_path=folder,
-                error=str(exc),
+                error=f"[API_FETCH] {exc}",
             )
+
+        logger.info(
+            "Mod.io API payload: id=%s game_id=%s name=%r name_id=%r "
+            "has_summary=%s has_description=%s has_logo=%s",
+            details.mod_id,
+            details.game_id,
+            details.name,
+            details.name_id,
+            bool(details.summary),
+            bool(details.description),
+            bool(details.logo_url),
+        )
 
         if not details.name.strip():
             return MetadataRefreshResult(
@@ -426,7 +492,7 @@ def refresh_modio_mod_metadata(
                 success=False,
                 managed_path=folder,
                 old_path=folder,
-                error="Mod.io API 未返回 Mod 名称",
+                error="[API_PARSE] Mod.io API 未返回 Mod 名称",
             )
 
         # Conflict check before mutating files (except we still allow metadata
@@ -437,7 +503,7 @@ def refresh_modio_mod_metadata(
             desired
             and desired != folder.name
             and target_probe.exists()
-            and target_probe != folder
+            and not _is_same_managed_directory(folder, target_probe)
         ):
             return MetadataRefreshResult(
                 mod_id=mid,
@@ -446,7 +512,7 @@ def refresh_modio_mod_metadata(
                 old_path=folder,
                 title=details.name,
                 error=(
-                    f"目录名冲突：目标「{desired}」已存在，"
+                    f"[METADATA_MERGE] 目录名冲突：目标「{desired}」已存在，"
                     "未覆盖现有 Mod，也未删除当前目录。"
                 ),
             )
@@ -478,7 +544,7 @@ def refresh_modio_mod_metadata(
                 managed_path=folder,
                 old_path=folder,
                 title=details.name,
-                error=str(exc),
+                error=f"[METADATA_MERGE] {exc}",
                 cover_path="",
                 message="",
             )
@@ -496,17 +562,41 @@ def refresh_modio_mod_metadata(
                 )
             except Exception:  # noqa: BLE001
                 pass
+            rename_err = format_directory_rename_error(
+                exc, source=folder, lock_summary=lock_summary
+            )
             return MetadataRefreshResult(
                 mod_id=mid,
                 success=False,
                 managed_path=folder,
                 old_path=folder,
                 title=details.name,
-                error=format_directory_rename_error(
-                    exc, source=folder, lock_summary=lock_summary
-                ),
+                error=f"[METADATA_MERGE] {rename_err}",
                 cover_path="",
             )
+
+        if renamed:
+            path_commit = record_filesystem_rename(
+                mid,
+                folder,
+                new_path,
+                reason="refresh",
+                db=database,
+            )
+            if not path_commit.success:
+                return MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=new_path,
+                    old_path=folder,
+                    renamed=True,
+                    title=details.name,
+                    error=(
+                        f"[{path_commit.stage}] {path_commit.error}"
+                        if path_commit.error
+                        else "路径提交失败"
+                    ),
+                )
 
         # Unified success path (os.rename / MoveFileExW / fallback content move).
         logger.info(
@@ -543,6 +633,15 @@ def refresh_modio_mod_metadata(
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Mod.io DB update failed for %s: %s", mid, exc)
+            return MetadataRefreshResult(
+                mod_id=mid,
+                success=False,
+                managed_path=new_path,
+                old_path=folder,
+                renamed=renamed,
+                title=details.name,
+                error=f"[{PathLifecycleStage.DB_WRITE.value}] 平台信息更新失败: {exc}",
+            )
 
         overrides = database.get_user_override_fields(mid)
         display_info = database.get_mod_display_info(mid)

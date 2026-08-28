@@ -224,6 +224,7 @@ ANNO_1800_NAME_ALIASES = frozenset(
     }
 )
 MODIO_ANNO_1800_URL = "https://mod.io/g/anno-1800"
+MODIO_BALDURS_GATE_3_URL = "https://mod.io/g/baldursgate3"
 MODIO_DEFAULT_URL = "https://mod.io"
 
 # Stardew Valley / 星露谷物语 — no Steam Workshop source.
@@ -237,12 +238,43 @@ STARDEW_VALLEY_NAME_ALIASES = frozenset(
     }
 )
 
+# Baldur's Gate 3 / 博德之门3 — no Steam Workshop source.
+BALDURS_GATE_3_APP_IDS = frozenset({1086940})
+BALDURS_GATE_3_NAME_ALIASES = frozenset(
+    {
+        "baldur's gate 3",
+        "baldurs gate 3",
+        "baldursgate3",
+        "bg3",
+        "博德之门3",
+        "博德之门Ⅲ",
+    }
+)
+
+# Cyberpunk 2077 / 赛博朋克2077 — no Steam Workshop source.
+CYBERPUNK_2077_APP_IDS = frozenset({1091500})
+CYBERPUNK_2077_NAME_ALIASES = frozenset(
+    {
+        "cyberpunk 2077",
+        "cyberpunk2077",
+        "赛博朋克2077",
+        "赛博朋克 2077",
+    }
+)
+
 
 def _normalize_game_key(game_name: str | None) -> str:
     text = str(game_name or "").strip().casefold()
-    for ch in (" ", "_", "-", "·", "—"):
+    for ch in (" ", "_", "-", "·", "—", "'", "’"):
         text = text.replace(ch, "")
     return text
+
+
+def _coerce_game_id(game_id: int | str = 0) -> int:
+    try:
+        return int(str(game_id or "0").strip() or 0)
+    except ValueError:
+        return 0
 
 
 def is_anno_1800_game(game_name: str = "", game_id: int = 0) -> bool:
@@ -260,10 +292,7 @@ def is_anno_1800_game(game_name: str = "", game_id: int = 0) -> bool:
 
 def is_stardew_valley_game(game_name: str = "", game_id: int | str = 0) -> bool:
     """True when the library game is Stardew Valley / 星露谷物语."""
-    try:
-        gid = int(str(game_id or "0").strip() or 0)
-    except ValueError:
-        gid = 0
+    gid = _coerce_game_id(game_id)
     if gid in STARDEW_VALLEY_APP_IDS:
         return True
     raw = str(game_name or "").strip()
@@ -277,6 +306,65 @@ def is_stardew_valley_game(game_name: str = "", game_id: int | str = 0) -> bool:
     key = _normalize_game_key(game_name)
     aliases = {_normalize_game_key(a) for a in STARDEW_VALLEY_NAME_ALIASES}
     return key in aliases
+
+
+def is_baldurs_gate_3_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Baldur's Gate 3 / 博德之门3."""
+    gid = _coerce_game_id(game_id)
+    if gid in BALDURS_GATE_3_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    if "博德之门" in raw and ("3" in raw or "Ⅲ" in raw or "iii" in raw.casefold()):
+        return True
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in BALDURS_GATE_3_NAME_ALIASES}
+    if key in aliases:
+        return True
+    return "baldursgate3" in key or key == "bg3"
+
+
+def is_cyberpunk_2077_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Cyberpunk 2077 / 赛博朋克2077."""
+    gid = _coerce_game_id(game_id)
+    if gid in CYBERPUNK_2077_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    if "赛博朋克" in raw and "2077" in raw:
+        return True
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in CYBERPUNK_2077_NAME_ALIASES}
+    if key in aliases:
+        return True
+    return "cyberpunk2077" in key
+
+
+def omits_steam_workshop_source(game_name: str = "", game_id: int | str = 0) -> bool:
+    """Games with no Steam Workshop Mod source in Import / Edit UI."""
+    return (
+        is_stardew_valley_game(game_name, game_id)
+        or is_baldurs_gate_3_game(game_name, game_id)
+        or is_cyberpunk_2077_game(game_name, game_id)
+    )
+
+
+def supports_modio_source(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when Import / Edit should offer mod.io for this game."""
+    return is_anno_1800_game(game_name, game_id) or is_baldurs_gate_3_game(
+        game_name, game_id
+    )
+
+
+def default_modio_game_url(game_name: str = "", game_id: int | str = 0) -> str:
+    """Game-scoped mod.io hub URL, or the generic mod.io home page."""
+    if is_anno_1800_game(game_name, game_id):
+        return MODIO_ANNO_1800_URL
+    if is_baldurs_gate_3_game(game_name, game_id):
+        return MODIO_BALDURS_GATE_3_URL
+    return MODIO_DEFAULT_URL
 
 
 # (platform_id, UI label) — base sources every game supports.
@@ -314,13 +402,13 @@ def get_available_sources(
     Dynamic source platforms for Import / Edit UI.
 
     Always includes Nexus / GitHub / 其它. Steam Workshop is omitted for
-    Stardew Valley (星露谷物语). For Anno 1800, ``mod.io`` is prepended
-    (Steam remains in the list but Import UI hides the radio).
+    Stardew Valley, Baldur's Gate 3, and Cyberpunk 2077. For Anno 1800 and
+    Baldur's Gate 3, ``mod.io`` is prepended.
     """
     sources = list(BASE_SOURCE_OPTIONS)
-    if is_stardew_valley_game(game_name, game_id):
+    if omits_steam_workshop_source(game_name, game_id):
         sources = [(p, label) for p, label in sources if p != PLATFORM_STEAM]
-    if is_anno_1800_game(game_name, game_id):
+    if supports_modio_source(game_name, game_id):
         sources.insert(0, (PLATFORM_MODIO, "mod.io"))
     return sources
 
@@ -380,9 +468,7 @@ def default_source_url_for_platform(
     """Baseline URL when the user leaves the source link empty."""
     key = normalize_platform(platform)
     if key == PLATFORM_MODIO:
-        if is_anno_1800_game(game_name, game_id):
-            return MODIO_ANNO_1800_URL
-        return MODIO_DEFAULT_URL
+        return default_modio_game_url(game_name, game_id)
     # 「其它」and similar free-form sources keep an empty link.
     return ""
 

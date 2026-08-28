@@ -21,7 +21,6 @@ from services.library_status import (
     GAME_STATUS_HEALTHY,
     compute_content_status,
     content_status_to_library_status,
-    normalize_library_source,
     row_content_status,
     row_source_type,
 )
@@ -297,7 +296,8 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
         deploy_status = "not_deployed"
         game_db = ""
         steam = str(resolved.title or "").strip()
-        platform = normalize_platform(resolved.platform or PLATFORM_STEAM)
+        # UI store platform — always prefer SQLite mods.platform over resolver/sticky
+        platform = ""
         source_url = str(resolved.source_url or "").strip()
         external_id = ""
         is_invalid = False
@@ -312,17 +312,26 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
             game_db = str(fields.game_name or "").strip()
             if not steam:
                 steam = str(fields.steam_name or "").strip()
+            platform = str(fields.platform or "").strip()
             external_id = str(fields.external_id or "").strip()
             is_invalid = bool(fields.is_invalid)
             conflict_status = str(fields.conflict_status or "none")
             enabled = bool(fields.enabled)
             category_tags = str(fields.category_tags or "")
+            if not source_url:
+                source_url = str(fields.source_url or "").strip()
 
+        from services.platform_identity import resolve_display_platform
+
+        platform = resolve_display_platform(
+            db_platform=platform,
+            metadata_platform=str(resolved.platform or ""),
+        )
         title = str(resolved.display_name or resolved.title or folder.name or "—").strip()
         json_display = str(resolved.display_name or "").strip()
         meta_title = str(resolved.title or "").strip()
         invalid = is_invalid or bool(getattr(flags, "invalid", False)) if flags else is_invalid
-        conflict = (conflict_status in ("conflict", "warning")) or (
+        conflict = (conflict_status == "conflict") or (
             bool(getattr(flags, "conflict", False)) if flags else False
         )
         tag_values = ""
@@ -348,9 +357,9 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
                 str(getattr(fields, "offline_status", "") or "none")
             )
         brow = backup_rows.get(mid) if mid else None
-        source_type = row_source_type(brow) if brow else normalize_library_source(platform)
-        if normalize_library_source(source_type) == "unknown":
-            source_type = normalize_library_source(platform)
+        # Sticky provenance only — must never overwrite ModCardData.platform
+        sticky = row_source_type(brow) if brow else ""
+        source_type = sticky if sticky and sticky != "unknown" else ""
         backup_status = str((brow or {}).get("backup_status") or "")
         db_content = row_content_status(brow) if brow else ""
         identity_conflict = conflict or db_content == "identity_conflict"

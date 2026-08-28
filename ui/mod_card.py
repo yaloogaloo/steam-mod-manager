@@ -764,7 +764,7 @@ class ModCardWidget(QFrame):
             enabled = True
         disabled = not enabled
         if st is not None:
-            if st.conflict_status in ("conflict", "warning"):
+            if st.conflict_status == "conflict":
                 conflict = True
                 tip_parts.append(
                     "冲突"
@@ -774,6 +774,9 @@ class ModCardWidget(QFrame):
                         else ""
                     )
                 )
+            elif st.conflict_status == "warning" and (st.conflict_note or "").strip():
+                # Soft warning — independent tip, not file-conflict badge
+                tip_parts.append(f"警告：{st.conflict_note.strip()}")
             if st.invalid:
                 invalid = True
                 tip_parts.append(
@@ -1094,27 +1097,29 @@ class ModCardWidget(QFrame):
         self.missing_badge.show()
 
     def _render_platform_badge(self) -> None:
-        from services.library_status import (
-            SOURCE_EXTERNAL,
-            SOURCE_LOCAL,
-            SOURCE_UNKNOWN,
-            normalize_library_source,
-            source_badge_label,
+        from services.platform_identity import (
+            format_platform_label,
+            resolve_display_platform,
         )
 
-        platform = "steam"
+        db_platform = ""
+        meta_platform = ""
         data = getattr(self, "_card_data", None)
-        if data is not None and str(getattr(data, "source_type", "") or "").strip():
-            platform = str(data.source_type).strip()
-        elif self.metadata and str(getattr(self.metadata, "source_type", "") or "").strip():
-            platform = str(self.metadata.source_type).strip()
-        else:
+        if data is not None:
+            db_platform = str(getattr(data, "platform", "") or "").strip()
+        if self.metadata is not None:
+            # ModMetadata.source_type is the JSON store-platform key, not mods.source_type
+            meta_platform = str(
+                getattr(self.metadata, "source_type", "") or ""
+            ).strip()
+        if not db_platform:
             info = self._display_info()
             if info is not None:
-                platform = getattr(info, "platform", "steam") or "steam"
-        key = normalize_library_source(platform)
-        if key == SOURCE_UNKNOWN:
-            key = str(platform).strip().lower() or "steam"
+                db_platform = str(getattr(info, "platform", "") or "").strip()
+        key = resolve_display_platform(
+            db_platform=db_platform,
+            metadata_platform=meta_platform,
+        )
 
         styles = {
             "steam": (PLATFORM_STEAM_BG, PLATFORM_STEAM_FG, PLATFORM_STEAM_BORDER),
@@ -1122,13 +1127,8 @@ class ModCardWidget(QFrame):
             "github": (PLATFORM_GITHUB_BG, PLATFORM_GITHUB_FG, PLATFORM_GITHUB_BORDER),
             "modio": (PLATFORM_MODIO_BG, PLATFORM_MODIO_FG, PLATFORM_MODIO_BORDER),
             "other": (PLATFORM_OTHER_BG, PLATFORM_OTHER_FG, PLATFORM_OTHER_BORDER),
-            SOURCE_EXTERNAL: (ACCENT_NEUTRAL_BG, TEXT_SECONDARY, ACCENT_NEUTRAL_BORDER),
-            SOURCE_LOCAL: (PLATFORM_OTHER_BG, PLATFORM_OTHER_FG, PLATFORM_OTHER_BORDER),
-            SOURCE_UNKNOWN: (ACCENT_NEUTRAL_BG, TEXT_SECONDARY, ACCENT_NEUTRAL_BORDER),
         }
-        text = source_badge_label(key) if key in (
-            "steam", "nexus", "modio", "github", SOURCE_EXTERNAL, SOURCE_LOCAL, SOURCE_UNKNOWN
-        ) else _platform_badge_label_fallback(key)
+        text = format_platform_label(key)
         bg, fg, border = styles.get(
             key, (ACCENT_NEUTRAL_BG, TEXT_SECONDARY, ACCENT_NEUTRAL_BORDER)
         )
@@ -1366,12 +1366,6 @@ class ModCardWidget(QFrame):
                 self.cover_label.setPixmap(scaled.copy(x, y, target_w, target_h))
                 return
         self.cover_label.setPixmap(_placeholder_cover(target_w, target_h))
-
-
-def _platform_badge_label_fallback(key: str) -> str:
-    from ui.platform_labels import platform_badge_label
-
-    return platform_badge_label(key)
 
 
 def _placeholder_cover(width: int, height: int) -> QPixmap:

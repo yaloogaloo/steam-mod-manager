@@ -29,7 +29,7 @@ from ui.library_query import (
     FILTER_CONTENT_MISSING,
     FILTER_FOLDER_MISSING,
     FILTER_IDENTITY_CONFLICT,
-    FILTER_PLATFORM_EXTERNAL,
+    FILTER_PLATFORM_STEAM,
     ModFilterIndex,
     filter_and_sort,
     matches_platform_filter,
@@ -209,10 +209,12 @@ def test_case4_game_summary_aggregation() -> None:
 def test_case5_backup_invalid_filter_and_source(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
-    # Filter by backup_invalid content_status
-    idx = _index(content_status="backup_invalid", source_type="external")
+    # Filter by backup_invalid content_status; sticky source_type is not a platform chip
+    idx = _index(content_status="backup_invalid", source_type="external", platform="steam")
     assert matches_status_filter(idx, "backup_invalid")
-    assert matches_platform_filter(idx, FILTER_PLATFORM_EXTERNAL)
+    assert matches_platform_filter(idx, FILTER_PLATFORM_STEAM)
+    # Legacy provenance filter key must not match via source_type
+    assert not matches_platform_filter(idx, "platform_external")
 
     # Persist invalid backup_status and ensure diagnostics / row read works
     library = tmp_path / "mod"

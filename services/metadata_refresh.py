@@ -584,6 +584,11 @@ def refresh_steam_mod_metadata(
     folder = Path(managed_path).expanduser().resolve()
     database = db if db is not None else get_db()
 
+    from services.path_lifecycle import record_filesystem_rename, resolve_managed_folder
+
+    resolved = resolve_managed_folder(mid, hint_path=folder, db=database)
+    folder = resolved.path or folder
+
     if not allow_official_sync or database.is_official_metadata_synced(mid):
         existing = None
         try:
@@ -751,6 +756,32 @@ def refresh_steam_mod_metadata(
                 error=f"Folder rename failed: {exc}",
                 cover_path=cover_path,
             )
+
+        if renamed:
+            from services.path_lifecycle import PathLifecycleStage
+
+            path_commit = record_filesystem_rename(
+                mid,
+                folder,
+                new_path,
+                reason="refresh",
+                db=database,
+            )
+            if not path_commit.success:
+                return MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=new_path,
+                    old_path=folder,
+                    renamed=True,
+                    title=meta.title,
+                    error=(
+                        f"[{path_commit.stage}] {path_commit.error}"
+                        if path_commit.error
+                        else "路径提交失败"
+                    ),
+                    cover_path=cover_path,
+                )
 
         meta.managed_path = str(new_path)
         meta.local_path = str(new_path)

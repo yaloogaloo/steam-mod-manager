@@ -8,6 +8,7 @@ import pytest
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
+    DEPLOY_TYPE_FOLDER_COPY,
     DatabaseManager,
 )
 from core.models import ModMetadata
@@ -34,8 +35,8 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
 
     mod = library / "G" / "ShrinkMod"
     mod.mkdir(parents=True)
-    (mod / "A.pak").write_bytes(b"A")
-    (mod / "B.pak").write_bytes(b"B")
+    (mod / "A.txt").write_text("A", encoding="utf-8")
+    (mod / "B.txt").write_text("B", encoding="utf-8")
     info = mod / INFO_DIR_NAME
     info.mkdir()
     (info / METADATA_FILENAME).write_text(
@@ -44,7 +45,9 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
         encoding="utf-8",
     )
 
-    db.update_game_deploy_config(42, name="G", mod_path=str(mods_root))
+    db.update_game_deploy_config(
+        42, name="G", mod_path=str(mods_root), deploy_type=DEPLOY_TYPE_FOLDER_COPY
+    )
     db.upsert_mod(ModMetadata(published_file_id="96001", title="ShrinkMod", app_id=42))
 
     deployer = ModDeployer(library_root=library, db=db)
@@ -52,24 +55,24 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     assert first["success"] is True
 
     target = mods_root / "ShrinkMod"
-    assert (target / "A.pak").is_file()
-    assert (target / "B.pak").is_file()
+    assert (target / "A.txt").is_file()
+    assert (target / "B.txt").is_file()
     old_man = load_manifest(mod)
     assert old_man is not None
     assert len(old_man.files) == 2
 
-    # New version drops B.pak
-    (mod / "B.pak").unlink()
+    # New version drops B.txt
+    (mod / "B.txt").unlink()
 
     red = deployer.redeploy_mod("96001")
     assert red["success"] is True
-    assert (target / "A.pak").is_file()
-    assert not (target / "B.pak").exists()
+    assert (target / "A.txt").is_file()
+    assert not (target / "B.txt").exists()
 
     new_man = load_manifest(mod)
     assert new_man is not None
     assert len(new_man.files) == 1
-    assert new_man.files[0].target.endswith("A.pak")
+    assert new_man.files[0].target.endswith("A.txt")
 
     info = db.get_mod_deploy_info("96001")
     assert info is not None

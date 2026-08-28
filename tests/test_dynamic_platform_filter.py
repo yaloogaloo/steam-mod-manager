@@ -15,6 +15,7 @@ from core.models import ModMetadata
 from core.mod_platform import PLATFORM_MODIO, PLATFORM_NEXUS
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.library_view import ModLibraryView
+from ui.library_query import FILTER_PLATFORM_NEXUS
 
 
 @pytest.fixture(scope="module")
@@ -68,13 +69,16 @@ def test_dynamic_platform_filter_bar(
     view.refresh()
 
     labels = [btn.text() for btn in view._platform_buttons.values()]
-    assert "全部平台" in labels
+    assert "全部" in labels
     assert "Nexus" in labels
-    assert "mod.io" in labels
+    assert "Mod.io" in labels or "mod.io" in labels
     assert "Steam" not in labels
     assert "GitHub" not in labels
 
-    nexus_btn = view._platform_buttons[PLATFORM_NEXUS]
+    nexus_btn = view._platform_buttons.get(FILTER_PLATFORM_NEXUS) or view._platform_buttons.get(
+        PLATFORM_NEXUS
+    )
+    assert nexus_btn is not None
     nexus_btn.setChecked(True)
     visible = view._visible_cards()
     assert len(visible) == 1

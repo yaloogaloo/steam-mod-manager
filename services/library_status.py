@@ -205,19 +205,6 @@ def compute_game_status(library_root: str | Path, game_folder: str) -> str:
     return GAME_STATUS_MISSING_FOLDER
 
 
-def source_badge_label(source_type: str | None) -> str:
-    key = normalize_library_source(source_type)
-    return {
-        SOURCE_STEAM: "Steam",
-        SOURCE_NEXUS: "Nexus",
-        SOURCE_MODIO: "mod.io",
-        SOURCE_GITHUB: "GitHub",
-        SOURCE_EXTERNAL: "External",
-        SOURCE_LOCAL: "Local",
-        SOURCE_UNKNOWN: "Unknown",
-    }.get(key, key.title() or "Unknown")
-
-
 def content_status_badge_label(content_status: str | None) -> str:
     key = str(content_status or "").strip() or CONTENT_HEALTHY
     return {

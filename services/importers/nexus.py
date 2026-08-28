@@ -111,16 +111,23 @@ class NexusImporter(ModImporter):
             if not ext and url:
                 ext = parse_nexus_id(url, "")
             if not url and not is_valid_nexus_mod_id(ext):
-                # No official URL: allow local placeholder only when some id/folder exists.
+                # Directory import: same external_id as batch (folder.name).
+                # Do not wrap folder.name in local/ — that breaks duplicate match.
                 if not ext:
-                    from services.importers.identity_resolve import MISSING_OFFICIAL_IDENTITY
+                    ext = folder.name
+                elif ext != folder.name and not str(ext).startswith("local/"):
+                    # Legacy non-folder placeholder only.
+                    ext = local_nexus_external_id(ext)
+                if not str(ext or "").strip():
+                    from services.importers.identity_resolve import (
+                        MISSING_OFFICIAL_IDENTITY,
+                    )
 
                     return ImportResult(
                         success=False,
                         error=MISSING_OFFICIAL_IDENTITY,
                         platform=self.platform,
                     )
-                ext = local_nexus_external_id(ext)
                 url = ""
             elif not is_valid_nexus_mod_id(ext) and url:
                 # URL present but id not numeric — refuse local/ invention.

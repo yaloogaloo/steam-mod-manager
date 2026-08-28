@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import shutil
 import uuid
@@ -17,7 +18,22 @@ from core.db_manager import (
     get_db,
 )
 from core.paths import default_mod_library
+from services.backup_manager import (
+    BackupIntegrityError,
+    BackupManager,
+    BackupRestoreError,
+)
 from services.conflict import ConflictDetector
+from services.deploy_errors import DeploySourceError, DeployValidationError
+from services.deploy_security import (
+    ManifestSecurityError,
+    collect_allowed_target_roots,
+    collect_protected_roots,
+    validate_manifest_for_save,
+    validate_manifest_mod_id,
+    validate_manifest_targets,
+    validate_planned_sources,
+)
 from services.deploy_rules import (
     DEPLOY_TYPE_ANNO_1800,
     DEPLOY_TYPE_CUSTOM_PATH,
@@ -32,10 +48,12 @@ from services.deploy_rules import (
     get_strategy,
     load_manifest,
     resolve_deploy_type,
+    resolve_strategy,
     save_manifest,
     supported_deploy_types,
 )
 from services.deploy_rules.custom import CustomPathStrategy
+from services.deploy_rules.manifest import prune_protection
 from services.deploy_status import (
     DEPLOY_BLOCKED_CONTENT_MISSING,
     DEPLOY_BLOCKED_FOLDER_MISSING,
@@ -49,6 +67,12 @@ from services.deploy_status import (
     deploy_block_reason_for_content_status,
     enrich_manifest_fingerprint,
     resolve_deployment_status,
+)
+from services.deploy_verifier import (
+    has_legal_deploy_content,
+    plain_content_allow_list,
+    verify_deploy_result,
+    verify_deploy_source,
 )
 from services.file_ops import (
     ModFileManager,
@@ -252,12 +276,169 @@ def _preserve_extract_layout_for_mod(
     return app_id == STARDEW_VALLEY_APP_ID
 
 
+def _top_level_dir_names(root: Path) -> set[str]:
+    """Immediate child directory names under *root* (ignore dot entries)."""
+    if not root.is_dir():
+        return set()
+    names: set[str] = set()
+    try:
+        for path in root.iterdir():
+            if path.name.startswith("."):
+                continue
+            if path.is_dir():
+                names.add(path.name)
+    except OSError:
+        return set()
+    return names
+
+
+def _extract_overlaps_custom_deploy_dirs(
+    extract_dir: Path,
+    custom_deploy_path: str | None,
+) -> bool:
+    """
+    Narrow rule: custom deploy target already has a top-level folder whose
+    name matches a top-level folder inside the extracted archive.
+
+    Example: extract/bin + GameRoot/bin → treat ``bin`` as install structure,
+    not a packaging wrapper (skip ``find_mod_root``).
+    """
+    raw = str(custom_deploy_path or "").strip()
+    if not raw:
+        return False
+    target = Path(raw).expanduser()
+    if not target.is_dir():
+        return False
+    extract_dirs = _top_level_dir_names(extract_dir)
+    if not extract_dirs:
+        return False
+    target_dirs = _top_level_dir_names(target)
+    if not target_dirs:
+        return False
+    # Case-insensitive: Windows game roots often mix casing.
+    return bool({n.casefold() for n in extract_dirs} & {n.casefold() for n in target_dirs})
+
+
+def _choose_archive_extract_root(
+    extract_dir: Path,
+    *,
+    preserve_extract_layout: bool,
+    custom_deploy_path: str = "",
+    find_mod_root_fn: Any | None = None,
+) -> Path:
+    """
+    Pick content root for one extracted archive.
+
+    Order:
+    1. Explicit preserve (e.g. Stardew)
+    2. Narrow custom_deploy_path overlap with extract top-level dirs
+    3. Legacy ``find_mod_root``
+    """
+    if preserve_extract_layout:
+        return extract_dir
+    if _extract_overlaps_custom_deploy_dirs(extract_dir, custom_deploy_path):
+        logger.info(
+            "[DEPLOY] preserve extract layout: custom path overlaps top-level dirs "
+            "extract=%s custom=%s",
+            extract_dir,
+            custom_deploy_path,
+        )
+        return extract_dir
+    if find_mod_root_fn is None:
+        from services.importers.archive import find_mod_root as find_mod_root_fn
+    return find_mod_root_fn(extract_dir) or extract_dir
+
+
+def validate_deploy_result(result: Any) -> int:
+    """
+    Verify every ``result.manifest.files`` target exists on disk.
+
+    Delegates to :func:`services.deploy_verifier.verify_deploy_result`
+    (existence + size). Raises ``DeployValidationError`` on failure.
+    """
+    return verify_deploy_result(result, check_size=True, check_hash=False)
+
+
+def _sha256_file(path: Path, *, chunk: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            block = fh.read(chunk)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def build_deploy_result_files(
+    manifest: Any,
+    *,
+    include_hash: bool = True,
+) -> list[dict[str, Any]]:
+    """
+    Build runtime DeployResult ``files`` entries from the final manifest.
+
+    Does not change on-disk manifest format — this list is only returned to
+    callers / logged. Each item: ``source``, ``target``, ``size``, and
+    optional ``hash`` (sha256 of the target file when readable).
+    """
+    out: list[dict[str, Any]] = []
+    for entry in list(getattr(manifest, "files", None) or []):
+        source = str(getattr(entry, "source", "") or "")
+        target = str(getattr(entry, "target", "") or "")
+        item: dict[str, Any] = {
+            "source": source,
+            "target": target,
+            "size": 0,
+        }
+        path = Path(target) if target else None
+        if path is not None and path.is_file():
+            try:
+                item["size"] = int(path.stat().st_size)
+            except OSError:
+                item["size"] = 0
+            if include_hash:
+                try:
+                    item["hash"] = _sha256_file(path)
+                except OSError:
+                    pass
+        elif path is not None and path.is_dir():
+            # Directory entries are rare; size stays 0, no hash.
+            pass
+        out.append(item)
+    return out
+
+
+def _deploy_result_file_labels(
+    files: list[dict[str, Any]],
+    *,
+    target_root: str = "",
+) -> list[str]:
+    """Prefer paths relative to deploy target root for success logs."""
+    root = Path(target_root).resolve() if str(target_root or "").strip() else None
+    labels: list[str] = []
+    for item in files:
+        raw = str(item.get("target") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw)
+        if root is not None:
+            try:
+                labels.append(path.resolve().relative_to(root).as_posix())
+                continue
+            except (ValueError, OSError):
+                pass
+        labels.append(path.as_posix())
+    return labels
+
+
 def _build_extracted_deploy_content(
     managed: Path,
     archive_paths: list[Path],
     *,
     include_other_plain: bool,
     preserve_extract_layout: bool = False,
+    custom_deploy_path: str = "",
 ) -> tuple[Path, Path]:
     """Extract archives (+ optional loose files) into a temp deploy payload."""
     from services.importers.archive import (
@@ -275,10 +456,12 @@ def _build_extracted_deploy_content(
             extract_dir = extract_archive(
                 archive, dest_dir=stage / f"ex_{uuid.uuid4().hex[:8]}"
             )
-            if preserve_extract_layout:
-                root = extract_dir
-            else:
-                root = find_mod_root(extract_dir) or extract_dir
+            root = _choose_archive_extract_root(
+                extract_dir,
+                preserve_extract_layout=preserve_extract_layout,
+                custom_deploy_path=custom_deploy_path,
+                find_mod_root_fn=find_mod_root,
+            )
             _merge_tree(root, content)
         if include_other_plain:
             for path in _iter_plain_managed_files(managed, skip_archives=True):
@@ -300,6 +483,7 @@ def prepare_deploy_content(
     managed_source: Path,
     *,
     db: DatabaseManager | None = None,
+    custom_deploy_path: str | None = None,
 ) -> tuple[Path, frozenset[str] | None, Path | None]:
     """
     Resolve deploy content root for *mod_id*.
@@ -310,6 +494,10 @@ def prepare_deploy_content(
 
     Returns ``(content_root, allowed_rel_paths, cleanup_dir)``.
     ``cleanup_dir`` is a temp extract folder to remove after deploy (or None).
+
+    When a listed archive is missing on disk, falls back to the managed folder
+    **only** if it already contains legal loose (non-archive) Mod content;
+    otherwise raises ``DeploySourceError``.
     """
     from core.mod_platform import (
         FILE_ROLE_GITHUB_SOURCE_ARCHIVE,
@@ -326,6 +514,40 @@ def prepare_deploy_content(
     database = db if db is not None else get_db()
     managed = Path(managed_source)
     preserve_layout = _preserve_extract_layout_for_mod(mod_id, db=database)
+
+    custom_path = str(custom_deploy_path or "").strip()
+    if not custom_path:
+        try:
+            display = database.get_mod_display_info(mod_id)
+            custom_path = (
+                str(display.custom_deploy_path or "").strip() if display else ""
+            )
+        except Exception:  # noqa: BLE001
+            custom_path = ""
+
+    def _managed_fallback_or_raise(reason: str) -> tuple[Path, frozenset[str], None]:
+        """
+        Archive missing / empty extract: allow managed only with loose content.
+
+        Always returns a non-archive allow-list so leftover ``.zip`` files are
+        never copied as deploy payload.
+        """
+        if not has_legal_deploy_content(managed):
+            raise DeploySourceError(reason)
+        allowed = resolve_deploy_sources(mod_id, managed, db=database)
+        if not allowed:
+            allowed = plain_content_allow_list(managed)
+        if not allowed:
+            raise DeploySourceError(reason)
+        logger.warning(
+            "Archive unavailable; using validated managed loose content "
+            "mod_id=%s files=%s reason=%s",
+            mod_id,
+            len(allowed),
+            reason,
+        )
+        return managed, allowed, None
+
     bundle = database.get_mod_files(mod_id)
     if not bundle.files:
         sniffed = _sniff_managed_archives(managed)
@@ -335,8 +557,13 @@ def prepare_deploy_content(
                 sniffed,
                 include_other_plain=True,
                 preserve_extract_layout=preserve_layout,
+                custom_deploy_path=custom_path,
             )
             return content, None, stage
+        if not has_legal_deploy_content(managed):
+            raise DeploySourceError(
+                "部署源没有可部署的内容：managed 目录为空或仅有压缩包"
+            )
         return managed, None, None
 
     selected = [
@@ -354,14 +581,24 @@ def prepare_deploy_content(
                 sniffed,
                 include_other_plain=True,
                 preserve_extract_layout=preserve_layout,
+                custom_deploy_path=custom_path,
             )
             return content, None, stage
+        if not has_legal_deploy_content(managed):
+            raise DeploySourceError(
+                "部署源没有可部署的内容：无选中文件且 managed 非法"
+            )
         return managed, None, None
 
     archive_entries = [e for e in selected if _entry_is_archive_source(e)]
     plain_entries = [e for e in selected if not _entry_is_archive_source(e)]
 
     if not archive_entries:
+        if not has_legal_deploy_content(managed):
+            # Plain entries selected but nothing on disk / archives-only.
+            raise DeploySourceError(
+                "部署源没有可部署的内容：选中文件均不可用"
+            )
         return managed, resolve_deploy_sources(mod_id, managed, db=database), None
 
     stage = import_cache_root() / f"deploy_{uuid.uuid4().hex}"
@@ -371,20 +608,28 @@ def prepare_deploy_content(
         for entry in archive_entries:
             archive = _resolve_archive_file(managed, entry)
             if archive is None:
-                # Directory-imported / extracted Mods may still list an archive
-                # FileEntry without a physical .zip/.7z/.rar on disk. Fall back
-                # to the managed folder so .pak / folder_copy scan can proceed.
+                label = str(
+                    getattr(entry, "filename", None)
+                    or getattr(entry, "path", None)
+                    or entry
+                )
                 logger.warning(
-                    "Archive source missing; falling back to managed dir: %s",
-                    getattr(entry, "filename", "") or entry,
+                    "Archive source missing; validating managed dir before fallback: %s",
+                    label,
                 )
                 cleanup_import_cache(stage)
-                return managed, None, None
-            extract_dir = extract_archive(archive, dest_dir=stage / f"ex_{uuid.uuid4().hex[:8]}")
-            if preserve_layout:
-                root = extract_dir
-            else:
-                root = find_mod_root(extract_dir) or extract_dir
+                return _managed_fallback_or_raise(
+                    f"压缩包源缺失且 managed 目录无合法 Mod 内容：{label}"
+                )
+            extract_dir = extract_archive(
+                archive, dest_dir=stage / f"ex_{uuid.uuid4().hex[:8]}"
+            )
+            root = _choose_archive_extract_root(
+                extract_dir,
+                preserve_extract_layout=preserve_layout,
+                custom_deploy_path=custom_path,
+                find_mod_root_fn=find_mod_root,
+            )
             _merge_tree(root, content)
 
         for entry in plain_entries:
@@ -402,10 +647,15 @@ def prepare_deploy_content(
 
         if not any(content.rglob("*")):
             cleanup_import_cache(stage)
-            return managed, None, None
+            return _managed_fallback_or_raise(
+                "压缩包解压后没有可部署的文件，且 managed 目录无合法 Mod 内容"
+            )
 
         # Extracted payload: deploy whole content tree (never the .zip itself).
         return content, None, stage
+    except DeploySourceError:
+        cleanup_import_cache(stage)
+        raise
     except Exception:
         cleanup_import_cache(stage)
         raise
@@ -747,7 +997,13 @@ class ModDeployer:
                     mid, source, db=db
                 )
                 allowed = _normalize_deploy_allow_list(allowed)
-            except (FileNotFoundError, ValueError, RuntimeError, OSError) as exc:
+            except (
+                FileNotFoundError,
+                ValueError,
+                RuntimeError,
+                OSError,
+                DeploySourceError,
+            ) as exc:
                 return None, {
                     "success": False,
                     "error": str(exc),
@@ -801,6 +1057,125 @@ class ModDeployer:
                 msg,
             )
 
+    def _abort_failed_deploy(
+        self,
+        *,
+        mid: str,
+        app_id: int,
+        manifest_root: Path,
+        backup_mgr: BackupManager,
+        prep: object | None,
+        error: str,
+    ) -> bool:
+        """
+        After a failed deploy attempt: try rollback, then align DB.
+
+        Returns ``True`` when rollback succeeded (or there was nothing to roll
+        back): manifest/transaction cleaned, DB ``not_deployed``.
+
+        Returns ``False`` when rollback failed: keeps manifest, backups, and
+        ``deploy_transaction.json`` for recovery; DB ``failed``.
+        """
+        msg = _normalize_deploy_error(error)
+        rollback_ok = True
+        if prep is not None:
+            try:
+                backup_mgr.rollback(prep)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                rollback_ok = False
+                logger.error(
+                    "[DEPLOY] rollback failed, keeping manifest and backup "
+                    "for recovery mod_id=%s error=%s",
+                    mid,
+                    exc,
+                )
+
+        if not rollback_ok:
+            self._mark_failed(mid, app_id=app_id, error=msg)
+            return False
+
+        try:
+            delete_manifest(manifest_root)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[DEPLOY] mod_id=%s delete_manifest after failure failed", mid
+            )
+        try:
+            backup_mgr.clear_transaction()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[DEPLOY] mod_id=%s clear_transaction after rollback failed", mid
+            )
+        try:
+            self._database().update_mod_deploy_status(
+                mid,
+                deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
+                deploy_path="",
+                deploy_time="",
+                deploy_error=msg,
+                app_id=app_id or None,
+            )
+        except Exception:  # noqa: BLE001
+            self._mark_failed(mid, app_id=app_id, error=msg)
+        return True
+
+    def recover_stale_deploy_transactions(self) -> list[dict[str, Any]]:
+        """
+        Scan managed Mods for leftover ``deploy_transaction.json`` and recover.
+
+        Intended for library startup / reconcile. Does not change ConflictDetector.
+        """
+        from services.file_ops import ModFileManager
+
+        reports: list[dict[str, Any]] = []
+        try:
+            folders = ModFileManager(self.library_root).list_managed_mods()
+        except Exception:  # noqa: BLE001
+            logger.exception("[DEPLOY] stale transaction scan failed to list mods")
+            return reports
+
+        for folder in folders:
+            mgr = BackupManager(folder)
+            txn = mgr.load_transaction()
+            if not txn:
+                continue
+            result = mgr.recover_interrupted_transaction(auto_rollback=True)
+            mid = str(txn.get("mod_id") or folder.name).strip()
+            entry = {
+                "mod_id": mid,
+                "managed_path": str(folder),
+                **result,
+            }
+            reports.append(entry)
+            action = str(result.get("action") or "")
+            if action == "rolled_back" and mid.isdigit():
+                try:
+                    self._database().update_mod_deploy_status(
+                        mid,
+                        deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
+                        deploy_path="",
+                        deploy_time="",
+                        deploy_error="interrupted deploy rolled back from transaction",
+                        app_id=None,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[DEPLOY] mod_id=%s failed to clear status after txn rollback",
+                        mid,
+                    )
+            elif action in {"needs_attention", "marked_failed"}:
+                logger.warning(
+                    "[DEPLOY] stale transaction needs attention mod_id=%s path=%s: %s",
+                    mid,
+                    folder,
+                    result.get("message"),
+                )
+        if reports:
+            logger.info(
+                "[DEPLOY] stale transaction recovery reports=%s", len(reports)
+            )
+        return reports
+
     def deploy_mod(
         self,
         mod_id: int | str,
@@ -811,6 +1186,61 @@ class ModDeployer:
         """Deploy one Mod by Workshop / published file id."""
         mid = str(mod_id).strip()
         log_prefix = f"[DEPLOY] mod_id={mid}"
+
+        import sys
+
+        import services.importers.archive as archive_mod
+        from services.importers.archive import (
+            find_7z_executable,
+            resolve_bundled_unrar_tool,
+        )
+
+        try:
+            import rarfile
+
+            rarfile_version = getattr(rarfile, "__version__", "unknown")
+        except ImportError:
+            rarfile_version = "not installed"
+
+        archive_path = getattr(archive_mod, "__file__", "unknown")
+        try:
+            from datetime import datetime, timezone
+
+            archive_mtime = datetime.fromtimestamp(
+                Path(archive_path).stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat()
+        except OSError:
+            archive_mtime = "unknown"
+
+        bundled = resolve_bundled_unrar_tool()
+        seven = find_7z_executable()
+        gui_runtime_lines = [
+            f"[GUI_RUNTIME] python_executable={sys.executable}",
+            f"[GUI_RUNTIME] python_version={sys.version}",
+            f"[GUI_RUNTIME] archive_module={archive_path}",
+            f"[GUI_RUNTIME] archive_module_mtime={archive_mtime}",
+            f"[GUI_RUNTIME] rarfile_version={rarfile_version}",
+            f"[GUI_RUNTIME] bundled_unrar={bundled}",
+            f"[GUI_RUNTIME] find_7z={seven}",
+        ]
+        for line in gui_runtime_lines:
+            logger.warning(line)
+        try:
+            from core.paths import data_dir
+
+            trace_file = data_dir() / "gui_runtime_trace.log"
+            with trace_file.open("a", encoding="utf-8") as fh:
+                fh.write(f"mod_id={mid}\n")
+                for line in gui_runtime_lines:
+                    fh.write(line + "\n")
+                fh.write("\n")
+        except OSError:
+            pass
+
+        from services.runtime_identity import log_archive_runtime_identity
+
+        log_archive_runtime_identity(logger, prefix="[DEPLOY_RUNTIME]")
 
         if mid.isdigit() and not self._database().is_mod_enabled(mid):
             error = "Mod disabled"
@@ -867,18 +1297,45 @@ class ModDeployer:
                     log_prefix,
                     exc_info=True,
                 )
-            if read_is_missing_content(source_for_gate):
-                logger.warning(
-                    "%s result=fail error=%s",
-                    log_prefix,
-                    MISSING_CONTENT_DEPLOY_ERROR,
-                )
-                return {
-                    "success": False,
-                    "error": MISSING_CONTENT_DEPLOY_ERROR,
-                    "mod_id": mid,
-                    "is_missing_content": True,
-                }
+
+        try:
+            from services.mod_source_integrity import validate_source
+
+            validate_source(
+                mid,
+                managed_path=source_for_gate,
+                db=self._database(),
+            )
+        except DeploySourceError as exc:
+            error = _normalize_deploy_error(str(exc))
+            logger.warning(
+                "%s result=fail reason=source_integrity error=%s code=%s",
+                log_prefix,
+                error,
+                getattr(exc, "code", ""),
+            )
+            if mid.isdigit():
+                self._mark_failed(mid, error=error)
+            out: dict[str, Any] = {
+                "success": False,
+                "error": error,
+                "reason": "source_integrity",
+                "mod_id": mid,
+            }
+            if exc.code:
+                out["source_error_code"] = exc.code
+            if exc.missing_files:
+                out["missing_files"] = list(exc.missing_files)
+            if exc.replacement_candidates:
+                out["replacement_candidates"] = list(exc.replacement_candidates)
+            is_missing = exc.code in {
+                "no_deployable_source",
+                "missing_files",
+                "managed_missing",
+            }
+            if is_missing:
+                out["is_missing_content"] = True
+            return out
 
         # Absolute order: deploy declared dependencies first, then this Mod.
         stack = set(_deploy_stack or ())
@@ -1025,7 +1482,7 @@ class ModDeployer:
         if str(ctx.custom_deploy_path or "").strip():
             strategy: Any = CustomPathStrategy()
         else:
-            strategy = get_strategy(ctx.deploy_type, app_id=ctx.app_id)
+            strategy = resolve_strategy(ctx)
         if strategy is None:
             error = f"暂不支持的部署类型：{ctx.deploy_type}"
             logger.warning("%s result=fail error=%s", log_prefix, error)
@@ -1035,6 +1492,28 @@ class ModDeployer:
                 "error": error,
                 "mod_id": ctx.mod_id,
                 "supported": list(supported_deploy_types()),
+            }
+
+        try:
+            verify_deploy_source(
+                ctx.content_root(),
+                managed_path=ctx.library_folder(),
+                allowed_rel_paths=ctx.allowed_rel_paths,
+            )
+        except DeploySourceError as exc:
+            error = _normalize_deploy_error(str(exc))
+            logger.warning(
+                "%s result=failed reason=invalid_source error=%s",
+                log_prefix,
+                error,
+            )
+            self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=error)
+            return {
+                "success": False,
+                "error": error,
+                "reason": "invalid_source",
+                "mod_id": ctx.mod_id,
+                "deploy_type": ctx.deploy_type,
             }
 
         game_label = (
@@ -1053,6 +1532,24 @@ class ModDeployer:
         conflicts_payload: dict[str, Any] | None = None
         planned = strategy.plan(ctx)
         if planned.success and planned.files:
+            try:
+                workspace_roots = [
+                    Path(ctx.library_folder()).resolve(),
+                    Path(ctx.content_root()).resolve(),
+                ]
+                validate_planned_sources(
+                    planned.files, workspace_roots=workspace_roots
+                )
+            except ManifestSecurityError as exc:
+                error = f"部署计划未通过安全校验：{exc}"
+                logger.warning("%s result=fail error=%s", log_prefix, error)
+                self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=error)
+                return {
+                    "success": False,
+                    "error": error,
+                    "mod_id": ctx.mod_id,
+                    "deploy_type": ctx.deploy_type,
+                }
             conflicts_payload = self.check_conflict_preview(
                 ctx.mod_id,
                 [e.target for e in planned.files],
@@ -1064,11 +1561,14 @@ class ModDeployer:
                     len(conflicts_payload.get("files") or []),
                 )
 
-        # Phase 8: hard-block folder_copy when target tree is foreign
+        # Folder ownership: foreign trees are no longer hard-blocked.
+        # Overwrite is allowed with BackupManager; ConflictDetector warns on
+        # multi-mod target claims (warn-only, never blocks here).
         if (
             not skip_target_ownership_check
             and not str(ctx.custom_deploy_path or "").strip()
             and ctx.deploy_type == DEPLOY_TYPE_FOLDER_COPY
+            and type(strategy).__name__ == "FolderCopyStrategy"
             and planned.success
         ):
             mod_path_raw = str(ctx.config.mod_path or "").strip()
@@ -1080,18 +1580,45 @@ class ModDeployer:
                     library_root=self.library_root,
                 )
                 if kind == "foreign":
-                    error = DEPLOY_ERR_TARGET_FOREIGN
-                    logger.warning("%s result=fail error=%s", log_prefix, error)
-                    self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=error)
-                    return {
-                        "success": False,
-                        "error": error,
-                        "mod_id": ctx.mod_id,
-                        "deploy_type": ctx.deploy_type,
-                        "deployment_status": "conflict",
-                    }
+                    logger.warning(
+                        "%s target_kind=foreign (backup-and-overwrite allowed)",
+                        log_prefix,
+                    )
 
-        result = strategy.deploy(ctx)
+        manifest_root = ctx.library_folder()
+        backup_mgr = BackupManager(manifest_root)
+        prep = None
+        planned_targets: list[str] = []
+        if planned.success and planned.files:
+            planned_targets = [e.target for e in planned.files]
+
+        try:
+            prep = backup_mgr.prepare_overwrite(planned_targets)
+        except (OSError, BackupIntegrityError, BackupRestoreError) as exc:
+            error = f"部署前备份原文件失败：{exc}"
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=error)
+            return {
+                "success": False,
+                "error": error,
+                "mod_id": ctx.mod_id,
+                "deploy_type": ctx.deploy_type,
+            }
+
+        try:
+            result = strategy.deploy(ctx)
+        except Exception as exc:
+            logger.exception("%s strategy.deploy raised", log_prefix)
+            self._abort_failed_deploy(
+                mid=ctx.mod_id,
+                app_id=ctx.app_id,
+                manifest_root=manifest_root,
+                backup_mgr=backup_mgr,
+                prep=prep,
+                error=str(exc),
+            )
+            raise
+
         if not result.success:
             err = _normalize_deploy_error(result.error)
             logger.warning(
@@ -1100,7 +1627,14 @@ class ModDeployer:
                 ctx.source,
                 err,
             )
-            self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=err)
+            self._abort_failed_deploy(
+                mid=ctx.mod_id,
+                app_id=ctx.app_id,
+                manifest_root=manifest_root,
+                backup_mgr=backup_mgr,
+                prep=prep,
+                error=err,
+            )
             out = {
                 "success": False,
                 "error": err,
@@ -1114,18 +1648,95 @@ class ModDeployer:
             return out
 
         assert result.manifest is not None
-        manifest_root = ctx.library_folder()
         try:
+            validated_count = validate_deploy_result(result)
+        except DeployValidationError as exc:
+            logger.warning(
+                "%s source=%s result=failed reason=missing_targets copied=%s",
+                log_prefix,
+                ctx.source,
+                result.copied_files,
+            )
+            for missing in exc.missing_targets:
+                logger.warning("%s missing target: %s", log_prefix, missing)
+            error = _normalize_deploy_error(str(exc))
+            self._abort_failed_deploy(
+                mid=ctx.mod_id,
+                app_id=ctx.app_id,
+                manifest_root=manifest_root,
+                backup_mgr=backup_mgr,
+                prep=prep,
+                error=error,
+            )
+            out = {
+                "success": False,
+                "error": error,
+                "reason": "missing_targets",
+                "missing_targets": list(exc.missing_targets),
+                "mod_id": ctx.mod_id,
+                "deploy_type": ctx.deploy_type,
+            }
+            if conflicts_payload:
+                out["conflicts"] = conflicts_payload
+            if relationship_warnings:
+                out["relationship_warnings"] = relationship_warnings
+            return out
+
+        if prep is not None:
+            backup_mgr.apply_to_manifest(result.manifest, prep)
+        try:
+            backup_mgr.validate_manifest_backups(result.manifest)
             enrich_manifest_fingerprint(
                 result.manifest,
                 source=manifest_root,
                 managed=manifest_root,
             )
+            from services.mod_source_integrity import enrich_manifest_source_hashes
+
+            enrich_manifest_source_hashes(result.manifest)
+            validate_manifest_for_save(
+                result.manifest,
+                managed=manifest_root,
+                ctx=ctx,
+            )
             save_manifest(manifest_root, result.manifest)
+            if prep is not None:
+                backup_mgr.mark_deployed(prep, mod_id=ctx.mod_id)
         except OSError as exc:
             error = f"文件已复制，但写入部署清单失败：{exc}"
             logger.warning("%s result=fail error=%s", log_prefix, error)
-            self._mark_failed(ctx.mod_id, app_id=ctx.app_id, error=error)
+            self._abort_failed_deploy(
+                mid=ctx.mod_id,
+                app_id=ctx.app_id,
+                manifest_root=manifest_root,
+                backup_mgr=backup_mgr,
+                prep=prep,
+                error=error,
+            )
+            return {"success": False, "error": error, "mod_id": ctx.mod_id}
+        except (ManifestSecurityError, BackupIntegrityError) as exc:
+            error = f"部署清单校验失败：{exc}"
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            self._abort_failed_deploy(
+                mid=ctx.mod_id,
+                app_id=ctx.app_id,
+                manifest_root=manifest_root,
+                backup_mgr=backup_mgr,
+                prep=prep,
+                error=error,
+            )
+            return {"success": False, "error": error, "mod_id": ctx.mod_id}
+        except Exception as exc:  # noqa: BLE001 — integrity / path escape
+            error = f"部署清单校验失败：{exc}"
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            self._abort_failed_deploy(
+                mid=ctx.mod_id,
+                app_id=ctx.app_id,
+                manifest_root=manifest_root,
+                backup_mgr=backup_mgr,
+                prep=prep,
+                error=error,
+            )
             return {"success": False, "error": error, "mod_id": ctx.mod_id}
 
         try:
@@ -1137,10 +1748,15 @@ class ModDeployer:
                 deploy_error="",
                 app_id=ctx.app_id,
             )
+            db_warning: str | None = None
         except Exception as exc:  # noqa: BLE001
-            error = f"文件已复制，但更新部署状态失败：{exc}"
-            logger.warning("%s result=fail error=%s", log_prefix, error)
-            return {"success": False, "error": error, "mod_id": ctx.mod_id}
+            db_warning = "database_update_failed"
+            logger.warning(
+                "[DEPLOY] database status update failed, filesystem deployment "
+                "succeeded mod_id=%s error=%s",
+                ctx.mod_id,
+                exc,
+            )
 
         # Post-deploy: refresh library-wide file-path conflicts into SQLite
         try:
@@ -1150,23 +1766,46 @@ class ModDeployer:
         except Exception:  # noqa: BLE001
             logger.exception("%s post-deploy conflict scan failed", log_prefix)
 
-        logger.info(
-            "%s source=%s target=%s type=%s result=ok copied=%s",
-            log_prefix,
-            ctx.source,
-            result.target,
-            result.deploy_type,
-            result.copied_files,
+        file_details = build_deploy_result_files(result.manifest)
+        file_labels = _deploy_result_file_labels(
+            file_details, target_root=str(result.target or "")
         )
+        files_log = "\n".join(f"- {name}" for name in file_labels) if file_labels else ""
+        if files_log:
+            logger.info(
+                "%s source=%s target=%s type=%s result=ok copied=%s validated=%s\n"
+                "files:\n%s",
+                log_prefix,
+                ctx.source,
+                result.target,
+                result.deploy_type,
+                result.copied_files,
+                validated_count,
+                files_log,
+            )
+        else:
+            logger.info(
+                "%s source=%s target=%s type=%s result=ok copied=%s validated=%s",
+                log_prefix,
+                ctx.source,
+                result.target,
+                result.deploy_type,
+                result.copied_files,
+                validated_count,
+            )
         out = {
             "success": True,
             "mod_id": ctx.mod_id,
             "target": result.target,
             "copied_files": result.copied_files,
+            "validated": validated_count,
+            "files": file_details,
             "deploy_type": result.deploy_type,
             "deploy_time": result.deploy_time,
             "deployment_status": "deployed",
         }
+        if db_warning:
+            out["warning"] = db_warning
         if conflicts_payload:
             out["conflicts"] = conflicts_payload
         if relationship_warnings:
@@ -1187,7 +1826,8 @@ class ModDeployer:
         planned_targets: list[str | Path],
     ) -> dict[str, Any] | None:
         """
-        Pre-deploy path-overlap preview. Never blocks; returns warning payload.
+        Pre-deploy path-overlap preview. Never blocks deploy; payload uses
+        ``status="conflict"`` for FILE_OVERWRITE (same as post-deploy scan).
         """
         mid = str(mod_id).strip()
         report = ConflictDetector(
@@ -1230,18 +1870,36 @@ class ModDeployer:
             return out
         assert ctx is not None
 
+        manifest_root = ctx.library_folder()
+        manifest = load_manifest(manifest_root, expected_mod_id=mid)
+
         if str(ctx.custom_deploy_path or "").strip():
             strategy = CustomPathStrategy()
+        elif manifest is not None and str(manifest.deploy_type or "").strip():
+            strategy = get_strategy(manifest.deploy_type, app_id=ctx.app_id)
+            if strategy is None:
+                strategy = get_strategy(DEPLOY_TYPE_FOLDER_COPY, app_id=0)
         else:
-            strategy = get_strategy(ctx.deploy_type, app_id=ctx.app_id)
+            strategy = resolve_strategy(ctx)
             if strategy is None:
                 strategy = get_strategy(DEPLOY_TYPE_FOLDER_COPY, app_id=0)
         assert strategy is not None
 
-        manifest_root = ctx.library_folder()
-        manifest = load_manifest(manifest_root)
         # Phase 8: refuse undeploy when ownership cannot be confirmed
         if manifest is None:
+            # Distinguish pollution (file present, wrong mod_id) from missing
+            raw_probe = load_manifest(manifest_root)
+            if raw_probe is not None and str(raw_probe.mod_id or "").strip() not in (
+                "",
+                mid,
+            ):
+                error = DEPLOY_ERR_UNDEPLOY_MISMATCH
+                logger.warning(
+                    "%s result=fail error=%s (manifest pollution)",
+                    log_prefix,
+                    error,
+                )
+                return {"success": False, "error": error, "mod_id": mid}
             info = self._database().get_mod_deploy_info(mid) if mid.isdigit() else None
             deploy_path = str(info.deploy_path or "").strip() if info else ""
             if deploy_path and Path(deploy_path).exists() and any(
@@ -1250,10 +1908,29 @@ class ModDeployer:
                 error = DEPLOY_ERR_UNDEPLOY_MISMATCH
                 logger.warning("%s result=fail error=%s", log_prefix, error)
                 return {"success": False, "error": error, "mod_id": mid}
-        elif str(manifest.mod_id or "").strip() not in ("", mid):
-            error = DEPLOY_ERR_UNDEPLOY_MISMATCH
-            logger.warning("%s result=fail error=%s", log_prefix, error)
-            return {"success": False, "error": error, "mod_id": mid}
+        else:
+            try:
+                validate_manifest_mod_id(manifest, mid)
+                planned_targets: list[str] = []
+                try:
+                    planned = strategy.plan(ctx)
+                    if planned.success and planned.files:
+                        planned_targets = [e.target for e in planned.files]
+                except Exception:  # noqa: BLE001 — plan is advisory for undeploy
+                    logger.debug(
+                        "%s strategy.plan for undeploy target check failed",
+                        log_prefix,
+                        exc_info=True,
+                    )
+                validate_manifest_targets(
+                    manifest,
+                    allowed_roots=collect_allowed_target_roots(ctx),
+                    planned_targets=planned_targets or None,
+                )
+            except ManifestSecurityError as exc:
+                error = f"取消部署中止：清单未通过安全校验 — {exc}"
+                logger.warning("%s result=fail error=%s", log_prefix, error)
+                return {"success": False, "error": error, "mod_id": mid}
 
         # Manifest from a prior custom deploy still undeploys via CustomPathStrategy.
         if (
@@ -1262,7 +1939,26 @@ class ModDeployer:
             and not str(ctx.custom_deploy_path or "").strip()
         ):
             strategy = CustomPathStrategy()
-        result = strategy.undeploy(ctx, manifest)
+
+        backup_mgr = BackupManager(manifest_root)
+        # Preflight: refuse undeploy when a required backup is missing/corrupt
+        # so we never silently delete targets that cannot be restored.
+        if manifest is not None:
+            try:
+                for entry in manifest.files:
+                    if entry.backup is None:
+                        continue
+                    backup_mgr.verify_backup_hash(entry.backup)
+            except BackupIntegrityError as exc:
+                logger.error("%s backup preflight failed: %s", log_prefix, exc)
+                return {
+                    "success": False,
+                    "error": f"取消部署中止：备份校验失败（未删除已部署文件）— {exc}",
+                    "mod_id": ctx.mod_id,
+                }
+
+        with prune_protection(collect_protected_roots(ctx)):
+            result = strategy.undeploy(ctx, manifest)
         if not result.success:
             logger.warning("%s result=fail error=%s", log_prefix, result.error)
             return {
@@ -1270,6 +1966,34 @@ class ModDeployer:
                 "error": result.error,
                 "mod_id": ctx.mod_id,
             }
+
+        # After strategy removes Mod files, restore any pre-overwrite originals.
+        if manifest is not None:
+            try:
+                restored = backup_mgr.restore_from_manifest(manifest)
+                if restored:
+                    logger.info(
+                        "%s restored_originals=%s", log_prefix, restored
+                    )
+            except BackupRestoreError as exc:
+                logger.error("%s restore failed: %s", log_prefix, exc)
+                return {
+                    "success": False,
+                    "error": f"取消部署时恢复原文件失败：{exc}",
+                    "mod_id": ctx.mod_id,
+                    "restore_failures": list(exc.failures),
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("%s restore from backup failed", log_prefix)
+                return {
+                    "success": False,
+                    "error": f"取消部署时恢复原文件失败：{exc}",
+                    "mod_id": ctx.mod_id,
+                }
+            try:
+                backup_mgr.cleanup_backups()
+            except Exception:  # noqa: BLE001
+                logger.exception("%s backup cleanup failed", log_prefix)
 
         delete_manifest(manifest_root)
         try:

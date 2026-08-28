@@ -1,4 +1,4 @@
-"""mod.io manual folder importer (Anno 1800 exclusive source in UI)."""
+"""mod.io manual folder importer (Anno 1800 / Baldur's Gate 3 in UI)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from core.mod_platform import (
-    MODIO_ANNO_1800_URL,
+    MODIO_DEFAULT_URL,
     PLATFORM_MODIO,
     default_source_url_for_platform,
 )
@@ -91,7 +91,7 @@ class ModioImporter(ModImporter):
                 PLATFORM_MODIO,
                 game_name=ctx.game_name,
                 game_id=ctx.game_id,
-            ) or MODIO_ANNO_1800_URL
+            ) or MODIO_DEFAULT_URL
 
         db = self._database()
         from services.importers.duplicate_check import check_import_duplicate

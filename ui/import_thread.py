@@ -235,10 +235,24 @@ class ImportWorker(QThread):
         if isinstance(prepared, ImportResult):
             return prepared
 
+        from services.importers.identity_resolve import (
+            ImportIdentity,
+            apply_directory_import_identity,
+        )
+
+        # Directory import: unify batch/single identity before Importer.import_mod.
+        prepared = apply_directory_import_identity(
+            prepared if isinstance(prepared, ImportIdentity) else ImportIdentity(),
+            folder=folder,
+            platform=self.platform,
+        )
+
         if self.platform == PLATFORM_STEAM:
-            workshop_id = prepared.workshop_id or str(params.get("workshop_id") or "").strip()
-            if batch and folder.name.isdigit():
-                workshop_id = folder.name
+            workshop_id = (
+                prepared.workshop_id
+                or prepared.external_id
+                or str(params.get("workshop_id") or "").strip()
+            )
             result = SteamImporter(db=db).import_mod(
                 workshop_id=workshop_id,
                 title=folder_title,
@@ -278,9 +292,8 @@ class ImportWorker(QThread):
                     else (prepared.source_url or str(params.get("modio_url") or ""))
                 ),
                 modio_id=(
-                    folder.name
-                    if batch
-                    else (prepared.external_id or str(params.get("modio_id") or ""))
+                    prepared.external_id
+                    or (folder.name if batch else str(params.get("modio_id") or ""))
                 ),
                 library_root=self.library_root,
                 game_name=str(params.get("game_name") or ""),
@@ -315,9 +328,9 @@ class ImportWorker(QThread):
             )
             return result
 
-        # Nexus — identity already resolved (including offline HTML).
-        nexus_id = prepared.external_id if not batch else folder.name
-        nexus_url = "" if batch else prepared.source_url
+        # Nexus — unified identity (official URL/id, else folder.name).
+        nexus_id = str(prepared.external_id or "").strip() or folder.name
+        nexus_url = "" if batch else str(prepared.source_url or "").strip()
         result = NexusImporter(db=db).import_mod(
             source_folder=str(folder),
             title=folder_title or prepared.title,

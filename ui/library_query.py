@@ -12,7 +12,6 @@ from core.mod_platform import (
 )
 from core.mod_status import (
     CONFLICT_STATUS_CONFLICT,
-    CONFLICT_STATUS_WARNING,
     normalize_conflict_status,
 )
 
@@ -38,7 +37,6 @@ FILTER_PLATFORM_STEAM = "platform_steam"
 FILTER_PLATFORM_NEXUS = "platform_nexus"
 FILTER_PLATFORM_GITHUB = "platform_github"
 FILTER_PLATFORM_MODIO = "platform_modio"
-FILTER_PLATFORM_EXTERNAL = "platform_external"
 FILTER_PLATFORM_LOCAL = "platform_local"
 FILTER_PLATFORM_OTHER = "platform_other"
 FILTER_CATEGORY_ALL = "category_all"
@@ -85,14 +83,13 @@ STATUS_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_FAVORITE, "收藏"),
 )
 
-# Platform / source chips — sticky source_type values (stable display order).
+# Platform chips — mods.platform / store platform only (never source_type provenance).
 PLATFORM_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_PLATFORM_ALL, "全部"),
     (FILTER_PLATFORM_STEAM, "Steam"),
     (FILTER_PLATFORM_NEXUS, "Nexus"),
     (FILTER_PLATFORM_MODIO, "Mod.io"),
     (FILTER_PLATFORM_GITHUB, "GitHub"),
-    (FILTER_PLATFORM_EXTERNAL, "External"),
     (FILTER_PLATFORM_LOCAL, "Local"),
 )
 
@@ -114,7 +111,6 @@ _SOURCE_TOKEN_TO_KEY: dict[str, str] = {
     "mod.io": FILTER_PLATFORM_MODIO,
     "mod_io": FILTER_PLATFORM_MODIO,
     "github": FILTER_PLATFORM_GITHUB,
-    "external": FILTER_PLATFORM_EXTERNAL,
     "local": FILTER_PLATFORM_LOCAL,
     "other": FILTER_PLATFORM_LOCAL,
     "manual": FILTER_PLATFORM_LOCAL,
@@ -329,10 +325,9 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
         return index_is_anomaly(index)
     if key == FILTER_CONFLICT:
         status = normalize_conflict_status(index.conflict_status)
-        return bool(index.conflict) or status in (
-            CONFLICT_STATUS_CONFLICT,
-            CONFLICT_STATUS_WARNING,
-        ) or str(index.content_status or "").strip() == FILTER_IDENTITY_CONFLICT
+        return bool(index.conflict) or status == CONFLICT_STATUS_CONFLICT or str(
+            index.content_status or ""
+        ).strip() == FILTER_IDENTITY_CONFLICT
     if key == FILTER_DISABLED:
         return not bool(index.enabled)
     # Platform keys accidentally passed as status → defer to platform matcher
@@ -342,7 +337,6 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
         FILTER_PLATFORM_NEXUS,
         FILTER_PLATFORM_GITHUB,
         FILTER_PLATFORM_MODIO,
-        FILTER_PLATFORM_EXTERNAL,
         FILTER_PLATFORM_LOCAL,
         FILTER_PLATFORM_OTHER,
     ):
@@ -351,10 +345,14 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
 
 
 def effective_source_token(index: ModFilterIndex) -> str:
-    """Sticky ``source_type`` when known, else card ``platform``. No disk I/O."""
-    source = str(index.source_type or "").strip().lower()
+    """Store platform token for filters/chips — never sticky ``source_type``."""
+    from services.platform_identity import normalize_platform, normalize_platform_if_known
+
     plat = str(index.platform or "").strip().lower()
-    token = source if source and source != "unknown" else plat
+    known = normalize_platform_if_known(plat)
+    token = known or (normalize_platform(plat) if plat and plat != "external" else "")
+    if not token:
+        token = "steam"
     if token in {"mod.io", "mod_io"}:
         return "modio"
     if token in {"other", "manual"}:
@@ -370,10 +368,8 @@ def index_is_anomaly(index: ModFilterIndex) -> bool:
     if bool(index.is_invalid or index.invalid):
         return True
     status = normalize_conflict_status(index.conflict_status)
-    if bool(index.conflict) or status in (
-        CONFLICT_STATUS_CONFLICT,
-        CONFLICT_STATUS_WARNING,
-    ):
+    # File conflict only — soft ``warning`` is not an anomaly badge
+    if bool(index.conflict) or status == CONFLICT_STATUS_CONFLICT:
         return True
     if not bool(index.enabled):
         return True
@@ -449,7 +445,6 @@ def matches_platform_filter(index: ModFilterIndex, platform_key: str) -> bool:
         FILTER_PLATFORM_NEXUS: "nexus",
         FILTER_PLATFORM_GITHUB: "github",
         FILTER_PLATFORM_MODIO: "modio",
-        FILTER_PLATFORM_EXTERNAL: "external",
         FILTER_PLATFORM_LOCAL: "local",
         FILTER_PLATFORM_OTHER: "other",
     }

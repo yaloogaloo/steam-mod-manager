@@ -42,13 +42,59 @@ ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
 _MOD_FILE_SUFFIXES = {".pak", ".dll", ".json", ".ini", ".cfg"}
 _MOD_DIR_NAMES = {"logicmods", "paks", "content", "binaries"}
 UNSUPPORTED_FMT_MSG = "部署失败：不支持的压缩格式"
-TOOL_UNAVAILABLE_MSG = "部署失败: 缺少 RAR 解压组件 (unrar)"
+RAR_ERROR_PYTHON_SUPPORT_MISSING = "RAR_PYTHON_SUPPORT_MISSING"
+RAR_ERROR_TOOL_UNAVAILABLE = "RAR_TOOL_UNAVAILABLE"
+RAR_ERROR_EXECUTION_FAILED = "RAR_EXECUTION_FAILED"
+RAR_PYTHON_SUPPORT_MISSING_MSG = (
+    "部署失败: 缺少 Python RAR 支持组件(rarfile)，请安装项目依赖"
+)
+RAR_TOOL_UNAVAILABLE_MSG = "部署失败: 未找到 RAR 解压执行组件(UnRAR)"
+# Backward-compatible alias for older tests / persisted deploy_error strings.
+TOOL_UNAVAILABLE_MSG = RAR_TOOL_UNAVAILABLE_MSG
 EMPTY_ARCHIVE_MSG = "压缩包为空"
 # Kept for older imports / tests that still reference the message string.
 NO_MOD_FILES_MSG = "压缩包中未找到 Mod 文件（.pak / .dll / .json / .ini 等）"
 
 
 ProgressCallback = Callable[[str], None]
+
+
+class RarExtractError(RuntimeError):
+    """RAR extract failure with a stable machine-readable ``code``."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def _raise_rar_python_support_missing(exc: ImportError) -> None:
+    raise RarExtractError(
+        RAR_ERROR_PYTHON_SUPPORT_MISSING,
+        RAR_PYTHON_SUPPORT_MISSING_MSG,
+    ) from exc
+
+
+def _raise_rar_tool_unavailable(exc: BaseException | None = None) -> None:
+    if exc is not None:
+        raise RarExtractError(
+            RAR_ERROR_TOOL_UNAVAILABLE,
+            RAR_TOOL_UNAVAILABLE_MSG,
+        ) from exc
+    raise RarExtractError(RAR_ERROR_TOOL_UNAVAILABLE, RAR_TOOL_UNAVAILABLE_MSG)
+
+
+def _raise_rar_execution_failed(
+    detail: str,
+    *,
+    exc: BaseException | None = None,
+) -> None:
+    text = (detail or "").strip() or "未知错误"
+    if exc is not None:
+        raise RarExtractError(
+            RAR_ERROR_EXECUTION_FAILED,
+            f"RAR 部署失败: {text}",
+        ) from exc
+    raise RarExtractError(RAR_ERROR_EXECUTION_FAILED, f"RAR 部署失败: {text}")
 
 
 def import_cache_root() -> Path:
@@ -88,6 +134,22 @@ def cleanup_import_cache(path: str | Path | None = None) -> bool:
         logger.warning("Failed to cleanup import cache %s: %s", target, exc)
         return False
     return True
+
+
+def find_system_unrar_executable() -> str | None:
+    """Return path to a system ``unrar`` / ``UnRAR`` binary on PATH, if any."""
+    is_windows = platform.system() == "Windows"
+    names = (
+        "UnRAR.exe",
+        "unrar.exe",
+        "UnRAR",
+        "unrar",
+    ) if is_windows else ("unrar",)
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 def find_7z_executable() -> str | None:
@@ -325,7 +387,7 @@ def extract_archive(
 
     ``.zip`` → stdlib ``zipfile``.
     ``.7z`` → system ``7z`` CLI when present, else ``py7zr``.
-    ``.rar`` → system ``7z`` CLI when present, else ``rarfile`` fallback.
+    ``.rar`` → bundled UnRAR, then system ``unrar``, then ``7z`` CLI fallback.
     """
     src = Path(archive_path).expanduser().resolve()
     if not src.is_file():
@@ -341,6 +403,10 @@ def extract_archive(
         _extract_zip(src, out)
         return out
 
+    if suffix == ".rar":
+        _extract_rar(src, out)
+        return out
+
     seven = find_7z_executable()
     if seven:
         _extract_with_7z(seven, src, out)
@@ -348,10 +414,6 @@ def extract_archive(
 
     if suffix == ".7z":
         _extract_7z_with_py7zr(src, out)
-        return out
-
-    if suffix == ".rar":
-        _extract_rar_with_rarfile(src, out)
         return out
 
     raise RuntimeError(f"{UNSUPPORTED_FMT_MSG} {suffix}")
@@ -411,7 +473,7 @@ def _extract_7z_with_py7zr(src: Path, dest: Path) -> None:
 
 
 def _format_rar_failure(detail: str) -> str:
-    """Map raw backend errors to stable Chinese UI messages."""
+    """Map raw 7-Zip RAR stderr to stable Chinese UI messages."""
     text = (detail or "").strip()
     low = text.lower()
     if (
@@ -421,34 +483,65 @@ def _format_rar_failure(detail: str) -> str:
         or "分卷" in text
     ):
         return "解压失败：这是一个分卷压缩包，请导入第一卷"
-    if (
-        "cannot find working tool" in low
-        or "cannot find unrar" in low
-        or ("unrar" in low and ("not found" in low or "no such file" in low))
-        or "filenotfounderror" in low
-    ):
-        return TOOL_UNAVAILABLE_MSG
     if not text:
         return "RAR 部署失败: 未知错误"
     return f"RAR 部署失败: {text}"
 
 
-def _extract_rar_with_rarfile(src: Path, dest: Path) -> None:
-    """Extract ``.rar`` via rarfile; raise concrete Chinese errors for the UI."""
+def _extract_rar(src: Path, dest: Path) -> None:
+    """
+    Extract ``.rar`` with backend priority:
+
+    1. Project-bundled UnRAR (``bin/tools``)
+    2. System ``unrar`` on PATH
+    3. System 7-Zip CLI fallback
+    """
+    bundled = resolve_bundled_unrar_tool()
+    if bundled is not None:
+        _extract_rar_with_rarfile(src, dest, unrar_tool=bundled)
+        return
+
+    system = find_system_unrar_executable()
+    if system is not None:
+        _extract_rar_with_rarfile(src, dest, unrar_tool=system)
+        return
+
+    seven = find_7z_executable()
+    if seven is not None:
+        _extract_with_7z(seven, src, dest)
+        return
+
+    try:
+        import rarfile  # noqa: F401
+    except ImportError as exc:  # pragma: no cover
+        _raise_rar_python_support_missing(exc)
+    _raise_rar_tool_unavailable()
+
+
+def _extract_rar_with_rarfile(
+    src: Path,
+    dest: Path,
+    *,
+    unrar_tool: Path | str | None = None,
+) -> None:
+    """Extract ``.rar`` via rarfile + an explicit UnRAR binary."""
     try:
         import rarfile
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(TOOL_UNAVAILABLE_MSG) from exc
+        _raise_rar_python_support_missing(exc)
 
-    # Prefer the project-bundled UnRAR (dev + PyInstaller), then optional 7z.
-    bundled = configure_rarfile_unrar_tool(rarfile)
-    if bundled is None:
-        seven = find_7z_executable()
-        if seven:
-            try:
-                rarfile.tool_setup(force=True, unzip=None, unrar=None, sevenzip=seven)
-            except Exception:  # noqa: BLE001
-                pass
+    tool = unrar_tool
+    if tool is None:
+        bundled = resolve_bundled_unrar_tool()
+        if bundled is not None:
+            tool = bundled
+        else:
+            system = find_system_unrar_executable()
+            if system is not None:
+                tool = system
+
+    if tool is not None:
+        rarfile.UNRAR_TOOL = str(tool)
 
     try:
         with rarfile.RarFile(src) as archive:
@@ -456,27 +549,21 @@ def _extract_rar_with_rarfile(src: Path, dest: Path) -> None:
     except rarfile.NeedFirstVolume as exc:
         raise RuntimeError("解压失败：这是一个分卷压缩包，请导入第一卷") from exc
     except rarfile.RarCannotExec as exc:
-        raise RuntimeError(TOOL_UNAVAILABLE_MSG) from exc
+        _raise_rar_tool_unavailable(exc)
     except FileNotFoundError as exc:
-        raise RuntimeError(TOOL_UNAVAILABLE_MSG) from exc
+        _raise_rar_tool_unavailable(exc)
     except rarfile.BadRarFile as exc:
-        raise RuntimeError(f"RAR 部署失败: {exc}") from exc
+        _raise_rar_execution_failed(str(exc), exc=exc)
     except rarfile.PasswordRequired as exc:
-        raise RuntimeError(f"RAR 部署失败: 压缩包已加密，需要密码") from exc
+        _raise_rar_execution_failed("压缩包已加密，需要密码", exc=exc)
     except Exception as exc:  # noqa: BLE001
         msg = str(exc) or exc.__class__.__name__
         low = msg.lower()
         if "password" in low or "encrypted" in low:
-            raise RuntimeError(f"RAR 部署失败: {msg}") from exc
+            _raise_rar_execution_failed(msg, exc=exc)
         if "volume" in low or "first volume" in low:
             raise RuntimeError("解压失败：这是一个分卷压缩包，请导入第一卷") from exc
-        if (
-            "unrar" in low
-            or "cannot find working tool" in low
-            or "no such file" in low
-        ):
-            raise RuntimeError(TOOL_UNAVAILABLE_MSG) from exc
-        raise RuntimeError(f"RAR 部署失败: {msg}") from exc
+        _raise_rar_execution_failed(msg, exc=exc)
 
 
 def normalize_archive_paths(

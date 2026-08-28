@@ -16,7 +16,6 @@ from core.db_manager import (
 from core.mod_status import (
     CONFLICT_STATUS_CONFLICT,
     CONFLICT_STATUS_NONE,
-    CONFLICT_STATUS_WARNING,
 )
 from services.deploy_rules.manifest import load_manifest
 from services.file_ops import ModFileManager
@@ -72,9 +71,16 @@ class ConflictDetector:
     """
     Detect deploy *target* path issues via ``.info/deploy_manifest.json``.
 
-    - FILE_OVERWRITE: identical target claimed by multiple enabled Mods → conflict
-    - PAK_OVERLAP: different ``.pak`` files in the same directory → warning
-    Disabled Mods are excluded from detection.
+    Automatic path rule (``preview_targets`` and ``check_all_mods``):
+    - FILE_OVERWRITE: identical normalized target (``Path.resolve()``) claimed by
+      multiple enabled Mods → status ``conflict`` (preview and post agree)
+
+    ``ConflictType.PAK_OVERLAP`` is retained for compatibility but is **not**
+    generated or persisted (same-dir distinct ``.pak`` files are legal).
+
+    User-declared ``mod_relationships`` (conflict) remain a separate signal and
+    do not participate in file-overwrite detection.
+    Disabled Mods are excluded from path detection.
     """
 
     def __init__(
@@ -131,7 +137,8 @@ class ConflictDetector:
         per_mod: dict[str, list[ConflictEntry]] = {}
         all_manifest_mods: set[str] = set()
 
-        # Type 1 — exact target overwrite
+        # Automatic path conflict — exact target overwrite only
+        # (same-dir distinct .pak / .dll / etc. are NOT conflicts)
         for target, mods in owners.items():
             for mid in mods:
                 all_manifest_mods.add(mid)
@@ -145,45 +152,7 @@ class ConflictDetector:
             for mid in mods:
                 per_mod.setdefault(mid, []).append(entry)
 
-        # Type 2 — same directory, different .pak files (warning)
-        dir_paks: dict[str, dict[str, set[str]]] = {}
-        for mid, target in self._iter_manifest_targets():
-            path = Path(target)
-            if path.suffix.lower() != ".pak":
-                continue
-            parent = _norm(path.parent)
-            bucket = dir_paks.setdefault(parent, {})
-            bucket.setdefault(path.name.lower(), set()).add(mid)
-
-        for parent, name_map in dir_paks.items():
-            if len(name_map) < 2:
-                continue
-            # Multiple distinct pak names in one folder → warning (not hard conflict)
-            mods_in_dir: list[str] = []
-            for mids in name_map.values():
-                for m in sorted(mids):
-                    if m not in mods_in_dir:
-                        mods_in_dir.append(m)
-            if len(mods_in_dir) < 2:
-                continue
-            entry = ConflictEntry(
-                file=parent,
-                mods=mods_in_dir,
-                conflict_type=ConflictType.PAK_OVERLAP.value,
-            )
-            for mid in mods_in_dir:
-                all_manifest_mods.add(mid)
-                # Avoid duplicating if already has FILE_OVERWRITE on same parent
-                existing = per_mod.setdefault(mid, [])
-                if any(
-                    e.conflict_type == ConflictType.PAK_OVERLAP.value
-                    and e.file == parent
-                    for e in existing
-                ):
-                    continue
-                existing.append(entry)
-
-        # Type 3 — user-declared conflict relationships (warn / conflict note)
+        # User-declared conflict relationships (separate from file overwrite)
         try:
             with self._database()._lock:
                 rel_rows = self._database()._conn.execute(
@@ -227,17 +196,9 @@ class ConflictDetector:
                     ConflictType.RELATIONSHIP.value,
                 )
             ]
-            soft = [
-                c
-                for c in conflicts
-                if c.conflict_type == ConflictType.PAK_OVERLAP.value
-            ]
             if hard:
                 status = CONFLICT_STATUS_CONFLICT
                 note = self._summarize(hard)
-            elif soft:
-                status = CONFLICT_STATUS_WARNING
-                note = self._summarize(soft, label="同目录 pak")
             else:
                 status = CONFLICT_STATUS_NONE
                 note = ""
@@ -300,7 +261,7 @@ class ConflictDetector:
                     conflict_type=ConflictType.FILE_OVERWRITE.value,
                 )
             )
-        status = CONFLICT_STATUS_WARNING if conflicts else CONFLICT_STATUS_NONE
+        status = CONFLICT_STATUS_CONFLICT if conflicts else CONFLICT_STATUS_NONE
         return ConflictReport(status=status, conflicts=conflicts, mod_id=mid)
 
     @staticmethod

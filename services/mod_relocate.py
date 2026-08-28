@@ -12,11 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from services.file_ops import read_info_metadata_dict
-from services.library_status import (
-    CONTENT_HEALTHY,
-    content_status_to_library_status,
-)
-from services.metadata_backup_sync import sync_after_metadata_change
 from services.mod_identity import read_internal_id, resolve_existing_mod_id
 
 
@@ -119,14 +114,28 @@ def relocate_mod_folder(
     resolved_path = str(folder.resolve())
     try:
         from core.db_manager import get_db
+        from services.path_lifecycle import commit_path_change
 
         db = get_db()
+        commit = commit_path_change(
+            mid,
+            old_path=str((db.get_mod_backup_row(mid) or {}).get("last_known_path") or ""),
+            new_path=folder,
+            renamed=False,
+            reason="restore",
+            sync_backup=True,
+            db=db,
+        )
+        if not commit.success:
+            return RelocateResult(
+                success=False,
+                mod_id=mid,
+                path=resolved_path,
+                error=commit.error or "更新路径失败",
+                matched_by=matched_by,
+            )
         db.update_mod_identity_fields(
             mid,
-            last_known_path=resolved_path,
-            folder_present=True,
-            content_status=CONTENT_HEALTHY,
-            library_status=content_status_to_library_status(CONTENT_HEALTHY),
             internal_id=read_internal_id(payload) or None,
             workspace_id=str(payload.get("workspace_id") or "") or None,
             sticky_source=True,
@@ -139,12 +148,6 @@ def relocate_mod_folder(
             error=f"更新路径失败: {exc}",
             matched_by=matched_by,
         )
-
-    try:
-        sync_after_metadata_change(mid, folder, "restore")
-    except Exception:  # noqa: BLE001
-        # Path update already committed; sync failure is non-fatal for relocate
-        pass
 
     return RelocateResult(
         success=True,

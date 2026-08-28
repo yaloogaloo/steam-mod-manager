@@ -1,4 +1,4 @@
-"""Dynamic source options — mod.io only for Anno 1800 / 纪元1800."""
+"""Dynamic source options — mod.io for Anno 1800 / Baldur's Gate 3."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from core.mod_platform import (
     MODIO_ANNO_1800_URL,
+    MODIO_BALDURS_GATE_3_URL,
     PLATFORM_GITHUB,
     PLATFORM_MODIO,
     PLATFORM_NEXUS,
@@ -92,6 +93,42 @@ def test_stardew_sources_omit_steam() -> None:
     assert PLATFORM_STEAM not in {p for p, _ in en}
 
 
+def test_bg3_sources_include_modio_without_steam() -> None:
+    from core.mod_platform import is_baldurs_gate_3_game
+
+    assert is_baldurs_gate_3_game("博德之门3")
+    assert is_baldurs_gate_3_game("Baldur's Gate 3")
+    assert is_baldurs_gate_3_game(game_id=1086940)
+
+    for name, gid in (("博德之门3", 1086940), ("Baldur's Gate 3", 0)):
+        sources = get_available_sources(name, gid)
+        assert PLATFORM_STEAM not in {p for p, _ in sources}
+        assert [p for p, _ in sources] == [
+            PLATFORM_MODIO,
+            PLATFORM_NEXUS,
+            PLATFORM_GITHUB,
+            PLATFORM_OTHER,
+        ]
+
+
+def test_cyberpunk_sources_omit_steam_without_modio() -> None:
+    from core.mod_platform import is_cyberpunk_2077_game
+
+    assert is_cyberpunk_2077_game("赛博朋克2077")
+    assert is_cyberpunk_2077_game("Cyberpunk 2077")
+    assert is_cyberpunk_2077_game(game_id=1091500)
+
+    for name, gid in (("赛博朋克2077", 1091500), ("Cyberpunk 2077", 0)):
+        sources = get_available_sources(name, gid)
+        assert PLATFORM_STEAM not in {p for p, _ in sources}
+        assert PLATFORM_MODIO not in {p for p, _ in sources}
+        assert [p for p, _ in sources] == [
+            PLATFORM_NEXUS,
+            PLATFORM_GITHUB,
+            PLATFORM_OTHER,
+        ]
+
+
 def test_other_platform_url_optional() -> None:
     assert not platform_requires_source_url(PLATFORM_OTHER)
     assert platform_requires_source_url(PLATFORM_GITHUB)
@@ -99,12 +136,24 @@ def test_other_platform_url_optional() -> None:
     assert default_source_url_for_platform(PLATFORM_OTHER) == ""
 
 
-def test_default_modio_url_for_anno() -> None:
+def test_default_modio_url_for_anno_and_bg3() -> None:
     assert (
         default_source_url_for_platform(
             PLATFORM_MODIO, game_name="纪元1800", game_id=916440
         )
         == MODIO_ANNO_1800_URL
+    )
+    assert (
+        default_source_url_for_platform(
+            PLATFORM_MODIO, game_name="博德之门3", game_id=1086940
+        )
+        == MODIO_BALDURS_GATE_3_URL
+    )
+    assert (
+        default_source_url_for_platform(
+            PLATFORM_MODIO, game_name="Baldur's Gate 3", game_id=0
+        )
+        == MODIO_BALDURS_GATE_3_URL
     )
     assert normalize_platform("mod.io") == PLATFORM_MODIO
 
@@ -179,6 +228,55 @@ def test_import_dialog_omits_steam_for_stardew(
     dlg.close()
 
 
+@pytest.mark.parametrize(
+    ("game_id", "game_name"),
+    [
+        (1086940, "博德之门3"),
+        (0, "Baldur's Gate 3"),
+    ],
+)
+def test_import_dialog_shows_modio_for_bg3(
+    qapp: QApplication,
+    tmp_path: Path,
+    game_id: int,
+    game_name: str,
+) -> None:
+    dlg = ModImportDialog(
+        tmp_path,
+        game_context={"game_id": game_id, "game_name": game_name},
+    )
+    assert PLATFORM_STEAM not in dlg._platform_radios
+    assert dlg.radio_steam is None
+    assert PLATFORM_MODIO in dlg._platform_radios
+    assert dlg.radio_modio is not None
+    assert dlg.radio_modio.isChecked()
+    assert MODIO_BALDURS_GATE_3_URL in dlg.modio_url_edit.placeholderText()
+    dlg.close()
+
+
+@pytest.mark.parametrize(
+    ("game_id", "game_name"),
+    [
+        (1091500, "赛博朋克2077"),
+        (0, "Cyberpunk 2077"),
+    ],
+)
+def test_import_dialog_omits_steam_and_modio_for_cyberpunk(
+    qapp: QApplication,
+    tmp_path: Path,
+    game_id: int,
+    game_name: str,
+) -> None:
+    dlg = ModImportDialog(
+        tmp_path,
+        game_context={"game_id": game_id, "game_name": game_name},
+    )
+    assert PLATFORM_STEAM not in dlg._platform_radios
+    assert PLATFORM_MODIO not in dlg._platform_radios
+    assert dlg.radio_steam is None
+    dlg.close()
+
+
 def test_edit_dialog_source_options_by_game(qapp: QApplication) -> None:
     pal = EditModDialog(
         game_name="Palworld",
@@ -217,6 +315,24 @@ def test_edit_dialog_source_options_by_game(qapp: QApplication) -> None:
     assert values["platform"] == PLATFORM_MODIO
     assert values["source_url"] == MODIO_ANNO_1800_URL
     anno.close()
+
+    bg3 = EditModDialog(
+        game_name="博德之门3",
+        game_id=1086940,
+        platform=PLATFORM_NEXUS,
+        source_url="",
+    )
+    bg3_ids = [
+        bg3.platform_combo.itemData(i) for i in range(bg3.platform_combo.count())
+    ]
+    assert PLATFORM_MODIO in bg3_ids
+    assert PLATFORM_STEAM not in bg3_ids
+    idx = bg3.platform_combo.findData(PLATFORM_MODIO)
+    bg3.platform_combo.setCurrentIndex(idx)
+    values = bg3.values()
+    assert values["platform"] == PLATFORM_MODIO
+    assert values["source_url"] == MODIO_BALDURS_GATE_3_URL
+    bg3.close()
 
 
 def test_import_dialog_other_allows_empty_url(qapp: QApplication, tmp_path) -> None:

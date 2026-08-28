@@ -38,37 +38,25 @@ def _zip_has_payload(archive_path: Path) -> bool:
         return True
 
 
-def is_missing_mod_content(managed_path: str | Path) -> bool:
+def is_missing_mod_content(
+    managed_path: str | Path,
+    *,
+    mod_id: int | str | None = None,
+) -> bool:
     """
-    True when the managed folder has no deployable payload outside ``.info`` / ``info``.
+    True when the managed folder has no local Mod payload outside ``.info`` / ``info``.
 
-    Empty folders, metadata-only stubs, and trees that only contain empty ``.zip``
-    archives are treated as missing content. Unreadable non-zip archives are
-    treated as having content (conservative).
+    Uses :func:`services.local_file_index.has_local_mod_payload` (presence only).
+    Deployment legality is enforced separately at deploy time.
     """
+    from services.local_file_index import has_local_mod_payload
+
     root = Path(managed_path)
-    if not root.is_dir():
-        return True
-    try:
-        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
-            dirnames[:] = [
-                name
-                for name in dirnames
-                if name not in _IGNORE_CONTENT_DIRS and "历史版本" not in name
-            ]
-            for name in filenames:
-                path = Path(dirpath) / name
-                if "历史版本" in str(path):
-                    continue
-                suffix = path.suffix.lower()
-                if suffix in _ARCHIVE_SUFFIXES:
-                    if suffix == ".zip" and not _zip_has_payload(path):
-                        continue
-                    return False
-                return False
-    except OSError:
-        return True
-    return True
+    mid = str(mod_id or "").strip() or None
+    if mid is None and root.is_dir():
+        data = read_info_metadata_dict(root) or {}
+        mid = str(data.get("published_file_id") or "").strip() or None
+    return not has_local_mod_payload(root, mod_id=mid)
 
 
 def set_is_missing_content(managed_path: str | Path, missing: bool) -> None:

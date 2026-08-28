@@ -19,6 +19,9 @@ def _configure_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    from services.runtime_identity import log_archive_runtime_identity
+
+    log_archive_runtime_identity(logging.getLogger(__name__), prefix="[RUNTIME]")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -192,6 +195,26 @@ def launch_gui() -> int:
     reset_startup_timeline()
     app = QApplication(sys.argv)
     mark_qapplication_created()
+
+    from services.runtime.dependency_check import (
+        ensure_runtime_dependencies_or_raise,
+        log_runtime_dependencies,
+    )
+
+    try:
+        log_runtime_dependencies(logging.getLogger(__name__))
+        ensure_runtime_dependencies_or_raise()
+    except RuntimeError as exc:
+        logging.getLogger(__name__).error("%s", exc)
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.critical(
+            None,
+            "缺少 Python 依赖",
+            str(exc),
+        )
+        return 1
+
     from core.debug_config import ui_trace_enabled, performance_log_enabled
 
     def _boot(msg: str) -> None:
@@ -241,7 +264,24 @@ def launch_gui() -> int:
     dump_startup_surface_audit(window)
     # Icon diagnose only — must not resize / change flags after show.
     QTimer.singleShot(0, lambda: diagnose_and_bind_win32_taskbar_icon(window))
+    QTimer.singleShot(800, _probe_modio_playwright_runtime)
     return app.exec()
+
+
+def _probe_modio_playwright_runtime() -> None:
+    """Non-blocking Chromium probe for mod.io offline archive."""
+    try:
+        from services.offline.modio_browser_snapshot import probe_modio_playwright_runtime
+
+        ready, message = probe_modio_playwright_runtime()
+        if not ready:
+            logging.getLogger(__name__).warning(
+                "[MODIO_OFFLINE] startup runtime check: %s", message
+            )
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).debug(
+            "mod.io playwright startup probe skipped: %s", exc
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -42,12 +42,26 @@ class ModRefreshWorker(QThread):
         import logging
 
         from services.mod_refresh import refresh_mod
+        from services.path_lifecycle import resolve_refresh_folder
 
         self.refresh_started.emit()
         try:
-            result = refresh_mod(
+            folder = resolve_refresh_folder(
                 self.mod_id,
                 self.managed_path,
+            )
+            if not folder.is_dir():
+                msg = f"[PATH_INVALID] Mod 目录不存在: {self.managed_path}"
+                logging.getLogger(__name__).error(
+                    "Mod refresh aborted: %s (mod_id=%s)",
+                    msg,
+                    self.mod_id,
+                )
+                self.refresh_failed.emit(msg)
+                return
+            result = refresh_mod(
+                self.mod_id,
+                folder,
                 platform=self.platform,
                 library_root=self.library_root,
                 source_url=self.source_url,
@@ -55,6 +69,13 @@ class ModRefreshWorker(QThread):
             if self.isInterruptionRequested():
                 return
             compat = result.to_metadata_refresh_result()
+            from services.path_lifecycle import resolve_managed_folder
+
+            final = resolve_managed_folder(self.mod_id)
+            if final.path is not None:
+                compat.managed_path = final.path
+                if compat.old_path is None:
+                    compat.old_path = self.managed_path
             if not compat.success and not compat.skipped:
                 logging.getLogger(__name__).error(
                     "Mod refresh failed: %s",

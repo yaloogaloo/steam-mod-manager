@@ -179,7 +179,7 @@ def test_stale_missing_flag_deploy_then_undeploy(
     folder = library / "Game" / "ZipMod"
     folder.mkdir(parents=True)
     with zipfile.ZipFile(folder / "payload.zip", "w") as zf:
-        zf.writestr("inside/readme.txt", "ok")
+        zf.writestr("inside/mod.dll", b"MZ")
     _write_meta(
         folder,
         mod_id=mod_id,

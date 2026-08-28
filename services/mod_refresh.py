@@ -66,6 +66,22 @@ class ModRefreshResult:
             (prov.managed_path if prov and prov.managed_path else None)
             or self.managed_path
         )
+        # Official sync attempted but failed must surface as UI failure.
+        # Previously success=True (local reconcile ok) hid provider errors and
+        # made「刷新信息」look like a no-op when metadata was never written.
+        if self.official_attempted and not self.official_success:
+            return MetadataRefreshResult(
+                mod_id=self.mod_id,
+                success=False,
+                skipped=False,
+                renamed=bool(prov and prov.renamed),
+                managed_path=path,
+                old_path=(prov.old_path if prov and prov.old_path else None) or path,
+                title=prov.title if prov else "",
+                error=self.error or self.message or "官方信息同步失败",
+                cover_path=prov.cover_path if prov else "",
+                message=self.message,
+            )
         return MetadataRefreshResult(
             mod_id=self.mod_id,
             success=self.success,
@@ -102,17 +118,17 @@ def reconcile_local_state(
     mid = str(mod_id or "").strip()
     notes: list[str] = []
 
-    folder: Path | None = None
-    if managed_path is not None:
-        candidate = Path(managed_path)
-        if candidate.is_dir():
-            folder = candidate
+    from services.path_lifecycle import resolve_managed_folder
 
-    if folder is None:
-        row = database.get_mod_backup_row(mid) or {}
-        lkp = str(row.get("last_known_path") or "").strip()
-        if lkp and Path(lkp).is_dir():
-            folder = Path(lkp)
+    resolved = resolve_managed_folder(mid, hint_path=managed_path, db=database)
+    folder = resolved.path
+    if folder is None or not folder.is_dir():
+        healed = resolve_managed_folder(mid, db=database)
+        if healed.path is not None and healed.path.is_dir():
+            folder = healed.path
+            notes.append(f"path_healed_from={healed.resolved_from}")
+    elif resolved.stale_hint and resolved.resolved_from != "hint":
+        notes.append(f"path_healed_from={resolved.resolved_from}")
 
     logger.info("[refresh] mod_id=%s local reconcile started", mid)
 
@@ -143,32 +159,10 @@ def reconcile_local_state(
             notes=["folder_missing"],
         )
 
-    # Heal missing-content marker from live payload
-    if clear_missing_content_if_present(folder):
-        notes.append("cleared_stale_missing_flag")
-    elif apply_missing_content_marker(folder, sync_backup=False):
-        notes.append("marked_missing_content")
-
-    missing = _folder_missing_content(folder)
     meta_missing = not _folder_has_metadata(folder)
     row = database.get_mod_backup_row(mid) or {}
     backup_status = str(row.get("backup_status") or "").strip()
-    cs = compute_content_status(
-        folder_present=True,
-        missing_content=missing,
-        metadata_missing=meta_missing,
-        backup_status=backup_status,
-    )
-    try:
-        database.update_mod_identity_fields(
-            mid,
-            content_status=cs,
-            library_status=content_status_to_library_status(cs),
-            folder_present=True,
-            last_known_path=str(folder.resolve()),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("update local content_status failed for %s: %s", mid, exc)
+    missing = _folder_missing_content(folder, mod_id=mid, db=database)
 
     try:
         if sync_after_metadata_change(mid, folder, "refresh"):
@@ -190,6 +184,45 @@ def reconcile_local_state(
     except Exception as exc:  # noqa: BLE001
         logger.debug("local rescan failed for %s: %s", mid, exc)
 
+    try:
+        from services.local_file_index import (
+            has_local_mod_payload,
+            reconcile_local_files,
+        )
+
+        recon = reconcile_local_files(mid, managed_path=folder, db=database)
+        if recon.updated:
+            notes.append("archive_source_reconciled")
+        if recon.replacement_candidates:
+            notes.append(
+                f"archive_replacement_candidates={len(recon.replacement_candidates)}"
+            )
+        missing = not has_local_mod_payload(folder, mod_id=mid, db=database)
+        if clear_missing_content_if_present(folder):
+            notes.append("cleared_stale_missing_flag")
+        elif apply_missing_content_marker(folder, sync_backup=False):
+            notes.append("marked_missing_content")
+    except Exception as exc:  # noqa: BLE001 — local file errors must not block refresh
+        logger.debug("local file reconcile failed for %s: %s", mid, exc)
+        notes.append("local_file_reconcile_failed")
+
+    cs = compute_content_status(
+        folder_present=True,
+        missing_content=missing,
+        metadata_missing=meta_missing,
+        backup_status=backup_status,
+    )
+    try:
+        database.update_mod_identity_fields(
+            mid,
+            content_status=cs,
+            library_status=content_status_to_library_status(cs),
+            folder_present=True,
+            last_known_path=str(folder.resolve()),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("update local content_status failed for %s: %s", mid, exc)
+
     logger.info(
         "[refresh] mod_id=%s local reconcile done content_status=%s folder_present=1",
         mid,
@@ -208,6 +241,18 @@ def _should_attempt_official_sync(db, mod_id: str) -> bool:
     return not db.is_official_metadata_synced(mod_id)
 
 
+def _resolve_refresh_folder(
+    mid: str,
+    managed_path: str | Path,
+    *,
+    db=None,
+) -> Path:
+    """Resolve live managed folder; heal stale UI hints via DB last_known_path."""
+    from services.path_lifecycle import resolve_refresh_folder
+
+    return resolve_refresh_folder(mid, managed_path, db=db)
+
+
 def refresh_mod(
     mod_id: int | str,
     managed_path: str | Path,
@@ -222,11 +267,13 @@ def refresh_mod(
     per mod lifetime (until first successful sync).
     """
     from core.db_manager import get_db
+    from services.path_lifecycle import resolve_managed_folder
 
     database = db if db is not None else get_db()
     mid = str(mod_id or "").strip()
-    folder = Path(managed_path)
     plat = normalize_platform(platform)
+
+    folder = _resolve_refresh_folder(mid, managed_path, db=database)
 
     local = reconcile_local_state(
         mid, folder, library_root=library_root, db=database
@@ -340,6 +387,11 @@ def refresh_mod(
         mid,
         provider_result.error,
     )
+    fail_path = (
+        provider_result.managed_path
+        or resolve_managed_folder(mid, db=database).path
+        or folder
+    )
     return ModRefreshResult(
         mod_id=mid,
         success=True,
@@ -348,7 +400,7 @@ def refresh_mod(
         official_success=False,
         official_synced=False,
         provider=provider_result,
-        managed_path=folder,
+        managed_path=fail_path,
         error=provider_result.error,
         message="本地状态已刷新，官方信息同步失败",
     )

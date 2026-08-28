@@ -67,7 +67,7 @@ def test_deploy_runs_dependency_before_main(
     order: list[str] = []
     real = ModDeployer._deploy_with_context
 
-    def _track(self, *, mid, log_prefix, ctx, early, relationship_warnings):
+    def _track(self, *, mid, log_prefix, ctx, early, relationship_warnings, **_kwargs):
         order.append(str(mid))
         return real(
             self,
@@ -76,6 +76,7 @@ def test_deploy_runs_dependency_before_main(
             ctx=ctx,
             early=early,
             relationship_warnings=relationship_warnings,
+            **_kwargs,
         )
 
     monkeypatch.setattr(ModDeployer, "_deploy_with_context", _track)

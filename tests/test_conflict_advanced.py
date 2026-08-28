@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_WARNING
+from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
 from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy_rules.manifest import (
@@ -59,7 +59,10 @@ def test_same_target_file_overwrite(tmp_path: Path, db: DatabaseManager) -> None
     assert reports["1"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
 
-def test_same_dir_different_pak_warning(tmp_path: Path, db: DatabaseManager) -> None:
+def test_same_dir_different_pak_is_not_conflict(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Distinct .pak names in one folder are legal (BG3 Mods / Palworld ~mods)."""
     library = tmp_path / "mod"
     mods_dir = tmp_path / "Paks" / "~mods"
     t1 = str((mods_dir / "A.pak").resolve())
@@ -87,11 +90,13 @@ def test_same_dir_different_pak_warning(tmp_path: Path, db: DatabaseManager) -> 
     db.upsert_mod(ModMetadata(published_file_id="11", title="A"))
     db.upsert_mod(ModMetadata(published_file_id="12", title="B"))
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["11"].status == CONFLICT_STATUS_WARNING
-    assert any(
+    assert reports["11"].status == CONFLICT_STATUS_NONE
+    assert reports["12"].status == CONFLICT_STATUS_NONE
+    assert not any(
         c.conflict_type == ConflictType.PAK_OVERLAP.value
         for c in reports["11"].conflicts
     )
+    assert db.get_mod_status(11).conflict_status == CONFLICT_STATUS_NONE
 
 
 def test_disabled_skipped(tmp_path: Path, db: DatabaseManager) -> None:
