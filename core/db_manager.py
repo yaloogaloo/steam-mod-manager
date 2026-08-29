@@ -18,6 +18,7 @@ from .mod_platform import (
     NON_STEAM_MOD_ID_BASE,
     OFFLINE_STATUS_NONE,
     PLATFORM_GITHUB,
+    PLATFORM_MODIO,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
     SUPPORTED_PLATFORMS,
@@ -25,6 +26,7 @@ from .mod_platform import (
     ModFilesBundle,
     corrected_nexus_workspace_id,
     generate_unique_workspace_id,
+    is_modio_external_id_pollution,
     normalize_offline_status,
     normalize_platform,
     resolve_workspace_id,
@@ -176,6 +178,20 @@ CREATE INDEX IF NOT EXISTS idx_deployment_record_items_record_id
     ON deployment_record_items(record_id);
 CREATE INDEX IF NOT EXISTS idx_deployment_record_items_mod_id
     ON deployment_record_items(mod_id);
+
+CREATE TABLE IF NOT EXISTS identity_audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mod_id      TEXT NOT NULL,
+    field_name  TEXT NOT NULL,
+    old_value   TEXT NOT NULL DEFAULT '',
+    new_value   TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_identity_audit_log_mod_id
+    ON identity_audit_log(mod_id);
 """
 
 # Columns added after the initial schema — applied on every startup.
@@ -495,6 +511,10 @@ class ModTagFlags:
     relationship_conflict_count: int = 0
 
 
+class IdentityIntegrityError(RuntimeError):
+    """Raised when identity UNIQUE constraints cannot be enforced (duplicates)."""
+
+
 class DatabaseManager:
     """
     Thread-safe SQLite access for permanent AppID / ModID snapshots.
@@ -521,7 +541,14 @@ class DatabaseManager:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
-        self._init_schema()
+        try:
+            self._init_schema()
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Singleton
@@ -631,6 +658,7 @@ class DatabaseManager:
                     WHEN (external_id IS NULL OR TRIM(external_id) = '')
                          AND (platform IS NULL OR TRIM(platform) = ''
                               OR platform = 'steam')
+                         AND mod_id > 0 AND mod_id < ?
                     THEN CAST(mod_id AS TEXT)
                     ELSE external_id
                 END,
@@ -638,6 +666,7 @@ class DatabaseManager:
                     WHEN (source_url IS NULL OR TRIM(source_url) = '')
                          AND (platform IS NULL OR TRIM(platform) = ''
                               OR platform = 'steam')
+                         AND mod_id > 0 AND mod_id < ?
                     THEN 'https://steamcommunity.com/sharedfiles/filedetails/?id='
                          || CAST(mod_id AS TEXT)
                     ELSE source_url
@@ -646,7 +675,8 @@ class DatabaseManager:
                     WHEN mod_files IS NULL OR TRIM(mod_files) = '' THEN '{}'
                     ELSE mod_files
                 END
-            """
+            """,
+            (NON_STEAM_MOD_ID_BASE, NON_STEAM_MOD_ID_BASE),
         )
 
     def _backfill_workspace_ids(self) -> None:
@@ -773,11 +803,10 @@ class DatabaseManager:
 
     def _ensure_unique_platform_external_index(self) -> None:
         """
-        Enforce UNIQUE(platform, app_id, external_id) when the database is clean.
+        Enforce UNIQUE(platform, app_id, external_id).
 
-        Migrates away from the legacy ``uq_mods_platform_external`` index.
-        Duplicate rows are never auto-deleted — only warned. The unique index
-        is skipped until duplicates are resolved manually.
+        Duplicate identity rows fail-fast unless ``SMM_IDENTITY_RECOVERY=1``
+        (recovery / repair mode). Silent skip is not allowed in normal runs.
         """
         cols = {
             str(row[1])
@@ -790,39 +819,75 @@ class DatabaseManager:
 
         dup_rows = self._conn.execute(
             """
-            SELECT platform, app_id, external_id, COUNT(*) AS cnt
+            SELECT platform, app_id, external_id, COUNT(*) AS cnt,
+                   GROUP_CONCAT(mod_id) AS mod_ids
             FROM mods
             WHERE TRIM(COALESCE(external_id, '')) != ''
             GROUP BY platform, app_id, external_id
             HAVING COUNT(*) > 1
             """
         ).fetchall()
+        recovery = os.environ.get("SMM_IDENTITY_RECOVERY", "").strip() in {
+            "1",
+            "true",
+            "TRUE",
+            "yes",
+            "YES",
+        }
         if dup_rows:
-            for row in dup_rows:
-                logger.warning(
+            details = [
+                {
+                    "platform": row["platform"],
+                    "app_id": row["app_id"],
+                    "external_id": row["external_id"],
+                    "count": row["cnt"],
+                    "mod_ids": row["mod_ids"],
+                }
+                for row in dup_rows
+            ]
+            for item in details:
+                logger.error(
                     "Duplicate mod identity platform=%r app_id=%s external_id=%r "
-                    "count=%s (UNIQUE index not applied; resolve manually)",
-                    row["platform"],
-                    row["app_id"],
-                    row["external_id"],
-                    row["cnt"],
+                    "count=%s mod_ids=%s",
+                    item["platform"],
+                    item["app_id"],
+                    item["external_id"],
+                    item["count"],
+                    item["mod_ids"],
                 )
+            if not recovery:
+                raise IdentityIntegrityError(
+                    "Identity UNIQUE conflict detected; refuse to start. "
+                    "Set SMM_IDENTITY_RECOVERY=1 and run identity repair, "
+                    f"or resolve manually. conflicts={details!r}"
+                )
+            logger.warning(
+                "SMM_IDENTITY_RECOVERY=1: continuing without UNIQUE index "
+                "(%s conflict group(s))",
+                len(details),
+            )
             return
 
-        # Replace the old non-unique helper index with a UNIQUE constraint index.
         self._conn.execute("DROP INDEX IF EXISTS idx_mods_external")
+        self._conn.execute("DROP INDEX IF EXISTS uq_mods_platform_app_external")
         try:
             self._conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_mods_platform_app_external
                 ON mods(platform, app_id, external_id)
+                WHERE TRIM(COALESCE(external_id, '')) != ''
                 """
             )
         except sqlite3.IntegrityError as exc:
-            logger.warning(
-                "Failed to create uq_mods_platform_app_external (duplicates remain): %s",
-                exc,
-            )
+            if recovery:
+                logger.warning(
+                    "SMM_IDENTITY_RECOVERY=1: UNIQUE index create failed: %s",
+                    exc,
+                )
+                return
+            raise IdentityIntegrityError(
+                f"Failed to create uq_mods_platform_app_external: {exc}"
+            ) from exc
 
     def _ensure_deployment_record_name_unique(self) -> None:
         """Ensure UNIQUE(app_id, name) for deployment records (idempotent)."""
@@ -1091,6 +1156,8 @@ class DatabaseManager:
         if not meta.title:
             return
         mid = int(meta.published_file_id)
+        if mid >= NON_STEAM_MOD_ID_BASE:
+            return
         source = steam_workshop_url(mid)
         with self._lock:
             self._conn.execute(
@@ -1212,6 +1279,9 @@ class DatabaseManager:
 
         Uses a high positive range so values never collide with Workshop IDs.
         Steam Mods continue to use Workshop ID as ``mod_id``.
+
+        Inserts a provisional stub row immediately so consecutive allocations
+        never return the same id before the caller persists identity fields.
         """
         with self._lock:
             row = self._conn.execute(
@@ -1223,8 +1293,12 @@ class DatabaseManager:
             ).fetchone()
             mx = int(row["mx"] or 0) if row is not None else 0
             if mx < NON_STEAM_MOD_ID_BASE:
-                return int(NON_STEAM_MOD_ID_BASE)
-            return mx + 1
+                next_id = int(NON_STEAM_MOD_ID_BASE)
+            else:
+                next_id = mx + 1
+            self._ensure_mod_stub(next_id)
+            self._conn.commit()
+            return next_id
 
     def find_mod_by_internal_id(self, internal_id: str) -> str | None:
         key = str(internal_id or "").strip()
@@ -1338,9 +1412,26 @@ class DatabaseManager:
         if source_url is not None:
             sets.append("source_url = ?")
             params.append(str(source_url or "").strip())
+        ext_param_set = False
         if external_id is not None:
-            sets.append("external_id = ?")
-            params.append(str(external_id or "").strip())
+            ext_val = str(external_id or "").strip()
+            if is_modio_external_id_pollution(ext_val, mod_id=mid):
+                ext_val = ""
+            if ext_val:
+                sets.append("external_id = ?")
+                params.append(ext_val)
+                ext_param_set = True
+        if (
+            platform is not None
+            and normalize_platform(platform) == PLATFORM_MODIO
+            and not ext_param_set
+        ):
+            sets.append(
+                "external_id = CASE "
+                "WHEN mod_id >= ? AND TRIM(COALESCE(external_id, '')) = CAST(mod_id AS TEXT) "
+                "THEN '' ELSE external_id END"
+            )
+            params.append(NON_STEAM_MOD_ID_BASE)
         if workspace_id is not None:
             sets.append("workspace_id = ?")
             params.append(str(workspace_id or "").strip())
@@ -1381,6 +1472,14 @@ class DatabaseManager:
         if row is None:
             return None
         return _display_info_from_row(row)
+
+    def find_mod_by_last_known_path(self, path: str) -> str | None:
+        """Return ``mod_id`` when *path* matches ``last_known_path`` exactly."""
+        row = self.get_mod_backup_row_by_path(str(path or "").strip())
+        if row is None:
+            return None
+        mid = str(row.get("mod_id") or "").strip()
+        return mid if mid.isdigit() else None
 
     def update_mod_platform_info(
         self,
@@ -1429,6 +1528,8 @@ class DatabaseManager:
                 if external_id is not None
                 else old_ext
             )
+            if plat == PLATFORM_MODIO and is_modio_external_id_pollution(ext, mod_id=mid):
+                ext = ""
             new_title = (
                 str(title).strip()
                 if title is not None
@@ -1448,9 +1549,13 @@ class DatabaseManager:
 
             if plat != old_plat or ext != old_ext or new_app != int(row["app_id"] or 0):
                 if not ext:
-                    raise ValueError(
-                        "external_id is required when changing platform identity"
-                    )
+                    if not (
+                        plat == PLATFORM_MODIO
+                        and is_modio_external_id_pollution(old_ext, mod_id=mid)
+                    ):
+                        raise ValueError(
+                            "external_id is required when changing platform identity"
+                        )
                 conflict = self._conn.execute(
                     """
                     SELECT mod_id FROM mods
@@ -3463,6 +3568,37 @@ class DatabaseManager:
         if label:
             self.add_category_tag(mod_id, label)
 
+    def append_identity_audit_log(
+        self,
+        *,
+        mod_id: int | str,
+        field_name: str,
+        old_value: str = "",
+        new_value: str = "",
+        source: str = "",
+        reason: str = "",
+    ) -> None:
+        """Persist one identity mutation provenance row."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO identity_audit_log (
+                    mod_id, field_name, old_value, new_value,
+                    source, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(mod_id or "").strip(),
+                    str(field_name or "").strip(),
+                    str(old_value or ""),
+                    str(new_value or ""),
+                    str(source or ""),
+                    str(reason or ""),
+                    _utc_now(),
+                ),
+            )
+            self._conn.commit()
+
     def delete_mod_record(self, mod_id: int | str) -> bool:
         """
         Remove SQLite rows for ``mod_id`` (mods + tags + relations).
@@ -3963,8 +4099,10 @@ class DatabaseManager:
         now = _utc_now()
         mid = int(mod_id)
         is_steam_range = mid > 0 and mid < NON_STEAM_MOD_ID_BASE
-        # Always set a unique provisional external_id (= mod_id text) so
-        # UNIQUE(platform, app_id, external_id) is not violated by empty stubs.
+        # Provisional external_id: Steam uses workshop id; non-Steam uses a
+        # non-numeric stub key so Mod.io refresh never treats it as platform id.
+        stub_external_id = str(mid) if is_steam_range else f"stub:{mid}"
+        stub_platform = PLATFORM_STEAM if is_steam_range else ""
         self._conn.execute(
             """
             INSERT INTO mods (
@@ -3972,13 +4110,14 @@ class DatabaseManager:
                 display_name, custom_description, user_notes, favorite,
                 platform, source_url, external_id, workspace_id, mod_files, updated_at
             )
-            VALUES (?, 0, '', '', '', '', '', '', 0, 'steam', ?, ?, ?, '{}', ?)
+            VALUES (?, 0, '', '', '', '', '', '', 0, ?, ?, ?, ?, '{}', ?)
             ON CONFLICT(mod_id) DO NOTHING
             """,
             (
                 mid,
+                stub_platform,
                 steam_workshop_url(mid) if is_steam_range else "",
-                str(mid),
+                stub_external_id,
                 # Only Steam-range stubs may reuse Workshop ID as Workspace ID.
                 # Non-Steam rows get workspace_id after platform identity is set.
                 str(mid) if is_steam_range else "",

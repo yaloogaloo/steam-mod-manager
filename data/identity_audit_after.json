@@ -1,0 +1,21 @@
+{
+  "counts": {
+    "CRITICAL": 0,
+    "HIGH": 0,
+    "MEDIUM": 354,
+    "LOW": 22,
+    "corrupted": 0,
+    "duplicate": 7,
+    "conflict": 0,
+    "orphan": 22,
+    "warning": 347,
+    "identity_conflict": 7,
+    "ghost": 13
+  },
+  "scanned_folders": 1621,
+  "scanned_db_rows": 1636,
+  "gate": {
+    "CRITICAL_ok": true,
+    "HIGH_ok": true
+  }
+}

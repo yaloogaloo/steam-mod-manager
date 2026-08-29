@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from core.models import ModMetadata
-from core.mod_platform import PLATFORM_MODIO
+from core.mod_platform import PLATFORM_MODIO, coerce_modio_api_mod_id
 from core.sanitize import sanitize_folder_name
 from services.file_ops import (
     INFO_DIR_NAME,
@@ -48,7 +48,7 @@ def _read_local_modio_ids(managed_path: Path) -> tuple[int, int]:
     gid = 0
     raw_m = str(data.get("modio_mod_id") or "").strip()
     if raw_m.isdigit():
-        mid = int(raw_m)
+        mid = coerce_modio_api_mod_id(raw_m)
     raw_g = str(data.get("modio_game_id") or "").strip()
     if raw_g.isdigit():
         gid = int(raw_g)
@@ -92,6 +92,26 @@ def _is_same_managed_directory(source: Path, target: Path) -> bool:
         return source.is_dir() and target.exists() and source.samefile(target)
     except OSError:
         return False
+
+
+def _is_duplicate_folder_for_same_mod(
+    source: Path,
+    target: Path,
+    *,
+    mod_id: int | str,
+) -> bool:
+    """
+    True when *target* is a different path but belongs to the same internal mod_id.
+
+    Used to skip rename (not fail) when slug-named and title-named folders coexist.
+    """
+    if not target.is_dir() or _is_same_managed_directory(source, target):
+        return False
+    meta = read_info_metadata_dict(target) or {}
+    pub = str(meta.get("published_file_id") or "").strip()
+    if pub and pub == str(mod_id):
+        return True
+    return False
 
 
 def rename_modio_folder_for_title(
@@ -425,13 +445,14 @@ def refresh_modio_mod_metadata(
         )
 
     local_mod_id, local_game_id = _read_local_modio_ids(folder)
-    # Numeric external_id from DB can also be the Mod.io mod id.
+    # Numeric external_id from DB may hold the Mod.io mod id (never internal mod_id).
     try:
         info = database.get_mod_display_info(mid)
         if info is not None:
             ext = str(info.external_id or "").strip()
-            if ext.isdigit() and local_mod_id <= 0:
-                local_mod_id = int(ext)
+            api_mod_id = coerce_modio_api_mod_id(ext)
+            if api_mod_id > 0 and local_mod_id <= 0:
+                local_mod_id = api_mod_id
             if not url and info.source_url:
                 url = info.source_url
                 parts = parse_modio_url(url) or parts
@@ -499,23 +520,32 @@ def refresh_modio_mod_metadata(
         # update if rename is not needed).
         desired = sanitize_folder_name(details.name, fallback=folder.name)
         target_probe = (folder.parent / desired).resolve()
+        skip_rename_same_mod_duplicate = False
         if (
             desired
             and desired != folder.name
             and target_probe.exists()
             and not _is_same_managed_directory(folder, target_probe)
         ):
-            return MetadataRefreshResult(
-                mod_id=mid,
-                success=False,
-                managed_path=folder,
-                old_path=folder,
-                title=details.name,
-                error=(
-                    f"[METADATA_MERGE] 目录名冲突：目标「{desired}」已存在，"
-                    "未覆盖现有 Mod，也未删除当前目录。"
-                ),
-            )
+            if _is_duplicate_folder_for_same_mod(folder, target_probe, mod_id=mid):
+                logger.warning(
+                    "Mod.io rename skipped: duplicate folder for same mod_id %s: %s",
+                    mid,
+                    target_probe,
+                )
+                skip_rename_same_mod_duplicate = True
+            else:
+                return MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=folder,
+                    old_path=folder,
+                    title=details.name,
+                    error=(
+                        f"[METADATA_MERGE] 目录名冲突：目标「{desired}」已存在，"
+                        "未覆盖现有 Mod，也未删除当前目录。"
+                    ),
+                )
 
         canonical = (
             details.profile_url.strip()
@@ -532,48 +562,52 @@ def refresh_modio_mod_metadata(
 
         new_path = folder
         renamed = False
-        try:
-            new_path, renamed = rename_modio_folder_for_title(
-                folder, details.name, library_root=root
-            )
-        except FileExistsError as exc:
-            logger.exception("Mod.io rename conflict: %s", exc)
-            return MetadataRefreshResult(
-                mod_id=mid,
-                success=False,
-                managed_path=folder,
-                old_path=folder,
-                title=details.name,
-                error=f"[METADATA_MERGE] {exc}",
-                cover_path="",
-                message="",
-            )
-        except OSError as exc:
-            logger.exception("Mod.io rename failed: %s", exc)
-            lock_summary = ""
+        if skip_rename_same_mod_duplicate:
+            new_path = folder
+            renamed = False
+        else:
             try:
-                from services.windows_path_locks import (
-                    find_processes_locking_path,
-                    summarize_lock_holders,
+                new_path, renamed = rename_modio_folder_for_title(
+                    folder, details.name, library_root=root
                 )
+            except FileExistsError as exc:
+                logger.exception("Mod.io rename conflict: %s", exc)
+                return MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=folder,
+                    old_path=folder,
+                    title=details.name,
+                    error=f"[METADATA_MERGE] {exc}",
+                    cover_path="",
+                    message="",
+                )
+            except OSError as exc:
+                logger.exception("Mod.io rename failed: %s", exc)
+                lock_summary = ""
+                try:
+                    from services.windows_path_locks import (
+                        find_processes_locking_path,
+                        summarize_lock_holders,
+                    )
 
-                lock_summary = summarize_lock_holders(
-                    find_processes_locking_path(folder)
+                    lock_summary = summarize_lock_holders(
+                        find_processes_locking_path(folder)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                rename_err = format_directory_rename_error(
+                    exc, source=folder, lock_summary=lock_summary
                 )
-            except Exception:  # noqa: BLE001
-                pass
-            rename_err = format_directory_rename_error(
-                exc, source=folder, lock_summary=lock_summary
-            )
-            return MetadataRefreshResult(
-                mod_id=mid,
-                success=False,
-                managed_path=folder,
-                old_path=folder,
-                title=details.name,
-                error=f"[METADATA_MERGE] {rename_err}",
-                cover_path="",
-            )
+                return MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=folder,
+                    old_path=folder,
+                    title=details.name,
+                    error=f"[METADATA_MERGE] {rename_err}",
+                    cover_path="",
+                )
 
         if renamed:
             path_commit = record_filesystem_rename(

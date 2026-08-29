@@ -29,6 +29,7 @@ from services.library_status import (
     compute_content_status,
     content_status_to_library_status,
     infer_initial_source_type,
+    is_steam_workshop_id,
     normalize_library_source,
     row_source_type,
 )
@@ -124,6 +125,13 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
     for folder in manager.list_managed_mods():
         result.scanned += 1
         raw = read_info_metadata_dict(folder) or {}
+        folder_key = str(folder.resolve())
+        if not resolve_existing_mod_id(raw):
+            path_mid = db.find_mod_by_last_known_path(folder_key)
+            if path_mid:
+                raw = dict(raw)
+                raw.setdefault("published_file_id", path_mid)
+                raw["_managed_path"] = folder_key
         had_row = bool(resolve_existing_mod_id(raw))
         mod_id, payload, changed = ensure_mod_identity(folder, raw)
         if not mod_id.isdigit():
@@ -173,18 +181,19 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
             result.imported += 1
 
         try:
-            db.upsert_mod(
-                ModMetadata(
-                    published_file_id=mod_id,
-                    title=title,
-                    description=str(payload.get("description") or ""),
-                    game_name=str(payload.get("game_name") or folder.parent.name),
-                    managed_path=str(folder.resolve()),
-                    app_id=int(payload.get("app_id") or 0),
-                    source_type=store_platform or source_type,
-                    url=str(payload.get("url") or payload.get("source_url") or ""),
+            if is_steam_workshop_id(mod_id):
+                db.upsert_mod(
+                    ModMetadata(
+                        published_file_id=mod_id,
+                        title=title,
+                        description=str(payload.get("description") or ""),
+                        game_name=str(payload.get("game_name") or folder.parent.name),
+                        managed_path=str(folder.resolve()),
+                        app_id=int(payload.get("app_id") or 0),
+                        source_type=store_platform or source_type,
+                        url=str(payload.get("url") or payload.get("source_url") or ""),
+                    )
                 )
-            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("upsert stub failed for %s: %s", mod_id, exc)
 

@@ -1,0 +1,493 @@
+{
+  "actions": [
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000000000",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000000000",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000000",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000002999",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000002999",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000002999",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003354",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003354",
+        "new_external_id": "1036",
+        "source_url": "https://www.nexusmods.com/baldursgate3/mods/1036",
+        "platform": "nexus"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003395",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003395",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003395",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003396",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003396",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003396",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003397",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003397",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003397",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003398",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003398",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003398",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003399",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003399",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003399",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003400",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003400",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003400",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003401",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003401",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003401",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003402",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003402",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003402",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003403",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003403",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003403",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "scrub_polluted_external_id",
+      "canonical_mod_id": "9000000000003404",
+      "duplicate_mod_id": "",
+      "reason": "external_id equals internal mod_id",
+      "details": {
+        "old_external_id": "9000000000003404",
+        "new_external_id": "",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003404",
+        "platform": "steam"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000000375",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/anno1800/mods/102",
+        "canonical_score": 131,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present",
+          "has_app_id"
+        ],
+        "duplicates": [
+          "9000000000000349"
+        ],
+        "duplicate_scores": {
+          "9000000000000349": 54
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000000375",
+      "duplicate_mod_id": "9000000000000349",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/anno1800/mods/102",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands",
+        "canonical_path": "",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000000434",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
+        "canonical_score": 125,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "modio_plausible",
+          "folder_present",
+          "has_app_id"
+        ],
+        "duplicates": [
+          "9000000000000351"
+        ],
+        "duplicate_scores": {
+          "9000000000000351": 79
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000000434",
+      "duplicate_mod_id": "9000000000000351",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]",
+        "canonical_path": "",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003226",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
+        "canonical_score": 124,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present"
+        ],
+        "duplicates": [
+          "9000000000003055"
+        ],
+        "duplicate_scores": {
+          "9000000000003055": 57
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003226",
+      "duplicate_mod_id": "9000000000003055",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu_9000000000003226",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003227",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
+        "canonical_score": 135,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present",
+          "has_app_id"
+        ],
+        "duplicates": [
+          "9000000000003056"
+        ],
+        "duplicate_scores": {
+          "9000000000003056": 126
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003227",
+      "duplicate_mod_id": "9000000000003056",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs_9000000000003227",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003228",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
+        "canonical_score": 134,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present",
+          "has_app_id"
+        ],
+        "duplicates": [
+          "9000000000003057"
+        ],
+        "duplicate_scores": {
+          "9000000000003057": 125
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003228",
+      "duplicate_mod_id": "9000000000003057",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport_9000000000003228",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003229",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
+        "canonical_score": 128,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present"
+        ],
+        "duplicates": [
+          "9000000000003058"
+        ],
+        "duplicate_scores": {
+          "9000000000003058": 54
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003229",
+      "duplicate_mod_id": "9000000000003058",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location_9000000000003229",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003230",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
+        "canonical_score": 127,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present"
+        ],
+        "duplicates": [
+          "9000000000003059"
+        ],
+        "duplicate_scores": {
+          "9000000000003059": 60
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003230",
+      "duplicate_mod_id": "9000000000003059",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车_9000000000003230",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003232",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
+        "canonical_score": 130,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present",
+          "has_app_id"
+        ],
+        "duplicates": [
+          "9000000000003079"
+        ],
+        "duplicate_scores": {
+          "9000000000003079": 124
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003232",
+      "duplicate_mod_id": "9000000000003079",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Extra-Map-Layers-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\地图显示更多图层信息",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    },
+    {
+      "action": "duplicate_source_url",
+      "canonical_mod_id": "9000000000003251",
+      "duplicate_mod_id": "",
+      "reason": "same source_url → 2 mod_ids",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
+        "canonical_score": 132,
+        "canonical_reasons": [
+          "has_platform_external",
+          "external_matches_url",
+          "nexus_numeric",
+          "folder_present",
+          "has_app_id"
+        ],
+        "duplicates": [
+          "9000000000003106"
+        ],
+        "duplicate_scores": {
+          "9000000000003106": 125
+        }
+      }
+    },
+    {
+      "action": "retire_duplicate_entity",
+      "canonical_mod_id": "9000000000003251",
+      "duplicate_mod_id": "9000000000003106",
+      "reason": "elect_canonical",
+      "details": {
+        "source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
+        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\爱心烹饪--新的烹饪系统",
+        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
+        "filesystem_policy": "retain_folders_bind_to_canonical"
+      }
+    }
+  ],
+  "before": {
+    "CRITICAL": 0,
+    "HIGH": 9,
+    "MEDIUM": 233,
+    "LOW": 24,
+    "corrupted": 0,
+    "duplicate": 9,
+    "conflict": 0,
+    "orphan": 24,
+    "warning": 233,
+    "identity_conflict": 0,
+    "ghost": 13
+  },
+  "after": {},
+  "applied": false,
+  "success": true,
+  "error": "",
+  "notes": [
+    "planned_actions=31",
+    "dry_run_only"
+  ]
+}

@@ -1,0 +1,350 @@
+{
+  "library": "E:\\project\\steam-mod-manager\\mod",
+  "scanned_folders": 1621,
+  "scanned_db_rows": 1645,
+  "counts": {
+    "CRITICAL": 0,
+    "HIGH": 9,
+    "MEDIUM": 233,
+    "LOW": 24,
+    "corrupted": 0,
+    "duplicate": 9,
+    "conflict": 0,
+    "orphan": 24,
+    "warning": 233,
+    "identity_conflict": 0,
+    "ghost": 13
+  },
+  "global_findings": [
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "8001",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9021",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "93002",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "93003",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "96001",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "97001",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "97002",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "555001",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "1623730013",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000000000",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "9000000000000344",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "9000000000000375",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row marked folder_present but path not in scan",
+      "mod_id": "9000000000000434",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000002999",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003395",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003396",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003397",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003398",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003399",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003400",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003401",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003402",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003403",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "MISSING_PLATFORM_ID",
+      "severity": "orphan",
+      "message": "DB row without filesystem folder",
+      "mod_id": "9000000000003404",
+      "source_url": "",
+      "external_id": "",
+      "expected": "",
+      "actual": ""
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/anno1800/mods/102",
+      "external_id": "",
+      "expected": "9000000000000349",
+      "actual": "9000000000000349, 9000000000000375"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
+      "external_id": "",
+      "expected": "9000000000000351",
+      "actual": "9000000000000351, 9000000000000434"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
+      "external_id": "",
+      "expected": "9000000000003055",
+      "actual": "9000000000003055, 9000000000003226"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
+      "external_id": "",
+      "expected": "9000000000003056",
+      "actual": "9000000000003056, 9000000000003227"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
+      "external_id": "",
+      "expected": "9000000000003057",
+      "actual": "9000000000003057, 9000000000003228"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
+      "external_id": "",
+      "expected": "9000000000003058",
+      "actual": "9000000000003058, 9000000000003229"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
+      "external_id": "",
+      "expected": "9000000000003059",
+      "actual": "9000000000003059, 9000000000003230"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
+      "external_id": "",
+      "expected": "9000000000003079",
+      "actual": "9000000000003079, 9000000000003232"
+    },
+    {
+      "code": "DUPLICATE_SOURCE_URL",
+      "severity": "duplicate",
+      "message": "source_url maps to 2 mod_ids (DB)",
+      "mod_id": "",
+      "source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
+      "external_id": "",
+      "expected": "9000000000003106",
+      "actual": "9000000000003106, 9000000000003251"
+    }
+  ]
+}

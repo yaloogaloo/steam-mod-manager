@@ -1,0 +1,36 @@
+{
+  "actions": [],
+  "before": {
+    "CRITICAL": 0,
+    "HIGH": 7,
+    "MEDIUM": 347,
+    "LOW": 22,
+    "corrupted": 0,
+    "duplicate": 7,
+    "conflict": 0,
+    "orphan": 22,
+    "warning": 347,
+    "identity_conflict": 7,
+    "ghost": 13
+  },
+  "after": {
+    "CRITICAL": 0,
+    "HIGH": 7,
+    "MEDIUM": 347,
+    "LOW": 22,
+    "corrupted": 0,
+    "duplicate": 7,
+    "conflict": 0,
+    "orphan": 22,
+    "warning": 347,
+    "identity_conflict": 7,
+    "ghost": 13
+  },
+  "applied": true,
+  "success": true,
+  "error": "",
+  "notes": [
+    "planned_actions=0",
+    "post_audit CRITICAL=0 HIGH=7"
+  ]
+}

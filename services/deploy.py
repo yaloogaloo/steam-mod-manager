@@ -864,7 +864,17 @@ class ModDeployer:
         )
         workspace_id = (
             str(display.workspace_id or "").strip() if display else ""
-        ) or mid
+        )
+        if display is not None:
+            from services.mod_identity_authority import safe_workspace_id_for_deploy
+
+            workspace_id = safe_workspace_id_for_deploy(
+                platform=str(display.platform or ""),
+                workspace_id=workspace_id,
+                mod_id=mid,
+                source_url=str(display.source_url or ""),
+                external_id=str(display.external_id or ""),
+            )
 
         if custom_deploy_path:
             # Custom absolute path overrides all game-level deploy rules.

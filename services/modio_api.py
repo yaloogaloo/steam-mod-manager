@@ -14,6 +14,8 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from core.mod_platform import coerce_modio_api_mod_id
+
 logger = logging.getLogger(__name__)
 
 MODIO_API_BASE = "https://api.mod.io/v1"
@@ -528,7 +530,9 @@ class ModioClient:
             raise ModioAPIError("Mod.io name_id 为空")
         gid = int(game_id)
         if slug.isdigit():
-            return self.get_mod(gid, int(slug))
+            api_mod_id = coerce_modio_api_mod_id(slug)
+            if api_mod_id > 0:
+                return self.get_mod(gid, api_mod_id)
         payload = self._get_game_resource(
             gid,
             f"games/{gid}/mods",
@@ -557,16 +561,25 @@ class ModioClient:
         game_id: int = 0,
         mod_id: int = 0,
     ) -> ModioModDetails:
-        """Resolve a Mod by numeric ids when known, otherwise by slug + name_id."""
+        """
+        Resolve a Mod by platform identity.
+
+        Priority: real Mod.io numeric id → ``name_id`` slug → error.
+        Internal app ``mod_id`` values (``>= NON_STEAM_MOD_ID_BASE``) are never
+        sent to ``GET …/mods/{id}``.
+        """
         gid = int(game_id or 0)
-        mid = int(mod_id or 0)
+        api_mod_id = coerce_modio_api_mod_id(mod_id)
+        name_id = str(mod_name_id or "").strip()
         if gid <= 0 and game_slug:
             gid = self.resolve_game_id(game_slug)
         if gid <= 0:
             raise ModioAPIError("无法解析 Mod.io game_id")
-        if mid > 0:
-            return self.get_mod(gid, mid)
-        return self.find_mod_by_name_id(gid, mod_name_id)
+        if api_mod_id > 0:
+            return self.get_mod(gid, api_mod_id)
+        if name_id:
+            return self.find_mod_by_name_id(gid, name_id)
+        raise ModioAPIError("无法解析 Mod.io Mod（缺少有效的 mod_id 或 name_id）")
 
     def download_file(self, url: str, dest: str | Path) -> Path:
         """Download a binary URL (logo) to *dest*."""

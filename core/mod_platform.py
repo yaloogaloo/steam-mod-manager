@@ -85,6 +85,56 @@ FILE_ROLE_ALIASES = {
 # Internal SQLite ``mod_id`` values for non-Steam Mods (avoid Workshop ID collisions).
 NON_STEAM_MOD_ID_BASE = 9_000_000_000_000_000
 
+
+def is_internal_mod_id(mod_id: int | str) -> bool:
+    """True when *mod_id* is an app-allocated non-Steam SQLite primary key."""
+    text = str(mod_id or "").strip()
+    if not text.isdigit():
+        return False
+    return int(text) >= NON_STEAM_MOD_ID_BASE
+
+
+def is_modio_api_mod_id(mod_id: int | str) -> bool:
+    """True when a numeric id is a plausible Mod.io Mod Object id (not internal)."""
+    text = str(mod_id or "").strip()
+    if not text.isdigit():
+        return False
+    value = int(text)
+    return 0 < value < NON_STEAM_MOD_ID_BASE
+
+
+def is_provisional_external_id(external_id: str) -> bool:
+    """True when *external_id* is stub/internal — not a real platform reference."""
+    ext = str(external_id or "").strip()
+    if not ext:
+        return False
+    if ext.startswith("stub:"):
+        return True
+    return is_internal_mod_id(ext)
+
+
+def is_modio_external_id_pollution(external_id: str, *, mod_id: int | str = "") -> bool:
+    """
+    True when *external_id* is the internal ``mod_id`` mistaken for a platform id.
+
+    Used to keep Mod.io rows from retaining stub ``external_id = mod_id`` values.
+    """
+    ext = str(external_id or "").strip()
+    if not ext:
+        return False
+    mid_text = str(mod_id or "").strip()
+    if mid_text and ext == mid_text and is_internal_mod_id(mid_text):
+        return True
+    return ext.isdigit() and is_internal_mod_id(ext)
+
+
+def coerce_modio_api_mod_id(value: int | str) -> int:
+    """Return Mod.io mod id when *value* is numeric and not internal; else ``0``."""
+    if not is_modio_api_mod_id(value):
+        return 0
+    return int(str(value).strip())
+
+
 DEFAULT_MOD_FILES_JSON = "{}"
 
 # mods.offline_status / offline_provider

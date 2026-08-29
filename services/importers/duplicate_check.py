@@ -5,7 +5,12 @@ from __future__ import annotations
 from urllib.parse import urlparse, urlunparse
 
 from core.db_manager import DatabaseManager, ModDisplayInfo
-from core.mod_platform import normalize_platform
+from core.mod_platform import (
+    is_internal_mod_id,
+    is_modio_external_id_pollution,
+    is_provisional_external_id,
+    normalize_platform,
+)
 from services.importers.importer_base import ImportResult
 
 DUPLICATE_STATUS = "duplicate"
@@ -40,23 +45,84 @@ def find_mod_by_source_url(
     app_id: int = 0,
 ) -> ModDisplayInfo | None:
     """Locate an existing Mod by normalized ``source_url`` (no schema change)."""
+    return find_mod_by_source_url_relaxed(
+        db,
+        source_url,
+        platform=platform,
+        app_id=app_id,
+        relax_app_id=False,
+    )
+
+
+def find_mod_by_source_url_relaxed(
+    db: DatabaseManager,
+    source_url: str,
+    *,
+    platform: str = "",
+    app_id: int = 0,
+    relax_app_id: bool = True,
+) -> ModDisplayInfo | None:
+    """
+    Locate an existing Mod by normalized ``source_url``.
+
+    When *relax_app_id* is True, also matches rows with ``app_id=0`` or any
+    ``app_id`` under the same platform (identity recovery after bad backfill).
+    """
     target = normalize_source_url(source_url)
     if not target:
         return None
     plat = normalize_platform(platform) if platform else ""
-    aid = int(app_id or 0)
+
+    def _scan_rows(rows) -> ModDisplayInfo | None:
+        for row in rows:
+            if normalize_source_url(str(row["source_url"] or "")) == target:
+                return db.get_mod_display_info(row["mod_id"])
+        return None
+
     with db._lock:
         if plat:
+            aid = int(app_id or 0)
+            if aid > 0:
+                hit = _scan_rows(
+                    db._conn.execute(
+                        """
+                        SELECT mod_id, platform, source_url, external_id, app_id
+                        FROM mods
+                        WHERE platform = ?
+                          AND app_id = ?
+                          AND source_url IS NOT NULL
+                          AND TRIM(source_url) != ''
+                        """,
+                        (plat, aid),
+                    ).fetchall()
+                )
+                if hit is not None:
+                    return hit
+            if relax_app_id and aid > 0:
+                hit = _scan_rows(
+                    db._conn.execute(
+                        """
+                        SELECT mod_id, platform, source_url, external_id, app_id
+                        FROM mods
+                        WHERE platform = ?
+                          AND (app_id = 0 OR app_id IS NULL)
+                          AND source_url IS NOT NULL
+                          AND TRIM(source_url) != ''
+                        """,
+                        (plat,),
+                    ).fetchall()
+                )
+                if hit is not None:
+                    return hit
             rows = db._conn.execute(
                 """
                 SELECT mod_id, platform, source_url, external_id, app_id
                 FROM mods
                 WHERE platform = ?
-                  AND app_id = ?
                   AND source_url IS NOT NULL
                   AND TRIM(source_url) != ''
                 """,
-                (plat, aid),
+                (plat,),
             ).fetchall()
         else:
             rows = db._conn.execute(
@@ -67,10 +133,7 @@ def find_mod_by_source_url(
                   AND TRIM(source_url) != ''
                 """
             ).fetchall()
-    for row in rows:
-        if normalize_source_url(str(row["source_url"] or "")) == target:
-            return db.get_mod_display_info(row["mod_id"])
-    return None
+    return _scan_rows(rows)
 
 
 def find_duplicate_mod(
@@ -97,10 +160,30 @@ def find_duplicate_mod(
             return existing
 
     ext = str(external_id or "").strip()
-    if ext:
-        existing = db.find_mod_by_external(plat, ext, app_id=aid)
-        if existing is not None:
-            return existing
+    if ext and not is_provisional_external_id(ext):
+        if not (ext.isdigit() and is_internal_mod_id(ext)):
+            if not is_modio_external_id_pollution(ext):
+                existing = db.find_mod_by_external(plat, ext, app_id=aid)
+                if existing is not None:
+                    return existing
+                if aid > 0:
+                    existing = db.find_mod_by_external(plat, ext, app_id=0)
+                    if existing is not None:
+                        return existing
+                if aid == 0:
+                    with db._lock:
+                        row = db._conn.execute(
+                            """
+                            SELECT mod_id FROM mods
+                            WHERE platform = ? AND external_id = ?
+                            LIMIT 1
+                            """,
+                            (plat, ext),
+                        ).fetchone()
+                    if row is not None:
+                        info = db.get_mod_display_info(row["mod_id"])
+                        if info is not None:
+                            return info
 
     url = str(source_url or "").strip()
     if url:
