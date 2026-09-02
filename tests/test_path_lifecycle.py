@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from core.game_info import GameInfo
 from core.models import ModMetadata
 from core.mod_platform import PLATFORM_MODIO, PLATFORM_NEXUS, PLATFORM_STEAM
 from core.steam_api import SteamWorkshopClient
@@ -168,10 +169,37 @@ def test_nexus_manual_rename_then_refresh_with_stale_path(
 ) -> None:
     """Case 2: Nexus manual rename + refresh heals path and marks synced."""
     lib = tmp_path / "mod"
-    mid = "9000000000004001"
-    old = _nexus_folder(lib, mid, name="OldNexus")
-    db.upsert_mod(ModMetadata(published_file_id=mid, title="OldNexus"))
-    db.update_mod_platform_info(mid, platform=PLATFORM_NEXUS, source_url="https://nexusmods.com/x")
+    db.upsert_game(GameInfo(app_id=1623730, name="Palworld", folder_name="Game"))
+    old = lib / "Game" / "OldNexus"
+    info = old / INFO_DIR_NAME
+    info.mkdir(parents=True)
+    (info / "metadata.json").write_text(
+        json.dumps({"title": "OldNexus", "source_type": "nexus"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with zipfile.ZipFile(old / "payload.zip", "w") as zf:
+        zf.writestr("mod.txt", "x")
+    reg = db.register_external_mod(
+        platform=PLATFORM_NEXUS,
+        external_id="4001",
+        source_url="https://nexusmods.com/x",
+        title="OldNexus",
+        app_id=1623730,
+        game_name="Palworld",
+    )
+    mid = str(reg.mod_id)
+    (info / "metadata.json").write_text(
+        json.dumps(
+            {
+                "published_file_id": mid,
+                "title": "OldNexus",
+                "source_type": "nexus",
+                "platform": "nexus",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     db.update_mod_identity_fields(mid, last_known_path=str(old.resolve()))
 
     new = old.parent / "RenamedNexus"
@@ -191,7 +219,7 @@ def test_steam_refresh_rename_then_stale_path_succeeds(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Case 3: Steam refresh rename; stale path on next refresh still works."""
-    mid = "9000000000004002"
+    mid = "3413524002"
     lib = tmp_path / "mod"
     folder = _steam_folder(lib, mid)
     db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}"))
@@ -223,7 +251,7 @@ def test_worker_heals_stale_path_after_rename(
 ) -> None:
     """Case 4: Worker constructed with old path recovers via resolve at run()."""
     lib = tmp_path / "mod"
-    mid = "9000000000004003"
+    mid = "3413524003"
     old = lib / "Game" / "before"
     old.mkdir(parents=True)
     (old / INFO_DIR_NAME).mkdir()
@@ -328,9 +356,29 @@ def test_manual_move_reconcile_via_library_scan(
 ) -> None:
     """Case 6: User manually moves folder; library reconcile updates last_known_path."""
     lib = tmp_path / "mod"
-    mid = "9000000000004004"
-    old = _nexus_folder(lib, mid, name="ManualOld")
-    db.upsert_mod(ModMetadata(published_file_id=mid, title="ManualOld"))
+    db.upsert_game(GameInfo(app_id=1623730, name="Palworld", folder_name="Game"))
+    old = _nexus_folder(lib, "pending", name="ManualOld")
+    reg = db.register_external_mod(
+        platform=PLATFORM_NEXUS,
+        external_id="4004",
+        source_url="https://nexusmods.com/y",
+        title="ManualOld",
+        app_id=1623730,
+        game_name="Palworld",
+    )
+    mid = str(reg.mod_id)
+    (old / INFO_DIR_NAME / "metadata.json").write_text(
+        json.dumps(
+            {
+                "published_file_id": mid,
+                "title": "ManualOld",
+                "source_type": "nexus",
+                "platform": "nexus",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     db.update_mod_identity_fields(
         mid,
         last_known_path=str(old.resolve()),

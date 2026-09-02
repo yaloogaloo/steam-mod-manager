@@ -26,9 +26,11 @@ from .mod_platform import (
     ModFilesBundle,
     corrected_nexus_workspace_id,
     generate_unique_workspace_id,
+    is_internal_mod_id,
     is_modio_external_id_pollution,
     normalize_offline_status,
     normalize_platform,
+    normalize_platform_if_known,
     resolve_workspace_id,
     steam_workshop_url,
 )
@@ -651,7 +653,9 @@ class DatabaseManager:
             """
             UPDATE mods SET
                 platform = CASE
-                    WHEN platform IS NULL OR TRIM(platform) = '' THEN 'steam'
+                    WHEN (platform IS NULL OR TRIM(platform) = '')
+                         AND mod_id > 0 AND mod_id < ?
+                    THEN 'steam'
                     ELSE platform
                 END,
                 external_id = CASE
@@ -676,7 +680,7 @@ class DatabaseManager:
                     ELSE mod_files
                 END
             """,
-            (NON_STEAM_MOD_ID_BASE, NON_STEAM_MOD_ID_BASE),
+            (NON_STEAM_MOD_ID_BASE, NON_STEAM_MOD_ID_BASE, NON_STEAM_MOD_ID_BASE),
         )
 
     def _backfill_workspace_ids(self) -> None:
@@ -706,15 +710,23 @@ class DatabaseManager:
         existing.discard("")
         for row in rows:
             mid = str(row["mod_id"])
+            plat = normalize_platform_if_known(str(row["platform"] or ""))
+            if is_internal_mod_id(mid) and plat in ("", PLATFORM_STEAM):
+                continue
             wid = resolve_workspace_id(
-                str(row["platform"] or PLATFORM_STEAM),
-                mod_id=mid,
+                plat,
+                mod_id=mid if (plat == PLATFORM_STEAM and not is_internal_mod_id(mid)) else "",
                 source_url=str(row["source_url"] or ""),
                 external_id=str(row["external_id"] or ""),
                 existing=str(row["workspace_id"] or ""),
             )
+            if wid and is_internal_mod_id(wid):
+                wid = ""
             if not wid:
-                wid = generate_unique_workspace_id(existing)
+                if plat in (PLATFORM_GITHUB, PLATFORM_MODIO, PLATFORM_NEXUS):
+                    wid = generate_unique_workspace_id(existing)
+                else:
+                    continue
             existing.add(wid)
             self._conn.execute(
                 "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
@@ -737,15 +749,28 @@ class DatabaseManager:
         if row is None:
             return ""
         existing = str(row["workspace_id"] or "").strip()
+        plat = normalize_platform_if_known(str(row["platform"] or ""))
+        mid = str(row["mod_id"])
         if existing:
-            return existing
+            if is_internal_mod_id(existing) and (
+                is_internal_mod_id(mid) or plat != PLATFORM_STEAM
+            ):
+                existing = ""
+            else:
+                return existing
+        if is_internal_mod_id(mid) and plat in ("", PLATFORM_STEAM):
+            return ""
         wid = resolve_workspace_id(
-            str(row["platform"] or PLATFORM_STEAM),
-            mod_id=str(row["mod_id"]),
+            plat,
+            mod_id=mid if (plat == PLATFORM_STEAM and not is_internal_mod_id(mid)) else "",
             source_url=str(row["source_url"] or ""),
             external_id=str(row["external_id"] or ""),
         )
+        if wid and is_internal_mod_id(wid):
+            wid = ""
         if not wid:
+            if plat not in (PLATFORM_GITHUB, PLATFORM_MODIO, PLATFORM_NEXUS):
+                return ""
             taken = {
                 str(r["workspace_id"] or "").strip()
                 for r in self._conn.execute(
@@ -1209,6 +1234,8 @@ class DatabaseManager:
             if not meta.title:
                 continue
             mid = int(meta.published_file_id)
+            if mid >= NON_STEAM_MOD_ID_BASE:
+                continue
             rows.append(
                 (
                     mid,
@@ -1283,7 +1310,13 @@ class DatabaseManager:
         Inserts a provisional stub row immediately so consecutive allocations
         never return the same id before the caller persists identity fields.
         """
-        with self._lock:
+        from services.identity_service import (
+            assert_lifecycle_may_allocate,
+            identity_create_scope,
+        )
+
+        assert_lifecycle_may_allocate()
+        with identity_create_scope(), self._lock:
             row = self._conn.execute(
                 """
                 SELECT MAX(mod_id) AS mx FROM mods
@@ -1415,7 +1448,7 @@ class DatabaseManager:
         ext_param_set = False
         if external_id is not None:
             ext_val = str(external_id or "").strip()
-            if is_modio_external_id_pollution(ext_val, mod_id=mid):
+            if is_modio_external_id_pollution(ext_val, mod_id=mid) or is_internal_mod_id(ext_val):
                 ext_val = ""
             if ext_val:
                 sets.append("external_id = ?")
@@ -1433,8 +1466,15 @@ class DatabaseManager:
             )
             params.append(NON_STEAM_MOD_ID_BASE)
         if workspace_id is not None:
+            ws_val = str(workspace_id or "").strip()
+            if ws_val and is_internal_mod_id(ws_val):
+                plat_now = ""
+                if platform is not None and str(platform).strip():
+                    plat_now = normalize_platform_if_known(platform)
+                if plat_now != PLATFORM_STEAM or is_internal_mod_id(mid):
+                    ws_val = ""
             sets.append("workspace_id = ?")
-            params.append(str(workspace_id or "").strip())
+            params.append(ws_val)
         if app_id is not None and int(app_id) > 0:
             sets.append("app_id = ?")
             params.append(int(app_id))
@@ -1511,10 +1551,10 @@ class DatabaseManager:
                 (mid,),
             ).fetchone()
             assert row is not None
-            old_plat = normalize_platform(str(row["platform"] or PLATFORM_STEAM))
+            old_plat = normalize_platform_if_known(str(row["platform"] or ""))
             old_ext = str(row["external_id"] or "").strip()
             plat = (
-                normalize_platform(platform)
+                normalize_platform_if_known(platform)
                 if platform is not None
                 else old_plat
             )
@@ -1529,6 +1569,8 @@ class DatabaseManager:
                 else old_ext
             )
             if plat == PLATFORM_MODIO and is_modio_external_id_pollution(ext, mod_id=mid):
+                ext = ""
+            if ext and is_internal_mod_id(ext):
                 ext = ""
             new_title = (
                 str(title).strip()
@@ -2110,17 +2152,24 @@ class DatabaseManager:
         if existing is not None:
             mid = int(existing.mod_id)
         else:
-            mid = int(mod_id) if mod_id is not None else self.allocate_mod_id()
+            mid = int(mod_id) if mod_id is not None else None
+            if mid is None:
+                from services.identity_service import allocate_internal_id
+
+                mid = int(allocate_internal_id(self))
+
+        from services.identity_service import identity_create_scope
 
         try:
-            info = self.update_mod_platform_info(
-                mid,
-                platform=plat,
-                source_url=source_url,
-                external_id=ext,
-                title=title or None,
-                app_id=resolved_app,
-            )
+            with identity_create_scope():
+                info = self.update_mod_platform_info(
+                    mid,
+                    platform=plat,
+                    source_url=source_url,
+                    external_id=ext,
+                    title=title or None,
+                    app_id=resolved_app,
+                )
         except (sqlite3.IntegrityError, ValueError):
             raced = self.find_mod_by_external(plat, ext, app_id=resolved_app)
             if raced is None or int(raced.mod_id) == mid:
@@ -2201,7 +2250,16 @@ class DatabaseManager:
         mid = int(str(mod_id).strip())
         now = _utc_now()
         with self._lock:
-            self._ensure_mod_stub(mid)
+            present = self._conn.execute(
+                "SELECT 1 FROM mods WHERE mod_id = ?", (mid,)
+            ).fetchone()
+            if present is None:
+                logger.warning(
+                    "update_mod_status skipped missing mod_id=%s "
+                    "(conflict/status persist must not mint identity)",
+                    mid,
+                )
+                return ModStatus()
             current = self.get_mod_status(mid)
             new_invalid = (
                 bool(invalid) if invalid is not None else current.invalid
@@ -2506,7 +2564,9 @@ class DatabaseManager:
             out[mid] = ModSearchFields(
                 mod_id=mid,
                 steam_name=steam,
-                display_name=user_display or steam or f"Unknown_Mod_{mid}",
+                display_name=user_display or steam or (
+                    f"Unknown_Mod_{mid}" if not is_internal_mod_id(mid) else steam
+                ),
                 user_notes=str(row["user_notes"] or ""),
                 favorite=bool(int(row["favorite"] or 0)),
                 deploy_status=status,
@@ -2573,55 +2633,14 @@ class DatabaseManager:
                 (mid,),
             ).fetchone()
             if existing is None:
-                plat = platform or PLATFORM_STEAM
-                url = (
-                    source_url
-                    if source_url is not None
-                    else (
-                        steam_workshop_url(mid)
-                        if mid > 0 and mid < NON_STEAM_MOD_ID_BASE
-                        else ""
-                    )
+                from services.identity_service import refuse_unauthorized_mod_insert
+
+                logger.warning(
+                    "update_mod_user_metadata refused create for missing mod_id=%s",
+                    mid,
                 )
-                ext = str(mid) if mid > 0 and mid < NON_STEAM_MOD_ID_BASE else ""
-                wid = resolve_workspace_id(
-                    plat, mod_id=mid, source_url=url, external_id=ext
-                )
-                if not wid:
-                    taken = {
-                        str(r["workspace_id"] or "").strip()
-                        for r in self._conn.execute(
-                            "SELECT workspace_id FROM mods "
-                            "WHERE workspace_id IS NOT NULL "
-                            "AND TRIM(workspace_id) != ''"
-                        ).fetchall()
-                    }
-                    taken.discard("")
-                    wid = generate_unique_workspace_id(taken)
-                self._conn.execute(
-                    """
-                    INSERT INTO mods (
-                        mod_id, app_id, title, preview_url, description,
-                        display_name, custom_description, user_notes, favorite,
-                        platform, source_url, external_id, workspace_id,
-                        custom_deploy_path, mod_files, updated_at
-                    )
-                    VALUES (?, 0, '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
-                    """,
-                    (
-                        mid,
-                        display_name,
-                        custom_description,
-                        user_notes,
-                        favorite,
-                        plat,
-                        url,
-                        ext,
-                        wid,
-                        custom_deploy_path or "",
-                        now,
-                    ),
-                )
+                refuse_unauthorized_mod_insert(mid)
+                raise RuntimeError(f"metadata edit refused: no mods row for {mid}")
             else:
                 if touch_source or touch_platform:
                     if touch_source and touch_platform:
@@ -2925,62 +2944,37 @@ class DatabaseManager:
                 err = ""
 
             if existing is None:
-                resolved_app = 0 if app_id is None else int(app_id)
-                is_steam_range = mid > 0 and mid < NON_STEAM_MOD_ID_BASE
+                from services.identity_service import refuse_unauthorized_mod_insert
+
+                refuse_unauthorized_mod_insert(mid)
+                raise RuntimeError(f"deploy status refused: no mods row for {mid}")
+            if app_id is not None:
                 self._conn.execute(
                     """
-                    INSERT INTO mods (
-                        mod_id, app_id, title, preview_url, description,
-                        display_name, custom_description, user_notes, favorite,
-                        deploy_status, deploy_time, deploy_path, deploy_error,
-                        platform, source_url, external_id, workspace_id, mod_files,
-                        updated_at
-                    )
-                    VALUES (?, ?, '', '', '', '', '', '', 0, ?, ?, ?, ?, 'steam', ?, ?, ?, '{}', ?)
+                    UPDATE mods SET
+                        app_id = ?,
+                        deploy_status = ?,
+                        deploy_time = ?,
+                        deploy_path = ?,
+                        deploy_error = ?,
+                        updated_at = ?
+                    WHERE mod_id = ?
                     """,
-                    (
-                        mid,
-                        resolved_app,
-                        status,
-                        when,
-                        path,
-                        err,
-                        steam_workshop_url(mid) if is_steam_range else "",
-                        str(mid) if is_steam_range else "",
-                        str(mid) if is_steam_range else "",
-                        now,
-                    ),
+                    (int(app_id), status, when, path, err, now, mid),
                 )
-                if not is_steam_range:
-                    self._ensure_mod_workspace_id_locked(mid)
             else:
-                if app_id is not None:
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET
-                            app_id = ?,
-                            deploy_status = ?,
-                            deploy_time = ?,
-                            deploy_path = ?,
-                            deploy_error = ?,
-                            updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (int(app_id), status, when, path, err, now, mid),
-                    )
-                else:
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET
-                            deploy_status = ?,
-                            deploy_time = ?,
-                            deploy_path = ?,
-                            deploy_error = ?,
-                            updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (status, when, path, err, now, mid),
-                    )
+                self._conn.execute(
+                    """
+                    UPDATE mods SET
+                        deploy_status = ?,
+                        deploy_time = ?,
+                        deploy_path = ?,
+                        deploy_error = ?,
+                        updated_at = ?
+                    WHERE mod_id = ?
+                    """,
+                    (status, when, path, err, now, mid),
+                )
             self._conn.commit()
             row = self._conn.execute(
                 """
@@ -3577,6 +3571,7 @@ class DatabaseManager:
         new_value: str = "",
         source: str = "",
         reason: str = "",
+        commit: bool = True,
     ) -> None:
         """Persist one identity mutation provenance row."""
         with self._lock:
@@ -3597,7 +3592,8 @@ class DatabaseManager:
                     _utc_now(),
                 ),
             )
-            self._conn.commit()
+            if commit:
+                self._conn.commit()
 
     def delete_mod_record(self, mod_id: int | str) -> bool:
         """
@@ -4098,6 +4094,14 @@ class DatabaseManager:
         """Insert a minimal mods row so FK-less tags can still attach to an ID."""
         now = _utc_now()
         mid = int(mod_id)
+        present = self._conn.execute(
+            "SELECT 1 FROM mods WHERE mod_id = ?", (mid,)
+        ).fetchone()
+        if present is not None:
+            return
+        from services.identity_service import refuse_unauthorized_mod_insert
+
+        refuse_unauthorized_mod_insert(mid)
         is_steam_range = mid > 0 and mid < NON_STEAM_MOD_ID_BASE
         # Provisional external_id: Steam uses workshop id; non-Steam uses a
         # non-numeric stub key so Mod.io refresh never treats it as platform id.
@@ -4283,12 +4287,20 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
             user_display = ""
     except Exception:  # noqa: BLE001
         pass
-    resolved = user_display or steam_name or f"Unknown_Mod_{row['mod_id']}"
-    platform = (
-        normalize_platform(str(row["platform"] or PLATFORM_STEAM))
-        if "platform" in keys
-        else PLATFORM_STEAM
+    resolved = user_display or steam_name or (
+        f"Unknown_Mod_{row['mod_id']}"
+        if not is_internal_mod_id(row["mod_id"])
+        else steam_name or str(row["mod_id"])
     )
+    raw_platform = (
+        str(row["platform"] or "") if "platform" in keys else ""
+    )
+    platform = normalize_platform_if_known(raw_platform)
+    if not platform:
+        if is_internal_mod_id(row["mod_id"]):
+            platform = ""
+        else:
+            platform = PLATFORM_STEAM
     source_url = str(row["source_url"] or "") if "source_url" in keys else ""
     external_id = str(row["external_id"] or "") if "external_id" in keys else ""
     mod_files_json = (

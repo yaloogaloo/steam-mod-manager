@@ -245,11 +245,16 @@ def format_offline_progress_message(
 
 
 def summarize_result(result: SyncResult) -> str:
-    return (
-        f"同步完成：成功 {len(result.success)}，"
-        f"跳过 {len(result.skipped)}，"
-        f"失败 {len(result.failed)}"
-    )
+    parts = [
+        f"成功 {len(result.success)}",
+    ]
+    if result.updated:
+        parts.append(f"更新 {len(result.updated)}")
+    parts.append(f"跳过 {len(result.skipped)}")
+    if result.baselined:
+        parts.append(f"基准 {len(result.baselined)}")
+    parts.append(f"失败 {len(result.failed)}")
+    return "同步完成：" + "，".join(parts)
 
 
 def summarize_offline_result(result: SyncResult) -> str:

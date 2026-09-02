@@ -110,7 +110,10 @@ class ModioImporter(ModImporter):
             folder,
             file_entries=_kwargs.get("file_entries"),
         )
-        info = db.register_external_mod(
+        from services.identity_service import create_mod_identity
+
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_MODIO,
             external_id=ext,
             source_url=url,
@@ -119,6 +122,11 @@ class ModioImporter(ModImporter):
             game_name=ctx.game_name,
             mod_files=bundle,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="mod.io identity create failed", platform=PLATFORM_MODIO
+            )
 
         managed = ""
         if library_root:

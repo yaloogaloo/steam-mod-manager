@@ -83,13 +83,13 @@ def content_status_for_mod(
 
 
 def _iter_deployable_rel_files(source: Path) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     files: list[Path] = []
     root = Path(source)
     if not root.is_dir():
         return files
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in safe_iter_files(root):
         try:
             rel_parts = path.relative_to(root).parts
         except ValueError:
@@ -135,18 +135,15 @@ def _norm(path: str | Path) -> str:
 
 
 def _target_has_payload(target: Path) -> bool:
+    from services.deploy_fs import safe_iter_files
+
     if not target.exists():
         return False
     if target.is_file():
         return True
-    try:
-        for path in target.rglob("*"):
-            if path.is_file():
-                # Ignore empty marker-only trees
-                if path.name in {INFO_DIR_NAME, LEGACY_INFO_DIR_NAME}:
-                    continue
-                return True
-    except OSError:
+    for path in safe_iter_files(target):
+        if path.name in {INFO_DIR_NAME, LEGACY_INFO_DIR_NAME}:
+            continue
         return True
     return False
 
@@ -243,6 +240,10 @@ def resolve_deployment_status(
 ) -> str:
     """
     Compute Phase 8 ``deployment_status`` without mutating disk/DB.
+
+    IMPORTANT:
+    This may scan the managed folder (``content_fingerprint``) and walk other Mod
+    manifests. Do not call from the Qt GUI thread — use a worker (see Detail panel).
     """
     mid = str(mod_id).strip()
     database = db if db is not None else get_db()
@@ -254,12 +255,15 @@ def resolve_deployment_status(
     if db_status == DEPLOY_STATUS_FAILED:
         return DEPLOYMENT_FAILED
 
+    if db_status != DEPLOY_STATUS_DEPLOYED:
+        return DEPLOYMENT_NOT_DEPLOYED
+
     root = Path(library_root) if library_root else None
     source = managed_path
     if source is None and root is not None:
         source = ModFileManager(root).find_by_published_id(mid)
 
-    # Conflict: configured folder_copy target exists but is foreign
+    # Conflict: configured folder_copy target exists but is foreign (deployed only).
     if source is not None and Path(source).is_dir() and info is not None:
         app_id = int(info.app_id or 0)
         if app_id:
@@ -276,9 +280,6 @@ def resolve_deployment_status(
                 )
                 if kind == "foreign":
                     return DEPLOYMENT_CONFLICT
-
-    if db_status != DEPLOY_STATUS_DEPLOYED:
-        return DEPLOYMENT_NOT_DEPLOYED
 
     if source is None or not Path(source).is_dir():
         # Deployed in DB but library gone — still "deployed" from game side;

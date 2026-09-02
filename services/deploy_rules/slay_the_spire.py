@@ -104,17 +104,17 @@ def _iter_source_files(
     allowed_rel_paths: frozenset[str] | None = None,
     jars_only: bool = False,
 ) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     files: list[Path] = []
-    for path in sorted(source.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in sorted(
+        safe_iter_files(source, suffix=".jar" if jars_only else None)
+    ):
         try:
             rel_parts = path.relative_to(source).parts
         except ValueError:
             continue
         if any(part in _IGNORE_DIR_NAMES for part in rel_parts):
-            continue
-        if jars_only and path.suffix.lower() != ".jar":
             continue
         if not is_rel_path_allowed(source, path, allowed_rel_paths):
             continue

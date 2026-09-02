@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse, unquote
@@ -24,6 +25,24 @@ from core.models import ModMetadata
 from core.paths import asset_cache_dir
 
 logger = logging.getLogger(__name__)
+
+# ensure_offline_page / archive operation outcomes (not DB offline_status).
+ARCHIVE_OUTCOME_SUCCESS = "success"
+ARCHIVE_OUTCOME_SKIPPED = "skipped"
+ARCHIVE_OUTCOME_FAILED = "failed"
+ARCHIVE_OUTCOME_RATE_LIMITED = "rate_limited"
+
+
+@dataclass(frozen=True)
+class ArchiveEnsureResult:
+    """Result of one archive / ensure attempt — existence ≠ success."""
+
+    path: Path
+    outcome: str
+    skip_reason: str = ""
+    http_performed: bool = False
+    write_performed: bool = False
+    error: str = ""
 
 WORKSHOP_PAGE_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id={id}"
 DEFAULT_INDEX_NAME = "index.html"
@@ -370,6 +389,91 @@ def is_archive_globally_blocked() -> bool:
     return STEAM_ARCHIVE_LIMITER.is_blocked()
 
 
+def _cookie_key_names(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return sorted(
+        {
+            p.split("=", 1)[0].strip()
+            for p in raw.split(";")
+            if "=" in p and p.split("=", 1)[0].strip()
+        }
+    )
+
+
+def log_steam_http_request(
+    *,
+    url: str,
+    proxy_label: str | None,
+    impersonate: str,
+    headers: dict[str, str],
+    settings_cookie: str | None,
+    session_cookie_count: int,
+    session_has_sessionid: bool,
+) -> None:
+    """Sanitized pre-request diagnostics (no cookie values)."""
+    logger.info(
+        "[STEAM ARCHIVE] HTTP request: url=%s proxy=%s impersonate=%s "
+        "user_agent=%s accept_language=%s referer=%s has_settings_cookie=%s "
+        "settings_cookie_keys=%s session_cookie_count=%s session_has_sessionid=%s",
+        url,
+        proxy_label or "(direct)",
+        impersonate,
+        (headers.get("User-Agent") or "")[:80],
+        headers.get("Accept-Language") or "",
+        headers.get("Referer") or "",
+        bool(settings_cookie),
+        _cookie_key_names(settings_cookie),
+        session_cookie_count,
+        session_has_sessionid,
+    )
+
+
+def log_steam_http_response(
+    *,
+    requested_url: str,
+    response: Any,
+    html_text: str | None = None,
+) -> None:
+    """Sanitized post-response diagnostics (no cookie values)."""
+    headers = getattr(response, "headers", None) or {}
+    final_url = str(getattr(response, "url", "") or "")
+    history = getattr(response, "history", None) or []
+    body_len = len(html_text.encode("utf-8", errors="replace")) if html_text is not None else 0
+    classification = (
+        classify_steam_workshop_html(html_text)
+        if html_text is not None
+        else "unknown"
+    )
+    title = ""
+    if html_text:
+        m = re.search(r"<title[^>]*>([^<]+)", html_text, re.I)
+        if m:
+            title = re.sub(r"\s+", " ", m.group(1)).strip()[:120]
+
+    logger.info(
+        "[STEAM ARCHIVE] HTTP response: status=%s requested_url=%s final_url=%s "
+        "redirect_count=%s content_type=%s content_length=%s body_bytes=%s "
+        "classification=%s title=%s",
+        getattr(response, "status_code", None),
+        requested_url,
+        final_url,
+        len(history),
+        headers.get("Content-Type") or headers.get("content-type") or "",
+        headers.get("Content-Length") or headers.get("content-length") or "",
+        body_len,
+        classification,
+        title,
+    )
+    for i, hop in enumerate(history):
+        logger.info(
+            "[STEAM ARCHIVE] HTTP redirect[%s]: status=%s url=%s",
+            i,
+            getattr(hop, "status_code", None),
+            getattr(hop, "url", ""),
+        )
+
+
 def _get_steam_cookie() -> str | None:
     try:
         from PySide6.QtCore import QSettings
@@ -447,14 +551,8 @@ def read_archive_status(info_dir: str | Path) -> dict[str, Any] | None:
 
 
 def _has_successful_offline_page(index_path: Path) -> bool:
-    try:
-        return (
-            index_path.is_file()
-            and index_path.stat().st_size > 0
-            and not is_stub_offline_page(index_path)
-        )
-    except OSError:
-        return False
+    """Delegate to Workshop validity (stubs / Steam error pages excluded)."""
+    return is_valid_steam_workshop_page(index_path)
 
 
 def write_archive_status(
@@ -504,8 +602,11 @@ def _parse_workshop_html(html_text: str) -> BeautifulSoup:
 # Markers written by ``write_fallback_page`` — used to reject stubs as "valid".
 _STUB_MARKERS: tuple[str, ...] = (
     "Offline (stub)",
+    "Offline (FAILED stub)",
+    "data-archive-outcome=\"failed\"",
     "未能下载完整的 Steam 创意工坊原网页",
     "未能下载完整的 Steam",
+    "离线归档失败（不是成功页面）",
 )
 
 
@@ -540,6 +641,119 @@ def is_stub_offline_page(path: str | Path) -> bool:
     ):
         return True
     if "archive failed" in lowered:
+        return True
+    return False
+
+
+# Error / login HTML that must not count as a successful Workshop mirror.
+_ERROR_TITLE_RE = re.compile(
+    r"<title[^>]*>\s*([^<]*?)\s*</title>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ERROR_TITLE_HINTS: tuple[str, ...] = (
+    "error",
+    "错误",
+    "出错",
+    "something went wrong",
+    "page not found",
+    "找不到",
+)
+_LOGIN_TITLE_HINTS: tuple[str, ...] = (
+    "sign in",
+    "log in",
+    "登录",
+    "登入",
+)
+_LOGIN_BODY_HINTS: tuple[str, ...] = (
+    "login.steampowered.com",
+    "steamcommunity.com/login",
+)
+
+
+def classify_steam_workshop_html(html_text: str) -> str:
+    """
+    Classify Steam Workshop HTML body.
+
+    Returns ``ok``, ``error_page``, ``login_page``, or ``invalid``.
+    """
+    text = html_text or ""
+    if not text.strip():
+        return "invalid"
+
+    title = ""
+    m = _ERROR_TITLE_RE.search(text)
+    if m:
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+    title_l = title.lower()
+
+    for hint in _LOGIN_TITLE_HINTS:
+        if hint in title_l:
+            return "login_page"
+
+    for hint in _ERROR_TITLE_HINTS:
+        if hint in title_l:
+            return "error_page"
+    if "steam community :: error" in title_l or "创意工坊 :: 错误" in title:
+        return "error_page"
+    if "rate limit" in title_l or "too many requests" in title_l:
+        return "error_page"
+
+    lowered = text.lower()
+    login_hits = sum(1 for h in _LOGIN_BODY_HINTS if h in lowered)
+    if login_hits >= 1 and (
+        "password" in lowered or "sign in" in lowered or "登录" in text
+    ):
+        compact = lowered.replace(" ", "")
+        if "sharedfile_content" not in lowered and "workshopitem" not in compact:
+            return "login_page"
+
+    return "ok"
+
+
+def steam_html_rejection_message(kind: str) -> str:
+    """User-facing reason when Workshop HTML cannot be archived."""
+    if kind == "login_page":
+        return (
+            "Steam 返回登录页面，无法获取可用于离线保存的 Workshop 页面。"
+            "请在浏览器确认该 Mod 是否需登录后才能查看。"
+        )
+    if kind == "error_page":
+        return (
+            "Steam 返回错误页面，该 Workshop 项目可能无法匿名访问、"
+            "已被移除或当前区域不可见。"
+        )
+    if kind == "invalid":
+        return "Steam 返回空或无效的 Workshop 页面内容。"
+    return f"Steam Workshop HTML 无效（{kind}）。"
+
+
+def is_valid_steam_workshop_page(path: str | Path) -> bool:
+    """
+    True when *path* is a usable Workshop offline mirror (not stub / error / login).
+
+    Cache-hit skip must use this — file exists + size > 0 is not enough.
+    """
+    p = Path(path)
+    try:
+        if not p.is_file() or p.stat().st_size <= 0:
+            return False
+        if is_stub_offline_page(p):
+            return False
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    kind = classify_steam_workshop_html(text)
+    if kind != "ok":
+        return False
+
+    # Successful archives inject our banner; require banner or clear workshop markers.
+    if "smm-offline-banner" in text:
+        return True
+    lowered = text.lower()
+    if "sharedfiles/filedetails" in lowered or "workshopitemdetails" in lowered:
+        return True
+    if 'id="highlight_strip"' in lowered or "workshopItemTitle" in text:
         return True
     return False
 
@@ -636,9 +850,11 @@ def ensure_offline_page_nonblocking_probe(info_dir: str | Path) -> bool:
     try:
         if not index.is_file() or index.stat().st_size <= 0:
             return False
-        if not is_stub_offline_page(index):
+        if is_valid_steam_workshop_page(index):
             return True
-        return is_archive_cooldown_active(info_dir)
+        if is_stub_offline_page(index):
+            return is_archive_cooldown_active(info_dir)
+        return False
     except OSError:
         return False
 
@@ -799,6 +1015,26 @@ class OfflinePageArchiver:
 
         mod_id = _tls_mod_id() or self._active_mod_id or "-"
         url_id = _workshop_id_from_url(url) or "-"
+        proxy_label = None
+        if self._proxies:
+            proxy_label = (
+                self._proxies.get("https")
+                or self._proxies.get("http")
+                or "<set>"
+            )
+        log_steam_http_request(
+            url=url,
+            proxy_label=proxy_label,
+            impersonate=IMPERSONATE,
+            headers=kwargs.get("headers") or {},
+            settings_cookie=self._steam_cookie,
+            session_cookie_count=_session_cookie_count(self._session),
+            session_has_sessionid=_session_has_sessionid(self._session)
+            or bool(
+                self._steam_cookie
+                and "sessionid" in self._steam_cookie.lower()
+            ),
+        )
 
         with STEAM_ARCHIVE_LIMITER.request_slot() as slot:
             t0 = time.monotonic()
@@ -840,6 +1076,7 @@ class OfflinePageArchiver:
                 setattr(err, "response", response)
                 raise err
             STEAM_ARCHIVE_LIMITER.register_html_success()
+            log_steam_http_response(requested_url=url, response=response)
             return response
 
     def _http_get_asset(
@@ -1067,12 +1304,13 @@ class OfflinePageArchiver:
         overwrite: bool = True,
         metadata: ModMetadata | None = None,
         on_status: Callable[[str], None] | None = None,
-    ) -> Path:
+    ) -> ArchiveEnsureResult:
         """
         Mirror the real Workshop page under *info_dir*.
 
-        Returns path to ``index.html``. On total HTML fetch failure, writes a
-        minimal stub (not a JSON-templated facsimile of the Workshop UI).
+        Returns :class:`ArchiveEnsureResult`. On total HTML fetch failure, writes a
+        minimal stub (not a JSON-templated facsimile of the Workshop UI) unless a
+        prior valid page is kept — in which case outcome is still ``failed``.
 
         Steam HTML GETs are single-flight via ``SteamArchiveLimiter``
         (not ``net_workers``). *on_status*: ``start`` / ``ok`` / ``fail`` /
@@ -1081,33 +1319,37 @@ class OfflinePageArchiver:
         _ARCHIVE_SEMAPHORE.acquire()
         prev_mod = _tls_mod_id()
         try:
+            from services.identity_service import lifecycle_scope
+
             mod_id = str(published_file_id)
             self._active_mod_id = mod_id
             _set_tls_mod_id(mod_id)
             self._request_count = 0
-            if on_status is not None:
-                try:
-                    on_status("start")
-                except Exception:  # noqa: BLE001
-                    pass
-            path = self._archive_body(
-                published_file_id,
-                info_dir,
-                overwrite=overwrite,
-                metadata=metadata,
-            )
-            if on_status is not None:
-                try:
-                    status = read_archive_status(info_dir)
-                    if status and status.get("archive_failed_reason") == _RATE_LIMITED_REASON:
-                        on_status("rate_limited")
-                    elif _has_successful_offline_page(Path(path)):
-                        on_status("ok")
-                    else:
-                        on_status("fail")
-                except Exception:  # noqa: BLE001
-                    pass
-            return path
+            with lifecycle_scope("archive"):
+                if on_status is not None:
+                    try:
+                        on_status("start")
+                    except Exception:  # noqa: BLE001
+                        pass
+                result = self._coerce_archive_result(
+                    self._archive_body(
+                        published_file_id,
+                        info_dir,
+                        overwrite=overwrite,
+                        metadata=metadata,
+                    )
+                )
+                if on_status is not None:
+                    try:
+                        if result.outcome == ARCHIVE_OUTCOME_RATE_LIMITED:
+                            on_status("rate_limited")
+                        elif result.outcome == ARCHIVE_OUTCOME_SUCCESS:
+                            on_status("ok")
+                        else:
+                            on_status("fail")
+                    except Exception:  # noqa: BLE001
+                        pass
+                return result
         finally:
             _set_tls_mod_id(prev_mod)
             _ARCHIVE_SEMAPHORE.release()
@@ -1119,7 +1361,7 @@ class OfflinePageArchiver:
         *,
         overwrite: bool = True,
         metadata: ModMetadata | None = None,
-    ) -> Path:
+    ) -> ArchiveEnsureResult:
         info_dir = Path(info_dir)
         info_dir.mkdir(parents=True, exist_ok=True)
         assets_dir = info_dir / DEFAULT_ASSETS_DIR
@@ -1127,7 +1369,11 @@ class OfflinePageArchiver:
 
         index_path = info_dir / DEFAULT_INDEX_NAME
         if index_path.exists() and not overwrite:
-            return index_path
+            return ArchiveEnsureResult(
+                path=index_path,
+                outcome=ARCHIVE_OUTCOME_SKIPPED,
+                skip_reason="overwrite_false",
+            )
 
         if is_archive_globally_blocked():
             return self._handle_rate_limited(
@@ -1152,9 +1398,51 @@ class OfflinePageArchiver:
             )
             page_url = WORKSHOP_PAGE_URL.format(id=mod_id)
 
+        from services.archive_observability import (
+            classify_archive_error,
+            connect_probe,
+            curl_code_from_error,
+            log_archive_failure,
+            log_archive_start,
+            log_archive_stub,
+            log_archive_success,
+        )
+
+        proxy_label = ""
+        if self._proxies:
+            proxy_label = str(
+                self._proxies.get("https") or self._proxies.get("http") or ""
+            )
+        log_archive_start(
+            mod_id=mod_id,
+            url=page_url,
+            source="steam_workshop",
+            proxy=proxy_label,
+            timeout=getattr(self, "timeout", DEFAULT_TIMEOUT),
+            impersonate=IMPERSONATE,
+        )
+        connect_probe(page_url, proxy=proxy_label)
+
+        http_performed = False
+        write_performed = False
+        archive_t0 = time.monotonic()
         try:
             t_html0 = time.monotonic()
+            logger.info(
+                "[STEAM ARCHIVE] HTTP request started mod_id=%s url=%s",
+                mod_id,
+                page_url,
+            )
             html_text = self._fetch_main_html(page_url)
+            http_performed = True
+            logger.info(
+                "[STEAM ARCHIVE] HTTP response received mod_id=%s bytes=%s",
+                mod_id,
+                len(html_text or ""),
+            )
+            kind = classify_steam_workshop_html(html_text)
+            if kind != "ok":
+                raise RuntimeError(steam_html_rejection_message(kind))
             html_elapsed = time.monotonic() - t_html0
             soup = _parse_workshop_html(html_text)
             self._strip_noise(soup)
@@ -1167,7 +1455,18 @@ class OfflinePageArchiver:
             )
             assets_elapsed = time.monotonic() - t_assets0
             self._inject_offline_banner(soup, published_file_id, page_url)
+            logger.info(
+                "[STEAM ARCHIVE] write started mod_id=%s path=%s",
+                mod_id,
+                index_path,
+            )
             self._write_atomic(index_path, str(soup))
+            write_performed = True
+            logger.info(
+                "[STEAM ARCHIVE] write completed mod_id=%s path=%s",
+                mod_id,
+                index_path,
+            )
             # Clear prior rate-limit marker on success.
             status_path = info_dir / _ARCHIVE_STATUS_NAME
             try:
@@ -1178,7 +1477,7 @@ class OfflinePageArchiver:
             logger.info(
                 "Archived live Workshop page -> %s "
                 "(html=%.2fs assets=%.2fs unique_assets=%s "
-                "top_ok=%s top_fail=%s workers=%s cache=%s)",
+                "top_ok=%s top_fail=%s workers=%s cache=%s) result=SUCCESS",
                 index_path,
                 html_elapsed,
                 assets_elapsed,
@@ -1188,7 +1487,17 @@ class OfflinePageArchiver:
                 GLOBAL_ASSET_WORKERS,
                 get_asset_cache_stats(),
             )
-            return index_path
+            log_archive_success(
+                status=200,
+                bytes_count=index_path.stat().st_size if index_path.is_file() else 0,
+                elapsed_ms=(time.monotonic() - archive_t0) * 1000.0,
+            )
+            return ArchiveEnsureResult(
+                path=index_path,
+                outcome=ARCHIVE_OUTCOME_SUCCESS,
+                http_performed=True,
+                write_performed=True,
+            )
         except Exception as exc:  # noqa: BLE001
             write_last_archive_attempt(info_dir, failed=True)
             # Global fuse (consecutive HTML 429) → rate_limited status + keep page.
@@ -1202,22 +1511,73 @@ class OfflinePageArchiver:
                     published_file_id,
                     metadata=metadata,
                     error=str(exc),
+                    http_performed=http_performed,
                 )
             logger.warning(
                 "Live Workshop archive failed for %s (%s); writing minimal stub",
                 published_file_id,
                 exc,
             )
+            error_type = classify_archive_error(exc, proxy=proxy_label)
+            host = urlparse(page_url).hostname or ""
+            elapsed_ms = (time.monotonic() - archive_t0) * 1000.0
+            log_archive_failure(
+                error_type=error_type,
+                curl_code=curl_code_from_error(exc),
+                http_status=str(getattr(exc, "response", "") or ""),
+                elapsed_ms=elapsed_ms,
+                proxy=proxy_label,
+                host=host,
+                retry_count=int(getattr(self, "_request_count", 0) or 0),
+                error=str(exc),
+            )
+            write_archive_status(
+                info_dir,
+                reason=error_type,
+                published_file_id=published_file_id,
+                detail=str(exc),
+            )
             if _has_successful_offline_page(index_path):
                 logger.warning(
-                    "Keeping existing offline page for %s after transient failure",
+                    "Keeping existing offline page for %s after transient failure "
+                    "(outcome=FAILED, old file retained)",
                     published_file_id,
                 )
-                return index_path
-            return self.write_fallback_page(
-                info_dir,
-                published_file_id,
-                metadata=metadata,
+                return ArchiveEnsureResult(
+                    path=index_path,
+                    outcome=ARCHIVE_OUTCOME_FAILED,
+                    http_performed=http_performed,
+                    write_performed=False,
+                    error=str(exc),
+                )
+            try:
+                stub_path = self.write_fallback_page(
+                    info_dir,
+                    published_file_id,
+                    metadata=metadata,
+                    error=str(exc),
+                    error_type=error_type,
+                )
+            except Exception as stub_exc:  # noqa: BLE001
+                logger.warning(
+                    "Fallback stub write also failed for %s: %s",
+                    published_file_id,
+                    stub_exc,
+                )
+                return ArchiveEnsureResult(
+                    path=index_path,
+                    outcome=ARCHIVE_OUTCOME_FAILED,
+                    http_performed=http_performed,
+                    write_performed=False,
+                    error=str(exc),
+                )
+            stub_bytes = stub_path.stat().st_size if stub_path.is_file() else 0
+            log_archive_stub(reason=error_type, stub_bytes=stub_bytes)
+            return ArchiveEnsureResult(
+                path=stub_path,
+                outcome=ARCHIVE_OUTCOME_FAILED,
+                http_performed=http_performed,
+                write_performed=True,
                 error=str(exc),
             )
 
@@ -1229,7 +1589,8 @@ class OfflinePageArchiver:
         *,
         metadata: ModMetadata | None,
         error: str,
-    ) -> Path:
+        http_performed: bool = False,
+    ) -> ArchiveEnsureResult:
         """
         On HTTP 429: record ``archive_failed_reason=rate_limited``.
 
@@ -1247,18 +1608,31 @@ class OfflinePageArchiver:
                 published_file_id,
                 index_path,
             )
-            return index_path
+            return ArchiveEnsureResult(
+                path=index_path,
+                outcome=ARCHIVE_OUTCOME_RATE_LIMITED,
+                http_performed=http_performed,
+                write_performed=False,
+                error=error or RATE_LIMIT_USER_MESSAGE,
+            )
 
         logger.warning(
             "Rate limited for %s; writing lightweight status (no success page to keep)",
             published_file_id,
         )
         # No usable page yet — write a minimal stub so callers still get index.html.
-        return self.write_fallback_page(
+        stub_path = self.write_fallback_page(
             info_dir,
             published_file_id,
             metadata=metadata,
             error=f"{_RATE_LIMITED_REASON}: {error}",
+        )
+        return ArchiveEnsureResult(
+            path=stub_path,
+            outcome=ARCHIVE_OUTCOME_RATE_LIMITED,
+            http_performed=http_performed,
+            write_performed=True,
+            error=error or RATE_LIMIT_USER_MESSAGE,
         )
 
     def ensure_offline_page(
@@ -1268,26 +1642,45 @@ class OfflinePageArchiver:
         *,
         metadata: ModMetadata | None = None,
         on_status: Callable[[str], None] | None = None,
-    ) -> Path:
+        force_refresh: bool = False,
+    ) -> ArchiveEnsureResult:
         """
-        Guarantee ``index.html`` exists.
+        Guarantee ``index.html`` exists (or refresh when *force_refresh*).
 
-        Successful cached pages are returned without a Steam request.
-        Stub pages inside the retry cooldown are returned as-is (no network).
-        Global 429 block returns without issuing another GET.
+        With ``force_refresh=False``, valid cached pages return ``skipped`` /
+        ``cache_hit`` without a Steam request. Stub pages inside the retry
+        cooldown are skipped similarly.
+
+        With ``force_refresh=True``, cache / cooldown skips are forbidden —
+        archive HTTP + write must run (unless globally rate-limited).
         """
         info_dir = Path(info_dir)
         info_dir.mkdir(parents=True, exist_ok=True)
         index_path = info_dir / DEFAULT_INDEX_NAME
-        if index_path.is_file():
+        force = bool(force_refresh)
+        logger.info(
+            "[STEAM ARCHIVE] ensure_offline_page force_refresh=%s mod_id=%s",
+            force,
+            published_file_id,
+        )
+        if index_path.is_file() and not force:
             try:
-                if index_path.stat().st_size > 0 and not is_stub_offline_page(index_path):
+                if is_valid_steam_workshop_page(index_path):
                     if on_status is not None:
                         try:
-                            on_status("ok")
+                            on_status("skipped")
                         except Exception:  # noqa: BLE001
                             pass
-                    return index_path
+                    logger.info(
+                        "[STEAM ARCHIVE] cache hit skip mod_id=%s path=%s",
+                        published_file_id,
+                        index_path,
+                    )
+                    return ArchiveEnsureResult(
+                        path=index_path,
+                        outcome=ARCHIVE_OUTCOME_SKIPPED,
+                        skip_reason="cache_hit",
+                    )
                 if (
                     index_path.stat().st_size > 0
                     and is_stub_offline_page(index_path)
@@ -1297,7 +1690,16 @@ class OfflinePageArchiver:
                         "Stub offline page for %s still in cooldown; skipping re-archive",
                         published_file_id,
                     )
-                    return index_path
+                    if on_status is not None:
+                        try:
+                            on_status("skipped")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return ArchiveEnsureResult(
+                        path=index_path,
+                        outcome=ARCHIVE_OUTCOME_SKIPPED,
+                        skip_reason="cooldown",
+                    )
             except OSError:
                 pass
         if is_archive_globally_blocked():
@@ -1313,12 +1715,43 @@ class OfflinePageArchiver:
                 metadata=metadata,
                 error=RATE_LIMIT_USER_MESSAGE,
             )
-        return self.archive(
-            published_file_id,
-            info_dir,
-            overwrite=True,
-            metadata=metadata,
-            on_status=on_status,
+        return self._coerce_archive_result(
+            self.archive(
+                published_file_id,
+                info_dir,
+                overwrite=True,
+                metadata=metadata,
+                on_status=on_status,
+            )
+        )
+
+    @staticmethod
+    def _coerce_archive_result(value: Any) -> ArchiveEnsureResult:
+        """Accept ArchiveEnsureResult or legacy Path from tests/monkeypatches."""
+        if isinstance(value, ArchiveEnsureResult):
+            return value
+        path = Path(value)
+        if is_valid_steam_workshop_page(path):
+            return ArchiveEnsureResult(
+                path=path,
+                outcome=ARCHIVE_OUTCOME_SUCCESS,
+                http_performed=True,
+                write_performed=True,
+            )
+        if is_stub_offline_page(path):
+            return ArchiveEnsureResult(
+                path=path,
+                outcome=ARCHIVE_OUTCOME_FAILED,
+                http_performed=True,
+                write_performed=True,
+                error="stub offline page",
+            )
+        return ArchiveEnsureResult(
+            path=path,
+            outcome=ARCHIVE_OUTCOME_FAILED,
+            http_performed=True,
+            write_performed=True,
+            error="invalid offline page",
         )
 
     def write_fallback_page(
@@ -1328,6 +1761,7 @@ class OfflinePageArchiver:
         *,
         metadata: ModMetadata | None = None,
         error: str | None = None,
+        error_type: str = "",
     ) -> Path:
         """Minimal stub when the real Workshop page cannot be downloaded."""
         info_dir = Path(info_dir)
@@ -1341,13 +1775,15 @@ class OfflinePageArchiver:
         title_e = html.escape(title)
         mid = html.escape(str(published_file_id))
         url_e = html.escape(workshop)
+        kind = html.escape(error_type or "ARCHIVE_FAILURE")
 
         stub = f"""<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-archive-outcome="failed" data-archive-error-type="{kind}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title_e} — Offline (stub)</title>
+<meta name="steam-mod-manager-archive" content="failed">
+<title>{title_e} — Offline (FAILED stub)</title>
 <style>
   body {{
     margin: 0; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
@@ -1361,13 +1797,16 @@ class OfflinePageArchiver:
   p {{ margin: 8px 0; color: #8f98a0; font-size: 14px; }}
   a {{ color: #66c0f4; }}
   code {{ color: #acb2b8; }}
+  .fail {{ color: #e35e4f; }}
 </style>
 </head>
 <body>
   <div class="box">
-    <h1>{title_e}</h1>
-    <p>未能下载完整的 Steam 创意工坊原网页（网络超时或被拦截）。</p>
+    <h1 class="fail">离线归档失败（不是成功页面）</h1>
+    <p>{title_e}</p>
+    <p>未能下载完整的 Steam 创意工坊原网页。</p>
     <p>Mod ID: <code>{mid}</code></p>
+    <p>错误分类: <code>{kind}</code></p>
     <p>原因: <code>{err}</code></p>
     <p>联网后可重新同步，或在浏览器打开：
        <a href="{url_e}">{url_e}</a></p>
@@ -1377,7 +1816,7 @@ class OfflinePageArchiver:
 """
         index_path = info_dir / DEFAULT_INDEX_NAME
         self._write_atomic(index_path, stub)
-        logger.info("Wrote minimal offline stub -> %s", index_path)
+        logger.info("Wrote diagnostic offline stub -> %s", index_path)
         return index_path
 
     # ------------------------------------------------------------------
@@ -1399,6 +1838,11 @@ class OfflinePageArchiver:
                 )
                 response.encoding = encoding
                 text = response.text or ""
+                log_steam_http_response(
+                    requested_url=page_url,
+                    response=response,
+                    html_text=text,
+                )
                 if len(text) < 200:
                     raise RuntimeError("Workshop HTML response too short")
                 return text
@@ -1883,11 +2327,16 @@ def backfill_offline_pages(target_root: str | Path) -> int:
                 if meta and meta.published_file_id
                 else folder.name
             )
-            path = archiver.archive(pub_id, info, overwrite=True, metadata=meta)
+            result = archiver.archive(pub_id, info, overwrite=True, metadata=meta)
+            path = result.path if isinstance(result, ArchiveEnsureResult) else Path(result)
             if meta:
                 meta.offline_page_path = str(path)
                 manager.save_metadata(meta, folder)
-            created += 1
+            if isinstance(result, ArchiveEnsureResult):
+                if result.outcome == ARCHIVE_OUTCOME_SUCCESS:
+                    created += 1
+            else:
+                created += 1
     return created
 
 

@@ -100,21 +100,23 @@ class SteamImporter(ModImporter):
             )
 
         name = (title or "").strip() or f"Unknown_Mod_{mid}"
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=name,
-                app_id=int(resolved_app_id or 0),
-            )
-        )
-        info = db.update_mod_platform_info(
-            mid,
+        from services.identity_service import create_mod_identity
+
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_STEAM,
-            source_url=url,
+            workshop_id=mid,
             external_id=mid,
+            source_url=url,
             title=name,
             app_id=int(resolved_app_id or 0),
+            game_name=resolved_game,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="Steam identity create failed", platform=self.platform
+            )
         # Single Workshop Content semantics: empty bundle → deploy whole Mod.
         # Optional file_entries (tests / advanced) are annotated as steam_content.
         raw_entries = _kwargs.get("file_entries")

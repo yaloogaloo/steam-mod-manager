@@ -68,8 +68,9 @@ class GithubOfflineProvider(OfflineProvider):
         managed_path: str | Path | None = None,
         library_root: str | Path | None = None,
         metadata: Any | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
-        del metadata
+        del metadata, force_refresh
         mid = str(mod_id).strip()
         root = Path(library_root) if library_root else default_mod_library()
         path = Path(managed_path) if managed_path else find_managed_mod_path(root, mid)

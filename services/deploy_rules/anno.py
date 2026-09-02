@@ -72,14 +72,14 @@ def _is_blueprint_category(ctx: DeployContext) -> bool:
 
 def _find_stamps_dir(root: Path) -> Path | None:
     """Locate a ``stamps`` directory under *root* (skip ``.info`` trees)."""
+    from services.deploy_fs import safe_iter_dirs
+
     if not root.is_dir():
         return None
     direct = root / STAMPS_DIR_NAME
     if direct.is_dir():
         return direct
-    for path in root.rglob(STAMPS_DIR_NAME):
-        if not path.is_dir():
-            continue
+    for path in safe_iter_dirs(root, name=STAMPS_DIR_NAME):
         try:
             parts = path.relative_to(root).parts
         except ValueError:
@@ -91,9 +91,35 @@ def _find_stamps_dir(root: Path) -> Path | None:
 
 
 def _iter_files_under(directory: Path) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     if not directory.is_dir():
         return []
-    return sorted(p for p in directory.rglob("*") if p.is_file())
+    return sorted(safe_iter_files(directory))
+
+
+def _manifest_stamp_source(src: Path, source_label: str) -> str:
+    """
+    Manifest ``source`` for stamps entries.
+
+    Archive extracts land in import_cache staging (outside the mod workspace).
+    Attribute those files to the archive / library label so security checks and
+    ownership stay workspace-bound — same pattern as Anno ``type=archive``.
+    """
+    label = str(source_label or "").strip()
+    if not label:
+        return str(src.resolve())
+    try:
+        label_path = Path(label).expanduser().resolve()
+    except OSError:
+        return label
+    if label_path.is_file():
+        return str(label_path)
+    try:
+        src.resolve().relative_to(label_path)
+        return str(src.resolve())
+    except (ValueError, OSError):
+        return str(label_path)
 
 
 def _copy_stamps_tree(
@@ -112,7 +138,7 @@ def _copy_stamps_tree(
         shutil.copy2(src, dst)
         entries.append(
             ManifestFileEntry(
-                source=source_label,
+                source=_manifest_stamp_source(src, source_label),
                 target=str(dst),
                 type=ENTRY_TYPE_STAMPS,
             )
@@ -128,7 +154,7 @@ def _plan_stamps_entries(
 ) -> list[ManifestFileEntry]:
     return [
         ManifestFileEntry(
-            source=source_label,
+            source=_manifest_stamp_source(src, source_label),
             target=str((stamps_dst / src.relative_to(stamps_src)).resolve()),
             type=ENTRY_TYPE_STAMPS,
         )
@@ -227,12 +253,15 @@ def _plan_stamps_from_directory(
 
 
 def _extract_archives_to_stage(archives: list[Path]) -> Path:
-    from services.importers.archive import extract_archive, import_cache_root
+    from services.archive_extractor import ArchiveExtractor
+    from services.importers.archive import import_cache_root
 
     stage = import_cache_root() / f"anno_stamps_{uuid.uuid4().hex}"
     stage.mkdir(parents=True, exist_ok=False)
     for archive in archives:
-        extract_archive(archive, dest_dir=stage)
+        result = ArchiveExtractor.extract(archive, stage)
+        if not result.success:
+            raise RuntimeError(result.error or "压缩包解压失败")
     return stage
 
 
@@ -297,9 +326,11 @@ def _looks_like_stamps_mod(ctx: DeployContext, archives: list[Path]) -> bool:
 
 
 def _snapshot_files(root: Path) -> set[Path]:
+    from services.deploy_fs import safe_iter_files
+
     if not root.is_dir():
         return set()
-    return {p.resolve() for p in root.rglob("*") if p.is_file()}
+    return {p.resolve() for p in safe_iter_files(root)}
 
 
 def _manifest_entries_for_paths(
@@ -308,6 +339,13 @@ def _manifest_entries_for_paths(
     *,
     source: str,
 ) -> list[ManifestFileEntry]:
+    """
+    Record files created by archive extract into ``mods/``.
+
+    IMPORTANT:
+    ``source`` is the archive path for manifest security; ``type=archive`` tells
+    post-deploy verification not to compare archive size with extracted targets.
+    """
     root = mods_root.resolve()
     entries: list[ManifestFileEntry] = []
     for path in deployed:
@@ -319,6 +357,7 @@ def _manifest_entries_for_paths(
             ManifestFileEntry(
                 source=source,
                 target=str(path.resolve()),
+                type="archive",
             )
         )
     return entries
@@ -332,16 +371,25 @@ def _plan_anno_archive_deploy(
     """Dry-run: extract archives to a temp dir (preserve zip roots) → map under mods/."""
     from services.importers.archive import (
         cleanup_import_cache,
-        extract_archive,
         import_cache_root,
     )
 
     stage = import_cache_root() / f"anno_plan_{uuid.uuid4().hex}"
     stage.mkdir(parents=True, exist_ok=False)
     try:
+        from services.archive_extractor import ArchiveExtractor
+
         for archive in archives:
-            extract_archive(archive, dest_dir=stage)
-        files = sorted(p for p in stage.rglob("*") if p.is_file())
+            result = ArchiveExtractor.extract(archive, stage)
+            if not result.success:
+                return StrategyResult(
+                    success=False,
+                    error=result.error or "压缩包解压失败",
+                    deploy_type=_ANNO_DEPLOY_TYPE,
+                )
+        from services.deploy_fs import safe_iter_files
+
+        files = sorted(safe_iter_files(stage))
         if not files:
             return StrategyResult(
                 success=False,
@@ -355,6 +403,7 @@ def _plan_anno_archive_deploy(
                 ManifestFileEntry(
                     source=str(archives[0]),
                     target=str((mods_root / rel).resolve()),
+                    type="archive",
                 )
             )
         return StrategyResult(
@@ -385,7 +434,7 @@ def _deploy_anno_archives_to_mods_root(
     """
     Extract archives directly into ``mods/`` — no managed-folder wrapper, no root strip.
     """
-    from services.importers.archive import extract_archive
+    from services.archive_extractor import ArchiveExtractor
 
     target_dir = mods_root.resolve()
     try:
@@ -404,7 +453,13 @@ def _deploy_anno_archives_to_mods_root(
     source_label = str(archives[0]) if len(archives) == 1 else str(ctx.library_folder())
     try:
         for archive in archives:
-            extract_archive(archive, dest_dir=target_dir)
+            result = ArchiveExtractor.extract(archive, target_dir)
+            if not result.success:
+                return StrategyResult(
+                    success=False,
+                    error=result.error or "解压失败",
+                    deploy_type=_ANNO_DEPLOY_TYPE,
+                )
     except OSError as exc:
         err = str(exc).lower()
         if "permission" in err or "denied" in err:

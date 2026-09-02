@@ -28,6 +28,11 @@ __all__ = [
     "OFFLINE_STATUS_FAILED",
     "OFFLINE_STATUS_GENERATED",
     "OFFLINE_STATUS_NONE",
+    "OFFLINE_OUTCOME_SUCCESS",
+    "OFFLINE_OUTCOME_SKIPPED",
+    "OFFLINE_OUTCOME_FAILED",
+    "OFFLINE_OUTCOME_RATE_LIMITED",
+    "OFFLINE_OUTCOME_NOT_RUN",
     "PROVIDER_GITHUB_GENERATOR",
     "PROVIDER_GITHUB_SNAPSHOT",
     "PROVIDER_MODIO_ARCHIVE",
@@ -41,6 +46,13 @@ __all__ = [
     "normalize_offline_status",
 ]
 
+# One-shot operation outcome (distinct from DB ``offline_status``).
+OFFLINE_OUTCOME_SUCCESS = "success"
+OFFLINE_OUTCOME_SKIPPED = "skipped"
+OFFLINE_OUTCOME_FAILED = "failed"
+OFFLINE_OUTCOME_RATE_LIMITED = "rate_limited"
+OFFLINE_OUTCOME_NOT_RUN = "not_run"
+
 
 @dataclass(frozen=True)
 class OfflineUpdateResult:
@@ -48,9 +60,14 @@ class OfflineUpdateResult:
 
     mod_id: str
     index_path: Path
-    status: str
+    status: str  # DB offline_status (archived/failed/…)
     provider: str
     error: str = ""
+    outcome: str = OFFLINE_OUTCOME_SUCCESS
+    skip_reason: str = ""
+    force_refresh: bool = False
+    http_performed: bool = False
+    write_performed: bool = False
 
 
 class OfflineProvider(ABC):
@@ -68,6 +85,7 @@ class OfflineProvider(ABC):
         managed_path: str | Path | None = None,
         library_root: str | Path | None = None,
         metadata: Any | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
         """Create or refresh offline ``index.html`` for *mod_id*."""
 

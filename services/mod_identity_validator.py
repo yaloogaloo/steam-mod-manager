@@ -137,12 +137,12 @@ def validate_db_row_identity(
             )
         )
 
-    if ws and mid and ws == mid and is_internal_mod_id(mid) and plat != PLATFORM_STEAM:
+    if ws and mid and ws == mid and is_internal_mod_id(mid):
         findings.append(
             IdentityFinding(
                 code=IdentityIssueCode.WORKSPACE_ID_POLLUTION,
                 severity=IdentitySeverity.CORRUPTED,
-                message="workspace_id equals internal mod_id on non-Steam mod",
+                message="workspace_id equals internal mod_id",
                 mod_id=mid,
                 platform=plat,
                 external_id=ext,
@@ -281,7 +281,18 @@ def validate_metadata_identity(
                     )
                 )
 
-    if ext and is_modio_external_id_pollution(ext, mod_id=mid):
+    if pub and is_internal_mod_id(pub) and plat == PLATFORM_STEAM:
+        findings.append(
+            IdentityFinding(
+                code=IdentityIssueCode.INTERNAL_ID_AS_PUBLISHED_FILE_ID_POLLUTION,
+                severity=IdentitySeverity.CORRUPTED,
+                message="Steam metadata published_file_id is an internal id",
+                mod_id=mid,
+                platform=plat,
+                expected="steam workshop id",
+                actual=pub,
+            )
+        )
         findings.append(
             IdentityFinding(
                 code=IdentityIssueCode.MODIO_ID_POLLUTION,

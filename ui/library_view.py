@@ -304,6 +304,10 @@ class ModLibraryView(QWidget):
         self._pending_game_filter: str | None = None
         self._deploy_worker: DeployWorker | None = None
         self._deploy_mod_id: str | None = None
+        self._deploy_watchdog = QTimer(self)
+        self._deploy_watchdog.setSingleShot(True)
+        self._deploy_watchdog.setInterval(180_000)
+        self._deploy_watchdog.timeout.connect(self._on_deploy_watchdog_timeout)
         self._status_filter = FILTER_ALL
         self._platform_filter = FILTER_PLATFORM_ALL
         self._category_filter = FILTER_CATEGORY_ALL
@@ -316,6 +320,11 @@ class ModLibraryView(QWidget):
         self._load_gen = 0
         self._library_snapshot = None
         self._pending_restore: dict | None = None
+        # _snapshot_dirty means the cached library snapshot is stale and needs
+        # rebuilding before a fresh snapshot is required.
+        #
+        # It does NOT mean that every game switch must rebuild the entire library.
+        # Game switches filter the warm snapshot in memory when dirty is False.
         self._snapshot_dirty = False
         self._pending_game_status_line = ""
         self._last_filter_sig: tuple | None = None
@@ -885,6 +894,7 @@ class ModLibraryView(QWidget):
     def _mark_card_stale(self, card) -> None:
         """Drop batched card data so the next paint reads live SQLite."""
         card._card_data = None
+        # Card metadata changed — next full snapshot rebuild is required.
         self._snapshot_dirty = True
 
     def _capture_scroll(self) -> int:
@@ -2659,7 +2669,31 @@ class ModLibraryView(QWidget):
         worker.deploy_failed.connect(self._on_deploy_failed)
         worker.finished.connect(self._on_deploy_thread_finished)
         self._deploy_worker = worker
+        self._deploy_ui_timed_out = False
         worker.start()
+        self._deploy_watchdog.start()
+
+    def _on_deploy_watchdog_timeout(self) -> None:
+        """UI-side stall recovery — does not kill the worker thread."""
+        worker = self._deploy_worker
+        if worker is None or not worker.isRunning():
+            return
+        mid = self._deploy_mod_id or ""
+        logger.warning(
+            "[DEPLOY_STALL] mod_id=%s worker still running after UI watchdog",
+            mid,
+        )
+        self.detail_panel.apply_deploy_failure(
+            "部署超时：后台任务可能仍在运行。请查看日志中的 "
+            "[DEPLOY_STAGE] / [DEPLOY_SLOW] 定位卡点。",
+            status="TIMEOUT",
+        )
+        self.detail_panel.set_deploy_busy(False, action="deploy")
+        self._deploy_ui_timed_out = True
+
+    def _stop_deploy_watchdog(self) -> None:
+        if self._deploy_watchdog.isActive():
+            self._deploy_watchdog.stop()
 
     def _on_remove_mod(self, mod_id: str) -> None:
         mid = str(mod_id).strip()
@@ -2714,6 +2748,13 @@ class ModLibraryView(QWidget):
         self.detail_panel.set_deploy_busy(True, action=action)
 
     def _on_deploy_finished(self, result: object) -> None:
+        self._stop_deploy_watchdog()
+        if getattr(self, "_deploy_ui_timed_out", False):
+            logger.warning(
+                "[DEPLOY_STALL] ignoring late worker result after UI timeout mod_id=%s",
+                self._deploy_mod_id or "",
+            )
+            return
         data = result if isinstance(result, dict) else {"success": False, "error": str(result)}
         mid = self._deploy_mod_id or str(data.get("mod_id") or "")
         self.detail_panel.apply_deploy_result(data)
@@ -2722,12 +2763,17 @@ class ModLibraryView(QWidget):
         self._refresh_mod_ui(mid, focus_mod_id=focus)
 
     def _on_deploy_failed(self, error: str) -> None:
+        self._stop_deploy_watchdog()
+        if getattr(self, "_deploy_ui_timed_out", False):
+            return
         self.detail_panel.apply_deploy_failure(error)
         self._refresh_mod_ui(self._deploy_mod_id or "")
 
     def _on_deploy_thread_finished(self) -> None:
+        self._stop_deploy_watchdog()
         self._deploy_worker = None
         self._deploy_mod_id = None
+        self._deploy_ui_timed_out = False
 
     def _refresh_mod_ui(self, mod_id: str, *, focus_mod_id: str = "") -> None:
         """Update only the matching card + detail panel (no library.refresh)."""
@@ -3100,22 +3146,29 @@ class ModLibraryView(QWidget):
         current: QListWidgetItem | None,
         _previous: QListWidgetItem | None,
     ) -> None:
+        from services.ui_perf_log import PerfScope
+
+        perf = PerfScope("GAME SWITCH")
         key = ""
         gid = 0
         if current is not None:
             key = current.data(GAME_ROLE) or ""
             gid = int(current.data(GAME_ID_ROLE) or 0)
+        perf.phase("context")
         self._set_current_game_context(key or None, game_id=gid or None)
         self._sidebar_category = None
         manager = ModFileManager(self._target_root)
         self._clear_selection()
         self.detail_panel.clear()
+        perf.phase("mod list construction")
         self._render_mod_cards(manager, force_reload=self._snapshot_dirty)
         self._snapshot_dirty = False
+        perf.phase("layout")
         # Game switch: never keep the previous game's scroll offset / range.
         self._sync_library_host_size()
         self._set_scroll_value(0)
         self.filter_changed.emit(key or ALL_GAMES_LABEL)
+        perf.end()
 
     def _render_mod_cards(
         self, manager: ModFileManager, *, force_reload: bool = True

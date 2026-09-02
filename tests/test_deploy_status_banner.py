@@ -138,8 +138,12 @@ def test_rar_without_tools_reports_reason(
 ) -> None:
     rar = tmp_path / "mod.rar"
     rar.write_bytes(b"Rar!\x1a\x07\x00not-a-real-rar")
+    monkeypatch.setattr("services.importers.archive.find_7z_executable", lambda: None)
     monkeypatch.setattr(
-        "services.importers.archive.find_7z_executable", lambda: None
+        "services.importers.archive.resolve_bundled_unrar_tool", lambda: None
+    )
+    monkeypatch.setattr(
+        "services.importers.archive.find_system_unrar_executable", lambda: None
     )
 
     def _boom(*_a, **_k):

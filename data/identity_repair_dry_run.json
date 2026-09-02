@@ -1,493 +1,1747 @@
 {
-  "actions": [
+  "candidates": [
     {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000000000",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000000000",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000000",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000002999",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000002999",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000002999",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003354",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003354",
-        "new_external_id": "1036",
-        "source_url": "https://www.nexusmods.com/baldursgate3/mods/1036",
-        "platform": "nexus"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003395",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003395",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003395",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003396",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003396",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003396",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003397",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003397",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003397",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003398",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003398",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003398",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003399",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003399",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003399",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003400",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003400",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003400",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003401",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003401",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003401",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003402",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003402",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003402",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003403",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003403",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003403",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "scrub_polluted_external_id",
-      "canonical_mod_id": "9000000000003404",
-      "duplicate_mod_id": "",
-      "reason": "external_id equals internal mod_id",
-      "details": {
-        "old_external_id": "9000000000003404",
-        "new_external_id": "",
-        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003404",
-        "platform": "steam"
-      }
-    },
-    {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000000375",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/anno1800/mods/102",
-        "canonical_score": 131,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present",
-          "has_app_id"
+      "ghost_mod_id": "9000000000003438",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3591453758",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003438",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003438",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3591453758",
+      "candidate_mod_id": "3591453758",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3591453758",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3591453758",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\更多收集品1.9b [AdditionalCollectibles]",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3591453758 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3591453758"
         ],
-        "duplicates": [
-          "9000000000000349"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3591453758",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3591453758\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000000349": 54
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003438"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000000375",
-      "duplicate_mod_id": "9000000000000349",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/anno1800/mods/102",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands",
-        "canonical_path": "",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000003439",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3592539424",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003439",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003439",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3592539424",
+      "candidate_mod_id": "3592539424",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3592539424",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3592539424",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\武器&改装拓展2.7 [VanillaAttachmentsExpanded]",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3592539424 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3592539424"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3592539424",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3592539424\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003439"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000000434",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
-        "canonical_score": 125,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "modio_plausible",
-          "folder_present",
-          "has_app_id"
+      "ghost_mod_id": "9000000000003440",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3781246892",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003440",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003440",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3781246892",
+      "candidate_mod_id": "3781246892",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3781246892",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3781246892",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\义体改造",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3781246892 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3781246892"
         ],
-        "duplicates": [
-          "9000000000000351"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3781246892",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3781246892\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000000351": 79
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003440"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000000434",
-      "duplicate_mod_id": "9000000000000351",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]",
-        "canonical_path": "",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000003441",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3783660244",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003441",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003441",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3783660244",
+      "candidate_mod_id": "3783660244",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3783660244",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3783660244",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\海岛挑战结算奖励",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3783660244 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3783660244"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3783660244",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3783660244\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003441"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003226",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
-        "canonical_score": 124,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present"
+      "ghost_mod_id": "9000000000003442",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784396849",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003442",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003442",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3784396849",
+      "candidate_mod_id": "3784396849",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3784396849",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3784396849",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Coop Revive System 联机倒地救援",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3784396849 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784396849"
         ],
-        "duplicates": [
-          "9000000000003055"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784396849",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784396849\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000003055": 57
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003442"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003226",
-      "duplicate_mod_id": "9000000000003055",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu_9000000000003226",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000003443",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784602736",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003443",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003443",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3784602736",
+      "candidate_mod_id": "3784602736",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3784602736",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3784602736",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Weapon Aura",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3784602736 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784602736"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784602736",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3784602736\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003443"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003227",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
-        "canonical_score": 135,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present",
-          "has_app_id"
+      "ghost_mod_id": "9000000000003444",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785095584",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003444",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003444",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3785095584",
+      "candidate_mod_id": "3785095584",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3785095584",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3785095584",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\FirstPersonCamera",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3785095584 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785095584"
         ],
-        "duplicates": [
-          "9000000000003056"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785095584",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785095584\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000003056": 126
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003444"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003227",
-      "duplicate_mod_id": "9000000000003056",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs_9000000000003227",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000003445",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785271947",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003445",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003445",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3785271947",
+      "candidate_mod_id": "3785271947",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3785271947",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3785271947",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\我在鸭科夫独自升级",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3785271947 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785271947"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785271947",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3785271947\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003445"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003228",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
-        "canonical_score": 134,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present",
-          "has_app_id"
+      "ghost_mod_id": "9000000000003446",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786388428",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003446",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003446",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3786388428",
+      "candidate_mod_id": "3786388428",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3786388428",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3786388428",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Duck Tracks",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3786388428 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786388428"
         ],
-        "duplicates": [
-          "9000000000003057"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786388428",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786388428\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000003057": 125
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003446"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003228",
-      "duplicate_mod_id": "9000000000003057",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport_9000000000003228",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000003447",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786411372",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003447",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003447",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3786411372",
+      "candidate_mod_id": "3786411372",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3786411372",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3786411372",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Quests Anywhere",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3786411372 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786411372"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786411372",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3786411372\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003447"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003229",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
-        "canonical_score": 128,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present"
+      "ghost_mod_id": "9000000000003448",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3787384780",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003448",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003448",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3787384780",
+      "candidate_mod_id": "3787384780",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3787384780",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3787384780",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\CS Like Kill Feed",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3787384780 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3787384780"
         ],
-        "duplicates": [
-          "9000000000003058"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3787384780",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3787384780\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000003058": 54
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003448"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003229",
-      "duplicate_mod_id": "9000000000003058",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location_9000000000003229",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000003449",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3789395672",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003449",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003449",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3789395672",
+      "candidate_mod_id": "3789395672",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3789395672",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3789395672",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\明日方舟模组系列物品包",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3789395672 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3789395672"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3789395672",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3789395672\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003449"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003230",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
-        "canonical_score": 127,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present"
+      "ghost_mod_id": "9000000000003450",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3790849356",
+      "ghost_platform": "steam",
+      "ghost_external_id": "stub:9000000000003450",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "",
+      "ghost_published_file_id": "9000000000003450",
+      "ghost_app_id": 0,
+      "ghost_title": "Unknown Mod 3790849356",
+      "candidate_mod_id": "3790849356",
+      "candidate_platform": "steam",
+      "candidate_external_id": "3790849356",
+      "candidate_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=3790849356",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\明日方舟周边集",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION+DUPLICATE_ENTITY",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION",
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "internal identity leaked into platform/workspace/sidecar",
+        "supporting folder leftover pattern Unknown Mod 3790849356 (not authority)",
+        "filesystem collision: both folders exist",
+        "INVALID_DUPLICATE_MOD",
+        "confirmed invalid ghost; canonical Steam entity already exists; delete ghost",
+        "quarantine ghost folder; canonical files are not overwritten"
+      ],
+      "references": {
+        "tables": {
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3790849356"
         ],
-        "duplicates": [
-          "9000000000003059"
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3790849356",
+          "D:\\project\\steam-mod-manager\\mod\\逃离鸭科夫\\Unknown Mod 3790849356\\.info\\metadata.json"
         ],
-        "duplicate_scores": {
-          "9000000000003059": 60
-        }
-      }
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003450"
+        ]
+      },
+      "finding_class": "steam_internal_ghost",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003230",
-      "duplicate_mod_id": "9000000000003059",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车_9000000000003230",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000000000",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973851919389",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000000",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000000000",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000000000",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003232",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
-        "canonical_score": 130,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present",
-          "has_app_id"
-        ],
-        "duplicates": [
-          "9000000000003079"
-        ],
-        "duplicate_scores": {
-          "9000000000003079": 124
-        }
-      }
+      "ghost_mod_id": "9000000000000354",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Palworld\\天极鲸替换奥沧鲸",
+      "ghost_platform": "other",
+      "ghost_external_id": "local/天极鲸替换奥沧鲸",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000354",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000000354",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000000354",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003232",
-      "duplicate_mod_id": "9000000000003079",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\Extra-Map-Layers-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\地图显示更多图层信息",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000000360",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\全产业模板",
+      "ghost_platform": "other",
+      "ghost_external_id": "local/分享全产业模板",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000360",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000000360",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000000360",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
     },
     {
-      "action": "duplicate_source_url",
-      "canonical_mod_id": "9000000000003251",
-      "duplicate_mod_id": "",
-      "reason": "same source_url → 2 mod_ids",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
-        "canonical_score": 132,
-        "canonical_reasons": [
-          "has_platform_external",
-          "external_matches_url",
-          "nexus_numeric",
-          "folder_present",
-          "has_app_id"
-        ],
-        "duplicates": [
-          "9000000000003106"
-        ],
-        "duplicate_scores": {
-          "9000000000003106": 125
-        }
-      }
+      "ghost_mod_id": "9000000000000361",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\全【区域】【居民区】蓝图",
+      "ghost_platform": "other",
+      "ghost_external_id": "local/全【区域】【居民区】蓝图",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000361",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000000361",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000000361",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
     },
     {
-      "action": "retire_duplicate_entity",
-      "canonical_mod_id": "9000000000003251",
-      "duplicate_mod_id": "9000000000003106",
-      "reason": "elect_canonical",
-      "details": {
-        "source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
-        "duplicate_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\爱心烹饪--新的烹饪系统",
-        "canonical_path": "E:\\project\\steam-mod-manager\\mod\\星露谷物语\\The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
-        "filesystem_policy": "retain_folders_bind_to_canonical"
-      }
+      "ghost_mod_id": "9000000000000362",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\游戏初期的【布局模板】",
+      "ghost_platform": "other",
+      "ghost_external_id": "local/游戏初期的【布局模板】",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000362",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 916440,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000000362",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000000362",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000002999",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852003597",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000002999",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000002999",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000002999",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003031",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\壮丽艺廊添加卡片(免费版)",
+      "ghost_platform": "other",
+      "ghost_external_id": "local/壮丽艺廊添加卡片(免费版)",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003031",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003031",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003031",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003054",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "更好的角色装备展示界面",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003054",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003054",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003225",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\暗黑地牢\\[ZIMIK]2b",
+      "ghost_platform": "other",
+      "ghost_external_id": "local/300 NIER2",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003225",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003225",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003225",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003395",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852097417",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003395",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003395",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003395",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003396",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852176642",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003396",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003396",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003396",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003397",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852267858",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003397",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003397",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003397",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003398",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852358547",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003398",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003398",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003398",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003399",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852438282",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003399",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003399",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003399",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003400",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852527560",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003400",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003400",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003400",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003401",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852605666",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003401",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003401",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003401",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003402",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852694295",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003402",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003402",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003402",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003403",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852778970",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003403",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003403",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003403",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000003404",
+      "ghost_folder": "",
+      "ghost_platform": "other",
+      "ghost_external_id": "",
+      "ghost_workspace_id": "17879973852864375",
+      "ghost_source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003404",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "",
+      "candidate_mod_id": "9000000000003404",
+      "candidate_platform": "",
+      "candidate_external_id": "",
+      "candidate_source_url": "",
+      "candidate_folder": "",
+      "relationship": "INTERNAL_IDENTITY_POLLUTION",
+      "relationships": [
+        "INTERNAL_IDENTITY_POLLUTION"
+      ],
+      "confidence": "MEDIUM",
+      "proposed_action": "SCRUB_POLLUTING_SOURCE_URL",
+      "blocking_reasons": [],
+      "evidence": [
+        "source_url embeds internal id(s): 9000000000003404",
+        "Steam URL is only the internal id — clear source_url"
+      ],
+      "references": {},
+      "finding_class": "source_url_internal_id",
+      "filesystem_action": "",
+      "reference_action": "",
+      "reason": ""
+    },
+    {
+      "ghost_mod_id": "9000000000000349",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "stub:9000000000000349",
+      "ghost_workspace_id": "102",
+      "ghost_source_url": "https://www.nexusmods.com/anno1800/mods/102",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "市政等效果影响整个岛屿",
+      "candidate_mod_id": "9000000000000375",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "102",
+      "candidate_source_url": "https://www.nexusmods.com/anno1800/mods/102",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000000375",
+        "source_url=https://www.nexusmods.com/anno1800/mods/102",
+        "INVALID_DUPLICATE_MOD",
+        "shared_folder"
+      ],
+      "references": {
+        "tables": {
+          "identity_audit_log": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands",
+          "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Item Buildings affect entire islands\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000000349"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "db_delete_shared_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000000351",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]",
+      "ghost_platform": "modio",
+      "ghost_external_id": "stub:9000000000000351",
+      "ghost_workspace_id": "",
+      "ghost_source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "更大的港口",
+      "candidate_mod_id": "9000000000000434",
+      "candidate_platform": "modio",
+      "candidate_external_id": "bigger-harbour",
+      "candidate_source_url": "https://mod.io/g/anno-1800/m/bigger-harbour",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000000434",
+        "source_url=https://mod.io/g/anno-1800/m/bigger-harbour",
+        "INVALID_DUPLICATE_MOD",
+        "shared_folder"
+      ],
+      "references": {
+        "tables": {
+          "identity_audit_log": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]",
+          "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\Bigger Harbour [Spice It Up]\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000000351"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "db_delete_shared_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003226",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu_9000000000003226",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "44639",
+      "ghost_workspace_id": "44639",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "JP's Teleporter Menu Mod - Warp Menu",
+      "candidate_mod_id": "9000000000003055",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003055",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/44639",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003055",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/44639",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu_9000000000003226"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu_9000000000003226",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\JP's Teleporter Menu Mod - Warp Menu_9000000000003226\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003226"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003227",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs_9000000000003227",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "31344",
+      "ghost_workspace_id": "31344",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 413150,
+      "ghost_title": "Simple Teleport To NPCs",
+      "candidate_mod_id": "9000000000003056",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003056",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/31344",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003056",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/31344",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs_9000000000003227"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs_9000000000003227",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Simple Teleport To NPCs_9000000000003227\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003227"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003228",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport_9000000000003228",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "21381",
+      "ghost_workspace_id": "21381",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 413150,
+      "ghost_title": "Stardew Valley Map Teleport",
+      "candidate_mod_id": "9000000000003057",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003057",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/21381",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003057",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/21381",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport_9000000000003228"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport_9000000000003228",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Stardew Valley Map Teleport_9000000000003228\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003228"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003229",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location_9000000000003229",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "17190",
+      "ghost_workspace_id": "17190",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "Teleport NPC Location",
+      "candidate_mod_id": "9000000000003058",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003058",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/17190",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003058",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/17190",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location_9000000000003229"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location_9000000000003229",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Teleport NPC Location_9000000000003229\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003229"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003230",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车_9000000000003230",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "13650",
+      "ghost_workspace_id": "13650",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 0,
+      "ghost_title": "Beach Minecart (CP)",
+      "candidate_mod_id": "9000000000003059",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003059",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/13650",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003059",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/13650",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车_9000000000003230"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车_9000000000003230",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\海滩矿车_9000000000003230\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003230"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003232",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\地图显示更多图层信息",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "9633",
+      "ghost_workspace_id": "9633",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 413150,
+      "ghost_title": "Extra Map Layers",
+      "candidate_mod_id": "9000000000003079",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003079",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/9633",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Extra-Map-Layers-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003079",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/9633",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\地图显示更多图层信息"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\地图显示更多图层信息",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\地图显示更多图层信息\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003232"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
+    },
+    {
+      "ghost_mod_id": "9000000000003251",
+      "ghost_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
+      "ghost_platform": "nexus",
+      "ghost_external_id": "6830",
+      "ghost_workspace_id": "6830",
+      "ghost_source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
+      "ghost_published_file_id": "",
+      "ghost_app_id": 413150,
+      "ghost_title": "The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
+      "candidate_mod_id": "9000000000003106",
+      "candidate_platform": "nexus",
+      "candidate_external_id": "stub:9000000000003106",
+      "candidate_source_url": "https://www.nexusmods.com/stardewvalley/mods/6830",
+      "candidate_folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\爱心烹饪--新的烹饪系统",
+      "relationship": "DUPLICATE_ENTITY",
+      "relationships": [
+        "DUPLICATE_ENTITY"
+      ],
+      "confidence": "HIGH",
+      "proposed_action": "REMOVE_INVALID_DUPLICATE",
+      "blocking_reasons": [],
+      "evidence": [
+        "confirmed invalid duplicate of original 9000000000003106",
+        "source_url=https://www.nexusmods.com/stardewvalley/mods/6830",
+        "INVALID_DUPLICATE_MOD",
+        "distinct_folder"
+      ],
+      "references": {
+        "tables": {
+          "mod_tags": 1,
+          "mods": 1
+        },
+        "filesystem": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com"
+        ],
+        "sidecar": [
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com",
+          "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\The-Love-of-Cooking-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com\\.info\\metadata.json"
+        ],
+        "backup": [
+          "D:\\project\\steam-mod-manager\\data\\mod_backup\\9000000000003251"
+        ]
+      },
+      "finding_class": "duplicate_source_url",
+      "filesystem_action": "quarantine_unique_folder",
+      "reference_action": "migrate_to_canonical",
+      "reason": "INVALID_DUPLICATE_MOD"
     }
   ],
   "before": {
-    "CRITICAL": 0,
+    "CRITICAL": 32,
+    "steam_internal": 13,
+    "workspace_internal": 0,
+    "source_url_internal": 19,
+    "duplicate_source_url_groups": 9,
     "HIGH": 9,
-    "MEDIUM": 233,
-    "LOW": 24,
-    "corrupted": 0,
-    "duplicate": 9,
-    "conflict": 0,
-    "orphan": 24,
-    "warning": 233,
-    "identity_conflict": 0,
-    "ghost": 13
+    "INFO": 0,
+    "rows": 1788
   },
   "after": {},
   "applied": false,
   "success": true,
   "error": "",
   "notes": [
-    "planned_actions=31",
-    "dry_run_only"
-  ]
+    "planned_candidates=41",
+    "invalid_entities_to_remove=22"
+  ],
+  "allocations": 0,
+  "applied_counts": {},
+  "forensics": {
+    "INVALID_ENTITY_FORENSICS": true,
+    "remove_invalid_duplicate": 22,
+    "scrub_polluting_source_url": 19,
+    "identity_conflict": 0,
+    "extra_invalid_entities_beyond_url_and_ghost": 0,
+    "finding_classes": [
+      "duplicate_source_url",
+      "steam_internal_ghost"
+    ]
+  }
 }

@@ -89,9 +89,10 @@ class NexusManualOfflineProvider(OfflineProvider):
         managed_path: str | Path | None = None,
         library_root: str | Path | None = None,
         metadata: Any | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
         """Auto-download is disabled — callers must use ``import_offline_page``."""
-        del managed_path, library_root, metadata
+        del managed_path, library_root, metadata, force_refresh
         mid = str(mod_id).strip()
         get_db().update_mod_offline_status(
             mid,

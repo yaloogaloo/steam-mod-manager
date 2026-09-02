@@ -199,8 +199,33 @@ class CoverLoaderManager(QObject):
 
     @classmethod
     def reset_instance(cls) -> None:
-        """Test helper — drop singleton (does not wait for in-flight tasks)."""
+        """
+        Test helper — clear singleton after draining the cover thread pool.
+
+        Must wait for in-flight tasks before dropping the QObject; otherwise
+        queued ``image_ready`` / pool teardown can corrupt the Qt heap
+        (Windows ``0xc0000374``) during pytest fixture teardown.
+        """
+        mgr = cls._instance
         cls._instance = None
+        if mgr is None:
+            return
+        try:
+            mgr._active_tokens.clear()
+            mgr._token_paths.clear()
+            mgr._cancelled_paths.clear()
+            with mgr._lock:
+                mgr._inflight_by_path.clear()
+            pool = getattr(mgr, "_pool", None)
+            if pool is not None:
+                pool.clear()
+                pool.waitForDone(2000)
+        except Exception:  # noqa: BLE001
+            logger.exception("CoverLoaderManager.reset_instance cleanup failed")
+        try:
+            mgr.deleteLater()
+        except Exception:  # noqa: BLE001
+            pass
 
     def is_path_cancelled(self, managed_path: str | Path) -> bool:
         return _path_key(managed_path) in self._cancelled_paths

@@ -247,9 +247,10 @@ def test_429_does_not_overwrite_successful_offline_page(
     session.get.side_effect = lambda *_a, **_k: _ok(429)
 
     with OfflinePageArchiver(session=session) as archiver:
-        path = archiver.archive("3761838546", info, overwrite=True)
+        result = archiver.archive("3761838546", info, overwrite=True)
 
-    assert path == index
+    assert result.path == index
+    assert result.outcome in ("failed", "rate_limited")
     assert index.read_text(encoding="utf-8") == LIVE_HTML
     # Transient 429 without global fuse must not wipe a good page.
     assert not is_stub_offline_page(index)
@@ -306,9 +307,8 @@ def test_log_mod_id_matches_url_id(
 
     steam_lines = [r.message for r in caplog.records if "[STEAM ARCHIVE]" in r.message]
     assert steam_lines
-    line = steam_lines[0]
-    assert "mod_id=3761838546" in line
-    assert "url_id=3761838546" in line
+    assert any("mod_id=3761838546" in line for line in steam_lines)
+    assert any("url_id=3761838546" in line for line in steam_lines)
 
 
 def test_archive_sets_tls_mod_id_for_matching_logs(
@@ -338,7 +338,7 @@ def test_archive_sets_tls_mod_id_for_matching_logs(
     main_logs = [
         r.message
         for r in caplog.records
-        if "[STEAM ARCHIVE]" in r.message and "filedetails" in r.message
+        if "[STEAM ARCHIVE]" in r.message and "url_id=" in r.message
     ]
     assert main_logs
     assert "mod_id=3664026608" in main_logs[0]

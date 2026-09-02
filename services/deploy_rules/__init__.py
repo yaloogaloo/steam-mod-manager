@@ -28,12 +28,19 @@ from services.deploy_rules.stardew_valley import (
     STARDEW_VALLEY_APP_ID,
     StardewValleyStrategy,
 )
+from services.deploy_rules.duckov import (
+    DUCKOV_APP_ID,
+    DEPLOY_TYPE_DUCKOV,
+    DuckovStrategy,
+    find_duckov_mod_root,
+)
 
 DEPLOY_TYPE_FOLDER_COPY = FolderCopyStrategy.deploy_type
 DEPLOY_TYPE_PALWORLD_PAK = PalworldStrategy.deploy_type
 DEPLOY_TYPE_ANNO_1800 = Anno1800Strategy.deploy_type
 DEPLOY_TYPE_SLAY_THE_SPIRE = SlayTheSpireStrategy.deploy_type
 DEPLOY_TYPE_STARDEW_VALLEY = StardewValleyStrategy.deploy_type
+DEPLOY_TYPE_DUCKOV = DuckovStrategy.deploy_type
 DEPLOY_TYPE_PAK_MOD_PATH = PakModPathStrategy.deploy_type
 
 # Steam AppID — always use enhanced PalworldStrategy (pak rules + folder_copy fallback).
@@ -46,6 +53,7 @@ _STRATEGIES: dict[str, DeployStrategy] = {
     DEPLOY_TYPE_ANNO_1800: Anno1800Strategy(),
     DEPLOY_TYPE_SLAY_THE_SPIRE: SlayTheSpireStrategy(),
     DEPLOY_TYPE_STARDEW_VALLEY: StardewValleyStrategy(),
+    DEPLOY_TYPE_DUCKOV: DuckovStrategy(),
     DEPLOY_TYPE_CUSTOM_PATH: CustomPathStrategy(),
 }
 
@@ -73,6 +81,8 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
         return DEPLOY_TYPE_SLAY_THE_SPIRE
     if aid == STARDEW_VALLEY_APP_ID:
         return DEPLOY_TYPE_STARDEW_VALLEY
+    if aid == DUCKOV_APP_ID:
+        return DEPLOY_TYPE_DUCKOV
     key = (deploy_type or DEPLOY_TYPE_FOLDER_COPY).strip() or DEPLOY_TYPE_FOLDER_COPY
     return key
 
@@ -115,7 +125,10 @@ __all__ = [
     "DEPLOY_TYPE_PAK_MOD_PATH",
     "DEPLOY_TYPE_PALWORLD_PAK",
     "DEPLOY_TYPE_SLAY_THE_SPIRE",
+    "DEPLOY_TYPE_DUCKOV",
     "DEPLOY_TYPE_STARDEW_VALLEY",
+    "DUCKOV_APP_ID",
+    "DuckovStrategy",
     "PALWORLD_APP_ID",
     "PakModPathStrategy",
     "SLAY_THE_SPIRE_APP_ID",

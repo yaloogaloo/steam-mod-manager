@@ -38,10 +38,12 @@ def _iter_pak_files(
     *,
     allowed_rel_paths: frozenset[str] | None = None,
 ) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     source = source.resolve()
     out: list[Path] = []
-    for path in sorted(source.rglob("*.pak")):
-        if not path.is_file() or path.name.startswith("."):
+    for path in sorted(safe_iter_files(source, suffix=".pak")):
+        if path.name.startswith("."):
             continue
         try:
             rel_parts = path.relative_to(source).parts

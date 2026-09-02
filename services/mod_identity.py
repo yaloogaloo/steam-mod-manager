@@ -66,12 +66,19 @@ def resolve_existing_mod_id(data: dict[str, Any] | None) -> str:
             pass
 
     pub = _text(payload.get("published_file_id"))
-    if pub.isdigit():
+    if pub.isdigit() and not is_internal_mod_id(pub):
         try:
             if db.get_mod(pub) is not None:
                 return pub
             row = db.get_mod_backup_row(pub)
             if row is not None:
+                return pub
+        except Exception:  # noqa: BLE001
+            pass
+    elif pub.isdigit() and is_internal_mod_id(pub):
+        # Recover an already-created internal entity (backup key). Never mint.
+        try:
+            if db.get_mod(pub) is not None:
                 return pub
         except Exception:  # noqa: BLE001
             pass
@@ -117,6 +124,8 @@ def resolve_existing_mod_id(data: dict[str, Any] | None) -> str:
             pass
 
     workspace = _text(payload.get("workspace_id"))
+    if workspace and is_internal_mod_id(workspace):
+        workspace = ""
     if workspace:
         try:
             found = db.find_mod_by_workspace_id(workspace, platform=platform or None)
@@ -183,12 +192,8 @@ def ensure_mod_identity(
 
     Returns ``(mod_id, metadata, metadata_changed)``.
 
-    Priority for mod_id:
-    published_file_id (digit) → matched existing → allocate new non-Steam id.
-
-    Always ensures ``internal_id`` UUID in metadata. When a new numeric id is
-    allocated, it is written to ``published_file_id`` so backup keys stay numeric
-    (compatible with ``data/mod_backup/<id>``).
+    Recovers an existing entity. Never allocates. Unresolved folders stay
+    ``identity_status=unresolved`` instead of minting a 900… ``mod_id``.
     """
     root = Path(managed_path)
     payload = dict(data if data is not None else (read_info_metadata_dict(root) or {}))
@@ -199,23 +204,20 @@ def ensure_mod_identity(
 
     if existing:
         mod_id = existing
-        if pub != mod_id and not (pub.isdigit() and pub == mod_id):
-            # Keep Steam workshop ids; for matched rows prefer existing mod_id.
-            if not pub.isdigit() or int(pub) != int(mod_id):
-                if not pub.isdigit():
-                    payload["published_file_id"] = mod_id
-                    changed = True
+        if not is_internal_mod_id(mod_id):
+            if not pub.isdigit() or is_internal_mod_id(pub):
+                payload["published_file_id"] = mod_id
+                changed = True
+        elif pub and is_internal_mod_id(pub) and pub != mod_id:
+            payload.pop("published_file_id", None)
+            changed = True
+        payload["identity_status"] = "complete"
         return mod_id, payload, changed
 
-    if pub.isdigit():
-        if is_internal_mod_id(pub):
-            existing_by_pub = resolve_existing_mod_id(payload)
-            if existing_by_pub:
-                return existing_by_pub, payload, changed
-        else:
-            return pub, payload, changed
+    if pub.isdigit() and not is_internal_mod_id(pub):
+        payload["identity_status"] = "complete"
+        return pub, payload, changed
 
-    # Last-chance identity recovery before allocating a new internal id.
     url = _text(payload.get("url") or payload.get("source_url"))
     if url:
         try:
@@ -237,26 +239,18 @@ def ensure_mod_identity(
             )
             if info is not None and str(info.mod_id).isdigit():
                 mod_id = str(info.mod_id)
-                payload["published_file_id"] = mod_id
+                if not is_internal_mod_id(mod_id):
+                    payload["published_file_id"] = mod_id
+                payload["identity_status"] = "complete"
                 changed = True
                 return mod_id, payload, changed
         except Exception:  # noqa: BLE001
             logger.debug("source_url identity recovery failed", exc_info=True)
 
-    if pub.isdigit() and not is_internal_mod_id(pub):
-        return pub, payload, changed
+    if pub and is_internal_mod_id(pub):
+        payload.pop("published_file_id", None)
+        changed = True
 
-    # Brand-new Mod: allocate numeric id for SQLite / backup key.
-    try:
-        from core.db_manager import get_db
-
-        mod_id = str(get_db().allocate_mod_id())
-    except Exception:  # noqa: BLE001
-        # Extremely rare: DB unavailable — still persist UUID; caller may retry.
-        mod_id = ""
-        logger.warning("allocate_mod_id failed for %s", root)
-        return mod_id, payload, changed
-
-    payload["published_file_id"] = mod_id
-    changed = True
-    return mod_id, payload, changed
+    payload["identity_status"] = "unresolved"
+    logger.info("identity unresolved for %s — will not allocate", root)
+    return "", payload, changed

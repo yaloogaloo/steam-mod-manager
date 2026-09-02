@@ -476,7 +476,9 @@ class ModDetailPanel(QWidget):
         """Load metadata via the unified resolver (no Steam I/O)."""
         from ui.popup_trace import log_popup
         from services.mod_metadata_resolver import resolve_mod_metadata
+        from services.ui_perf_log import PerfScope
 
+        perf = PerfScope("MOD DETAIL")
         log_popup("slot:show_mod", detail=str(mod_id or managed_path or ""))
         self._batch_mod_ids = []
         self._batch_game_name = ""
@@ -495,6 +497,7 @@ class ModDetailPanel(QWidget):
             self.btn_edit_info.setToolTip("编辑显示名称、介绍与源链接")
             self.btn_edit_info.setEnabled(True)
 
+        perf.phase("resolve mod")
         resolved = resolve_mod_metadata(mod_id, managed_path)
         path = Path(managed_path) if managed_path is not None else None
         if resolved is not None and resolved.managed_path:
@@ -532,6 +535,7 @@ class ModDetailPanel(QWidget):
         self._display_info = None
         mid = str(mod_id or meta.published_file_id or "").strip()
         if str(mid).isdigit():
+            perf.phase("database query")
             try:
                 self._display_info = get_db().get_mod_display_info(mid)
             except Exception:  # noqa: BLE001
@@ -539,8 +543,10 @@ class ModDetailPanel(QWidget):
 
         self._stack.setCurrentWidget(self._view_page)
         self._mode = MODE_VIEW
+        perf.phase("detail widget construction")
         self._fill_view()
         self.setEnabled(True)
+        perf.end()
 
     def clear(self) -> None:
         """Empty / unselected state."""
@@ -2138,7 +2144,30 @@ class ModDetailPanel(QWidget):
             workspace_id = ""
             if info is not None:
                 workspace_id = str(info.workspace_id or "").strip()
+        from core.mod_platform import PLATFORM_STEAM as _STEAM, is_internal_mod_id as _is_internal
+
+        internal_id = str(
+            (info.mod_id if info is not None else "")
+            or (self.current_mod_id() or "")
+            or (
+                resolved.published_file_id
+                if resolved is not None and _is_internal(resolved.published_file_id)
+                else ""
+            )
+            or meta.published_file_id
+            or ""
+        ).strip()
+        workshop_id = ""
+        if platform == _STEAM or str(db_platform).lower() == _STEAM:
+            cand = str(external_id or meta.published_file_id or "").strip()
+            if cand and cand.isdigit() and not _is_internal(cand):
+                workshop_id = cand
+        if not _is_internal(internal_id) and internal_id.isdigit() and not workshop_id:
+            if platform == _STEAM:
+                workshop_id = internal_id
         self.meta_workspace_line.setText(
+            f"内部 ID: {internal_id or '—'}  |  "
+            f"Steam Workshop ID: {workshop_id or '—'}  |  "
             f"Workspace ID: {workspace_id or '—'}"
         )
         self._source_url_value = source_url
@@ -2197,6 +2226,8 @@ class ModDetailPanel(QWidget):
             desc_text=desc_text,
             platform_name=platform_name,
             workspace_id=workspace_id,
+            internal_id=internal_id,
+            workshop_id=workshop_id,
             author=author,
             version=version,
             updated=updated,
@@ -2409,6 +2440,8 @@ class ModDetailPanel(QWidget):
         author: str,
         version: str,
         updated: str,
+        internal_id: str = "",
+        workshop_id: str = "",
     ) -> None:
         """Rich-text metadata block — bold prefixes, isolated long description."""
         esc = html_module.escape
@@ -2432,6 +2465,8 @@ class ModDetailPanel(QWidget):
                 f"<div style='margin:0;padding:0;line-height:1.55;'>{desc_html}</div>"
             )
         parts.append(_line(f"<b>来源：</b> {esc(platform_name)}"))
+        parts.append(_line(f"<b>内部 ID:</b> {esc(internal_id or '—')}"))
+        parts.append(_line(f"<b>Steam Workshop ID:</b> {esc(workshop_id or '—')}"))
         parts.append(
             _line(f"<b>Workspace ID:</b> {esc(workspace_id or '—')}")
         )
@@ -3670,7 +3705,7 @@ class ModDetailPanel(QWidget):
         conflict_map = {
             CONFLICT_STATUS_NONE: "正常",
             CONFLICT_STATUS_WARNING: "警告",
-            CONFLICT_STATUS_CONFLICT: "冲突",
+            CONFLICT_STATUS_CONFLICT: "文件覆盖冲突",
         }
         conflict_text = conflict_map.get(st.conflict_status, st.conflict_status)
         self.status_conflict_label.setText(f"[Conflict] {conflict_text}")
@@ -3898,7 +3933,8 @@ class ModDetailPanel(QWidget):
                 return f"冲突备注：{st.conflict_note}"
             return ""
         try:
-            from services.conflict import ConflictDetector
+            from services.conflict import ConflictClass, ConflictDetector
+            from services.text_encoding import repair_mojibake
 
             report = ConflictDetector(
                 self._library_root, db=get_db()
@@ -3913,24 +3949,51 @@ class ModDetailPanel(QWidget):
             if st and st.conflict_note:
                 return f"冲突备注：{st.conflict_note}"
             return ""
+
+        def _name_for(mod_key: str) -> str:
+            label = mod_key
+            try:
+                info = get_db().get_mod_display_info(mod_key)
+                if info and info.display_name:
+                    label = repair_mojibake(str(info.display_name))
+            except Exception:  # noqa: BLE001
+                pass
+            return label
+
+        type_labels = {
+            ConflictClass.FILE_OVERWRITE.value: "文件覆盖",
+            ConflictClass.IDENTITY_CONFLICT.value: "身份冲突",
+            ConflictClass.PATH_OVERLAP.value: "路径重叠",
+            ConflictClass.DEPLOYMENT_CONFLICT.value: "部署冲突",
+            ConflictClass.DEPENDENCY_CONFLICT.value: "依赖冲突",
+            ConflictClass.GAME_RULE_CONFLICT.value: "游戏规则冲突",
+            ConflictClass.UNKNOWN_CONFLICT.value: "未知冲突",
+        }
+        traces = list(report.traces or [])
         lines: list[str] = []
+        if traces:
+            for trace in traces:
+                kind = type_labels.get(trace.conflict_type, trace.conflict_type)
+                name_a = _name_for(trace.mod_a)
+                name_b = _name_for(trace.mod_b)
+                lines.append(f"冲突类型：{kind}")
+                lines.append(f"冲突对象：{name_a} vs {name_b}")
+                lines.append(f"重叠文件：{trace.overlap_count}")
+                if trace.sample_paths:
+                    lines.append("代表性路径：")
+                    for sample in trace.sample_paths[:5]:
+                        lines.append(f"  · {sample}")
+                lines.append(f"内部 ID：{trace.mod_a} / {trace.mod_b}")
+                lines.append("")
+            return "\n".join(lines).strip()
+
+        lines = []
         for entry in report.conflicts:
-            name = Path(entry.file).name or entry.file
-            lines.append(f"冲突文件：{name}")
-            # Resolve display names when possible
-            sources: list[str] = []
-            for other in entry.mods:
-                label = other
-                try:
-                    info = get_db().get_mod_display_info(other)
-                    if info and info.display_name:
-                        label = f"{info.display_name} ({other})"
-                except Exception:  # noqa: BLE001
-                    pass
-                sources.append(label)
-            lines.append("来源：")
-            for s in sources:
-                lines.append(f"  · {s}")
+            kind = type_labels.get(entry.conflict_type, entry.conflict_type or "文件覆盖")
+            names = [_name_for(other) for other in entry.mods]
+            lines.append(f"冲突类型：{kind}")
+            lines.append("冲突对象：" + " vs ".join(names))
+            lines.append(f"冲突文件：{Path(entry.file).name or entry.file}")
             lines.append("")
         return "\n".join(lines).strip()
 
@@ -4270,10 +4333,12 @@ class ModDetailPanel(QWidget):
             published_file_id=self._metadata.published_file_id,
             metadata=self._metadata,
             library_root=self._library_root,
+            force_refresh=True,
             parent=self,
         )
         worker.archive_started.connect(self._on_offline_archive_started)
         worker.archive_finished.connect(self._on_offline_archive_finished)
+        worker.archive_skipped.connect(self._on_offline_archive_skipped)
         worker.archive_failed.connect(self._on_offline_archive_failed)
         worker.finished.connect(self._on_offline_archive_thread_finished)
         self._offline_worker = worker
@@ -4311,10 +4376,12 @@ class ModDetailPanel(QWidget):
             published_file_id=mid,
             metadata=None,
             library_root=self._library_root,
+            force_refresh=True,
             parent=self,
         )
         worker.archive_started.connect(self._on_offline_archive_started)
         worker.archive_finished.connect(self._on_offline_archive_finished)
+        worker.archive_skipped.connect(self._on_offline_archive_skipped)
         worker.archive_failed.connect(self._on_offline_archive_failed)
         worker.finished.connect(self._on_offline_archive_thread_finished)
         self._offline_worker = worker
@@ -4365,6 +4432,7 @@ class ModDetailPanel(QWidget):
         )
         worker.archive_started.connect(self._on_offline_archive_started)
         worker.archive_finished.connect(self._on_offline_archive_finished)
+        worker.archive_skipped.connect(self._on_offline_archive_skipped)
         worker.archive_failed.connect(self._on_offline_archive_failed)
         worker.finished.connect(self._on_offline_archive_thread_finished)
         self._offline_worker = worker
@@ -4392,6 +4460,22 @@ class ModDetailPanel(QWidget):
             self._refresh_offline_status_label()
         self._update_offline_download_button()
         self._set_op_status("✓ 离线页面已保存", tone="success", auto_clear_ms=1800)
+
+    def _on_offline_archive_skipped(self, reason: str) -> None:
+        del reason
+        if self._offline_batch_active:
+            self._update_offline_download_button()
+            return
+        if self._managed_path is not None:
+            self.show_mod(self._managed_path)
+        else:
+            self._refresh_offline_status_label()
+        self._update_offline_download_button()
+        self._set_op_status(
+            "已使用现有离线页面，未刷新",
+            tone="warning",
+            auto_clear_ms=2400,
+        )
 
     def _on_offline_archive_failed(self, error: str) -> None:
         err = (error or "").strip() or "保存失败"
@@ -4728,6 +4812,29 @@ class ModDetailPanel(QWidget):
             self._set_op_status("✓ 部署完成", tone="success", auto_clear_ms=1800)
             return
 
+        terminal_status = str(result.get("status") or "").strip().upper()
+        if terminal_status == "CANCELLED":
+            raw_error = str(result.get("error") or "").strip() or "部署已取消"
+            self.view_deploy.setText("[Deploy] 状态：部署已取消")
+            self._apply_tone(self.view_deploy, "warning")
+            self.view_deploy_error.setText(f"原因：{raw_error}")
+            self._hide_status_banner()
+            self._fill_deploy_status_from_db()
+            self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
+            self._set_op_status("◌ 部署已取消", tone="warning", auto_clear_ms=2400)
+            return
+        if terminal_status == "TIMEOUT":
+            raw_error = str(result.get("error") or "").strip() or "部署超时"
+            self.view_deploy.setText("[Deploy] 状态：部署超时")
+            self._apply_tone(self.view_deploy, "error")
+            self.view_deploy_error.setText(f"原因：{raw_error}")
+            self._show_deploy_failure_banner(raw_error)
+            self.view_deploy_path.clear()
+            self.view_deploy_time.clear()
+            self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
+            self._set_op_status("⚠ 部署超时", tone="error", auto_clear_ms=2400)
+            return
+
         # Keep the raw error for the banner — humanize preserves archive details.
         raw_error = str(result.get("error") or "").strip() or "未知错误"
         error = humanize_deploy_error(raw_error)
@@ -4740,12 +4847,23 @@ class ModDetailPanel(QWidget):
         self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
         self._set_op_status("⚠ 部署失败", tone="error", auto_clear_ms=2400)
 
-    def apply_deploy_failure(self, error: str) -> None:
+    def apply_deploy_failure(self, error: str, *, status: str = "FAILED") -> None:
         self._deploy_busy = False
         self.btn_deploy.setText("部署")
         self.btn_undeploy.setText("取消部署")
         raw = str(error or "").strip() or "未知错误"
         msg = humanize_deploy_error(raw)
+        terminal = str(status or "FAILED").strip().upper()
+        if terminal == "TIMEOUT":
+            self.view_deploy.setText("[Deploy] 状态：部署超时")
+            self._apply_tone(self.view_deploy, "error")
+            self.view_deploy_error.setText(f"原因：{msg}")
+            self._show_deploy_failure_banner(raw)
+            self.view_deploy_path.clear()
+            self.view_deploy_time.clear()
+            self._set_deploy_buttons(DEPLOY_STATUS_FAILED)
+            self._set_op_status("⚠ 部署超时", tone="error", auto_clear_ms=2400)
+            return
         self.view_deploy.setText("[Deploy] 状态：部署失败")
         self._apply_tone(self.view_deploy, "error")
         self.view_deploy_error.setText(f"原因：{msg}")
@@ -4847,7 +4965,117 @@ class ModDetailPanel(QWidget):
             pass
         return DEPLOY_TYPE_FOLDER_COPY
 
+    def _request_deploy_runtime_status_async(self, mid: str) -> None:
+        """
+        Resolve outdated/conflict off the UI thread (fingerprint scan).
+
+        IMPORTANT:
+        This method can be triggered from the Qt GUI thread but must not run
+        ``resolve_deployment_status`` synchronously here.
+        """
+        if self._library_root is None:
+            return
+        token = f"{mid}:{self._library_root}"
+        self._deploy_runtime_token = token
+
+        from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+
+        class _DeployRuntimeSignals(QObject):
+            finished = Signal(str, str)
+
+        class _DeployRuntimeTask(QRunnable):
+            def __init__(
+                self,
+                tok: str,
+                mod_id: str,
+                library_root: Path,
+                managed_path: Path | None,
+                signals: _DeployRuntimeSignals,
+            ) -> None:
+                super().__init__()
+                self._tok = tok
+                self._mod_id = mod_id
+                self._library_root = library_root
+                self._managed_path = managed_path
+                self._signals = signals
+
+            def run(self) -> None:  # noqa: D401
+                from services.deploy_status import resolve_deployment_status
+
+                try:
+                    runtime = resolve_deployment_status(
+                        self._mod_id,
+                        library_root=self._library_root,
+                        managed_path=self._managed_path,
+                    )
+                except Exception:  # noqa: BLE001
+                    runtime = ""
+                self._signals.finished.emit(self._tok, str(runtime or ""))
+
+        signals = _DeployRuntimeSignals(self)
+        self._deploy_runtime_signals = signals
+        signals.finished.connect(self._on_deploy_runtime_status_ready)
+        QThreadPool.globalInstance().start(
+            _DeployRuntimeTask(
+                token,
+                mid,
+                Path(self._library_root),
+                Path(self._managed_path) if self._managed_path else None,
+                signals,
+            )
+        )
+
+    def _on_deploy_runtime_status_ready(self, token: str, runtime: str) -> None:
+        from services.deploy_status import DEPLOYMENT_CONFLICT, DEPLOYMENT_OUTDATED
+
+        if str(token) != getattr(self, "_deploy_runtime_token", ""):
+            return
+        if self._mode != MODE_VIEW:
+            return
+        if self.current_mod_id() != token.split(":", 1)[0]:
+            return
+        if runtime in (DEPLOYMENT_OUTDATED, DEPLOYMENT_CONFLICT):
+            self._fill_deploy_status_from_db_sync_runtime(runtime)
+
+    def _fill_deploy_status_from_db_sync_runtime(self, runtime: str) -> None:
+        """Apply async runtime status without re-scheduling another worker."""
+        from services.deploy_status import DEPLOYMENT_CONFLICT, DEPLOYMENT_OUTDATED
+
+        mid = self.current_mod_id()
+        if not mid:
+            return
+        try:
+            info = get_db().get_mod_deploy_info(mid)
+        except Exception:  # noqa: BLE001
+            info = None
+        if runtime == DEPLOYMENT_OUTDATED and info is not None:
+            self._hide_status_banner()
+            self.view_deploy.setText("[Deploy] 状态：需要更新")
+            self._apply_tone(self.view_deploy, "warning")
+            self.view_deploy_path.setText(
+                f"目标路径：{info.deploy_path}" if info.deploy_path else "目标路径：—"
+            )
+            self.view_deploy_time.setText(
+                f"部署时间：{info.deploy_time}" if info.deploy_time else "部署时间：—"
+            )
+            self.view_deploy_error.clear()
+            self._set_deploy_buttons(DEPLOYMENT_OUTDATED)
+        elif runtime == DEPLOYMENT_CONFLICT:
+            self.view_deploy.setText("[Deploy] 状态：冲突")
+            self._apply_tone(self.view_deploy, "error")
+            self.view_deploy_error.setText("目标目录已存在其他内容，无法部署")
+            self._set_deploy_buttons(DEPLOYMENT_CONFLICT)
+
     def _fill_deploy_status_from_db(self) -> None:
+        """
+        Paint deploy status from SQLite on the GUI thread.
+
+        IMPORTANT:
+        Do not call ``resolve_deployment_status`` / ``content_fingerprint`` here.
+        Heavy checks run via ``_request_deploy_runtime_status_async``.
+        """
+        from services.deploy_status import DEPLOYMENT_CONFLICT, DEPLOYMENT_OUTDATED
+
         mid = self.current_mod_id()
         if not mid:
             self._hide_status_banner()
@@ -4874,23 +5102,10 @@ class ModDetailPanel(QWidget):
             else DEPLOY_STATUS_NOT_DEPLOYED
         ) or DEPLOY_STATUS_NOT_DEPLOYED
 
-        # Prefer Phase 8 runtime deployment_status when Library root is known
+        # Fast path: DB status on main thread; outdated/conflict resolved async.
         runtime = status
-        try:
-            from services.deploy_status import (
-                DEPLOYMENT_CONFLICT,
-                DEPLOYMENT_OUTDATED,
-                resolve_deployment_status,
-            )
-
-            if self._library_root is not None:
-                runtime = resolve_deployment_status(
-                    mid,
-                    library_root=self._library_root,
-                    managed_path=self._managed_path,
-                )
-        except Exception:  # noqa: BLE001
-            runtime = status
+        if status == DEPLOY_STATUS_DEPLOYED and self._library_root is not None:
+            self._request_deploy_runtime_status_async(mid)
 
         if runtime == DEPLOYMENT_OUTDATED and info is not None:
             self._hide_status_banner()

@@ -55,7 +55,7 @@ def _steam_folder(lib: Path, mid: str, *, name: str = "", with_zip: bool = True)
 def test_case1_new_import_first_official_sync(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002001"
+    mid = "3591452001"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid)
     db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}"))
@@ -83,7 +83,7 @@ def test_case1_new_import_first_official_sync(
 def test_case2_synced_mod_refresh_skips_provider(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002002"
+    mid = "3591452002"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid, name="Synced Mod")
     db.upsert_mod(ModMetadata(published_file_id=mid, title="Synced Mod"))
@@ -101,7 +101,7 @@ def test_case2_synced_mod_refresh_skips_provider(
 def test_case3_synced_mod_delete_payload_marks_content_missing(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002003"
+    mid = "3591452003"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid, name="Payload Mod")
     db.upsert_mod(ModMetadata(published_file_id=mid, title="Payload Mod"))
@@ -120,7 +120,7 @@ def test_case3_synced_mod_delete_payload_marks_content_missing(
 def test_case4_restore_payload_back_to_healthy(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002004"
+    mid = "3591452004"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid, name="Restore Mod", with_zip=False)
     apply_missing_content_marker(folder, sync_backup=False)
@@ -142,7 +142,7 @@ def test_case4_restore_payload_back_to_healthy(
 def test_case5_first_sync_failure_stays_unsynced(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002005"
+    mid = "3591452005"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid)
     db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}"))
@@ -166,7 +166,7 @@ def test_case5_first_sync_failure_stays_unsynced(
 def test_case6_user_display_name_not_overwritten(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002006"
+    mid = "3591452006"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid)
     db.upsert_mod(ModMetadata(published_file_id=mid, title="Original"))
@@ -197,7 +197,7 @@ def test_case6_user_display_name_not_overwritten(
 def test_case7_user_description_not_overwritten(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002007"
+    mid = "3591452007"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid, name="Desc Mod")
     db.upsert_mod(ModMetadata(published_file_id=mid, title="Desc Mod", description="Old official"))
@@ -227,7 +227,7 @@ def test_case7_user_description_not_overwritten(
 def test_case8_user_cover_not_overwritten(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002008"
+    mid = "3591452008"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid, name="Cover Mod")
     info_dir = folder / INFO_DIR_NAME
@@ -264,7 +264,7 @@ def test_case8_user_cover_not_overwritten(
 def test_case9_placeholder_replaced_on_first_sync(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002009"
+    mid = "3591452009"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid)
     db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}"))
@@ -283,7 +283,7 @@ def test_case9_placeholder_replaced_on_first_sync(
 def test_case10_missing_folder_local_only(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002010"
+    mid = "3591452010"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid, name="Gone Mod")
     db.upsert_mod(ModMetadata(published_file_id=mid, title="Gone Mod"))
@@ -312,7 +312,7 @@ def test_case10_missing_folder_local_only(
 def test_case12_official_sync_only_once_across_refreshes(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mid = "9000000000002012"
+    mid = "3591452012"
     lib = tmp_path / "lib"
     folder = _steam_folder(lib, mid)
     db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}"))

@@ -767,7 +767,7 @@ class ModCardWidget(QFrame):
             if st.conflict_status == "conflict":
                 conflict = True
                 tip_parts.append(
-                    "冲突"
+                    "文件覆盖冲突"
                     + (
                         f"：{st.conflict_note}"
                         if (st.conflict_note or "").strip()

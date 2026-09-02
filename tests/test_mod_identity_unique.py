@@ -246,7 +246,7 @@ def test_update_platform_identity_conflict(db: DatabaseManager) -> None:
 
 
 def test_duplicate_warning_skips_unique_index(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import logging
     import sqlite3
@@ -286,6 +286,7 @@ def test_duplicate_warning_skips_unique_index(
     conn.close()
 
     DatabaseManager.reset_instance()
+    monkeypatch.setenv("SMM_IDENTITY_RECOVERY", "1")
     with caplog.at_level(logging.WARNING, logger="core.db_manager"):
         manager = DatabaseManager(path)
     assert any("Duplicate mod identity" in r.message for r in caplog.records)

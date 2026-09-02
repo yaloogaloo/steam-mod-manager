@@ -102,13 +102,13 @@ def test_second_mod_reuses_cache_fewer_http(
         import time
 
         t0 = time.perf_counter()
-        path_a = archiver.archive("111", info_a, overwrite=True)
+        path_a = archiver.archive("111", info_a, overwrite=True).path
         elapsed_a = time.perf_counter() - t0
         after_a = get_asset_cache_stats()
         http_after_a = len(http_urls)
 
         t1 = time.perf_counter()
-        path_b = archiver.archive("222", info_b, overwrite=True)
+        path_b = archiver.archive("222", info_b, overwrite=True).path
         elapsed_b = time.perf_counter() - t1
         after_b = get_asset_cache_stats()
         http_after_b = len(http_urls)

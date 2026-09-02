@@ -45,13 +45,24 @@ def _copy_file(src: Path, dst: Path) -> None:
 
 
 def _iter_pak_files(directory: Path) -> list[Path]:
-    """List ``*.pak`` files directly under *directory* (one level)."""
+    """List ``*.pak`` files directly under *directory* (one level, no recursion)."""
     if not directory.is_dir():
         return []
     out: list[Path] = []
-    for path in sorted(directory.glob("*.pak")):
-        if path.is_file() and not path.name.startswith("."):
+    try:
+        for path in sorted(directory.iterdir()):
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            if path.suffix.lower() != ".pak":
+                continue
+            try:
+                if path.is_symlink():
+                    continue
+            except OSError:
+                continue
             out.append(path)
+    except OSError:
+        return []
     return out
 
 

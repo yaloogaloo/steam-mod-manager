@@ -25,6 +25,11 @@ from .archive import (
     read_archive_status,
 )
 from .file_ops import COVER_BASENAME, ModFileManager
+from .source_timestamp import (
+    SourceTimestampDecision,
+    compare_source_timestamps,
+    normalize_source_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +102,9 @@ class SyncResult:
     """Outcome of a full or partial library sync."""
 
     success: list[ModMetadata] = field(default_factory=list)
+    updated: list[ModMetadata] = field(default_factory=list)
     skipped: list[ModMetadata] = field(default_factory=list)
+    baselined: list[ModMetadata] = field(default_factory=list)
     failed: list[tuple[ModMetadata | None, str]] = field(default_factory=list)
     rate_limited: list[tuple[ModMetadata | None, str]] = field(default_factory=list)
 
@@ -166,6 +173,8 @@ class ModSyncService:
         self._archive_ctx: SteamArchiveSyncContext | None = None
         # Protect destination path allocation across IO workers
         self._alloc_lock = threading.Lock()
+        # Mod IDs that need copytree overwrite due to Steam source update detection.
+        self._force_overwrite_ids: set[str] = set()
 
     def close(self) -> None:
         self._end_archive_batch()
@@ -259,39 +268,93 @@ class ModSyncService:
         if not scanned:
             return result
 
-        # --- Phase 1b: index library + granular delta (NO network) ---
+        # --- Phase 1b: index library + timestamp-aware delta (minimal network) ---
         progress("scan", 1, 1, "Indexing local library for delta sync…")
         existing_index = self._build_existing_index()
+        self._force_overwrite_ids = set()
 
-        to_skip: list[tuple[str, Path]] = []  # fully synced — nothing to do
-        to_fetch: list = []  # need copy and/or missing-component fill
+        to_skip: list[tuple[str, Path]] = []
+        to_fetch: list = []
+        skip_candidates: list[tuple] = []
+        baselined_ids: set[str] = set()
 
         for item in scanned:
             existing = existing_index.get(item.published_file_id)
             if opts.overwrite_files:
-                # Force overwrite: never early-skip
                 to_fetch.append(item)
                 continue
-            if (
-                existing
-                and opts.skip_existing
-                and self._is_fully_synced_mod(existing)
-            ):
-                to_skip.append((item.published_file_id, existing))
-            else:
-                # Missing / empty index.html, numeric folder name, or no folder
+            if not existing or not self._is_fully_synced_mod(existing):
                 to_fetch.append(item)
+                continue
+            skip_candidates.append((item, existing))
+
+        source_ts_by_id = self._fetch_source_timestamps_for_candidates(
+            skip_candidates,
+            progress,
+        )
+
+        for item, existing in skip_candidates:
+            pub_id = item.published_file_id
+            local_meta = self.files.load_metadata(existing)
+            local_ts = (
+                normalize_source_timestamp(local_meta.time_updated)
+                if local_meta
+                else None
+            )
+            source_ts = source_ts_by_id.get(pub_id)
+            if pub_id not in source_ts_by_id:
+                # API returned no row; use scanner stat (one stat/mod at scan time).
+                # Never used when API explicitly returned zero/missing time_updated.
+                source_ts = normalize_source_timestamp(item.source_dir_mtime)
+
+            decision = compare_source_timestamps(
+                source_ts,
+                local_ts,
+                local_sync_complete=True,
+            )
+            logger.debug(
+                "[SYNC] mod_id=%s source_timestamp=%s local_timestamp=%s decision=%s",
+                pub_id,
+                source_ts,
+                local_ts,
+                decision.value,
+            )
+
+            if decision == SourceTimestampDecision.UPDATED:
+                to_fetch.append(item)
+                self._force_overwrite_ids.add(pub_id)
+                continue
+
+            if decision == SourceTimestampDecision.BASELINE:
+                if source_ts and self._apply_source_timestamp_baseline(
+                    existing, pub_id, source_ts
+                ):
+                    stub = self._stub_metadata_for_skip(pub_id, existing, item, scanned)
+                    loaded = self.files.load_metadata(existing)
+                    if loaded:
+                        stub.title = loaded.title
+                        stub.game_name = loaded.game_name
+                        stub.app_id = loaded.app_id
+                        stub.time_updated = source_ts
+                    result.baselined.append(stub)
+                    baselined_ids.add(pub_id)
+                to_skip.append((pub_id, existing))
+                continue
+
+            to_skip.append((pub_id, existing))
 
         for pub_id, managed in to_skip:
-            stub = ModMetadata(
-                published_file_id=pub_id,
-                managed_path=str(managed),
-                source_path=str(
-                    next(
-                        (s.path for s in scanned if s.published_file_id == pub_id),
-                        managed,
-                    )
-                ),
+            if pub_id in baselined_ids:
+                continue
+            item = next(
+                (s for s in scanned if s.published_file_id == pub_id),
+                None,
+            )
+            stub = self._stub_metadata_for_skip(
+                pub_id,
+                managed,
+                item,
+                scanned,
             )
             loaded = self.files.load_metadata(managed)
             if loaded:
@@ -300,16 +363,20 @@ class ModSyncService:
                 stub.app_id = loaded.app_id
                 stub.cover_path = loaded.cover_path
                 stub.offline_page_path = loaded.offline_page_path
+                stub.time_updated = loaded.time_updated
             self.files.enrich_title_from_db(stub)
             result.skipped.append(stub)
 
-        if to_skip:
+        updated_count = len(self._force_overwrite_ids)
+        if to_skip or to_fetch:
             progress(
                 "metadata",
                 0,
                 max(len(to_fetch), 1),
-                f"Delta sync: {len(to_skip)} fully synced, "
-                f"{len(to_fetch)} need work (copy / rename / offline page)",
+                f"Delta sync: {len(to_skip)} up to date, "
+                f"{len(to_fetch)} need work"
+                + (f" ({updated_count} Steam-updated)" if updated_count else "")
+                + f" ({len(result.baselined)} baseline)",
             )
 
         if not to_fetch:
@@ -444,6 +511,8 @@ class ModSyncService:
                     with progress_lock:
                         if outcome_hint == "skipped_incomplete":
                             result.skipped.append(meta)
+                        elif meta.published_file_id in self._force_overwrite_ids:
+                            result.updated.append(meta)
                         else:
                             result.success.append(meta)
                         archives_done += 1
@@ -488,6 +557,100 @@ class ModSyncService:
                 index[folder.name] = folder
         return index
 
+    @staticmethod
+    def _stub_metadata_for_skip(
+        pub_id: str,
+        managed: Path,
+        item,
+        scanned,
+    ) -> ModMetadata:
+        stub = ModMetadata(
+            published_file_id=pub_id,
+            managed_path=str(managed),
+            source_path=str(
+                item.path
+                if item is not None
+                else next(
+                    (s.path for s in scanned if s.published_file_id == pub_id),
+                    managed,
+                )
+            ),
+        )
+        return stub
+
+    def _fetch_source_timestamps_for_candidates(
+        self,
+        skip_candidates: list[tuple],
+        progress: ProgressCallback,
+    ) -> dict[str, int | None]:
+        """Network fetch of Steam ``time_updated`` for mods that would otherwise skip."""
+        if not skip_candidates:
+            return {}
+        ids = [item.published_file_id for item, _ in skip_candidates]
+        progress(
+            "metadata",
+            0,
+            max(len(ids), 1),
+            f"Checking Steam update timestamps for {len(ids)} mod(s)…",
+        )
+
+        def _on_progress(done: int, total: int) -> None:
+            progress(
+                "metadata",
+                done,
+                total,
+                f"Fetching Steam timestamps {done}/{total}",
+            )
+
+        refreshed = self.client.refresh_details(ids, on_progress=_on_progress)
+        out: dict[str, int | None] = {}
+        for meta in refreshed:
+            ts = normalize_source_timestamp(meta.time_updated)
+            # Explicit API response with missing/zero time_updated → no mtime fallback.
+            out[meta.published_file_id] = ts
+        return out
+
+    def _apply_source_timestamp_baseline(
+        self,
+        managed: Path,
+        pub_id: str,
+        source_ts: int,
+    ) -> bool:
+        """
+        Establish ``time_updated`` baseline without re-copying mod content.
+
+        Contract: local ``time_updated=0`` here means “no sync baseline yet”, not
+        “must re-download”. Only metadata is updated; mod files are untouched.
+
+        Returns True when metadata was updated.
+        """
+        meta = self.files.load_metadata(managed)
+        if meta is None:
+            meta = ModMetadata(published_file_id=pub_id, managed_path=str(managed))
+        old = normalize_source_timestamp(meta.time_updated)
+        source = normalize_source_timestamp(source_ts)
+        if source is None:
+            return False
+        if old is not None and source < old:
+            logger.warning(
+                "[SYNC] mod_id=%s source_timestamp_regression old=%s new=%s",
+                pub_id,
+                old,
+                source,
+            )
+            return False
+        if old == source:
+            return False
+        meta.time_updated = source
+        self.files.save_metadata(meta, managed, sync_reason="source_timestamp_baseline")
+        logger.info(
+            "[SYNC] mod_id=%s decision=BASELINE timestamp updated old=%s new=%s",
+            pub_id,
+            old,
+            source,
+        )
+        return True
+
     def _is_fully_synced_mod(self, managed: Path) -> bool:
         """
         True when the managed folder needs no further *file* sync work:
@@ -505,11 +668,13 @@ class ModSyncService:
 
     def _has_valid_offline_page(self, managed: Path) -> bool:
         """
-        True when a real (non-stub) offline page exists.
+        True when a real (non-stub, non-error) offline page exists.
 
-        Requires ``index.html`` present, non-empty, and not a failure stub
-        produced by ``OfflinePageArchiver.write_fallback_page``.
+        Requires ``index.html`` present, non-empty, and a valid Steam Workshop
+        mirror (not a failure stub / Steam error / login page).
         """
+        from services.archive import is_valid_steam_workshop_page
+
         candidates = (
             self.files.info_dir_for_write(managed) / "index.html",
             self.files.info_dir(managed) / "index.html",
@@ -524,11 +689,8 @@ class ModSyncService:
                 continue
             seen.add(key)
             try:
-                if not path.is_file() or path.stat().st_size <= 0:
-                    continue
-                if is_stub_offline_page(path):
-                    continue
-                return True
+                if is_valid_steam_workshop_page(path):
+                    return True
             except OSError:
                 continue
         return False
@@ -556,6 +718,10 @@ class ModSyncService:
           - success: freshly copied (or overwritten)
         """
         existing = existing_index.get(meta.published_file_id)
+        force_overwrite = (
+            opts.overwrite_files
+            or meta.published_file_id in self._force_overwrite_ids
+        )
 
         with self._alloc_lock:
             # Detection A — numeric ID folder → real Mod title
@@ -564,7 +730,7 @@ class ModSyncService:
                 existing_index[meta.published_file_id] = existing
 
             # Force overwrite: re-copy into (possibly renamed) destination
-            if existing and opts.overwrite_files:
+            if existing and force_overwrite:
                 managed = self.files.copy_mod(
                     meta,
                     overwrite_existing=True,
@@ -624,6 +790,8 @@ class ModSyncService:
         opts: SyncOptions,
         on_status: Callable[[str], None] | None = None,
     ) -> None:
+        # time_updated (and other metadata) is committed only after copy + enrich
+        # succeed; a failed sync must leave the prior baseline for retry detection.
         self._network_enrich(meta, managed, opts, on_status=on_status)
         self.files.save_metadata(meta, managed)
 
@@ -689,20 +857,31 @@ class ModSyncService:
         # Archive is opt-in only (dedicated offline queue). Never run via net_workers
         # concurrency when archive_pages is False.
         if need_archive:
-            path = self.archiver.archive(
+            archived = self.archiver.archive(
                 meta.published_file_id,
                 info_dir,
                 overwrite=True,
                 metadata=meta,
                 on_status=on_status,
             )
+            path = (
+                archived.path
+                if hasattr(archived, "path")
+                else Path(archived)
+            )
             meta.offline_page_path = str(path)
             if not self._has_valid_offline_page(managed):
-                path = self.archiver.ensure_offline_page(
+                ensured = self.archiver.ensure_offline_page(
                     info_dir,
                     meta.published_file_id,
                     metadata=meta,
                     on_status=None,
+                    force_refresh=False,
+                )
+                path = (
+                    ensured.path
+                    if hasattr(ensured, "path")
+                    else Path(ensured)
                 )
                 meta.offline_page_path = str(path)
         elif not meta.offline_page_path:
@@ -914,6 +1093,7 @@ class ModSyncService:
                         detail_map = {
                             "start": "正在下载页面资源…",
                             "ok": "离线页面完成",
+                            "skipped": "跳过（已有离线页）",
                             "rate_limited": RATE_LIMIT_USER_MESSAGE,
                             "fail": "离线页面失败",
                         }
@@ -931,11 +1111,17 @@ class ModSyncService:
                         in_progress=True,
                     )
 
-                    path = self.archiver.ensure_offline_page(
+                    ensured = self.archiver.ensure_offline_page(
                         info_dir,
                         meta.published_file_id,
                         metadata=meta,
                         on_status=_status,
+                        force_refresh=False,
+                    )
+                    path = (
+                        ensured.path
+                        if hasattr(ensured, "path")
+                        else Path(ensured)
                     )
 
                     meta.offline_page_path = str(path)
@@ -946,9 +1132,16 @@ class ModSyncService:
                             "save_metadata failed for %s: %s", folder, exc
                         )
 
+                    outcome = getattr(ensured, "outcome", None)
                     status = read_archive_status(info_dir)
-                    if status and status.get("archive_failed_reason") == (
-                        _RATE_LIMITED_REASON
+                    if outcome == "skipped":
+                        with result_lock:
+                            result.skipped.append(meta)
+                        phase_detail = "跳过（已有离线页）"
+                    elif outcome == "rate_limited" or (
+                        status
+                        and status.get("archive_failed_reason")
+                        == _RATE_LIMITED_REASON
                     ):
                         # Only freeze the queue when the global HTML fuse is armed.
                         # A single Mod stub / transient 429 must not mark the rest.
@@ -966,7 +1159,19 @@ class ModSyncService:
                                     (meta, "HTML 429 after retries (no global block)")
                                 )
                             phase_detail = "离线页面失败"
-                    elif self._has_valid_offline_page(folder):
+                    elif outcome == "failed":
+                        with result_lock:
+                            result.failed.append(
+                                (
+                                    meta,
+                                    getattr(ensured, "error", None)
+                                    or "archive failed",
+                                )
+                            )
+                        phase_detail = "离线页面失败"
+                    elif outcome == "success" or self._has_valid_offline_page(
+                        folder
+                    ):
                         with result_lock:
                             result.success.append(meta)
                         phase_detail = "离线页面完成"

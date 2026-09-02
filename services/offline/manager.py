@@ -109,12 +109,16 @@ class OfflineManager:
         managed_path: str | Path | None = None,
         metadata=None,
         platform: str | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
         """
         Refresh ``.info/index.html`` using the provider for this Mod's platform.
 
         Does not run on library open / scan — call only from user actions
         (detail panel refresh) or explicit sync flows.
+
+        *force_refresh*: when True (manual UI save), providers must not treat an
+        existing page as a successful refresh (Steam: no cache-hit skip).
         """
         mid = str(mod_id).strip()
         info = self.db.get_mod_display_info(mid)
@@ -150,6 +154,7 @@ class OfflineManager:
             managed_path=managed_path,
             library_root=self.library_root,
             metadata=metadata,
+            force_refresh=bool(force_refresh),
         )
         try:
             from services.metadata_backup_sync import sync_after_metadata_change

@@ -19,6 +19,7 @@ from core.mod_platform import (
     ModFilesBundle,
     normalize_file_role,
     normalize_platform,
+    normalize_platform_if_known,
     parse_metadata_platform,
 )
 from services.file_ops import (
@@ -268,12 +269,24 @@ def build_sidecar_from_db(
         except Exception:  # noqa: BLE001
             pass
         description = str(info.custom_description or "").strip()
-        source_type = normalize_platform(info.platform)
+        source_type = normalize_platform_if_known(info.platform) or str(info.platform or "")
         url = str(info.source_url or "").strip()
-        workspace_id = str(info.workspace_id or "").strip()
+        from services.identity_service import persist_workspace_id, sidecar_published_file_id
+
+        workspace_id = persist_workspace_id(
+            platform=source_type,
+            mod_id=info.mod_id,
+            workspace_id=str(info.workspace_id or ""),
+            source_url=url,
+            external_id=str(info.external_id or ""),
+        )
         custom_deploy_path = str(info.custom_deploy_path or "").strip()
         cover_path = str(info.cover_path or "").strip()
-        published = str(info.mod_id or mod_id)
+        published = sidecar_published_file_id(
+            mod_id=info.mod_id,
+            platform=source_type,
+            external_id=str(info.external_id or ""),
+        )
         bundle = info.mod_files
         cat_tags = database.get_category_tags(str(mod_id))
         category = cat_tags[0] if cat_tags else ""
@@ -288,7 +301,13 @@ def build_sidecar_from_db(
                     str(dep_info.workspace_id or "").strip()
                     if dep_info is not None
                     else ""
-                ) or tid
+                )
+                from core.mod_platform import is_internal_mod_id
+
+                if is_internal_mod_id(wid):
+                    wid = ""
+                if not wid and tid and not is_internal_mod_id(tid):
+                    wid = tid
                 if wid not in dependencies:
                     dependencies.append(wid)
         except Exception:  # noqa: BLE001
@@ -421,6 +440,7 @@ def apply_sidecar_to_db(
     Returns True when a sidecar was found and applied.
     """
     from core.db_manager import get_db
+    from services.identity_service import lifecycle_scope
     from services.importers.local_scanner import scan_mod_directory
     from services.mod_files import ModFileManager as JsonMgr
 
@@ -434,15 +454,11 @@ def apply_sidecar_to_db(
     if not mid or not mid.isdigit():
         return False
 
-    # Ensure row exists.
-    try:
-        with database._lock:  # noqa: SLF001
-            database._ensure_mod_stub(int(mid))  # noqa: SLF001
-            database._conn.commit()  # noqa: SLF001
-    except Exception:  # noqa: BLE001
-        pass
-
-    existing = database.get_mod_display_info(mid)
+    with lifecycle_scope("sidecar"):
+        existing = database.get_mod_display_info(mid)
+        if existing is None:
+            logger.warning("apply_sidecar_to_db refused create for missing mod_id=%s", mid)
+            return False
     sidecar_display = str(sidecar.display_name or "").strip()
     try:
         from core.models import is_unknown_mod_title
@@ -491,12 +507,17 @@ def apply_sidecar_to_db(
 
     if sidecar.workspace_id:
         try:
-            with database._lock:  # noqa: SLF001
-                database._conn.execute(  # noqa: SLF001
-                    "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
-                    (sidecar.workspace_id, int(mid)),
-                )
-                database._conn.commit()  # noqa: SLF001
+            from services.identity_service import persist_workspace_id
+
+            plat = str(sidecar.source_type or (existing.platform if existing else "") or "")
+            ws = persist_workspace_id(
+                platform=plat,
+                mod_id=mid,
+                workspace_id=str(sidecar.workspace_id or ""),
+                source_url=str(sidecar.url or ""),
+                external_id=str(existing.external_id if existing else ""),
+            )
+            database.update_mod_identity_fields(mid, workspace_id=ws)
         except Exception as exc:  # noqa: BLE001
             logger.warning("apply sidecar workspace_id failed: %s", exc)
 

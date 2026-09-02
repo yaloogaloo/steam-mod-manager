@@ -34,10 +34,10 @@ def _iter_deployable_files(
     *,
     allowed_rel_paths: frozenset[str] | None = None,
 ) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     files: list[Path] = []
-    for path in source.rglob("*"):
-        if not path.is_file():
-            continue
+    for path in safe_iter_files(source):
         try:
             rel_parts = path.relative_to(source).parts
         except ValueError:
@@ -137,19 +137,37 @@ class FolderCopyStrategy(DeployStrategy):
                     )
                 return StrategyResult(success=False, error=f"复制失败：{exc}")
         else:
+            from services.deploy_file_ops_log import (
+                log_deploy_file_failed,
+                log_deploy_file_start,
+                log_deploy_file_success,
+            )
+
             for entry in planned.files:
                 src = Path(entry.source)
                 dst = Path(entry.target)
+                log_deploy_file_start(source=src, target=dst, mode="copy")
                 try:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                 except OSError as exc:
                     err = str(exc).lower()
+                    log_deploy_file_failed(
+                        source=src,
+                        target=dst,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
                     if "permission" in err or "denied" in err:
                         return StrategyResult(
                             success=False, error=f"Permission denied：{exc}"
                         )
                     return StrategyResult(success=False, error=f"复制失败：{exc}")
+                try:
+                    nbytes = int(dst.stat().st_size)
+                except OSError:
+                    nbytes = 0
+                log_deploy_file_success(source=src, target=dst, bytes_written=nbytes)
 
         for banned in _IGNORE_DIR_NAMES:
             if (target / banned).exists():
@@ -159,17 +177,20 @@ class FolderCopyStrategy(DeployStrategy):
                 )
 
         when = _utc_now()
-        # Record every deployed file (whole-tree or selective).
-        manifest_files = _iter_deployable_files(
-            source, allowed_rel_paths=ctx.allowed_rel_paths
-        )
-        entries = [
-            ManifestFileEntry(
-                source=str(src_file),
-                target=str((target / src_file.relative_to(source)).resolve()),
+        # Reuse plan manifest — do not rescan the source tree after copy.
+        if planned.files:
+            entries = list(planned.files)
+        else:
+            manifest_files = _iter_deployable_files(
+                source, allowed_rel_paths=ctx.allowed_rel_paths
             )
-            for src_file in manifest_files
-        ]
+            entries = [
+                ManifestFileEntry(
+                    source=str(src_file),
+                    target=str((target / src_file.relative_to(source)).resolve()),
+                )
+                for src_file in manifest_files
+            ]
         if not entries:
             return StrategyResult(
                 success=False,

@@ -122,6 +122,19 @@ def test_post_deploy_runs_check_all(
 
     monkeypatch.setattr(ConflictDetector, "check_all_mods", _wrap)
 
+    def _sync_conflict_scan(
+        library_root: Path,
+        *,
+        db: DatabaseManager | None = None,
+        log_prefix: str = "",
+    ) -> None:
+        ConflictDetector(library_root, db=db).check_all_mods(persist=True)
+
+    monkeypatch.setattr(
+        "services.deploy._schedule_post_deploy_conflict_scan",
+        _sync_conflict_scan,
+    )
+
     man = DeployManifest(
         mod_id="602",
         deploy_time="t2",

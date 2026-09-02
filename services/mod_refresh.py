@@ -267,84 +267,133 @@ def refresh_mod(
     per mod lifetime (until first successful sync).
     """
     from core.db_manager import get_db
+    from services.identity_service import lifecycle_scope
     from services.path_lifecycle import resolve_managed_folder
 
     database = db if db is not None else get_db()
     mid = str(mod_id or "").strip()
     plat = normalize_platform(platform)
 
-    folder = _resolve_refresh_folder(mid, managed_path, db=database)
+    with lifecycle_scope("refresh"):
+        folder = _resolve_refresh_folder(mid, managed_path, db=database)
 
-    local = reconcile_local_state(
-        mid, folder, library_root=library_root, db=database
-    )
-
-    if not _should_attempt_official_sync(database, mid):
-        logger.info(
-            "[refresh] mod_id=%s official metadata already synced; network refresh skipped",
-            mid,
-        )
-        msg = "已刷新本地状态"
-        if not local.folder_present:
-            msg = "已刷新本地状态（Mod 目录缺失）"
-        return ModRefreshResult(
-            mod_id=mid,
-            success=True,
-            local=local,
-            official_attempted=False,
-            official_synced=True,
-            managed_path=folder,
-            message=msg,
+        local = reconcile_local_state(
+            mid, folder, library_root=library_root, db=database
         )
 
-    logger.info(
-        "[refresh] mod_id=%s official metadata not synced; attempting initial provider sync",
-        mid,
-    )
-
-    provider_result: MetadataRefreshResult | None = None
-    try:
-        if plat == PLATFORM_STEAM:
-            from services.metadata_refresh import refresh_steam_mod_metadata
-
-            provider_result = refresh_steam_mod_metadata(
+        if not _should_attempt_official_sync(database, mid):
+            logger.info(
+                "[refresh] mod_id=%s official metadata already synced; network refresh skipped",
                 mid,
-                folder,
-                library_root=library_root,
-                force=True,
-                allow_official_sync=True,
-                db=database,
             )
-        elif plat == PLATFORM_MODIO:
-            from services.modio_metadata_refresh import refresh_modio_mod_metadata
-
-            provider_result = refresh_modio_mod_metadata(
-                mid,
-                folder,
-                library_root=library_root,
-                source_url=source_url,
-                allow_official_sync=True,
-                db=database,
-            )
-        else:
-            # Nexus / GitHub / other — local only; mark synced if folder exists
-            if local.folder_present:
-                database.set_official_metadata_synced(mid, True)
+            msg = "已刷新本地状态"
+            if not local.folder_present:
+                msg = "已刷新本地状态（Mod 目录缺失）"
             return ModRefreshResult(
                 mod_id=mid,
                 success=True,
                 local=local,
                 official_attempted=False,
-                official_synced=database.is_official_metadata_synced(mid),
+                official_synced=True,
                 managed_path=folder,
-                message="已刷新本地状态",
+                message=msg,
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "[refresh] mod_id=%s official metadata sync failed; remains unsynced",
+
+        logger.info(
+            "[refresh] mod_id=%s official metadata not synced; attempting initial provider sync",
             mid,
         )
+
+        provider_result: MetadataRefreshResult | None = None
+        try:
+            if plat == PLATFORM_STEAM:
+                from services.metadata_refresh import refresh_steam_mod_metadata
+
+                provider_result = refresh_steam_mod_metadata(
+                    mid,
+                    folder,
+                    library_root=library_root,
+                    force=True,
+                    allow_official_sync=True,
+                    db=database,
+                )
+            elif plat == PLATFORM_MODIO:
+                from services.modio_metadata_refresh import refresh_modio_mod_metadata
+
+                provider_result = refresh_modio_mod_metadata(
+                    mid,
+                    folder,
+                    library_root=library_root,
+                    source_url=source_url,
+                    allow_official_sync=True,
+                    db=database,
+                )
+            else:
+                # Nexus / GitHub / other — local only; mark synced if folder exists
+                if local.folder_present:
+                    database.set_official_metadata_synced(mid, True)
+                return ModRefreshResult(
+                    mod_id=mid,
+                    success=True,
+                    local=local,
+                    official_attempted=False,
+                    official_synced=database.is_official_metadata_synced(mid),
+                    managed_path=folder,
+                    message="已刷新本地状态",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "[refresh] mod_id=%s official metadata sync failed; remains unsynced",
+                mid,
+            )
+            database.set_official_metadata_synced(mid, False)
+            return ModRefreshResult(
+                mod_id=mid,
+                success=True,
+                local=local,
+                official_attempted=True,
+                official_success=False,
+                official_synced=False,
+                managed_path=folder,
+                error=str(exc),
+                message="本地状态已刷新，官方信息同步失败",
+            )
+
+        assert provider_result is not None
+        if provider_result.success and not provider_result.skipped:
+            database.set_official_metadata_synced(mid, True)
+            logger.info(
+                "[refresh] mod_id=%s official metadata sync succeeded; marked synced",
+                mid,
+            )
+            # Reconcile again after official writes (.info / rename / cover)
+            final_path = provider_result.managed_path or folder
+            local = reconcile_local_state(
+                mid, final_path, library_root=library_root, db=database
+            )
+            return ModRefreshResult(
+                mod_id=mid,
+                success=True,
+                local=local,
+                official_attempted=True,
+                official_success=True,
+                official_synced=True,
+                provider=provider_result,
+                managed_path=final_path,
+                message="已刷新本地状态，并同步官方信息",
+            )
+
         database.set_official_metadata_synced(mid, False)
+        logger.warning(
+            "[refresh] mod_id=%s official metadata sync failed; remains unsynced error=%s",
+            mid,
+            provider_result.error,
+        )
+        fail_path = (
+            provider_result.managed_path
+            or resolve_managed_folder(mid, db=database).path
+            or folder
+        )
         return ModRefreshResult(
             mod_id=mid,
             success=True,
@@ -352,55 +401,8 @@ def refresh_mod(
             official_attempted=True,
             official_success=False,
             official_synced=False,
-            managed_path=folder,
-            error=str(exc),
+            provider=provider_result,
+            managed_path=fail_path,
+            error=provider_result.error,
             message="本地状态已刷新，官方信息同步失败",
         )
-
-    assert provider_result is not None
-    if provider_result.success and not provider_result.skipped:
-        database.set_official_metadata_synced(mid, True)
-        logger.info(
-            "[refresh] mod_id=%s official metadata sync succeeded; marked synced",
-            mid,
-        )
-        # Reconcile again after official writes (.info / rename / cover)
-        final_path = provider_result.managed_path or folder
-        local = reconcile_local_state(
-            mid, final_path, library_root=library_root, db=database
-        )
-        return ModRefreshResult(
-            mod_id=mid,
-            success=True,
-            local=local,
-            official_attempted=True,
-            official_success=True,
-            official_synced=True,
-            provider=provider_result,
-            managed_path=final_path,
-            message="已刷新本地状态，并同步官方信息",
-        )
-
-    database.set_official_metadata_synced(mid, False)
-    logger.warning(
-        "[refresh] mod_id=%s official metadata sync failed; remains unsynced error=%s",
-        mid,
-        provider_result.error,
-    )
-    fail_path = (
-        provider_result.managed_path
-        or resolve_managed_folder(mid, db=database).path
-        or folder
-    )
-    return ModRefreshResult(
-        mod_id=mid,
-        success=True,
-        local=local,
-        official_attempted=True,
-        official_success=False,
-        official_synced=False,
-        provider=provider_result,
-        managed_path=fail_path,
-        error=provider_result.error,
-        message="本地状态已刷新，官方信息同步失败",
-    )

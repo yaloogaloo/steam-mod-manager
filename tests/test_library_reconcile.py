@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from core.mod_platform import is_internal_mod_id
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
 from services.library_reconcile import (
@@ -206,6 +207,8 @@ def test_case5_generates_uuid_without_published_file_id(
             "game_name": "GameU",
             "source_type": "github",
             "url": "https://github.com/a/b",
+            "app_id": 1623730,
+            "external_id": "a/b",
         },
     )
     result = reconcile_library(library)
@@ -267,6 +270,9 @@ def test_ensure_mod_identity_does_not_use_folder_name(
     payload = {"title": "X", "source_type": "github"}
     mid, out, changed = ensure_mod_identity(folder, payload)
     assert changed is True
-    assert mid.isdigit()
-    assert mid != "SomeFolderName"
+    assert mid == ""
+    assert out.get("identity_status") == "unresolved"
+    assert not str(out.get("published_file_id") or "").isdigit() or not is_internal_mod_id(
+        out.get("published_file_id")
+    )
     assert read_internal_id(out)

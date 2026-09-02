@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import subprocess
@@ -45,6 +46,7 @@ UNSUPPORTED_FMT_MSG = "部署失败：不支持的压缩格式"
 RAR_ERROR_PYTHON_SUPPORT_MISSING = "RAR_PYTHON_SUPPORT_MISSING"
 RAR_ERROR_TOOL_UNAVAILABLE = "RAR_TOOL_UNAVAILABLE"
 RAR_ERROR_EXECUTION_FAILED = "RAR_EXECUTION_FAILED"
+RAR_ERROR_EXECUTABLE_INVALID = "RAR_EXECUTABLE_INVALID"
 RAR_PYTHON_SUPPORT_MISSING_MSG = (
     "部署失败: 缺少 Python RAR 支持组件(rarfile)，请安装项目依赖"
 )
@@ -81,6 +83,34 @@ def _raise_rar_tool_unavailable(exc: BaseException | None = None) -> None:
             RAR_TOOL_UNAVAILABLE_MSG,
         ) from exc
     raise RarExtractError(RAR_ERROR_TOOL_UNAVAILABLE, RAR_TOOL_UNAVAILABLE_MSG)
+
+
+def _raise_rar_executable_invalid(exc: BaseException | None = None) -> None:
+    msg = "部署失败: RAR 解压执行组件无效或架构不兼容"
+    if exc is not None:
+        raise RarExtractError(RAR_ERROR_EXECUTABLE_INVALID, msg) from exc
+    raise RarExtractError(RAR_ERROR_EXECUTABLE_INVALID, msg)
+
+
+def _unrar_executable_usable(tool: Path) -> bool:
+    """
+    Reject placeholder / wrong-architecture UnRAR binaries before subprocess.
+
+    Real bundled UnRAR is hundreds of KB; tiny ``MZ`` stubs fail with WinError 216.
+    """
+    try:
+        if not tool.is_file():
+            return False
+        size = int(tool.stat().st_size)
+        if size < 50_000:
+            return False
+        if platform.system() == "Windows":
+            with tool.open("rb") as fh:
+                if fh.read(2) != b"MZ":
+                    return False
+        return True
+    except OSError:
+        return False
 
 
 def _raise_rar_execution_failed(
@@ -221,7 +251,7 @@ def resolve_bundled_unrar_tool() -> Path | None:
             for name in names:
                 candidate = base / folder / name
                 try:
-                    if candidate.is_file():
+                    if candidate.is_file() and _unrar_executable_usable(candidate):
                         return candidate.resolve()
                 except OSError:
                     continue
@@ -272,23 +302,25 @@ def find_mod_root(extract_root: str | Path) -> Path | None:
     back to a single wrapper folder or the extract root itself — import never
     requires known Mod file types.
     """
+    from services.deploy_fs import safe_iter_dirs, safe_iter_files
+
     root = Path(extract_root).expanduser().resolve()
     if not root.is_dir():
         return None
 
     candidates: list[tuple[int, int, Path]] = []  # (-score, depth, path)
 
-    for path in root.rglob("*"):
+    for path in safe_iter_dirs(root, name="LogicMods"):
         if is_history_version_path(path):
             continue
-        if path.is_dir() and path.name.lower() == "logicmods":
-            parent = path.parent
-            if is_history_version_path(parent):
-                continue
-            depth = len(parent.relative_to(root).parts)
-            candidates.append((-(_dir_score(parent) + 30), depth, parent))
+        parent = path.parent
+        if is_history_version_path(parent):
             continue
-        if not path.is_file():
+        depth = len(parent.relative_to(root).parts)
+        candidates.append((-(_dir_score(parent) + 30), depth, parent))
+
+    for path in safe_iter_files(root):
+        if is_history_version_path(path):
             continue
         if path.name.startswith("."):
             continue
@@ -331,6 +363,8 @@ def find_mod_root(extract_root: str | Path) -> Path | None:
 
 def _has_files_outside(root: Path, inner: Path) -> bool:
     """True when *root* contains files that are not under *inner*."""
+    from services.deploy_fs import safe_iter_files
+
     try:
         inner_r = inner.resolve()
         root_r = root.resolve()
@@ -339,10 +373,10 @@ def _has_files_outside(root: Path, inner: Path) -> bool:
     if inner_r == root_r:
         return False
     try:
-        for path in root_r.rglob("*"):
+        for path in safe_iter_files(root_r):
             if is_history_version_path(path):
                 continue
-            if not path.is_file() or path.name.startswith("."):
+            if path.name.startswith("."):
                 continue
             try:
                 path.relative_to(inner_r)
@@ -359,11 +393,10 @@ def _fallback_content_root(root: Path) -> Path | None:
 
     Returns ``None`` only when the extract tree has no files at all.
     """
+    from services.deploy_fs import safe_has_any_file
+
     try:
-        has_files = any(
-            p.is_file() and not p.name.startswith(".")
-            for p in root.rglob("*")
-        )
+        has_files = safe_has_any_file(root)
     except OSError:
         return None
     if not has_files:
@@ -492,19 +525,32 @@ def _extract_rar(src: Path, dest: Path) -> None:
     """
     Extract ``.rar`` with backend priority:
 
-    1. Project-bundled UnRAR (``bin/tools``)
-    2. System ``unrar`` on PATH
+    1. Project-bundled UnRAR (``bin/tools``) — subprocess with timeout
+    2. System ``unrar`` on PATH — subprocess with timeout
     3. System 7-Zip CLI fallback
+    4. rarfile + explicit UnRAR binary (last resort)
     """
     bundled = resolve_bundled_unrar_tool()
     if bundled is not None:
-        _extract_rar_with_rarfile(src, dest, unrar_tool=bundled)
-        return
+        try:
+            _extract_rar_with_unrar_subprocess(bundled, src, dest)
+            return
+        except RarExtractError as exc:
+            if exc.code != RAR_ERROR_EXECUTABLE_INVALID:
+                raise
+            logger.warning("bundled UnRAR unusable: %s", bundled)
 
     system = find_system_unrar_executable()
     if system is not None:
-        _extract_rar_with_rarfile(src, dest, unrar_tool=system)
-        return
+        system_path = Path(system)
+        if _unrar_executable_usable(system_path):
+            try:
+                _extract_rar_with_unrar_subprocess(system_path, src, dest)
+                return
+            except RarExtractError as exc:
+                if exc.code != RAR_ERROR_EXECUTABLE_INVALID:
+                    raise
+                logger.warning("system UnRAR unusable: %s", system_path)
 
     seven = find_7z_executable()
     if seven is not None:
@@ -516,6 +562,36 @@ def _extract_rar(src: Path, dest: Path) -> None:
     except ImportError as exc:  # pragma: no cover
         _raise_rar_python_support_missing(exc)
     _raise_rar_tool_unavailable()
+
+
+def _extract_rar_with_unrar_subprocess(
+    tool: Path | str,
+    src: Path,
+    dest: Path,
+    *,
+    timeout: int = 600,
+) -> None:
+    """Run UnRAR with a hard timeout — avoids rarfile blocking indefinitely."""
+    dest.mkdir(parents=True, exist_ok=True)
+    cmd = [str(tool), "x", "-o+", "-inul", str(src), str(dest) + os.sep]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"RAR 部署失败: 解压超时（>{timeout}s）") from exc
+    except OSError as exc:
+        winerr = getattr(exc, "winerror", None)
+        if winerr == 216 or "216" in str(exc):
+            _raise_rar_executable_invalid(exc)
+        _raise_rar_tool_unavailable(exc)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+        raise RuntimeError(_format_rar_failure(err)) from None
 
 
 def _extract_rar_with_rarfile(
@@ -951,6 +1027,9 @@ class ArchiveImporter(ModImporter):
         else:
             raw_url = nexus_url
             nid = nexus_id or parse_nexus_id(raw_url, "")
+            local_archive = not str(nid or "").strip()
+            if local_archive:
+                nid = archives[0].stem
             result = NexusImporter(db=db).import_mod(
                 source_folder=staging_dir,
                 title=name,
@@ -959,6 +1038,7 @@ class ArchiveImporter(ModImporter):
                 library_root=library_root,
                 game_name=game_name,
                 app_id=app_id,
+                is_batch_mode=local_archive,
                 **cover_kwargs,
             )
 

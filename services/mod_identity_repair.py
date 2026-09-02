@@ -268,6 +268,17 @@ def build_repair_plan(db, library_root: str | Path) -> RepairPlan:
             )
 
         if is_internal_mod_id(mid) and plat == PLATFORM_STEAM:
+            url_l = url.lower()
+            steamish = (
+                not url
+                or "steamcommunity.com" in url_l
+                or "steampowered.com" in url_l
+            )
+            if steamish:
+                # Leftover Steam Workshop ghosts are owned by identity_repair
+                # (merge/quarantine). Do not reclassify them as platform=other.
+                plan.notes.append(f"defer_steam_ghost:{mid}")
+                continue
             inferred = ""
             if "mod.io" in url.lower():
                 inferred = PLATFORM_MODIO

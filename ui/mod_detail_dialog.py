@@ -57,11 +57,22 @@ class OfflinePageWorker(QThread):
     def run(self) -> None:
         try:
             with OfflinePageArchiver() as archiver:
-                path = archiver.ensure_offline_page(
+                ensured = archiver.ensure_offline_page(
                     self.info_dir,
                     self.published_file_id,
                     metadata=self.metadata,
+                    force_refresh=True,
                 )
+            path = ensured.path if hasattr(ensured, "path") else ensured
+            outcome = getattr(ensured, "outcome", "success")
+            if outcome in ("failed", "rate_limited"):
+                err = getattr(ensured, "error", "") or "离线页面保存失败"
+                self.finished_error.emit(str(err))
+                return
+            if outcome == "skipped":
+                # Dialog path is always force_refresh; skip should not happen.
+                self.finished_error.emit("离线页面未刷新（意外跳过）")
+                return
             self.finished_ok.emit(str(path))
         except Exception as exc:  # noqa: BLE001 — surface to UI
             self.finished_error.emit(str(exc))

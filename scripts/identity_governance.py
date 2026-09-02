@@ -105,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
     p_verify = sub.add_parser("verify", help="Alias of audit with exit code gate")
     p_verify.add_argument("--out", type=Path, default=None)
 
+    p_id = sub.add_parser(
+        "identity-repair",
+        help="Historical identity pollution planner (dry-run by default)",
+    )
+    p_id.add_argument("--audit", action="store_true", help="Read-only plan (default)")
+    p_id.add_argument("--apply", action="store_true", help="Apply mutations")
+    p_id.add_argument("--yes", action="store_true", help="Required for --apply")
+    p_id.add_argument("--out", type=Path, default=None)
+    p_id.add_argument("--db", type=Path, default=None)
+
     args = parser.parse_args(argv)
     library = Path(args.library) if args.library else Path(default_mod_library())
     out = getattr(args, "out", None)
@@ -114,6 +124,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "repair":
         apply = bool(args.apply) and not bool(args.dry_run)
         return cmd_repair(library, apply=apply, out=out)
+    if args.cmd == "identity-repair":
+        from services.identity_repair import main as identity_repair_main
+
+        argv2: list[str] = ["--library", str(library)]
+        if args.db:
+            argv2.extend(["--db", str(args.db)])
+        if out:
+            argv2.extend(["--out", str(out)])
+        if args.apply:
+            argv2.append("--apply")
+            if args.yes:
+                argv2.append("--yes")
+        else:
+            argv2.append("--audit")
+        return identity_repair_main(argv2)
     return 1
 
 

@@ -7,7 +7,12 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.mod_platform import normalize_platform, normalize_platform_if_known
+from core.mod_platform import (
+    PLATFORM_STEAM,
+    is_internal_mod_id,
+    normalize_platform,
+    normalize_platform_if_known,
+)
 from core.models import ModMetadata
 from core.paths import default_mod_library
 from services.file_ops import (
@@ -135,8 +140,102 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
         had_row = bool(resolve_existing_mod_id(raw))
         mod_id, payload, changed = ensure_mod_identity(folder, raw)
         if not mod_id.isdigit():
-            result.notes.append(f"skip unidentifiable folder: {folder}")
-            continue
+            from services.identity_service import (
+                create_mod_identity,
+                has_official_platform_identity,
+                is_empty_mod_placeholder,
+                sidecar_published_file_id,
+            )
+
+            plat = normalize_platform_if_known(
+                str(payload.get("source_type") or payload.get("platform") or "")
+            )
+            url = str(payload.get("url") or payload.get("source_url") or "").strip()
+            ext = str(payload.get("external_id") or "").strip()
+            folder_title = str(payload.get("title") or folder.name)
+            placeholder = is_empty_mod_placeholder(folder.name) or is_empty_mod_placeholder(
+                folder_title
+            )
+            official = has_official_platform_identity(
+                platform=plat,
+                external_id=ext,
+                source_url=url,
+            )
+            if placeholder and not official:
+                result.notes.append(f"IDENTITY_UNRESOLVED_PLACEHOLDER: {folder}")
+                if changed:
+                    try:
+                        persist_unified_metadata_dict(
+                            folder, payload, sync_backup=False, sync_reason="unresolved"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "persist unresolved placeholder failed for %s: %s", folder, exc
+                        )
+                continue
+            try:
+                app_id = int(payload.get("app_id") or 0)
+            except (TypeError, ValueError):
+                app_id = 0
+            game_name = str(payload.get("game_name") or folder.parent.name)
+            created_id = ""
+            try:
+                if plat == PLATFORM_STEAM:
+                    from core.mod_platform import steam_workshop_url as _swu
+                    from urllib.parse import parse_qs, urlparse
+
+                    wid = ext if ext.isdigit() and not is_internal_mod_id(ext) else ""
+                    if not wid and "id=" in url:
+                        wid = parse_qs(urlparse(url).query).get("id", [""])[0]
+                    if wid.isdigit() and not is_internal_mod_id(wid):
+                        created = create_mod_identity(
+                            db,
+                            platform=PLATFORM_STEAM,
+                            workshop_id=wid,
+                            external_id=wid,
+                            source_url=url or _swu(wid),
+                            title=str(payload.get("title") or folder.name),
+                            app_id=app_id,
+                            game_name=game_name,
+                            operation="reconcile",
+                        )
+                        created_id = created.mod_id
+                elif plat and (url or ext):
+                    created = create_mod_identity(
+                        db,
+                        platform=plat,
+                        external_id=ext,
+                        source_url=url,
+                        title=str(payload.get("title") or folder.name),
+                        app_id=app_id,
+                        game_name=game_name,
+                        operation="reconcile",
+                    )
+                    created_id = created.mod_id
+            except Exception as exc:  # noqa: BLE001
+                logger.info("reconcile identity create skipped for %s: %s", folder, exc)
+            if created_id.isdigit():
+                mod_id = created_id
+                payload["published_file_id"] = sidecar_published_file_id(
+                    mod_id=mod_id,
+                    platform=plat,
+                    external_id=ext,
+                ) or (mod_id if plat != PLATFORM_STEAM else "")
+                payload["identity_status"] = "complete"
+                changed = True
+                had_row = False
+            else:
+                result.notes.append(f"IDENTITY_UNRESOLVED: {folder}")
+                if changed:
+                    try:
+                        persist_unified_metadata_dict(
+                            folder, payload, sync_backup=False, sync_reason="unresolved"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "persist unresolved identity failed for %s: %s", folder, exc
+                        )
+                continue
 
         if changed:
             try:
@@ -205,6 +304,19 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
         )
         library_status = content_status_to_library_status(content_status)
 
+        from services.identity_service import persist_workspace_id
+        from services.mod_identity_authority import sanitize_platform_external_id
+
+        ws = persist_workspace_id(
+            platform=store_platform,
+            mod_id=mod_id,
+            workspace_id=str(payload.get("workspace_id") or ""),
+            source_url=str(payload.get("url") or payload.get("source_url") or ""),
+            external_id=str(payload.get("external_id") or ""),
+        )
+        ext = sanitize_platform_external_id(
+            store_platform, str(payload.get("external_id") or ""), mod_id=mod_id
+        )
         try:
             db.update_mod_identity_fields(
                 mod_id,
@@ -218,8 +330,8 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                 platform=store_platform or None,
                 source_url=str(payload.get("url") or payload.get("source_url") or "")
                 or None,
-                external_id=str(payload.get("external_id") or "") or None,
-                workspace_id=str(payload.get("workspace_id") or "") or None,
+                external_id=ext or None,
+                workspace_id=ws,
                 app_id=int(payload.get("app_id") or 0) or None,
                 sticky_source=True,
             )
@@ -292,6 +404,9 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                     continue
                 mid = child.name
                 if mid in seen_ids:
+                    continue
+                if is_internal_mod_id(mid) and db.get_mod(mid) is None:
+                    result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
                     continue
                 meta_file = child / "metadata.json"
                 if not meta_file.is_file():

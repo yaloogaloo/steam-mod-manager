@@ -82,12 +82,10 @@ def safe_workspace_id_for_deploy(
     plat = normalize_platform(platform)
     mid = str(mod_id or "").strip()
     if existing:
-        if is_internal_mod_id(existing) and plat != PLATFORM_STEAM:
-            return ""
-        if is_internal_mod_id(existing) and plat == PLATFORM_STEAM and existing != mid:
-            # Steam workspace should equal workshop id (= mod_id in steam range).
-            if mid and not is_internal_mod_id(mid) and mid.isdigit():
+        if is_internal_mod_id(existing):
+            if plat == PLATFORM_STEAM and mid.isdigit() and not is_internal_mod_id(mid):
                 return mid
+            return ""
         return existing
     resolved = resolve_workspace_id(
         plat,
@@ -336,6 +334,7 @@ def log_identity_mutation(
     new_value: str,
     source: str,
     reason: str,
+    commit: bool = True,
 ) -> None:
     """Append one identity provenance row (best-effort)."""
     try:
@@ -346,6 +345,7 @@ def log_identity_mutation(
             new_value=new_value,
             source=source,
             reason=reason,
+            commit=commit,
         )
     except Exception:  # noqa: BLE001
         logger.debug("identity audit log failed", exc_info=True)
@@ -360,7 +360,9 @@ def ensure_non_polluted_workspace(db, mod_id: int | str) -> str:
     plat = normalize_platform(info.platform)
     ws = str(info.workspace_id or "").strip()
     if plat == PLATFORM_STEAM:
-        return ws
+        return ws if not is_internal_mod_id(mid) else (
+            "" if is_internal_mod_id(ws) else ws
+        )
     if ws and is_internal_mod_id(ws) and ws == mid:
         taken = set()
         try:

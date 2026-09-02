@@ -21,6 +21,7 @@ from core.mod_platform import (
     PLATFORM_MODIO,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
+    is_internal_mod_id,
     normalize_platform,
     silent_correct_nexus_workspace_id,
 )
@@ -33,6 +34,28 @@ from services.file_ops import (
     persist_unified_metadata_dict,
     read_info_metadata_dict,
 )
+
+def resolve_steam_workshop_external_id(database: Any, mod_id: str) -> str:
+    """Steam Workshop published_file_id — never an internal entity key.
+
+    Steam rows typically use workshop id as ``mod_id``, but the platform
+    identity is ``external_id``. Refresh/API/sidecar writes must use that
+    workshop id, not a 900… internal pk.
+    """
+    mid = str(mod_id or "").strip()
+    ext = ""
+    try:
+        info = database.get_mod_display_info(mid) if database is not None else None
+        if info is not None:
+            ext = str(getattr(info, "external_id", "") or "").strip()
+    except Exception:  # noqa: BLE001
+        ext = ""
+    if ext.isdigit() and not is_internal_mod_id(ext):
+        return ext
+    if mid.isdigit() and not is_internal_mod_id(mid):
+        return mid
+    return ""
+
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +77,7 @@ __all__ = [
     "refresh_steam_mod_metadata",
     "refresh_steam_mods_metadata",
     "rename_managed_folder_for_title",
+    "resolve_steam_workshop_external_id",
     "safe_directory_rename",
 ]
 
@@ -583,6 +607,15 @@ def refresh_steam_mod_metadata(
     mid = str(mod_id).strip()
     folder = Path(managed_path).expanduser().resolve()
     database = db if db is not None else get_db()
+    steam_external_id = resolve_steam_workshop_external_id(database, mid)
+    if not steam_external_id:
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=False,
+            managed_path=folder,
+            old_path=folder,
+            error="Steam identity unresolved; refresh will not use internal mod_id as published_file_id",
+        )
 
     from services.path_lifecycle import record_filesystem_rename, resolve_managed_folder
 
@@ -640,11 +673,11 @@ def refresh_steam_mod_metadata(
         try:
             # Manual refresh: only this mod id, API retries, no workshop scrape fan-out.
             fetched_list = api.refresh_details(
-                [mid],
+                [steam_external_id],
                 enable_scrape_fallback=False,
             )
             fetched = fetched_list[0] if fetched_list else ModMetadata(
-                published_file_id=mid,
+                published_file_id=steam_external_id,
                 fetch_error="Empty response from Steam API",
             )
         except Exception as exc:  # noqa: BLE001
@@ -657,11 +690,11 @@ def refresh_steam_mod_metadata(
             )
 
         if fetched.fetch_error or is_unknown_mod_title(
-            fetched.title, published_file_id=mid
+            fetched.title, published_file_id=steam_external_id
         ):
             # Persist failure marker so UI / next retry still see fetch_error.
-            failed = existing or ModMetadata(published_file_id=mid)
-            failed.published_file_id = mid
+            failed = existing or ModMetadata(published_file_id=steam_external_id)
+            failed.published_file_id = steam_external_id
             if fetched.title:
                 failed.title = fetched.title
             failed.fetch_error = (
@@ -683,8 +716,8 @@ def refresh_steam_mod_metadata(
             )
 
         # Merge into existing sidecar fields we want to keep.
-        meta = existing or ModMetadata(published_file_id=mid)
-        meta.published_file_id = mid
+        meta = existing or ModMetadata(published_file_id=steam_external_id)
+        meta.published_file_id = steam_external_id
         meta.title = fetched.title.strip()
         official_description = str(fetched.description or "").strip()
         if official_description and should_apply_official_field(
@@ -800,18 +833,28 @@ def refresh_steam_mod_metadata(
             meta.json_display_name = local_display
 
         # Upsert Steam title first so sidecar merge / Detail see the real name.
+        # Refresh must never create a missing mods row.
         try:
             from core.db_manager import get_db
 
-            upsert_meta = ModMetadata(
-                published_file_id=mid,
-                title=meta.title,
-                description=official_description or meta.description or "",
-                preview_url=meta.preview_url,
-                app_id=meta.app_id,
-            )
-            database.upsert_mod(upsert_meta)
-            _clear_placeholder_display_name(mid, new_path)
+            existing_row = database.get_mod_display_info(mid)
+            steam_row = database.get_mod_display_info(steam_external_id)
+            if existing_row is None or steam_row is None:
+                logger.warning(
+                    "refresh refused identity create for missing row mid=%s steam_id=%s",
+                    mid,
+                    steam_external_id,
+                )
+            else:
+                upsert_meta = ModMetadata(
+                    published_file_id=steam_external_id,
+                    title=meta.title,
+                    description=official_description or meta.description or "",
+                    preview_url=meta.preview_url,
+                    app_id=meta.app_id,
+                )
+                database.upsert_mod(upsert_meta)
+                _clear_placeholder_display_name(mid, new_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "DB upsert after metadata refresh failed for %s: %s", mid, exc
@@ -1000,6 +1043,8 @@ def filter_steam_batch_entries(
     out: list[tuple[str, Path]] = []
     for mid, path, plat in entries:
         if normalize_platform(plat) != PLATFORM_STEAM:
+            continue
+        if is_internal_mod_id(mid):
             continue
         out.append((str(mid), Path(path)))
     return out

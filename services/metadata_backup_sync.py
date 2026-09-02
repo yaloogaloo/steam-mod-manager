@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -100,6 +101,11 @@ def sync_after_metadata_change(
             _record_status(mid, status="missing")
         return False
 
+    from services.backup_observability import BackupTimingSession
+
+    session = BackupTimingSession(reason=reason_key, mods=1)
+    session.t0 = time.perf_counter()
+    t_sync = time.perf_counter()
     try:
         sync_metadata_backup(root)
     except Exception as exc:  # noqa: BLE001
@@ -113,6 +119,9 @@ def sync_after_metadata_change(
         if mid.isdigit():
             _record_status(mid, status="invalid")
         return False
+    copy_ms = (time.perf_counter() - t_sync) * 1000.0
+    session.copied = True
+    session.add("backup", copy_ms, files=1)
 
     if not mid.isdigit():
         try:
@@ -130,24 +139,39 @@ def sync_after_metadata_change(
                 validate_backup,
             )
 
+            t_persist = time.perf_counter()
             result = validate_backup(mid)
             status = status_from_validation(result)
             _record_status(mid, status=status, validate=True)
+            persist_ms = (time.perf_counter() - t_persist) * 1000.0
+            session.add("persist", persist_ms, files=1)
+            total_ms = (time.perf_counter() - session.t0) * 1000.0
             logger.info(
-                "backup synced mod_id=%s reason=%s status=%s issues=%s",
+                "backup synced mod_id=%s reason=%s status=%s issues=%s "
+                "elapsed_ms=%.1f copy_ms=%.1f persist_ms=%.1f",
                 mid,
                 reason_key,
                 status,
                 result.get("issues") or [],
+                total_ms,
+                copy_ms,
+                persist_ms,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("backup validate after sync failed: %s", exc)
             _record_status(mid, status="partial")
+            logger.info(
+                "backup synced mod_id=%s reason=%s status=partial elapsed_ms=%.1f",
+                mid,
+                reason_key,
+                (time.perf_counter() - session.t0) * 1000.0,
+            )
     else:
         logger.info(
-            "backup synced path=%s reason=%s (mod_id unresolved)",
+            "backup synced path=%s reason=%s (mod_id unresolved) elapsed_ms=%.1f",
             root,
             reason_key,
+            (time.perf_counter() - session.t0) * 1000.0,
         )
     return True
 

@@ -185,6 +185,8 @@ def normalize_offline_status(value: str | None) -> str:
 
 def steam_workshop_url(workshop_id: int | str) -> str:
     mid = str(workshop_id).strip()
+    if not mid.isdigit() or is_internal_mod_id(mid):
+        return ""
     return f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}"
 
 
@@ -250,9 +252,12 @@ def resolve_workspace_id(
     ext = str(external_id or "").strip()
     url = str(source_url or "").strip()
     if key == PLATFORM_STEAM:
-        if mid.isdigit():
+        # Steam workspace == Workshop published_file_id. Never an internal pk.
+        if mid.isdigit() and not is_internal_mod_id(mid):
             return mid
-        return ext if ext.isdigit() else ""
+        if ext.isdigit() and not is_internal_mod_id(ext):
+            return ext
+        return ""
     if key == PLATFORM_NEXUS:
         nid = _nexus_numeric_id_from_url(url)
         if nid:

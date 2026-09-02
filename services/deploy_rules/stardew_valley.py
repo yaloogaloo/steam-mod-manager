@@ -62,13 +62,11 @@ def find_smapi_mod_roots(content_root: Path) -> list[Path]:
     root = Path(content_root).resolve()
     if not root.is_dir():
         return []
+    from services.deploy_fs import safe_iter_files
+
     found: list[Path] = []
     seen: set[Path] = set()
-    for manifest in sorted(root.rglob(SMAPI_MANIFEST_NAME)):
-        if not manifest.is_file():
-            continue
-        if manifest.name != SMAPI_MANIFEST_NAME:
-            continue
+    for manifest in sorted(safe_iter_files(root, name=SMAPI_MANIFEST_NAME)):
         try:
             rel_parts = manifest.relative_to(root).parts
         except ValueError:
@@ -121,10 +119,10 @@ def _iter_mod_files(
     content_root: Path,
     allowed_rel_paths: frozenset[str] | None,
 ) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     files: list[Path] = []
-    for path in sorted(mod_root.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in sorted(safe_iter_files(mod_root)):
         try:
             rel_parts = path.relative_to(content_root).parts
         except ValueError:

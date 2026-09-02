@@ -17,6 +17,9 @@ class ScannedMod:
 
     published_file_id: str
     path: Path
+    # Single stat() on the workshop mod root at scan time. Fallback only when the
+    # Steam API returned no row for this mod; never overrides explicit API timestamps.
+    source_dir_mtime: int | None = None
 
 
 class WorkshopScanner:
@@ -88,8 +91,18 @@ class WorkshopScanner:
 
         for entry in entries:
             if entry.is_dir() and _MOD_ID_PATTERN.match(entry.name):
+                mtime: int | None = None
+                try:
+                    raw = int(entry.stat().st_mtime)
+                    mtime = raw if raw > 0 else None
+                except OSError:
+                    mtime = None
                 results.append(
-                    ScannedMod(published_file_id=entry.name, path=entry)
+                    ScannedMod(
+                        published_file_id=entry.name,
+                        path=entry,
+                        source_dir_mtime=mtime,
+                    )
                 )
         return results
 

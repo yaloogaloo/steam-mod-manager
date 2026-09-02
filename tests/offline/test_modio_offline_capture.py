@@ -82,6 +82,7 @@ def _mock_browser_page(page: MagicMock) -> MagicMock:
     return browser
 
 
+@pytest.mark.playwright
 def test_playwright_runtime_can_launch() -> None:
     """Real Playwright package + Chromium binary + launch."""
     try:
@@ -91,8 +92,8 @@ def test_playwright_runtime_can_launch() -> None:
 
     with sync_playwright() as playwright:
         path = str(playwright.chromium.executable_path or "")
-        assert path
-        assert Path(path).is_file(), f"chromium executable missing: {path}"
+        if not path or not Path(path).is_file():
+            pytest.skip(f"Playwright Chromium not installed: {path or 'missing'}")
         browser = _launch_chromium_browser(playwright)
         browser.close()
 

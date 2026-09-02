@@ -14,6 +14,41 @@ import pytest
 from core.db_manager import DatabaseManager
 
 
+def _playwright_chromium_available() -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False
+    try:
+        with sync_playwright() as pw:
+            path = str(pw.chromium.executable_path or "")
+            return bool(path and Path(path).is_file())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "network: requires outbound network and/or Playwright browser"
+    )
+    config.addinivalue_line(
+        "markers", "playwright: requires Playwright Chromium installed"
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if _playwright_chromium_available():
+        return
+    skip = pytest.mark.skip(
+        reason="Playwright Chromium not installed (playwright install)"
+    )
+    for item in items:
+        if "playwright" in item.keywords or "network" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_production_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -71,19 +106,23 @@ def _isolate_production_data(
     DatabaseManager.reset_instance()
     DatabaseManager.instance(db_file)
     yield
+    # Drain cover-loader pool before processEvents — avoids Qt native heap
+    # corruption (0xc0000374) when late cover callbacks touch freed QObjects.
     try:
+        from services.cover_loader import CoverLoaderManager
+
+        CoverLoaderManager.reset_instance()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from PySide6.QtCore import QCoreApplication
         from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance()
         if app is not None:
-            try:
-                from services.cover_loader import CoverLoaderManager
-
-                CoverLoaderManager.reset_instance()
-            except Exception:  # noqa: BLE001
-                pass
-            for _ in range(20):
-                app.processEvents()
+            # Bounded, non-aggressive flush — do not spin dozens of times.
+            for _ in range(3):
+                app.processEvents(QCoreApplication.ProcessEventsFlag.AllEvents, 50)
     except Exception:  # noqa: BLE001
         pass
     DatabaseManager.reset_instance()

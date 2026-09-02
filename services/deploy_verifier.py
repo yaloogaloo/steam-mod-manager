@@ -33,27 +33,24 @@ def _is_archive_name(name: str) -> bool:
 
 def iter_loose_deploy_files(root: Path, *, skip_archives: bool = True) -> list[Path]:
     """Non-metadata files under *root* (optionally excluding archives)."""
+    from services.deploy_fs import safe_iter_files
+
     base = Path(root)
     if not base.is_dir():
         return []
     files: list[Path] = []
-    try:
-        for path in base.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                parts = path.relative_to(base).parts
-            except ValueError:
-                continue
-            if any(part in _SKIP_DIR_NAMES or part.startswith(".") for part in parts[:-1]):
-                continue
-            if parts and parts[0] in _SKIP_DIR_NAMES:
-                continue
-            if skip_archives and _is_archive_name(path.name):
-                continue
-            files.append(path)
-    except OSError:
-        return []
+    for path in safe_iter_files(base):
+        try:
+            parts = path.relative_to(base).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIR_NAMES or part.startswith(".") for part in parts[:-1]):
+            continue
+        if parts and parts[0] in _SKIP_DIR_NAMES:
+            continue
+        if skip_archives and _is_archive_name(path.name):
+            continue
+        files.append(path)
     return files
 
 
@@ -105,6 +102,29 @@ def verify_deploy_source(
     )
 
 
+def _source_size_check_applies(source: Path | None, entry: Any = None) -> bool:
+    """
+    Size compare only when *source* is a regular non-archive file.
+
+    IMPORTANT:
+    Archive source size and extracted file size are unrelated.
+    Never use archive size to verify an extracted target file.
+    """
+    entry_type = str(getattr(entry, "type", "") or "").strip().lower()
+    if entry_type in {"archive", "generated", "virtual"}:
+        return False
+    if source is None:
+        return False
+    try:
+        if not source.is_file():
+            return False
+    except OSError:
+        return False
+    if _is_archive_name(source.name):
+        return False
+    return True
+
+
 def verify_deploy_result(
     result: Any,
     *,
@@ -112,10 +132,11 @@ def verify_deploy_result(
     check_hash: bool = False,
 ) -> int:
     """
-    Post-deploy gate: every manifest target must exist and match source size.
+    Post-deploy gate: every manifest target must exist as a file or directory.
 
-    Optional sha256 when ``check_hash=True``. Raises ``DeployValidationError``.
-    Returns validated entry count.
+    Empty files (size 0) are valid deploy targets — marker/flag files must not
+    fail validation. Size/hash checks apply only when the source is a regular
+    non-archive file. Raises ``DeployValidationError``. Returns validated count.
     """
     manifest = getattr(result, "manifest", None)
     if manifest is None:
@@ -147,13 +168,18 @@ def verify_deploy_result(
             missing.append(str(target))
             continue
 
+        try:
+            dst_size = int(target.stat().st_size)
+        except OSError:
+            missing.append(f"{target} (unreadable)")
+            continue
+
         raw_source = str(getattr(entry, "source", "") or "").strip()
         source = Path(raw_source) if raw_source else None
 
-        if check_size and source is not None and source.is_file():
+        if check_size and _source_size_check_applies(source, entry):
             try:
                 src_size = int(source.stat().st_size)
-                dst_size = int(target.stat().st_size)
             except OSError:
                 size_mismatches.append(str(target))
             else:
@@ -162,7 +188,7 @@ def verify_deploy_result(
                         f"{target} (source={src_size} target={dst_size})"
                     )
 
-        if check_hash and source is not None and source.is_file():
+        if check_hash and _source_size_check_applies(source, entry):
             try:
                 if _sha256_file(source) != _sha256_file(target):
                     hash_mismatches.append(str(target))

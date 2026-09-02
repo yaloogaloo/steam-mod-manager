@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import logging
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -18,7 +20,11 @@ from core.mod_status import (
     CONFLICT_STATUS_NONE,
 )
 from services.deploy_rules.manifest import load_manifest
-from services.file_ops import ModFileManager
+from services.file_ops import INFO_DIR_NAME, ModFileManager
+
+logger = logging.getLogger(__name__)
+
+CONFLICT_TRACE_FILENAME = "conflict_trace.json"
 
 
 def _utc_now() -> str:
@@ -37,6 +43,44 @@ class ConflictType(str, Enum):
     PAK_OVERLAP = "PAK_OVERLAP"
     RELATIONSHIP = "RELATIONSHIP"
     UNKNOWN = "UNKNOWN"
+
+
+class ConflictClass(str, Enum):
+    IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
+    FILE_OVERWRITE = "FILE_OVERWRITE"
+    PATH_OVERLAP = "PATH_OVERLAP"
+    DEPLOYMENT_CONFLICT = "DEPLOYMENT_CONFLICT"
+    DEPENDENCY_CONFLICT = "DEPENDENCY_CONFLICT"
+    GAME_RULE_CONFLICT = "GAME_RULE_CONFLICT"
+    UNKNOWN_CONFLICT = "UNKNOWN_CONFLICT"
+
+
+_TYPE_TO_CLASS = {
+    ConflictType.FILE_OVERWRITE.value: ConflictClass.FILE_OVERWRITE.value,
+    ConflictType.PAK_OVERLAP.value: ConflictClass.PATH_OVERLAP.value,
+    ConflictType.RELATIONSHIP.value: ConflictClass.GAME_RULE_CONFLICT.value,
+    ConflictType.UNKNOWN.value: ConflictClass.UNKNOWN_CONFLICT.value,
+}
+
+
+@dataclass
+class ConflictDecisionTrace:
+    conflict_type: str = ConflictClass.FILE_OVERWRITE.value
+    mod_a: str = ""
+    mod_b: str = ""
+    source_a: str = ""
+    source_b: str = ""
+    target_a: str = ""
+    target_b: str = ""
+    overlap_count: int = 0
+    sample_paths: list[str] = field(default_factory=list)
+    rule_id: str = ""
+    severity: str = "warning"
+    decision: str = "warn"
+    timestamp: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
@@ -58,12 +102,14 @@ class ConflictReport:
     status: str = CONFLICT_STATUS_NONE
     conflicts: list[ConflictEntry] = field(default_factory=list)
     mod_id: str = ""
+    traces: list[ConflictDecisionTrace] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
             "conflicts": [c.as_dict() for c in self.conflicts],
             "mod_id": self.mod_id,
+            "traces": [t.as_dict() for t in self.traces],
         }
 
 
@@ -96,16 +142,30 @@ class ConflictDetector:
     def _database(self) -> DatabaseManager:
         return self._db if self._db is not None else get_db()
 
+    def _known_mod_ids(self) -> set[str]:
+        """Live SQLite identity set. Missing rows are not conflict owners."""
+        try:
+            db = self._database()
+            with db._lock:  # noqa: SLF001
+                rows = db._conn.execute("SELECT mod_id FROM mods").fetchall()  # noqa: SLF001
+            return {str(row["mod_id"]) for row in rows}
+        except Exception:  # noqa: BLE001
+            logger.debug("conflict known-id load failed", exc_info=True)
+            return set()
+
     def _is_enabled(self, mid: str) -> bool:
         if not mid.isdigit():
             return True
         try:
+            if self._database().get_mod(mid) is None:
+                return False
             return bool(self._database().is_mod_enabled(mid))
         except Exception:  # noqa: BLE001
-            return True
+            return False
 
     def _iter_manifest_targets(self) -> list[tuple[str, str]]:
-        """List of (mod_id, normalized_target) for enabled Mods only."""
+        """List of (mod_id, normalized_target) for enabled Mods that exist in DB."""
+        known = self._known_mod_ids()
         pairs: list[tuple[str, str]] = []
         for folder in self.files.list_managed_mods():
             manifest = load_manifest(folder)
@@ -115,7 +175,17 @@ class ConflictDetector:
             if not mid:
                 meta = self.files.load_metadata(folder)
                 mid = str(meta.published_file_id or "") if meta else ""
-            if not mid or not self._is_enabled(mid):
+            if not mid:
+                continue
+            if mid.isdigit() and mid not in known:
+                logger.info(
+                    "[CONFLICT_SKIP] missing identity mod_id=%s folder=%s "
+                    "(will not persist or mint)",
+                    mid,
+                    folder,
+                )
+                continue
+            if not self._is_enabled(mid):
                 continue
             for entry in manifest.files:
                 if not entry.target:
@@ -185,6 +255,7 @@ class ConflictDetector:
                 existing.append(entry)
 
         reports: dict[str, ConflictReport] = {}
+        traces_by_mod = self._build_decision_traces(per_mod)
         for mid in sorted(all_manifest_mods):
             conflicts = per_mod.get(mid) or []
             hard = [
@@ -202,16 +273,25 @@ class ConflictDetector:
             else:
                 status = CONFLICT_STATUS_NONE
                 note = ""
+            traces = traces_by_mod.get(mid) or []
             reports[mid] = ConflictReport(
-                status=status, conflicts=conflicts, mod_id=mid
+                status=status, conflicts=conflicts, mod_id=mid, traces=traces
             )
             if persist and mid.isdigit():
+                if self._database().get_mod(mid) is None:
+                    logger.info(
+                        "[CONFLICT_SKIP] persist skipped missing mod_id=%s",
+                        mid,
+                    )
+                    continue
                 self._database().update_mod_status(
                     mid,
                     conflict_status=status,
                     conflict_note=note,
                     touch_check_time=True,
                 )
+        if persist:
+            self._write_conflict_traces(reports)
         return reports
 
     def check_mod(self, mod_id: int | str, *, persist: bool = True) -> ConflictReport:
@@ -262,7 +342,35 @@ class ConflictDetector:
                 )
             )
         status = CONFLICT_STATUS_CONFLICT if conflicts else CONFLICT_STATUS_NONE
-        return ConflictReport(status=status, conflicts=conflicts, mod_id=mid)
+        traces: list[ConflictDecisionTrace] = []
+        if conflicts:
+            paths = [c.file for c in conflicts]
+            others: list[str] = []
+            for c in conflicts:
+                for m in c.mods:
+                    if m != mid and m not in others:
+                        others.append(m)
+            partner = others[0] if others else ""
+            traces.append(
+                ConflictDecisionTrace(
+                    conflict_type=ConflictClass.FILE_OVERWRITE.value,
+                    mod_a=mid,
+                    mod_b=partner,
+                    source_a=mid,
+                    source_b=partner,
+                    target_a=paths[0] if paths else "",
+                    target_b=paths[0] if paths else "",
+                    overlap_count=len(paths),
+                    sample_paths=paths[:8],
+                    rule_id="FILE_OVERWRITE.identical_resolved_target",
+                    severity="warning",
+                    decision="warn",
+                    timestamp=_utc_now(),
+                )
+            )
+        return ConflictReport(
+            status=status, conflicts=conflicts, mod_id=mid, traces=traces
+        )
 
     @staticmethod
     def _summarize(
@@ -278,3 +386,101 @@ class ConflictDetector:
         prefix = f"{label} " if label else ""
         extra = f" 等 {len(conflicts)} 处" if len(conflicts) > 1 else ""
         return f"{prefix}{base} ← {names}{extra}"
+
+    def _build_decision_traces(
+        self, per_mod: dict[str, list[ConflictEntry]]
+    ) -> dict[str, list[ConflictDecisionTrace]]:
+        now = _utc_now()
+        seen: set[tuple[str, str, str]] = set()
+        by_mod: dict[str, list[ConflictDecisionTrace]] = {}
+        for mid, entries in per_mod.items():
+            overwrite = [
+                e for e in entries if e.conflict_type == ConflictType.FILE_OVERWRITE.value
+            ]
+            partners: dict[str, list[str]] = {}
+            for entry in overwrite:
+                for other in entry.mods:
+                    if other == mid:
+                        continue
+                    partners.setdefault(other, []).append(entry.file)
+            for other, paths in partners.items():
+                key = tuple(sorted((mid, other))) + (ConflictClass.FILE_OVERWRITE.value,)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sample = paths[:8]
+                trace = ConflictDecisionTrace(
+                    conflict_type=ConflictClass.FILE_OVERWRITE.value,
+                    mod_a=mid,
+                    mod_b=other,
+                    source_a=mid,
+                    source_b=other,
+                    target_a=sample[0] if sample else "",
+                    target_b=sample[0] if sample else "",
+                    overlap_count=len(paths),
+                    sample_paths=sample,
+                    rule_id="FILE_OVERWRITE.identical_resolved_target",
+                    severity="warning",
+                    decision="warn",
+                    timestamp=now,
+                )
+                by_mod.setdefault(mid, []).append(trace)
+                by_mod.setdefault(other, []).append(trace)
+            for entry in entries:
+                if entry.conflict_type != ConflictType.RELATIONSHIP.value:
+                    continue
+                others = [m for m in entry.mods if m != mid]
+                if not others:
+                    continue
+                other = others[0]
+                key = tuple(sorted((mid, other))) + (ConflictClass.GAME_RULE_CONFLICT.value,)
+                if key in seen:
+                    continue
+                seen.add(key)
+                trace = ConflictDecisionTrace(
+                    conflict_type=ConflictClass.GAME_RULE_CONFLICT.value,
+                    mod_a=mid,
+                    mod_b=other,
+                    source_a=mid,
+                    source_b=other,
+                    overlap_count=1,
+                    sample_paths=[entry.file],
+                    rule_id="GAME_RULE.user_declared_conflict",
+                    severity="warning",
+                    decision="warn",
+                    timestamp=now,
+                )
+                by_mod.setdefault(mid, []).append(trace)
+                by_mod.setdefault(other, []).append(trace)
+        return by_mod
+
+    def _folder_for_mod(self, mod_id: str) -> Path | None:
+        for folder in self.files.list_managed_mods():
+            manifest = load_manifest(folder)
+            if manifest is not None and str(manifest.mod_id or "").strip() == mod_id:
+                return folder
+            meta = self.files.load_metadata(folder)
+            if meta and str(meta.published_file_id or "").strip() == mod_id:
+                return folder
+        return None
+
+    def _write_conflict_traces(self, reports: dict[str, ConflictReport]) -> None:
+        for mid, report in reports.items():
+            if not report.traces:
+                continue
+            folder = self._folder_for_mod(mid)
+            if folder is None:
+                continue
+            path = folder / INFO_DIR_NAME / CONFLICT_TRACE_FILENAME
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(
+                        [t.as_dict() for t in report.traces],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                logger.debug("conflict trace write failed for %s", mid, exc_info=True)

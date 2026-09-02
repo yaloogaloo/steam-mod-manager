@@ -111,13 +111,6 @@ class NexusImporter(ModImporter):
             if not ext and url:
                 ext = parse_nexus_id(url, "")
             if not url and not is_valid_nexus_mod_id(ext):
-                # Directory import: same external_id as batch (folder.name).
-                # Do not wrap folder.name in local/ — that breaks duplicate match.
-                if not ext:
-                    ext = folder.name
-                elif ext != folder.name and not str(ext).startswith("local/"):
-                    # Legacy non-folder placeholder only.
-                    ext = local_nexus_external_id(ext)
                 if not str(ext or "").strip():
                     from services.importers.identity_resolve import (
                         MISSING_OFFICIAL_IDENTITY,
@@ -165,7 +158,10 @@ class NexusImporter(ModImporter):
             folder,
             file_entries=_kwargs.get("file_entries"),
         )
-        info = db.register_external_mod(
+        from services.identity_service import create_mod_identity
+
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_NEXUS,
             external_id=ext,
             source_url=url,
@@ -174,6 +170,11 @@ class NexusImporter(ModImporter):
             game_name=ctx.game_name,
             mod_files=bundle,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="Nexus identity create failed", platform=PLATFORM_NEXUS
+            )
 
         managed = ""
         if library_root:

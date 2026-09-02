@@ -95,10 +95,14 @@ def test_archive_succeeds_when_lxml_unavailable(
             lambda *_a, **_k: {"ok": 0, "fail": 0, "unique": 0},
         )
         with caplog.at_level("WARNING", logger=archive_mod.logger.name):
-            path = archiver.archive("3761838546", tmp_path / ".info", overwrite=True)
+            result = archiver.archive("3761838546", tmp_path / ".info", overwrite=True)
 
+    path = result.path
     assert path.is_file()
     assert is_stub_offline_page(path) is False
     text = path.read_text(encoding="utf-8")
     assert "smm-offline-banner" in text
     assert "falling back to html.parser" in caplog.text
+    assert result.outcome == "success"
+    assert result.http_performed is True
+    assert result.write_performed is True

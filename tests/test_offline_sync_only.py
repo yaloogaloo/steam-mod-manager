@@ -135,6 +135,8 @@ def test_one_mod_cache_reuse_after_first_success(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         calls["n"] += 1
         path = Path(info_dir) / "index.html"
@@ -178,6 +180,8 @@ def test_ten_mods_no_429_storm(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         network_hits["n"] += 1
         # Simulate consecutive HTML 429 → global block.
@@ -229,6 +233,8 @@ def test_single_mod_429_without_global_fuse_does_not_freeze_queue(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         hits.append(str(published_file_id))
         path = Path(info_dir) / "index.html"
@@ -287,6 +293,8 @@ def test_offline_sync_retries_stub(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         if on_status:
             on_status("start")
@@ -327,6 +335,8 @@ def test_offline_sync_emits_archive_progress(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         if on_status:
             on_status("start")
