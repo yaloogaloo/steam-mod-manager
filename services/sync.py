@@ -129,7 +129,7 @@ class SyncOptions:
     # Concurrency knobs
     io_workers: int | None = None  # default: 2..4 based on CPU
     net_workers: int | None = None  # default: 12
-    # Optional HTTP(S) proxy, e.g. "http://127.0.0.1:7890"
+    # Optional HTTP(S)/SOCKS proxy URL. Empty = system auto-detect.
     proxy_url: str = ""
     # Optional Steam browser Cookie string (steamLoginSecure / sessionid / …)
     steam_cookie: str = ""

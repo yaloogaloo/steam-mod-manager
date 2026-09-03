@@ -121,6 +121,27 @@ class ImportWorker(QThread):
         except Exception:  # noqa: BLE001
             # Missing / invalid offline pages must never fail the Mod import.
             pass
+        try:
+            from services.path_lifecycle import resolve_managed_folder
+
+            resolved = resolve_managed_folder(
+                result.mod_id,
+                hint_path=result.managed_path or None,
+                db=get_db(),
+            )
+            if resolved.path is not None and resolved.path.is_dir():
+                result.managed_path = str(resolved.path)
+            info = get_db().get_mod_display_info(result.mod_id)
+            if info is not None:
+                result.title = str(
+                    getattr(info, "display_name", "")
+                    or getattr(info, "steam_name", "")
+                    or result.title
+                    or ""
+                ).strip() or result.title
+                result.display = info
+        except Exception:  # noqa: BLE001
+            pass
         return result
 
     def _resolve_folder_sidecars(
@@ -217,7 +238,6 @@ class ImportWorker(QThread):
             cover_source=cover_source,
             offline_html=offline_html,
         )
-        folder_title = (title or "").strip() or folder.name
 
         prepared = self._prepare_identity(
             offline_html=offline,
@@ -238,6 +258,7 @@ class ImportWorker(QThread):
         from services.importers.identity_resolve import (
             ImportIdentity,
             apply_directory_import_identity,
+            canonical_nexus_offline_import_title,
         )
 
         # Directory import: unify batch/single identity before Importer.import_mod.
@@ -246,6 +267,17 @@ class ImportWorker(QThread):
             folder=folder,
             platform=self.platform,
         )
+
+        if self.platform == PLATFORM_NEXUS and str(offline or "").strip():
+            # Offline HTML metadata participates in final directory naming.
+            # Valid parsed title wins over Empty Mod <random> stub folders.
+            folder_title = canonical_nexus_offline_import_title(
+                user_title=title,
+                parsed_title=prepared.title,
+                folder_name=folder.name,
+            )
+        else:
+            folder_title = (title or "").strip() or folder.name
 
         if self.platform == PLATFORM_STEAM:
             workshop_id = (
@@ -514,12 +546,23 @@ class ImportWorker(QThread):
                 self._emit_progress("正在解压...")
             else:
                 self._emit_progress("正在准备压缩包...")
+            archive_title = title or prepared.title
+            if self.platform == PLATFORM_NEXUS and str(offline_html or "").strip():
+                from services.importers.identity_resolve import (
+                    canonical_nexus_offline_import_title,
+                )
+
+                archive_title = canonical_nexus_offline_import_title(
+                    user_title=title,
+                    parsed_title=prepared.title,
+                    folder_name="",
+                )
             result = ArchiveImporter(db=db).import_mod(
                 archive_path=archive_paths[0] if archive_paths else source,
                 archive_paths=archive_paths or None,
                 platform=self.platform,
                 library_root=self.library_root,
-                title=title or prepared.title,
+                title=archive_title,
                 workshop_id=prepared.workshop_id
                 or str(params.get("workshop_id") or ""),
                 nexus_url=prepared.source_url

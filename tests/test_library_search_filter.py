@@ -89,7 +89,7 @@ def test_matches_search_display_steam_notes_id_game() -> None:
         display_name="自定义名",
         steam_name="Workshop Title",
         notes="我的备注关键字",
-        mod_id="424242",
+        workspace_id="424242",
         game_name="Palworld",
     )
     assert matches_search(item, "自定义")

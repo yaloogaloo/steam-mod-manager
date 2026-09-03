@@ -98,14 +98,14 @@ def test_case2_identical_pak_target_is_file_overwrite(
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
-    assert reports["201"].status == CONFLICT_STATUS_CONFLICT
-    assert reports["202"].status == CONFLICT_STATUS_CONFLICT
+    assert reports["201"].status == CONFLICT_STATUS_NONE
+    assert reports["202"].status == CONFLICT_STATUS_NONE
     assert reports["201"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
     assert set(reports["201"].conflicts[0].mods) == {"201", "202"}
-    assert db.get_mod_status(201).conflict_status == CONFLICT_STATUS_CONFLICT
+    assert db.get_mod_status(201).conflict_status == CONFLICT_STATUS_NONE
 
     preview = det.preview_targets("201", [shared])
-    assert preview.status == CONFLICT_STATUS_CONFLICT
+    assert preview.status == CONFLICT_STATUS_NONE
     assert preview.conflicts
     assert preview.conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
     assert "202" in preview.conflicts[0].mods

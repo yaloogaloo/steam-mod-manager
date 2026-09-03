@@ -90,31 +90,132 @@ def _tls(host: str, timeout: float = 8.0) -> dict[str, Any]:
         }
 
 
-def _steam_http(url: str, *, timeout: float, impersonate: str) -> dict[str, Any]:
+def _env_proxies() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ):
+        out[key] = _text(os.environ.get(key))
+    return out
+
+
+def _steam_http(
+    url: str,
+    *,
+    timeout: float,
+    impersonate: str,
+    proxies: dict[str, str] | None = None,
+) -> dict[str, Any]:
     t0 = time.perf_counter()
     try:
         from curl_cffi import requests as curl_requests
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"curl_cffi import failed: {exc}"}
     try:
-        response = curl_requests.get(
-            url,
-            timeout=timeout,
-            impersonate=impersonate,
-            allow_redirects=True,
-        )
+        kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "impersonate": impersonate,
+            "allow_redirects": True,
+        }
+        if proxies:
+            kwargs["proxies"] = proxies
+        response = curl_requests.get(url, **kwargs)
         return {
             "ok": int(getattr(response, "status_code", 0) or 0) < 400,
             "status": getattr(response, "status_code", None),
             "bytes": len(getattr(response, "content", b"") or b""),
             "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            "curl_error": "",
         }
     except Exception as exc:  # noqa: BLE001
         return {
             "ok": False,
             "error": str(exc),
+            "curl_error": str(exc),
             "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 1),
         }
+
+
+def _layer_attempt(
+    *,
+    name: str,
+    url: str,
+    host: str,
+    timeout: float,
+    impersonate: str,
+    proxy_url: str = "",
+    proxy_source: str = "",
+    skip_http: bool = False,
+) -> dict[str, Any]:
+    from services.proxy_resolver import parse_proxy_url, tcp_listening, probe_proxy_protocol
+
+    parsed = parse_proxy_url(proxy_url) if proxy_url else None
+    dns = _dns(host)
+    tcp_host = parsed.host if parsed and parsed.host else host
+    tcp_port = parsed.port if parsed and parsed.port else 443
+    tcp = _tcp(tcp_host, tcp_port, timeout=min(timeout, 5.0))
+    tls = {"ok": None, "skipped": True}
+    if not proxy_url and dns.get("ok") and tcp.get("ok"):
+        tls = _tls(host, timeout=min(timeout, 8.0))
+    listening = None
+    protocol = ""
+    if parsed and parsed.host and parsed.port:
+        listening = tcp_listening(parsed.host, parsed.port)
+        if listening:
+            protocol = probe_proxy_protocol(parsed.host, parsed.port)
+    steam_http: dict[str, Any] = {"ok": None, "skipped": True}
+    if not skip_http:
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        if tcp.get("ok") or not proxy_url:
+            steam_http = _steam_http(
+                url, timeout=timeout, impersonate=impersonate, proxies=proxies
+            )
+        else:
+            steam_http = {
+                "ok": False,
+                "skipped": True,
+                "error": "tcp_failed_skip_http",
+            }
+    from services.archive_observability import classify_failure_layer
+
+    layer = classify_failure_layer(
+        {
+            "dns": dns if not proxy_url else {"ok": True},
+            "tcp": tcp,
+            "tls": tls,
+            "steam_http": steam_http,
+            "curl_cffi_version": "ok",
+            "proxy_config": proxy_url or "(direct)",
+        }
+    )
+    if steam_http.get("ok"):
+        layer = ""
+    return {
+        "name": name,
+        "proxy_source": proxy_source or ("direct" if not proxy_url else "manual"),
+        "proxy_scheme": parsed.scheme if parsed else "",
+        "proxy_host": parsed.host if parsed else "",
+        "proxy_port": parsed.port if parsed else 0,
+        "proxy_url": proxy_url or "(direct)",
+        "listening": listening,
+        "protocol_probe": protocol,
+        "dns": dns,
+        "tcp": tcp,
+        "tls": tls,
+        "http_status": steam_http.get("status"),
+        "curl_error": steam_http.get("curl_error") or steam_http.get("error") or "",
+        "elapsed_ms": steam_http.get("elapsed_ms") or tcp.get("elapsed_ms"),
+        "steam_http": steam_http,
+        "failure_layer": layer or None,
+        "ok": bool(steam_http.get("ok")),
+    }
 
 
 def collect_archive_diagnostics(*, mod_id: str) -> dict[str, Any]:
@@ -126,6 +227,13 @@ def collect_archive_diagnostics(*, mod_id: str) -> dict[str, Any]:
         IMPERSONATE,
         MAIN_PAGE_RETRIES,
         WORKSHOP_PAGE_URL,
+        _get_archive_proxy,
+    )
+    from services.archive_observability import classify_failure_layer
+    from services.proxy_resolver import (
+        refresh_system_proxy,
+        tcp_listening,
+        probe_proxy_protocol,
     )
 
     try:
@@ -135,16 +243,90 @@ def collect_archive_diagnostics(*, mod_id: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         curl_ver = f"unavailable: {exc}"
 
-    proxy = _proxy_from_settings()
+    qsettings_proxy = _proxy_from_settings()
+    resolved = refresh_system_proxy(probe=True)
+    archive_resolved = _get_archive_proxy()
     url = WORKSHOP_PAGE_URL.format(id=mod_id) if mod_id else WORKSHOP_URL.format(id="0")
     host = urlparse(url).hostname or "steamcommunity.com"
+    timeout = DEFAULT_TIMEOUT
+
+    candidates = [ep.as_dict() for ep in resolved.candidates]
+    for item in candidates:
+        if item.get("host") and item.get("port"):
+            item["listening"] = tcp_listening(str(item["host"]), int(item["port"]))
+            if item["listening"]:
+                item["protocol_probe"] = probe_proxy_protocol(
+                    str(item["host"]), int(item["port"])
+                )
+
+    attempts = [
+        _layer_attempt(
+            name="A_direct",
+            url=url,
+            host=host,
+            timeout=timeout,
+            impersonate=IMPERSONATE,
+            proxy_url="",
+            proxy_source="direct",
+        ),
+        _layer_attempt(
+            name="B_system_auto",
+            url=url,
+            host=host,
+            timeout=timeout,
+            impersonate=IMPERSONATE,
+            proxy_url=resolved.url,
+            proxy_source=resolved.source or "system",
+            skip_http=not resolved.url,
+        ),
+        _layer_attempt(
+            name="C_manual_qsettings",
+            url=url,
+            host=host,
+            timeout=timeout,
+            impersonate=IMPERSONATE,
+            proxy_url=qsettings_proxy,
+            proxy_source="qsettings",
+            skip_http=not qsettings_proxy,
+        ),
+        _layer_attempt(
+            name="D_curl_cffi_resolved",
+            url=url,
+            host=host,
+            timeout=timeout,
+            impersonate=IMPERSONATE,
+            proxy_url=archive_resolved or resolved.url,
+            proxy_source="archive_contract",
+            skip_http=not (archive_resolved or resolved.url),
+        ),
+    ]
+
+    dns = _dns(host)
+    tcp = _tcp(host)
+    tls = _tls(host) if dns.get("ok") and tcp.get("ok") else {"ok": False, "skipped": True}
+    steam_direct = next((a["steam_http"] for a in attempts if a["name"] == "A_direct"), {})
+    failure_layer = classify_failure_layer(
+        {
+            "dns": dns,
+            "tcp": tcp,
+            "tls": tls,
+            "steam_http": steam_direct,
+            "curl_cffi_version": curl_ver,
+            "proxy_config": archive_resolved or resolved.url or "(direct)",
+        }
+    )
     return {
         "mod_id": mod_id,
         "python_version": sys.version.split()[0],
         "curl_cffi_version": curl_ver,
-        "proxy_config": proxy or "(empty / direct)",
+        "qsettings_proxy_url": qsettings_proxy or "(empty)",
+        "proxy_config": archive_resolved or resolved.url or "(empty / direct)",
+        "resolved_proxy": resolved.as_dict(),
+        "archive_uses_resolved_proxy": bool(archive_resolved)
+        and archive_resolved == (resolved.url or archive_resolved),
+        "archive_resolved_proxy_url": archive_resolved or "(direct)",
         "impersonate": IMPERSONATE,
-        "timeout": DEFAULT_TIMEOUT,
+        "timeout": timeout,
         "retry": {
             "main_page_retries": MAIN_PAGE_RETRIES,
             "html_429_max_attempts": HTML_429_MAX_ATTEMPTS,
@@ -152,10 +334,16 @@ def collect_archive_diagnostics(*, mod_id: str) -> dict[str, Any]:
             "cooldown_sec": ARCHIVE_RETRY_COOLDOWN_SEC,
         },
         "url": url,
-        "dns": _dns(host),
-        "tcp": _tcp(host),
-        "tls": _tls(host),
-        "steam_http": _steam_http(url, timeout=DEFAULT_TIMEOUT, impersonate=IMPERSONATE),
+        "env_proxies": _env_proxies(),
+        "system_proxy_candidates": candidates,
+        "dns": dns,
+        "tcp": tcp,
+        "tls": tls,
+        "steam_http": steam_direct,
+        "attempts": attempts,
+        "failure_layer": failure_layer,
+        "old_env": "OLD_ENV_UNKNOWN",
+        "current_env": "CURRENT_ENV_BASELINE",
         "note": "Read-only diagnostics. Does not archive, deploy, or mutate identity.",
     }
 

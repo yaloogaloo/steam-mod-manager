@@ -299,11 +299,13 @@ def test_case6_two_mods_same_target_conflict_unchanged(
     assert overwrite
     assert sorted(overwrite[0].mods) == ["92006", "92007"]
 
-    # Preview still reports conflict; deploy path remains warn-only (no hard block)
+    # Preview still reports FILE_OVERWRITE diagnostic; deploy path remains warn-only
     preview = ConflictDetector(library, db=db).preview_targets(
         "92007", [str(shared)]
     )
-    assert preview.status == "conflict"
+    assert preview.status == "none"
+    assert preview.conflicts
+    assert preview.conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
 
 def test_backup_manager_unique_names(tmp_path: Path) -> None:

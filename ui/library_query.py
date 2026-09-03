@@ -148,6 +148,7 @@ class ModFilterIndex:
     platform: str = PLATFORM_STEAM
     source_url: str = ""
     external_id: str = ""
+    workspace_id: str = ""
     is_invalid: bool = False
     conflict_status: str = "none"
     enabled: bool = True
@@ -288,7 +289,7 @@ def matches_search(index: ModFilterIndex, query: str) -> bool:
         index.display_name,
         index.steam_name,
         index.notes,
-        index.mod_id,
+        index.workspace_id,
         index.game_name,
         index.tag_values,
         index.category_tags,

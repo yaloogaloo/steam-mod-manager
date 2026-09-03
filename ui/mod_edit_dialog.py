@@ -44,8 +44,11 @@ class ModEditDialog(QDialog):
         root = QVBoxLayout(self)
         root.setSpacing(12)
 
+        ws = ""
+        if info is not None:
+            ws = str(info.workspace_id or "").strip()
         hint = QLabel(
-            f"Mod ID: {self.mod_id}"
+            f"Workspace ID: {ws or '—'}"
             + (f"\nSteam 原名: {self.steam_name}" if self.steam_name else "")
         )
         hint.setObjectName("subtitleLabel")

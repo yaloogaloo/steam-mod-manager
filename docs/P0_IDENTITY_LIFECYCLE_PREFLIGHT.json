@@ -1,0 +1,693 @@
+{
+  "generated_at": "2026-09-02T18:50:25+00:00",
+  "phase": "A",
+  "production_mutation": "NONE",
+  "production_db": "D:\\project\\steam-mod-manager\\data\\mod_manager.db",
+  "production_library": "D:\\project\\steam-mod-manager\\mod",
+  "static_guards_lifecycle": [],
+  "static_guards_architecture": [],
+  "static_ok": true,
+  "db": {
+    "mods_count": 1773,
+    "tables": [
+      "games",
+      "mods",
+      "mod_tags",
+      "sqlite_sequence",
+      "mod_relations",
+      "mod_relationships",
+      "game_categories",
+      "deployment_records",
+      "deployment_record_items",
+      "identity_audit_log",
+      "identity_repair_audit"
+    ],
+    "steam_pk_10782": null,
+    "workspace_10782_rows": [
+      {
+        "mod_id": 9000000000003456,
+        "app_id": 292030,
+        "title": "Flashbacks - Something you've already seen",
+        "display_name": "闪回：似曾相识之物",
+        "platform": "nexus",
+        "external_id": "10782",
+        "workspace_id": "10782",
+        "source_url": "https://www.nexusmods.com/witcher3/mods/10782",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Flashbacks - Something you've already seen",
+        "folder_present": 1,
+        "internal_id": "eb8a3ddd-1886-40fb-85b6-c1b1be8159a3",
+        "library_status": "normal",
+        "content_status": "healthy",
+        "source_type": "nexus",
+        "updated_at": "2026-09-02T18:46:27+00:00"
+      }
+    ],
+    "internal_3054_rows": [
+      {
+        "mod_id": 9000000000003054,
+        "app_id": 0,
+        "title": "更好的角色装备展示界面",
+        "display_name": "",
+        "platform": "nexus",
+        "external_id": "更好的角色装备展示界面",
+        "workspace_id": "17870313801551871",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面",
+        "folder_present": 1,
+        "internal_id": "a2639141-3164-4f7b-9828-280923c5400e",
+        "library_status": "normal",
+        "content_status": "healthy",
+        "source_type": "nexus",
+        "updated_at": "2026-09-02T18:46:27+00:00"
+      }
+    ],
+    "internal_id_steam_urls": [
+      {
+        "internal_id": "9000000000000354",
+        "workspace_id": "17863417826512025",
+        "platform": "other",
+        "app_id": 0,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000354",
+        "title": "天极鲸替换奥沧鲸",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\Palworld\\天极鲸替换奥沧鲸",
+        "classify": "NEEDS_REPAIR"
+      },
+      {
+        "internal_id": "9000000000000360",
+        "workspace_id": "17863520439005318",
+        "platform": "other",
+        "app_id": 0,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000360",
+        "title": "全产业模板",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\全产业模板",
+        "classify": "NEEDS_REPAIR"
+      },
+      {
+        "internal_id": "9000000000000361",
+        "workspace_id": "17863520737858927",
+        "platform": "other",
+        "app_id": 0,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000361",
+        "title": "全【区域】【居民区】蓝图",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\全【区域】【居民区】蓝图",
+        "classify": "NEEDS_REPAIR"
+      },
+      {
+        "internal_id": "9000000000000362",
+        "workspace_id": "17863521013284165",
+        "platform": "other",
+        "app_id": 916440,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000000362",
+        "title": "游戏初期的【布局模板】",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\游戏初期的【布局模板】",
+        "classify": "NEEDS_REPAIR"
+      },
+      {
+        "internal_id": "9000000000003031",
+        "workspace_id": "17869450595153325",
+        "platform": "other",
+        "app_id": 0,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003031",
+        "title": "壮丽艺廊添加卡片(免费版)",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\Anno 1800\\壮丽艺廊添加卡片(免费版)",
+        "classify": "NEEDS_REPAIR"
+      },
+      {
+        "internal_id": "9000000000003054",
+        "workspace_id": "17870313801551871",
+        "platform": "nexus",
+        "app_id": 0,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "title": "更好的角色装备展示界面",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面",
+        "classify": "NEEDS_REPAIR"
+      },
+      {
+        "internal_id": "9000000000003225",
+        "workspace_id": "17877226612092567",
+        "platform": "other",
+        "app_id": 0,
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003225",
+        "title": "[ZIMIK]2b",
+        "last_known_path": "D:\\project\\steam-mod-manager\\mod\\暗黑地牢\\[ZIMIK]2b",
+        "classify": "NEEDS_REPAIR"
+      }
+    ],
+    "named_workspace_collisions": {
+      "10782": [],
+      "1720": [
+        {
+          "internal_id": "9000000000000394",
+          "platform": "nexus",
+          "app_id": 0,
+          "external_id": "【必备】Json Assets at Stardew Valley",
+          "last_known_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Json Assets at Stardew Valley"
+        },
+        {
+          "internal_id": "9000000000003381",
+          "platform": "nexus",
+          "app_id": 0,
+          "external_id": "1720",
+          "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Variant of the Barbarian's outfit"
+        }
+      ],
+      "6183": [
+        {
+          "internal_id": "9000000000003091",
+          "platform": "nexus",
+          "app_id": 0,
+          "external_id": "6183",
+          "last_known_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Train-Station-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com"
+        },
+        {
+          "internal_id": "9000000000003222",
+          "platform": "nexus",
+          "app_id": 1086940,
+          "external_id": "6183",
+          "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Sit This One Out 2"
+        }
+      ],
+      "97": [
+        {
+          "internal_id": "9000000000003204",
+          "platform": "nexus",
+          "app_id": 0,
+          "external_id": "97",
+          "last_known_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Villagers-Anime-Portrait-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com"
+        },
+        {
+          "internal_id": "9000000000003331",
+          "platform": "nexus",
+          "app_id": 1086940,
+          "external_id": "97",
+          "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Basket Full of Equipment"
+        }
+      ]
+    },
+    "all_workspace_collisions_count": 3,
+    "all_workspace_collision_ids": [
+      "1720",
+      "6183",
+      "97"
+    ],
+    "audit_focus": [
+      {
+        "internal_id": "9000000000003456",
+        "log": [
+          {
+            "created_at": "2026-09-02T17:49:52+00:00",
+            "field_name": "mod_id",
+            "old_value": "",
+            "new_value": "9000000000003456",
+            "source": "identity_authority",
+            "reason": "create_external"
+          },
+          {
+            "created_at": "2026-09-02T17:49:52+00:00",
+            "field_name": "mod_id",
+            "old_value": "",
+            "new_value": "9000000000003456",
+            "source": "identity_service",
+            "reason": "allocate_internal"
+          }
+        ]
+      },
+      {
+        "internal_id": "9000000000003054",
+        "log": [
+          {
+            "created_at": "2026-09-02T17:43:25+00:00",
+            "field_name": "source_url",
+            "old_value": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+            "new_value": "",
+            "source": "p0_1b_id_semantic_repair",
+            "reason": "source_url embeds Internal ID as fake Steam Workshop URL"
+          },
+          {
+            "created_at": "2026-09-02T10:10:49+00:00",
+            "field_name": "identity_repair",
+            "old_value": "9000000000003054",
+            "new_value": "9000000000003054",
+            "source": "identity_repair",
+            "reason": "scrub_url:SCRUB_POLLUTING_SOURCE_URL"
+          }
+        ]
+      },
+      {
+        "internal_id": "10782",
+        "log": []
+      }
+    ],
+    "classify_3054": "NEEDS_REPAIR",
+    "classify_10782_rows": [
+      {
+        "internal_id": "9000000000003456",
+        "status": "VALID"
+      }
+    ]
+  },
+  "filesystem": {
+    "library_exists": true,
+    "library_root": "D:\\project\\steam-mod-manager\\mod",
+    "focus_folder_hits": [
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "readme.txt",
+          "【主要】【选其一】屏幕尺寸及显示差异"
+        ],
+        "content_names": [
+          "readme.txt",
+          "【主要】【选其一】屏幕尺寸及显示差异"
+        ],
+        "content_count": 2,
+        "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "workspace_id": "17870313801551871",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "a2639141-3164-4f7b-9828-280923c5400e",
+        "title": "更好的角色装备展示界面",
+        "identity_status": "complete",
+        "offline_original_url": "",
+        "offline_source_file": "Better Character and Party Panels at Baldur's Gate 3 Nexus - Mods and community --- Baldur's Gate 3 Nexus 的更好角色和派对面板 - Mod 和社区-www.nexusmods.com.mhtml",
+        "game_folder": "博德之门Ⅲ",
+        "has_payload": true
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Flashbacks - Something you've already seen",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Flashbacks - Something you've already seen\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "Flashbacks-10782-1-3-1749321816.zip",
+          "Save file-10782-1-0-1748525224.zip"
+        ],
+        "content_names": [
+          "Flashbacks-10782-1-3-1749321816.zip",
+          "Save file-10782-1-0-1748525224.zip"
+        ],
+        "content_count": 2,
+        "url": "https://www.nexusmods.com/witcher3/mods/10782",
+        "workspace_id": "10782",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "eb8a3ddd-1886-40fb-85b6-c1b1be8159a3",
+        "title": "Flashbacks - Something you've already seen",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/witcher3/mods/10782",
+        "offline_source_file": "Flashbacks-Something-you-ve-already-seen-at-The-Witcher-3-Nexus-Mods-and-community-www.nexusmods.com.mhtml",
+        "game_folder": "巫师三",
+        "has_payload": true
+      }
+    ],
+    "empty_mod_folders": [
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 6dec21cd",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 6dec21cd\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "MIXARMOUR 2-8556-0-9-1720784242.zip",
+          "MIXARMOUR complete version-8556-5-3-1717731296.zip"
+        ],
+        "content_names": [
+          "MIXARMOUR 2-8556-0-9-1720784242.zip",
+          "MIXARMOUR complete version-8556-5-3-1717731296.zip"
+        ],
+        "content_count": 2,
+        "url": "https://www.nexusmods.com/baldursgate3/mods/8556",
+        "workspace_id": "8556",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "544925a1-57ea-4224-8f54-e9637d12c192",
+        "title": "Mix armour - Vanilla and SBBF and Beautiful Curvy body",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/baldursgate3/mods/8556",
+        "offline_source_file": "Mix-armour-Vanilla-and-SBBF-and-Beautiful-Curvy-body-at-Baldur-s-Gate-3-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 9ec8fa2e",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 9ec8fa2e\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "Arcane Aegis-14819-1-0-1738061345.zip",
+          "Athena's Chiton (Camp Clothes)-14819-1-1-1738494865.zip",
+          "Athena's Chiton-14819-1-0-1738492307.zip",
+          "Blood Hunter's Armour-14819-1-0-1738060995.zip",
+          "BloomCore Outfit-14819-1-0-1738061268.zip",
+          "Dragon's Snare-14819-1-1-1739898846.zip",
+          "Hiwar Al Turab-14819-1-0-1739380554.zip",
+          "Lady of the Orchids Dress-14819-1-1756829821.zip",
+          "Lady of the Spores Dress-14819-1-0-1738060928.zip",
+          "Lightcrown Dress-14819-1-0-1738061472.zip",
+          "Luminous SBBF Conversions-14819-1-1740835741.zip",
+          "Persephone's Gift-14819-1-0-1738060877.zip",
+          "Sylfina's Bodysuit-14819-1-0-1738061191.zip",
+          "Sylfina's Camp Clothes-14819-1-0-1738061108.zip",
+          "Sylvan Songweave Dress-14819-1-0-1738061398.zip",
+          "Xena's Armour-14819-1-0-1738061038.zip"
+        ],
+        "content_names": [
+          "Arcane Aegis-14819-1-0-1738061345.zip",
+          "Athena's Chiton (Camp Clothes)-14819-1-1-1738494865.zip",
+          "Athena's Chiton-14819-1-0-1738492307.zip",
+          "Blood Hunter's Armour-14819-1-0-1738060995.zip",
+          "BloomCore Outfit-14819-1-0-1738061268.zip",
+          "Dragon's Snare-14819-1-1-1739898846.zip",
+          "Hiwar Al Turab-14819-1-0-1739380554.zip",
+          "Lady of the Orchids Dress-14819-1-1756829821.zip",
+          "Lady of the Spores Dress-14819-1-0-1738060928.zip",
+          "Lightcrown Dress-14819-1-0-1738061472.zip",
+          "Luminous SBBF Conversions-14819-1-1740835741.zip",
+          "Persephone's Gift-14819-1-0-1738060877.zip",
+          "Sylfina's Bodysuit-14819-1-0-1738061191.zip",
+          "Sylfina's Camp Clothes-14819-1-0-1738061108.zip",
+          "Sylvan Songweave Dress-14819-1-0-1738061398.zip",
+          "Xena's Armour-14819-1-0-1738061038.zip"
+        ],
+        "content_count": 16,
+        "url": "https://www.nexusmods.com/baldursgate3/mods/14819",
+        "workspace_id": "14819",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "1f68a8e8-72b7-4371-904b-7f1b059eb057",
+        "title": "Luminous Threads",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/baldursgate3/mods/14819",
+        "offline_source_file": "Luminous-Threads-at-Baldur-s-Gate-3-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Empty Mod fe039b69",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Empty Mod fe039b69\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "Autogen rewards-9788-1-9-1741891578.zip",
+          "The Legend Of The West's Spirit-9788-2-2-5-1772456033.zip",
+          "The Legend Of The West's Spirit_Translation-9788-2-2-1-1765906261.zip"
+        ],
+        "content_names": [
+          "Autogen rewards-9788-1-9-1741891578.zip",
+          "The Legend Of The West's Spirit-9788-2-2-5-1772456033.zip",
+          "The Legend Of The West's Spirit_Translation-9788-2-2-1-1765906261.zip"
+        ],
+        "content_count": 3,
+        "url": "https://www.nexusmods.com/witcher3/mods/9788",
+        "workspace_id": "9788",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "faf59a68-b84a-4ece-a55f-fe6178f25059",
+        "title": "The Legend of the West's Spirit - Treasure Hunt Quest",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/witcher3/mods/9788",
+        "offline_source_file": "The-Legend-of-the-West-s-Spirit-Treasure-Hunt-Quest-at-The-Witcher-3-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 40938d22",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 40938d22\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "2024_04_16_UnlimitedPlayers-2213-2024-4-16-1713288327.zip"
+        ],
+        "content_names": [
+          "2024_04_16_UnlimitedPlayers-2213-2024-4-16-1713288327.zip"
+        ],
+        "content_count": 1,
+        "url": "https://www.nexusmods.com/stardewvalley/mods/2213",
+        "workspace_id": "2213",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "c7ebace3-e2bf-46e4-b7fe-c083fc4b0e43",
+        "title": "Unlimited Players",
+        "identity_status": "complete",
+        "offline_original_url": "",
+        "offline_source_file": "Unlimited-Players-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 96215ee0",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 96215ee0\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "Ridgeside Village chinese-9247-2-5-17-1732449848.zip"
+        ],
+        "content_names": [
+          "Ridgeside Village chinese-9247-2-5-17-1732449848.zip"
+        ],
+        "content_count": 1,
+        "url": "https://www.nexusmods.com/stardewvalley/mods/9247",
+        "workspace_id": "9247",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "e8cf3931-8749-419e-bdaf-7d6c0b88d5e2",
+        "title": "Ridgeside Village - Chinese",
+        "identity_status": "complete",
+        "offline_original_url": "",
+        "offline_source_file": "Ridgeside-Village-Chinese-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod bb554d94",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod bb554d94\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "Custom Fixed Dialog-20938-2-4-2-reupload-1711359357.zip",
+          "[已损坏？]"
+        ],
+        "content_names": [
+          "Custom Fixed Dialog-20938-2-4-2-reupload-1711359357.zip",
+          "[已损坏？]"
+        ],
+        "content_count": 2,
+        "url": "https://www.nexusmods.com/stardewvalley/mods/6358",
+        "workspace_id": "6358",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "48f66681-d087-416d-8b61-c556cf56a0de",
+        "title": "Custom Fixed Dialogue",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/stardewvalley/mods/6358",
+        "offline_source_file": "Custom-Fixed-Dialogue-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 1702b3d1",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 1702b3d1\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "ArchiveXL 4198 1.27.1 2026-07-30T19-32Z k8Iw8mCEv.zip"
+        ],
+        "content_names": [
+          "ArchiveXL 4198 1.27.1 2026-07-30T19-32Z k8Iw8mCEv.zip"
+        ],
+        "content_count": 1,
+        "url": "https://www.nexusmods.com/cyberpunk2077/mods/4198",
+        "workspace_id": "4198",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "1a55adae-617d-4c6d-bb02-f15b87ef17ad",
+        "title": "ArchiveXL",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/cyberpunk2077/mods/4198",
+        "offline_source_file": "ArchiveXL-at-Cyberpunk-2077-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      },
+      {
+        "folder": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 236caa23",
+        "exists": true,
+        "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 236caa23\\.info\\metadata.json",
+        "sidecar_exists": true,
+        "offline_exists": true,
+        "child_names": [
+          ".info",
+          "Immersive First Person 2675 2.1.2 2026-08-05T20-25Z tvQTvs5Cv.zip"
+        ],
+        "content_names": [
+          "Immersive First Person 2675 2.1.2 2026-08-05T20-25Z tvQTvs5Cv.zip"
+        ],
+        "content_count": 1,
+        "url": "https://www.nexusmods.com/cyberpunk2077/mods/2675",
+        "workspace_id": "2675",
+        "published_file_id": "",
+        "external_id": "",
+        "platform": "nexus",
+        "internal_id": "53ca4841-e68d-41da-b41c-ea61b4f82335",
+        "title": "Immersive First Person v2.0 - Native Height and Camera Rework",
+        "identity_status": "complete",
+        "offline_original_url": "https://www.nexusmods.com/cyberpunk2077/mods/2675",
+        "offline_source_file": "Immersive-First-Person-v2-0-Native-Height-and-Camera-Rework-at-Cyberpunk-2077-Nexus-Mods-and-community-www.nexusmods.com.mhtml"
+      }
+    ]
+  },
+  "backups": {
+    "backup_root_exists": false,
+    "focus": []
+  },
+  "isolated_reconcile": {
+    "copied_folders": [
+      "博德之门Ⅲ\\更好的角色装备展示界面",
+      "巫师三\\Flashbacks - Something you've already seen",
+      "博德之门Ⅲ\\Empty Mod 6dec21cd",
+      "博德之门Ⅲ\\Empty Mod 9ec8fa2e",
+      "巫师三\\Empty Mod fe039b69",
+      "星露谷物语\\Empty Mod 40938d22",
+      "星露谷物语\\Empty Mod 96215ee0",
+      "星露谷物语\\Empty Mod bb554d94",
+      "赛博朋克2077\\Empty Mod 1702b3d1",
+      "赛博朋克2077\\Empty Mod 236caa23"
+    ],
+    "before": {
+      "9000000000003456": {
+        "mod_id": 9000000000003456,
+        "platform": "nexus",
+        "workspace_id": "10782",
+        "source_url": "https://www.nexusmods.com/witcher3/mods/10782",
+        "external_id": "10782"
+      },
+      "9000000000003054": {
+        "mod_id": 9000000000003054,
+        "platform": "nexus",
+        "workspace_id": "17870313801551871",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "external_id": "更好的角色装备展示界面"
+      },
+      "10782": null,
+      "ws_10782": [
+        {
+          "mod_id": 9000000000003456,
+          "platform": "nexus",
+          "workspace_id": "10782"
+        }
+      ],
+      "mods_count": 1773
+    },
+    "after": {
+      "9000000000003456": {
+        "mod_id": 9000000000003456,
+        "platform": "nexus",
+        "workspace_id": "10782",
+        "source_url": "https://www.nexusmods.com/witcher3/mods/10782",
+        "external_id": "10782"
+      },
+      "9000000000003054": {
+        "mod_id": 9000000000003054,
+        "platform": "nexus",
+        "workspace_id": "17870313801551871",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "external_id": "更好的角色装备展示界面"
+      },
+      "10782": null,
+      "ws_10782": [
+        {
+          "mod_id": 9000000000003456,
+          "platform": "nexus",
+          "workspace_id": "10782"
+        }
+      ],
+      "mods_count": 1773
+    },
+    "reconcile_imported_pass1": 0,
+    "reconcile_imported_pass2": 0,
+    "reconcile_notes_sample": [],
+    "visible_cards": {
+      "博德之门Ⅲ": [
+        {
+          "internal_id": "9000000000003394",
+          "workspace_id": "8556",
+          "title": "Mix armour - Vanilla and SBBF and Beautiful Curvy body"
+        },
+        {
+          "internal_id": "9000000000003384",
+          "workspace_id": "14819",
+          "title": "Luminous Threads"
+        },
+        {
+          "internal_id": "9000000000003054",
+          "workspace_id": "17870313801551871",
+          "title": "更好的角色装备展示界面"
+        }
+      ],
+      "巫师三": [
+        {
+          "internal_id": "9000000000003455",
+          "workspace_id": "9788",
+          "title": "The Legend of the West's Spirit - Treasure Hunt Quest"
+        },
+        {
+          "internal_id": "9000000000003456",
+          "workspace_id": "10782",
+          "title": "Flashbacks - Something you've already seen"
+        }
+      ],
+      "星露谷物语": [
+        {
+          "internal_id": "9000000000003060",
+          "workspace_id": "2213",
+          "title": "Unlimited Players"
+        },
+        {
+          "internal_id": "9000000000003061",
+          "workspace_id": "9247",
+          "title": "Ridgeside Village - Chinese"
+        },
+        {
+          "internal_id": "9000000000003064",
+          "workspace_id": "6358",
+          "title": "Custom Fixed Dialogue"
+        }
+      ],
+      "赛博朋克2077": [
+        {
+          "internal_id": "9000000000003209",
+          "workspace_id": "4198",
+          "title": "ArchiveXL"
+        },
+        {
+          "internal_id": "9000000000003221",
+          "workspace_id": "2675",
+          "title": "Immersive First Person v2.0 - Native Height and Camera Rework"
+        }
+      ]
+    },
+    "steam_pk_10782_created": false,
+    "mods_count_delta": 0,
+    "source_url_3054_rehydrated": true,
+    "source_url_3054_after": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+    "ws_10782_count_before": 1,
+    "ws_10782_count_after": 1,
+    "SAFE_NO_STEAM_DUPLICATE": true,
+    "SAFE_NO_REHYDRATION": false,
+    "SAFE_NO_NET_INSERT": true
+  }
+}

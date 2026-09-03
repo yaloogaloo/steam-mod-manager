@@ -49,11 +49,6 @@ DEFAULT_INDEX_NAME = "index.html"
 DEFAULT_ASSETS_DIR = "assets"
 DEFAULT_TIMEOUT = 15
 
-# Must match ui/sync_view.py QSettings keys (Sync Center proxy field).
-_SETTINGS_ORG = "SteamModManager"
-_SETTINGS_APP = "WorkshopLibrary"
-_SETTING_PROXY = "network/proxy_url"
-
 # Sidecar under ``.info/`` — not part of ModMetadata / SQLite schema.
 _ARCHIVE_ATTEMPT_NAME = "archive_attempt.json"
 ARCHIVE_RETRY_COOLDOWN_SEC = 10 * 60
@@ -88,13 +83,17 @@ MAX_ASSET_BYTES = 12 * 1024 * 1024
 _GLOBAL_ASSET_SEMAPHORE = threading.Semaphore(GLOBAL_ASSET_WORKERS)
 
 # Global URL → sha256 disk cache under data/asset_cache/ (raw bytes, pre-CSS rewrite).
-_ASSET_CACHE_STATS: dict[str, int] = {"hit": 0, "miss": 0}
+_ASSET_CACHE_STATS: dict[str, int] = {"hit": 0, "miss": 0, "fail": 0}
 _ASSET_CACHE_STATS_LOCK = threading.Lock()
+_CSS_LOCALIZED_MARK = "/* smm-css-localized */"
+_CSS_URL_RE = re.compile(r"url\(([^)]+)\)", re.IGNORECASE)
 _CACHE_KEY_LOCKS_GUARD = threading.Lock()
 _CACHE_KEY_LOCKS: dict[str, threading.Lock] = {}
 
 _ARCHIVE_STATUS_NAME = "archive_status.json"
 _RATE_LIMITED_REASON = "rate_limited"
+_SETTINGS_ORG = "SteamModManager"
+_SETTINGS_APP = "WorkshopLibrary"
 _SETTINGS_STEAM_COOKIE = "network/steam_cookie"
 RATE_LIMIT_USER_MESSAGE = "Steam 当前限流，请稍后重试"
 
@@ -119,19 +118,72 @@ def normalize_page_url(url: str) -> str:
 
 
 def reset_asset_cache_stats() -> None:
-    """Test / bench helper: clear hit/miss counters."""
+    """Test / bench helper: clear hit/miss/fail counters."""
     with _ASSET_CACHE_STATS_LOCK:
         _ASSET_CACHE_STATS["hit"] = 0
         _ASSET_CACHE_STATS["miss"] = 0
+        _ASSET_CACHE_STATS["fail"] = 0
 
 
 def get_asset_cache_stats() -> dict[str, int]:
-    """Return a snapshot of ``{hit, miss}`` for the global asset cache."""
+    """Return a snapshot of ``{hit, miss, fail}`` for the global asset cache."""
     with _ASSET_CACHE_STATS_LOCK:
         return {
             "hit": int(_ASSET_CACHE_STATS["hit"]),
             "miss": int(_ASSET_CACHE_STATS["miss"]),
+            "fail": int(_ASSET_CACHE_STATS["fail"]),
         }
+
+
+def _bump_asset_stat(key: str, n: int = 1) -> None:
+    with _ASSET_CACHE_STATS_LOCK:
+        _ASSET_CACHE_STATS[key] = int(_ASSET_CACHE_STATS.get(key) or 0) + n
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    text = str(exc or "").lower()
+    code = str(getattr(exc, "code", "") or "")
+    combined = f"{code} {text}"
+    if "(28)" in combined or "curl: (28)" in text:
+        return True
+    if "timed out" in text or "timeout" in text or "operation timed out" in text:
+        return True
+    return isinstance(exc, TimeoutError)
+
+
+def _is_immediate_proxy_failure(exc: BaseException) -> bool:
+    """Proxy is down (refused / unreachable). Timeout is NOT immediate."""
+    if _is_timeout_error(exc):
+        return False
+    if isinstance(exc, ConnectionError):
+        return True
+    text = str(exc or "").lower()
+    tokens = (
+        "connection refused",
+        "failed to connect",
+        "econnrefused",
+        "cannot connect",
+        "connecterror",
+        "curl: (7)",
+        "could not resolve proxy",
+        "proxyconnect",
+        "proxy connection",
+    )
+    return any(token in text for token in tokens)
+
+
+def _iter_css_url_raw(text: str) -> list[str]:
+    out: list[str] = []
+    for match in _CSS_URL_RE.finditer(text or ""):
+        raw = match.group(1).strip(" '\"")
+        if not raw or raw.startswith("data:") or raw.startswith("#"):
+            continue
+        out.append(raw)
+    return out
+
+
+def _css_already_localized(text: str) -> bool:
+    return _CSS_LOCALIZED_MARK in (text or "")[:800]
 
 
 def _asset_cache_key(absolute_url: str) -> str:
@@ -758,20 +810,43 @@ def is_valid_steam_workshop_page(path: str | Path) -> bool:
     return False
 
 
+def _session_proxy_log_fields() -> dict[str, Any]:
+    """Snapshot session-cached resolver fields for ARCHIVE_* logs. Never mints."""
+    try:
+        from services.proxy_resolver import resolve_proxy
+
+        resolved = resolve_proxy()
+    except Exception:  # noqa: BLE001
+        return {
+            "proxy": "",
+            "proxy_source": "none",
+            "proxy_scheme": "",
+            "proxy_host": "",
+            "proxy_port": "",
+        }
+    return {
+        "proxy": resolved.url or "",
+        "proxy_source": resolved.source or "none",
+        "proxy_scheme": resolved.scheme or "",
+        "proxy_host": resolved.host or "",
+        "proxy_port": resolved.port or "",
+    }
+
+
 def _get_archive_proxy() -> str | None:
     """
-    Resolve the Sync Center proxy URL from QSettings.
+    Resolve proxy for Archive via the session Proxy Resolution Contract.
 
-    Supports ``http://``, ``https://``, and ``socks5://`` URLs as entered by
-    the user. Returns ``None`` when unset / blank (direct connect).
+    Manual Sync Center URL wins; otherwise system auto-detect; otherwise direct.
+    Never invents identity. Never assumes a hardcoded local port.
     """
     try:
-        from PySide6.QtCore import QSettings
-    except ImportError:
+        from services.proxy_resolver import resolved_proxy_url
+
+        return resolved_proxy_url()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("proxy resolution failed; archive will try direct: %s", exc)
         return None
-    settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
-    url = (settings.value(_SETTING_PROXY, "", str) or "").strip()
-    return url or None
 
 
 def archive_proxies_dict(proxy_url: str | None = None) -> dict[str, str] | None:
@@ -909,8 +984,9 @@ class OfflinePageArchiver:
         self.timeout = timeout
         self.max_css = max_css
         self.max_images = max_images
-        # Explicit non-empty proxies win; otherwise resolve Sync Center QSettings.
-        if proxies:
+        # Explicit non-empty proxies win; otherwise resolve via proxy contract.
+        self._explicit_proxies = bool(proxies)
+        if self._explicit_proxies:
             self._proxies: dict[str, str] | None = dict(proxies)
         else:
             self._proxies = archive_proxies_dict()
@@ -930,6 +1006,12 @@ class OfflinePageArchiver:
         self._active_mod_id: str = ""
         self._request_count: int = 0
 
+    def _bind_session_proxy(self) -> None:
+        """Reuse session cache. Does not re-detect Windows proxy."""
+        if getattr(self, "_explicit_proxies", False):
+            return
+        self._proxies = archive_proxies_dict()
+
     def configure(
         self,
         *,
@@ -942,8 +1024,10 @@ class OfflinePageArchiver:
             self.timeout = float(timeout)
         if proxies is not _CONFIGURE_UNSET:
             if isinstance(proxies, dict) and proxies:
+                self._explicit_proxies = True
                 self._proxies = dict(proxies)
             else:
+                self._explicit_proxies = False
                 self._proxies = archive_proxies_dict()
         if steam_cookie is not _CONFIGURE_UNSET:
             if isinstance(steam_cookie, str) and steam_cookie.strip():
@@ -1186,19 +1270,28 @@ class OfflinePageArchiver:
         """
         Concurrent-safe asset GET (module-level curl_cffi, not HTML Session).
 
-        Proxy → direct fallback mirrors the HTML path without the limiter.
+        Direct fallback is only for *immediate* proxy-down errors (refused).
+        Timeout / hang does **not** spend a second full ``timeout`` on direct —
+        HTML already proved the session proxy when present.
         """
         if self._proxies:
             try:
-                return curl_requests.get(
+                response = curl_requests.get(
                     url, **kwargs, proxies=self._proxies
                 )
+                setattr(response, "_smm_via", "proxy")
+                return response
             except _PROXY_TRANSPORT_ERRORS as exc:
-                logger.debug(
-                    "[ARCHIVE ASSET] proxy failed, fallback direct (%s)",
+                if not _is_immediate_proxy_failure(exc):
+                    raise
+                logger.info(
+                    "[ARCHIVE ASSET] proxy immediate-fail, fallback direct (%s) url=%s",
                     exc,
+                    url,
                 )
-        return curl_requests.get(url, **kwargs)
+        response = curl_requests.get(url, **kwargs)
+        setattr(response, "_smm_via", "direct")
+        return response
 
     # ------------------------------------------------------------------
     # Public API
@@ -1325,6 +1418,7 @@ class OfflinePageArchiver:
             self._active_mod_id = mod_id
             _set_tls_mod_id(mod_id)
             self._request_count = 0
+            self._bind_session_proxy()
             with lifecycle_scope("archive"):
                 if on_status is not None:
                     try:
@@ -1400,6 +1494,7 @@ class OfflinePageArchiver:
 
         from services.archive_observability import (
             classify_archive_error,
+            classify_failure_layer,
             connect_probe,
             curl_code_from_error,
             log_archive_failure,
@@ -1408,18 +1503,21 @@ class OfflinePageArchiver:
             log_archive_success,
         )
 
+        proxy_fields = _session_proxy_log_fields()
         proxy_label = ""
         if self._proxies:
             proxy_label = str(
                 self._proxies.get("https") or self._proxies.get("http") or ""
             )
+        if proxy_label:
+            proxy_fields["proxy"] = proxy_label
         log_archive_start(
             mod_id=mod_id,
             url=page_url,
             source="steam_workshop",
-            proxy=proxy_label,
             timeout=getattr(self, "timeout", DEFAULT_TIMEOUT),
             impersonate=IMPERSONATE,
+            **proxy_fields,
         )
         connect_probe(page_url, proxy=proxy_label)
 
@@ -1477,20 +1575,48 @@ class OfflinePageArchiver:
             logger.info(
                 "Archived live Workshop page -> %s "
                 "(html=%.2fs assets=%.2fs unique_assets=%s "
-                "top_ok=%s top_fail=%s workers=%s cache=%s) result=SUCCESS",
+                "top_ok=%s top_fail=%s nested_ok=%s nested_fail=%s "
+                "hit=%s miss=%s fail=%s workers=%s cache=%s) result=SUCCESS",
                 index_path,
                 html_elapsed,
                 assets_elapsed,
                 asset_stats.get("unique", 0),
                 asset_stats.get("ok", 0),
                 asset_stats.get("fail", 0),
+                asset_stats.get("nested_ok", 0),
+                asset_stats.get("nested_fail", 0),
+                asset_stats.get("hit", 0),
+                asset_stats.get("miss", 0),
+                asset_stats.get("http_fail", 0),
                 GLOBAL_ASSET_WORKERS,
                 get_asset_cache_stats(),
+            )
+            logger.info(
+                "[ARCHIVE ASSETS] total=%s hit=%s miss=%s fail=%s top_ok=%s "
+                "top_fail=%s nested_ok=%s nested_fail=%s unique=%s "
+                "elapsed_ms=%.1f workers=%s",
+                int(asset_stats.get("hit", 0))
+                + int(asset_stats.get("miss", 0))
+                + int(asset_stats.get("http_fail", 0)),
+                asset_stats.get("hit", 0),
+                asset_stats.get("miss", 0),
+                asset_stats.get("http_fail", 0),
+                asset_stats.get("ok", 0),
+                asset_stats.get("fail", 0),
+                asset_stats.get("nested_ok", 0),
+                asset_stats.get("nested_fail", 0),
+                asset_stats.get("unique", 0),
+                assets_elapsed * 1000.0,
+                GLOBAL_ASSET_WORKERS,
             )
             log_archive_success(
                 status=200,
                 bytes_count=index_path.stat().st_size if index_path.is_file() else 0,
                 elapsed_ms=(time.monotonic() - archive_t0) * 1000.0,
+                proxy=proxy_fields.get("proxy") or proxy_label,
+                proxy_source=str(proxy_fields.get("proxy_source") or ""),
+                proxy_scheme=str(proxy_fields.get("proxy_scheme") or ""),
+                failure_layer="none",
             )
             return ArchiveEnsureResult(
                 path=index_path,
@@ -1521,15 +1647,22 @@ class OfflinePageArchiver:
             error_type = classify_archive_error(exc, proxy=proxy_label)
             host = urlparse(page_url).hostname or ""
             elapsed_ms = (time.monotonic() - archive_t0) * 1000.0
+            failure_layer = classify_failure_layer(
+                {
+                    "steam_http": {"ok": False, "error": str(exc)},
+                    "proxy_config": proxy_label or "(direct)",
+                }
+            )
             log_archive_failure(
                 error_type=error_type,
                 curl_code=curl_code_from_error(exc),
                 http_status=str(getattr(exc, "response", "") or ""),
                 elapsed_ms=elapsed_ms,
-                proxy=proxy_label,
                 host=host,
                 retry_count=int(getattr(self, "_request_count", 0) or 0),
                 error=str(exc),
+                failure_layer=failure_layer,
+                **proxy_fields,
             )
             write_archive_status(
                 info_dir,
@@ -1805,7 +1938,7 @@ class OfflinePageArchiver:
     <h1 class="fail">离线归档失败（不是成功页面）</h1>
     <p>{title_e}</p>
     <p>未能下载完整的 Steam 创意工坊原网页。</p>
-    <p>Mod ID: <code>{mid}</code></p>
+    <p>Workspace ID: <code>{mid}</code></p>
     <p>错误分类: <code>{kind}</code></p>
     <p>原因: <code>{err}</code></p>
     <p>联网后可重新同步，或在浏览器打开：
@@ -1930,6 +2063,9 @@ class OfflinePageArchiver:
         acquires ``_GLOBAL_ASSET_SEMAPHORE`` (``GLOBAL_ASSET_WORKERS``). All Mods
         therefore share one process-wide cap of 6 CDN downloads — never 3×6.
         Soup mutations happen on this thread only after futures complete.
+
+        CSS ``url()`` prefetch runs on the archive thread *after* the top-level
+        pool shuts down (no nested executors).
         """
         css_count = 0
         img_count = 0
@@ -1937,8 +2073,18 @@ class OfflinePageArchiver:
         max_fonts = 40
         seen: dict[str, str] = {}
         seen_lock = threading.Lock()
-        stats = {"ok": 0, "fail": 0}
-        stats_lock = threading.Lock()
+        failed: set[str] = set()
+        pipe_lock = threading.Lock()
+        pipe = {
+            "ok": 0,
+            "fail": 0,
+            "hit": 0,
+            "miss": 0,
+            "http_fail": 0,
+            "nested_ok": 0,
+            "nested_fail": 0,
+        }
+        css_pending: list[tuple[Path, str]] = []
 
         css_jobs: list[tuple[Tag, str]] = []
         font_jobs: list[tuple[Tag, str]] = []
@@ -1989,15 +2135,25 @@ class OfflinePageArchiver:
             img_jobs.append((img, candidates))
             img_count += 1
 
-        def _tracked_download(raw: str, base: str) -> str | None:
+        def _tracked_download(raw: str, base: str, *, nested: bool = False) -> str | None:
             local = self._download_asset(
-                raw, base, assets_dir, seen, seen_lock=seen_lock
+                raw,
+                base,
+                assets_dir,
+                seen,
+                seen_lock=seen_lock,
+                failed=failed,
+                pipe=pipe,
+                pipe_lock=pipe_lock,
+                css_pending=css_pending,
+                nested=nested,
             )
-            with stats_lock:
-                if local:
-                    stats["ok"] += 1
-                else:
-                    stats["fail"] += 1
+            if not nested:
+                with pipe_lock:
+                    if local:
+                        pipe["ok"] += 1
+                    else:
+                        pipe["fail"] += 1
             return local
 
         def _download_first(candidates: list[str]) -> str | None:
@@ -2007,8 +2163,6 @@ class OfflinePageArchiver:
                     return local
             return None
 
-        # Pool size matches the global cap; excess threads just wait on the
-        # semaphore when other Mods are also downloading.
         workers = max(1, int(GLOBAL_ASSET_WORKERS))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             css_futs = {
@@ -2052,13 +2206,35 @@ class OfflinePageArchiver:
                         if attr in img.attrs:
                             del img.attrs[attr]
 
-        # Inline style url(...) on elements (best-effort, limited)
+        self._localize_pending_css(
+            css_pending,
+            assets_dir,
+            seen,
+            seen_lock=seen_lock,
+            failed=failed,
+            pipe=pipe,
+            pipe_lock=pipe_lock,
+            nested_download=_tracked_download,
+        )
+
+        inline_raw: list[tuple[Tag, str]] = []
         for node in soup.find_all(style=True):
             if not isinstance(node, Tag):
                 continue
             style = str(node.get("style") or "")
             if "url(" not in style.lower():
                 continue
+            inline_raw.append((node, style))
+
+        prefetch: list[str] = []
+        for _node, style in inline_raw:
+            prefetch.extend(_iter_css_url_raw(style))
+        self._pool_fetch_urls(
+            prefetch,
+            page_url,
+            nested_download=_tracked_download,
+        )
+        for node, style in inline_raw:
             node["style"] = self._rewrite_css_url_refs(
                 style,
                 page_url,
@@ -2066,10 +2242,116 @@ class OfflinePageArchiver:
                 seen,
                 download=True,
                 seen_lock=seen_lock,
+                failed=failed,
+                pipe=pipe,
+                pipe_lock=pipe_lock,
+                css_pending=css_pending,
+                nested=True,
             )
 
-        stats["unique"] = len(seen)
-        return stats
+        if css_pending:
+            self._localize_pending_css(
+                css_pending,
+                assets_dir,
+                seen,
+                seen_lock=seen_lock,
+                failed=failed,
+                pipe=pipe,
+                pipe_lock=pipe_lock,
+                nested_download=_tracked_download,
+            )
+
+        pipe["unique"] = len(seen)
+        return pipe
+
+    def _pool_fetch_urls(
+        self,
+        raw_urls: list[str],
+        base_url: str,
+        *,
+        nested_download,
+    ) -> None:
+        unique: list[str] = []
+        seen_raw: set[str] = set()
+        for raw in raw_urls:
+            key = str(raw or "").strip()
+            if not key or key in seen_raw:
+                continue
+            seen_raw.add(key)
+            unique.append(key)
+        if not unique:
+            return
+        workers = max(1, int(GLOBAL_ASSET_WORKERS))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(nested_download, raw, base_url, nested=True) for raw in unique]
+            for fut in as_completed(futs):
+                fut.result()
+
+    def _localize_pending_css(
+        self,
+        css_pending: list[tuple[Path, str]],
+        assets_dir: Path,
+        seen: dict[str, str],
+        *,
+        seen_lock: threading.Lock,
+        failed: set[str],
+        pipe: dict[str, int],
+        pipe_lock: threading.Lock,
+        nested_download,
+    ) -> None:
+        """Prefetch nested CSS urls on the archive thread, then rewrite files."""
+        remaining = list(css_pending)
+        css_pending.clear()
+        rounds = 0
+        while remaining and rounds < 3:
+            rounds += 1
+            batch = remaining
+            remaining = []
+            prefetch: list[tuple[str, str]] = []
+            for css_path, css_url in batch:
+                try:
+                    text = css_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                if _css_already_localized(text):
+                    continue
+                for raw in _iter_css_url_raw(text):
+                    prefetch.append((raw, css_url))
+            if prefetch:
+                uniq: list[tuple[str, str]] = []
+                seen_pf: set[tuple[str, str]] = set()
+                for item in prefetch:
+                    if item in seen_pf:
+                        continue
+                    seen_pf.add(item)
+                    uniq.append(item)
+                prefetch = uniq
+            if prefetch:
+                workers = max(1, int(GLOBAL_ASSET_WORKERS))
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futs = [
+                        pool.submit(nested_download, raw, base, nested=True)
+                        for raw, base in prefetch
+                    ]
+                    for fut in as_completed(futs):
+                        fut.result()
+            for css_path, css_url in batch:
+                try:
+                    self._localize_css_file(
+                        css_path,
+                        css_url,
+                        assets_dir,
+                        seen,
+                        seen_lock=seen_lock,
+                        failed=failed,
+                        pipe=pipe,
+                        pipe_lock=pipe_lock,
+                        css_pending=css_pending,
+                    )
+                except OSError:
+                    continue
+            remaining = list(css_pending)
+            css_pending.clear()
 
     def _download_asset(
         self,
@@ -2079,41 +2361,80 @@ class OfflinePageArchiver:
         seen: dict[str, str],
         *,
         seen_lock: threading.Lock | None = None,
+        failed: set[str] | None = None,
+        pipe: dict[str, int] | None = None,
+        pipe_lock: threading.Lock | None = None,
+        css_pending: list[tuple[Path, str]] | None = None,
+        nested: bool = False,
     ) -> str | None:
         absolute = self._absolutize(raw_url, page_url)
         if absolute is None:
             return None
 
         lock = seen_lock
-        if lock is not None:
-            with lock:
-                if absolute in seen:
-                    return seen[absolute]
-        elif absolute in seen:
-            return seen[absolute]
+        failed_set = failed if failed is not None else set()
 
-        parsed = urlparse(absolute)
-        # Mod-local filename keeps sha1[:16] (unchanged href/src rewrite contract).
-        ext_guess = _guess_extension(parsed.path, "")
-        digest = hashlib.sha1(absolute.encode("utf-8")).hexdigest()[:16]
-        cache_key = _asset_cache_key(absolute)
-
-        # Serialize per-URL so concurrent Mods share one download into the cache.
-        with _cache_lock_for(cache_key):
+        def _seen_get() -> str | None:
             if lock is not None:
                 with lock:
                     if absolute in seen:
                         return seen[absolute]
-            elif absolute in seen:
-                return seen[absolute]
+                    if absolute in failed_set:
+                        return None
+            else:
+                if absolute in seen:
+                    return seen[absolute]
+                if absolute in failed_set:
+                    return None
+            return ""
+
+        def _mark_failed() -> None:
+            if lock is not None:
+                with lock:
+                    failed_set.add(absolute)
+            else:
+                failed_set.add(absolute)
+
+        def _bump_pipe(key: str) -> None:
+            if pipe is not None and pipe_lock is not None:
+                with pipe_lock:
+                    pipe[key] = int(pipe.get(key) or 0) + 1
+
+        def _note_nested(ok: bool) -> None:
+            if nested:
+                _bump_pipe("nested_ok" if ok else "nested_fail")
+
+        early = _seen_get()
+        if early is None:
+            return None
+        if early:
+            return early
+
+        parsed = urlparse(absolute)
+        ext_guess = _guess_extension(parsed.path, "")
+        digest = hashlib.sha1(absolute.encode("utf-8")).hexdigest()[:16]
+        cache_key = _asset_cache_key(absolute)
+        t0 = time.monotonic()
+        localize_css = False
+        dest: Path | None = None
+        relative = ""
+        result_kind = ""
+
+        with _cache_lock_for(cache_key):
+            early = _seen_get()
+            if early is None:
+                return None
+            if early:
+                return early
 
             ext = ext_guess
             filename = f"{digest}{ext}"
             dest = assets_dir / filename
             cached = _find_cached_asset(cache_key, ext_guess)
+            via = "none"
+            http_status = ""
 
             if cached is not None:
-                # Prefer cached suffix when URL had no useful extension.
                 if cached.suffix and (not ext or ext == ".bin"):
                     ext = cached.suffix.lower()
                     filename = f"{digest}{ext}"
@@ -2121,19 +2442,48 @@ class OfflinePageArchiver:
                 try:
                     if not dest.exists():
                         _copy_file_atomic(cached, dest)
-                    with _ASSET_CACHE_STATS_LOCK:
-                        _ASSET_CACHE_STATS["hit"] += 1
-                    logger.debug("Asset cache HIT %s -> %s", absolute, cached.name)
+                    _bump_asset_stat("hit")
+                    result_kind = "hit"
+                    _bump_pipe("hit")
                 except OSError as exc:
-                    logger.debug("Asset cache copy failed %s: %s", cached, exc)
+                    logger.info(
+                        "[ARCHIVE ASSET] result=fail url=%s elapsed_ms=%.1f "
+                        "failure_type=io via=none http_status= nested=%s error=%s",
+                        absolute,
+                        (time.monotonic() - t0) * 1000.0,
+                        nested,
+                        exc,
+                    )
+                    _bump_asset_stat("fail")
+                    _bump_pipe("http_fail")
+                    _mark_failed()
+                    _note_nested(False)
                     return None
             else:
                 response: Any = None
                 try:
                     response = self._http_get_asset(absolute, stream=True)
+                    via = str(
+                        getattr(response, "_smm_via", None)
+                        or ("proxy" if self._proxies else "direct")
+                    )
+                    http_status = str(getattr(response, "status_code", "") or "")
                     response.raise_for_status()
                 except _CURL_HTTP_ERRORS as exc:
-                    logger.debug("Asset download failed %s: %s", absolute, exc)
+                    elapsed_ms = (time.monotonic() - t0) * 1000.0
+                    failure_type = "timeout" if _is_timeout_error(exc) else "http"
+                    status = getattr(getattr(exc, "response", None), "status_code", "")
+                    logger.info(
+                        "[ARCHIVE ASSET] result=fail url=%s elapsed_ms=%.1f "
+                        "failure_type=%s via=%s http_status=%s nested=%s error=%s",
+                        absolute,
+                        elapsed_ms,
+                        failure_type,
+                        via if via != "none" else ("proxy" if self._proxies else "direct"),
+                        status or http_status,
+                        nested,
+                        exc,
+                    )
                     close = (
                         getattr(response, "close", None)
                         if response is not None
@@ -2144,6 +2494,10 @@ class OfflinePageArchiver:
                             close()
                         except Exception:  # noqa: BLE001
                             pass
+                    _bump_asset_stat("fail")
+                    _bump_pipe("http_fail")
+                    _mark_failed()
+                    _note_nested(False)
                     return None
 
                 content_type = (
@@ -2161,26 +2515,28 @@ class OfflinePageArchiver:
                         self._stream_to_file(response, dest)
                     else:
                         response.close()
-                    # Store raw bytes (before CSS localization) for reuse.
                     if not cache_path.exists():
                         _copy_file_atomic(dest, cache_path)
-                    with _ASSET_CACHE_STATS_LOCK:
-                        _ASSET_CACHE_STATS["miss"] += 1
-                    logger.debug(
-                        "Asset cache MISS %s -> %s", absolute, cache_path.name
-                    )
+                    _bump_asset_stat("miss")
+                    result_kind = "miss"
+                    _bump_pipe("miss")
                 except (*_CURL_HTTP_ERRORS, OSError) as exc:
-                    logger.debug("Failed writing asset %s: %s", dest, exc)
-                    dest.unlink(missing_ok=True)
-                    return None
-
-            if ext == ".css":
-                try:
-                    self._localize_css_file(
-                        dest, absolute, assets_dir, seen, seen_lock=lock
+                    logger.info(
+                        "[ARCHIVE ASSET] result=fail url=%s elapsed_ms=%.1f "
+                        "failure_type=io via=%s http_status=%s nested=%s error=%s",
+                        absolute,
+                        (time.monotonic() - t0) * 1000.0,
+                        via,
+                        http_status,
+                        nested,
+                        exc,
                     )
-                except OSError:
-                    pass
+                    dest.unlink(missing_ok=True)
+                    _bump_asset_stat("fail")
+                    _bump_pipe("http_fail")
+                    _mark_failed()
+                    _note_nested(False)
+                    return None
 
             relative = f"./{DEFAULT_ASSETS_DIR}/{filename}"
             if lock is not None:
@@ -2191,7 +2547,47 @@ class OfflinePageArchiver:
                     seen[absolute] = relative
             else:
                 seen[absolute] = relative
-            return relative
+
+            if ext == ".css" and dest is not None:
+                try:
+                    raw_text = dest.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    raw_text = ""
+                if not _css_already_localized(raw_text):
+                    localize_css = True
+
+        if localize_css and dest is not None:
+            if css_pending is not None:
+                if lock is not None:
+                    with lock:
+                        css_pending.append((dest, absolute))
+                else:
+                    css_pending.append((dest, absolute))
+            else:
+                try:
+                    self._localize_css_file(
+                        dest,
+                        absolute,
+                        assets_dir,
+                        seen,
+                        seen_lock=lock,
+                        failed=failed_set if failed is not None else None,
+                        pipe=pipe,
+                        pipe_lock=pipe_lock,
+                        css_pending=None,
+                    )
+                except OSError:
+                    pass
+
+        _note_nested(True)
+        if result_kind == "hit":
+            logger.debug(
+                "[ARCHIVE ASSET] result=hit url=%s elapsed_ms=%.1f nested=%s",
+                absolute,
+                (time.monotonic() - t0) * 1000.0,
+                nested,
+            )
+        return relative
 
     def _stream_to_file(self, response: Any, dest: Path) -> None:
         """Write via temp file then replace — avoids partial files under concurrency.
@@ -2238,8 +2634,14 @@ class OfflinePageArchiver:
         seen: dict[str, str],
         *,
         seen_lock: threading.Lock | None = None,
+        failed: set[str] | None = None,
+        pipe: dict[str, int] | None = None,
+        pipe_lock: threading.Lock | None = None,
+        css_pending: list[tuple[Path, str]] | None = None,
     ) -> None:
         text = css_path.read_text(encoding="utf-8", errors="ignore")
+        if _css_already_localized(text):
+            return
         rewritten = self._rewrite_css_url_refs(
             text,
             css_url,
@@ -2248,7 +2650,14 @@ class OfflinePageArchiver:
             download=True,
             peer_relative=True,
             seen_lock=seen_lock,
+            failed=failed,
+            pipe=pipe,
+            pipe_lock=pipe_lock,
+            css_pending=css_pending,
+            nested=True,
         )
+        if not _css_already_localized(rewritten):
+            rewritten = f"{_CSS_LOCALIZED_MARK}\n{rewritten}"
         self._write_atomic(css_path, rewritten)
 
     def _rewrite_css_url_refs(
@@ -2261,6 +2670,11 @@ class OfflinePageArchiver:
         download: bool,
         peer_relative: bool = False,
         seen_lock: threading.Lock | None = None,
+        failed: set[str] | None = None,
+        pipe: dict[str, int] | None = None,
+        pipe_lock: threading.Lock | None = None,
+        css_pending: list[tuple[Path, str]] | None = None,
+        nested: bool = False,
     ) -> str:
         def replacer(match: re.Match[str]) -> str:
             raw = match.group(1).strip(" '\"")
@@ -2269,7 +2683,16 @@ class OfflinePageArchiver:
             if not download:
                 return match.group(0)
             local = self._download_asset(
-                raw, base_url, assets_dir, seen, seen_lock=seen_lock
+                raw,
+                base_url,
+                assets_dir,
+                seen,
+                seen_lock=seen_lock,
+                failed=failed,
+                pipe=pipe,
+                pipe_lock=pipe_lock,
+                css_pending=css_pending,
+                nested=nested,
             )
             if not local:
                 return match.group(0)
@@ -2277,7 +2700,7 @@ class OfflinePageArchiver:
                 return f"url({Path(local).name})"
             return f"url({local})"
 
-        return re.sub(r"url\(([^)]+)\)", replacer, text)
+        return _CSS_URL_RE.sub(replacer, text)
 
     @staticmethod
     def _absolutize(raw_url: str, page_url: str) -> str | None:

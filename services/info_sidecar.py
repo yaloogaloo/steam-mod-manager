@@ -17,6 +17,7 @@ from core.mod_platform import (
     METADATA_SOURCE_TYPE_KEY,
     ModFileEntry,
     ModFilesBundle,
+    is_internal_mod_id,
     normalize_file_role,
     normalize_platform,
     normalize_platform_if_known,
@@ -59,7 +60,13 @@ def _badge_kind(entry: ModFileEntry) -> str | None:
 
 @dataclass
 class InfoSidecar:
-    """Full portable snapshot written beside the Mod under ``.info/``."""
+    """Portable ``.info`` snapshot.
+
+    User identity: ``workspace_id`` only.
+    Platform identity: ``url`` / ``published_file_id`` (Steam Workshop ID for
+    recovery — not a second user-facing Mod ID).
+    Internal database PK is never written here.
+    """
 
     display_name: str = ""
     description: str = ""
@@ -69,6 +76,7 @@ class InfoSidecar:
     custom_deploy_path: str = ""
     offline_page_path: str = ""
     cover_path: str = ""
+    # Steam Workshop ID for technical recovery only — not a second user Mod ID.
     published_file_id: str = ""
     category: str = ""
     # Workspace IDs this Mod depends on (deploy-before list).
@@ -450,7 +458,10 @@ def apply_sidecar_to_db(
         return False
 
     database = db if db is not None else get_db()
-    mid = str(mod_id or sidecar.published_file_id or "").strip()
+    pub = str(sidecar.published_file_id or "").strip()
+    if is_internal_mod_id(pub):
+        pub = ""
+    mid = str(mod_id or pub or "").strip()
     if not mid or not mid.isdigit():
         return False
 
@@ -488,14 +499,6 @@ def apply_sidecar_to_db(
         "user_notes": (existing.user_notes if existing else ""),
         "favorite": bool(existing.favorite) if existing else False,
     }
-    if sidecar.url:
-        patch["source_url"] = sidecar.url
-    elif existing is not None and existing.source_url:
-        patch["source_url"] = existing.source_url
-    if sidecar.source_type:
-        patch["platform"] = sidecar.source_type
-    elif existing is not None and existing.platform:
-        patch["platform"] = existing.platform
     if sidecar.custom_deploy_path:
         patch["custom_deploy_path"] = sidecar.custom_deploy_path
     elif existing is not None:
@@ -505,21 +508,32 @@ def apply_sidecar_to_db(
     except Exception as exc:  # noqa: BLE001
         logger.warning("apply sidecar metadata failed: %s", exc)
 
-    if sidecar.workspace_id:
-        try:
-            from services.identity_service import persist_workspace_id
+    try:
+        from services.identity_service import persist_identity
+        from services.mod_identity import source_url_embeds_internal
 
-            plat = str(sidecar.source_type or (existing.platform if existing else "") or "")
-            ws = persist_workspace_id(
-                platform=plat,
-                mod_id=mid,
-                workspace_id=str(sidecar.workspace_id or ""),
-                source_url=str(sidecar.url or ""),
-                external_id=str(existing.external_id if existing else ""),
+        ident_patch: dict[str, Any] = {}
+        url = str(sidecar.url or "").strip()
+        if url and not source_url_embeds_internal(url, internal_pk=mid):
+            ident_patch["source_url"] = url
+        ws = str(sidecar.workspace_id or "").strip()
+        if ws and not is_internal_mod_id(ws) and ws != mid:
+            ident_patch["workspace_id"] = ws
+        plat = str(sidecar.source_type or "").strip()
+        if plat and plat != "steam":
+            ident_patch["platform"] = plat
+        elif plat == "steam" and url and not source_url_embeds_internal(url, internal_pk=mid):
+            ident_patch["platform"] = plat
+        if ident_patch:
+            persist_identity(
+                database,
+                mid,
+                source="sidecar",
+                reason="apply_sidecar",
+                **ident_patch,
             )
-            database.update_mod_identity_fields(mid, workspace_id=ws)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("apply sidecar workspace_id failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("apply sidecar identity persist failed: %s", exc)
 
     if sidecar.cover_path:
         try:

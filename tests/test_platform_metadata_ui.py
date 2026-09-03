@@ -62,13 +62,13 @@ def _mod_folder(root: Path, *, pub_id: str, title: str) -> Path:
 def test_get_platform_metadata_labels() -> None:
     steam = get_platform_metadata_labels(PLATFORM_STEAM)
     assert steam.name == "名称"
-    assert steam.external_id == "Workshop ID"
+    assert steam.external_id == "Workspace ID"
     assert steam.badge == "Steam"
     assert format_platform_name(PLATFORM_NEXUS) == "Nexus Mods"
     nexus = get_platform_metadata_labels(PLATFORM_NEXUS)
-    assert nexus.external_id == "Nexus Mod ID"
+    assert nexus.external_id == "Workspace ID"
     github = get_platform_metadata_labels(PLATFORM_GITHUB)
-    assert github.external_id == "GitHub Repository"
+    assert github.external_id == "Workspace ID"
     assert github.badge == "GitHub"
 
 
@@ -79,7 +79,7 @@ def test_steam_workshop_id_ui(
     db.upsert_mod(ModMetadata(published_file_id="3761838546", title="Steam Mod"))
     panel = ModDetailPanel()
     panel.show_mod(folder)
-    assert panel.view_id_caption.text().startswith("Workshop ID")
+    assert panel.view_id_caption.text().startswith("Workspace ID")
     assert panel.view_id.text() == "3761838546"
     assert panel.view_name_caption.text().startswith("名称")
     assert "Steam Workshop" in panel.view_platform.text()
@@ -99,7 +99,7 @@ def test_nexus_mod_id_from_external_not_internal(
     folder = _mod_folder(tmp_path, pub_id=info.mod_id, title="Pal Analyzer")
     panel = ModDetailPanel()
     panel.show_mod(folder)
-    assert panel.view_id_caption.text().startswith("Nexus Mod ID")
+    assert panel.view_id_caption.text().startswith("Workspace ID")
     assert panel.view_id.text() == "336"
     assert "9000" not in panel.view_id.text()
     assert panel.view_steam.text() == "Pal Analyzer"
@@ -121,8 +121,10 @@ def test_github_repository_ui(
     folder = _mod_folder(tmp_path, pub_id=info.mod_id, title="Cool Tool")
     panel = ModDetailPanel()
     panel.show_mod(folder)
-    assert panel.view_id_caption.text().startswith("GitHub Repository")
-    assert panel.view_id.text() == "owner/repo"
+    assert panel.view_id_caption.text().startswith("Workspace ID")
+    assert panel.view_id.text() == info.workspace_id
+    assert "9000" not in panel.view_id.text()
+    assert "owner/repo" not in panel.view_id.text()
 
 
 def test_format_external_id_parses_nexus_url_when_missing() -> None:

@@ -1,7 +1,8 @@
 """Canonical Mod Identity Authority — single write entry for identity fields.
 
-All importers / reconcile / refresh should resolve and mutate identity through
-this module (or thin wrappers that call it). Deploy must never invent identity.
+ID contract: Internal ID (``ResolvedIdentity.mod_id``) is database-only.
+Workspace ID is derived from platform ``external_id`` (Steam/Nexus) or
+generated uniquely (GitHub/mod.io/其它). Never ``workspace_id = internal_id``.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Any
 
 from core.mod_platform import (
     PLATFORM_MODIO,
+    PLATFORM_NEXUS,
     PLATFORM_STEAM,
     generate_unique_workspace_id,
     is_internal_mod_id,
@@ -71,29 +73,31 @@ def safe_workspace_id_for_deploy(
     mod_id: int | str = "",
     source_url: str = "",
     external_id: str = "",
+    workshop_id: str = "",
 ) -> str:
     """
-    Workspace id for deploy manifests — never falls back to internal mod_id.
+    Workspace id for deploy manifests — never falls back to Internal ID.
 
-    Steam workshop-range mod_id may equal workspace_id by design.
-    Non-Steam: empty when unresolved (caller must not invent).
+    Steam: Workspace ID = Steam Workshop ID (``external_id`` / ``workshop_id``).
+    Numeric equality with Internal PK is coincidence of the Steam PK scheme.
+    Non-Steam: empty when unresolved (caller must not invent from Internal ID).
     """
     existing = str(workspace_id or "").strip()
     plat = normalize_platform(platform)
     mid = str(mod_id or "").strip()
     if existing:
-        if is_internal_mod_id(existing):
-            if plat == PLATFORM_STEAM and mid.isdigit() and not is_internal_mod_id(mid):
-                return mid
-            return ""
-        return existing
+        if mid and is_internal_mod_id(mid) and existing == mid:
+            existing = ""
+        else:
+            return existing
+    steam_workshop = str(workshop_id or "").strip()
     resolved = resolve_workspace_id(
         plat,
-        mod_id=mid if (plat == PLATFORM_STEAM and not is_internal_mod_id(mid)) else "",
         source_url=source_url,
         external_id=sanitize_platform_external_id(plat, external_id, mod_id=mid),
+        workshop_id=steam_workshop,
     )
-    if resolved and is_internal_mod_id(resolved) and plat != PLATFORM_STEAM:
+    if resolved and mid and is_internal_mod_id(mid) and resolved == mid:
         return ""
     return resolved
 
@@ -126,7 +130,11 @@ def resolve_mod_identity(
             return out
 
     wid = str(workshop_id or "").strip()
-    if wid.isdigit() and not is_internal_mod_id(wid):
+    if (
+        out.platform == PLATFORM_STEAM
+        and wid.isdigit()
+        and not is_internal_mod_id(wid)
+    ):
         info = db.get_mod_display_info(wid)
         if info is not None:
             out.mod_id = str(info.mod_id)
@@ -134,9 +142,23 @@ def resolve_mod_identity(
             out.notes.append("matched_workshop_id")
             return out
 
+    ws_key = out.external_id or wid
+    if ws_key and not is_internal_mod_id(ws_key):
+        try:
+            found = db.find_mod_by_workspace_id(
+                ws_key, platform=out.platform or None, app_id=out.app_id
+            )
+            if found:
+                out.mod_id = str(found)
+                out.reused = True
+                out.notes.append("matched_workspace_id")
+                return out
+        except Exception:  # noqa: BLE001
+            logger.debug("workspace_id create-gate lookup failed", exc_info=True)
+
     dup = find_duplicate_mod(
         db,
-        platform=out.platform or PLATFORM_STEAM,
+        platform=out.platform,
         external_id=out.external_id,
         source_url=out.source_url,
         workshop_id=wid,
@@ -176,8 +198,13 @@ def create_mod_identity(
     """
     Create or reuse a Mod entity via the sole allocation path.
 
-    Steam workshop ids use ``upsert_mod`` / workshop id as mod_id.
-    Non-Steam uses ``register_external_mod`` (which allocates atomically).
+    Steam: Workshop ID → ``external_id`` → ``workspace_id``. The SQLite PK
+    historically equals Workshop ID; that is Internal ID storage, not the
+    Workspace source.
+
+    Non-Steam: ``register_external_mod`` allocates Internal ID, then binds
+    platform identity. Workspace is resolved from ``external_id``/URL or
+    generated — never copied from Internal ID.
     """
     existing = resolve_mod_identity(
         db,
@@ -205,7 +232,8 @@ def create_mod_identity(
                 title=title or f"Unknown_Mod_{steam_id}",
                 app_id=int(app_id or 0),
                 url=url,
-            )
+            ),
+            allow_insert=True,
         )
         if url:
             db.update_mod_platform_info(
@@ -229,6 +257,7 @@ def create_mod_identity(
             external_id=steam_id,
             source_url=url,
             app_id=int(app_id or 0),
+            workspace_id=steam_id,
             created=True,
             notes=["created_steam"],
         )
@@ -352,44 +381,42 @@ def log_identity_mutation(
 
 
 def ensure_non_polluted_workspace(db, mod_id: int | str) -> str:
-    """Clear non-Steam workspace_id that equals internal mod_id; regenerate."""
+    """Clear workspace_id that equals Internal ID; never regenerate from Internal ID."""
     mid = str(mod_id).strip()
     info = db.get_mod_display_info(mid)
     if info is None:
         return ""
     plat = normalize_platform(info.platform)
     ws = str(info.workspace_id or "").strip()
-    if plat == PLATFORM_STEAM:
-        return ws if not is_internal_mod_id(mid) else (
-            "" if is_internal_mod_id(ws) else ws
-        )
-    if ws and is_internal_mod_id(ws) and ws == mid:
-        taken = set()
-        try:
-            with db._lock:
-                rows = db._conn.execute(
-                    "SELECT workspace_id FROM mods "
-                    "WHERE workspace_id IS NOT NULL AND TRIM(workspace_id) != ''"
-                ).fetchall()
-            taken = {str(r["workspace_id"] or "").strip() for r in rows}
-        except Exception:  # noqa: BLE001
-            pass
-        new_ws = resolve_workspace_id(
-            plat,
-            source_url=info.source_url or "",
-            external_id=sanitize_platform_external_id(
-                plat, info.external_id or "", mod_id=mid
-            ),
-        ) or generate_unique_workspace_id(taken)
-        db.update_mod_identity_fields(mid, workspace_id=new_ws)
-        log_identity_mutation(
-            db,
-            mod_id=mid,
-            field_name="workspace_id",
-            old_value=ws,
-            new_value=new_ws,
-            source="identity_authority",
-            reason="scrub_internal_workspace",
-        )
-        return new_ws
-    return ws
+    if not (is_internal_mod_id(mid) and ws == mid):
+        return ws
+    taken = set()
+    try:
+        with db._lock:
+            rows = db._conn.execute(
+                "SELECT workspace_id FROM mods "
+                "WHERE workspace_id IS NOT NULL AND TRIM(workspace_id) != ''"
+            ).fetchall()
+        taken = {str(r["workspace_id"] or "").strip() for r in rows}
+    except Exception:  # noqa: BLE001
+        pass
+    new_ws = resolve_workspace_id(
+        plat,
+        source_url=info.source_url or "",
+        external_id=sanitize_platform_external_id(
+            plat, info.external_id or "", mod_id=mid
+        ),
+    )
+    if not new_ws and plat not in (PLATFORM_STEAM, PLATFORM_NEXUS):
+        new_ws = generate_unique_workspace_id(taken)
+    db.update_mod_identity_fields(mid, workspace_id=new_ws)
+    log_identity_mutation(
+        db,
+        mod_id=mid,
+        field_name="workspace_id",
+        old_value=ws,
+        new_value=new_ws,
+        source="identity_authority",
+        reason="scrub_internal_workspace",
+    )
+    return new_ws

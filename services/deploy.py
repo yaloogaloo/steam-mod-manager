@@ -1679,10 +1679,14 @@ class ModDeployer:
                     ctx.mod_id,
                     [e.target for e in planned.files],
                 )
-            if conflicts_payload and conflicts_payload.get("conflict"):
+            if conflicts_payload and (
+                conflicts_payload.get("overwrite") or conflicts_payload.get("conflict")
+            ):
                 logger.warning(
-                    "%s conflict=true files=%s",
+                    "%s overwrite=%s conflict=%s files=%s",
                     log_prefix,
+                    bool(conflicts_payload.get("overwrite")),
+                    bool(conflicts_payload.get("conflict")),
                     len(conflicts_payload.get("files") or []),
                 )
 
@@ -1965,14 +1969,17 @@ class ModDeployer:
         planned_targets: list[str | Path],
     ) -> dict[str, Any] | None:
         """
-        Pre-deploy path-overlap preview. Never blocks deploy; payload uses
-        ``status="conflict"`` for FILE_OVERWRITE (same as post-deploy scan).
+        Pre-deploy path-overlap preview. Never blocks deploy.
+
+        FILE_OVERWRITE is a diagnostic (``overwrite=True``). ``conflict=True``
+        only when a user-declared relationship is present. Path overlap never
+        sets ``status="conflict"``.
         """
         mid = str(mod_id).strip()
         report = ConflictDetector(
             self.library_root, db=self._database()
         ).preview_targets(mid, list(planned_targets))
-        if report.status == "none" or not report.conflicts:
+        if not report.conflicts:
             return None
         files = []
         for entry in report.conflicts:
@@ -1983,8 +1990,15 @@ class ModDeployer:
                     "existing_mod": others[0] if others else "",
                 }
             )
+        overwrite = any(
+            c.conflict_type == "FILE_OVERWRITE" for c in report.conflicts
+        )
+        relationship = any(
+            c.conflict_type == "RELATIONSHIP" for c in report.conflicts
+        )
         return {
-            "conflict": True,
+            "conflict": relationship,
+            "overwrite": overwrite,
             "status": report.status,
             "conflicts": [c.as_dict() for c in report.conflicts],
             "files": files,

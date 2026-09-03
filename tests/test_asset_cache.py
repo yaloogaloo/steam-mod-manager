@@ -97,7 +97,7 @@ def test_second_mod_reuses_cache_fewer_http(
 
     with OfflinePageArchiver(session=session, timeout=5) as archiver:
         t0_stats = get_asset_cache_stats()
-        assert t0_stats == {"hit": 0, "miss": 0}
+        assert t0_stats == {"hit": 0, "miss": 0, "fail": 0}
 
         import time
 

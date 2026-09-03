@@ -58,11 +58,11 @@ def format_platform_name(platform: str | None) -> str:
 def get_platform_metadata_labels(platform: str | None) -> PlatformMetadataLabels:
     key = normalize_platform(platform)
     id_labels = {
-        PLATFORM_STEAM: "Workshop ID",
-        PLATFORM_NEXUS: "Nexus Mod ID",
-        PLATFORM_GITHUB: "GitHub Repository",
-        PLATFORM_MODIO: "mod.io ID",
-        PLATFORM_OTHER: "本地标识",
+        PLATFORM_STEAM: "Workspace ID",
+        PLATFORM_NEXUS: "Workspace ID",
+        PLATFORM_GITHUB: "Workspace ID",
+        PLATFORM_MODIO: "Workspace ID",
+        PLATFORM_OTHER: "Workspace ID",
     }
     return PlatformMetadataLabels(
         name="名称",
@@ -202,20 +202,22 @@ def format_mod_info_clipboard(
     platform: str | None,
     source_url: str = "",
     external_id: str = "",
+    workspace_id: str = "",
     files: list[str] | None = None,
     deploy_status: str = "",  # kept for callers; omitted from Phase-6 format
 ) -> str:
-    """Plain-text Mod summary for the system clipboard."""
+    """Plain-text Mod summary for the system clipboard. User ID is Workspace ID only."""
     del deploy_status  # Phase-6 format does not include deploy status
     file_lines = [str(f).strip() for f in (files or []) if str(f).strip()]
     files_text = "\n".join(file_lines) if file_lines else "—"
+    user_id = (workspace_id or external_id or "").strip()
     return "\n".join(
         [
             f"名称:\n{(name or '').strip() or '—'}",
             "",
             f"平台:\n{format_platform_name(platform)}",
             "",
-            f"ID:\n{(external_id or '').strip() or '—'}",
+            f"Workspace ID:\n{user_id or '—'}",
             "",
             f"来源:\n{(source_url or '').strip() or '—'}",
             "",

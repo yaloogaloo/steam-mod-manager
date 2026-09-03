@@ -77,6 +77,12 @@ def sync_after_metadata_change(
             except Exception:  # noqa: BLE001
                 pass
             _record_status(mid, status="missing")
+        try:
+            from services.reconcile_observability import note_backup_skipped
+
+            note_backup_skipped()
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
     if not mid.isdigit():
@@ -99,81 +105,102 @@ def sync_after_metadata_change(
         )
         if mid.isdigit():
             _record_status(mid, status="missing")
+        try:
+            from services.reconcile_observability import note_backup_skipped
+
+            note_backup_skipped()
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
     from services.backup_observability import BackupTimingSession
+    from services.reconcile_observability import (
+        add_persist_ms,
+        note_backup_skipped,
+        note_backup_started,
+        note_mod_id,
+        pop_mod_timing,
+        push_mod_timing,
+    )
 
+    push_mod_timing(folder=str(root), reason=reason_key, internal_id=mid)
     session = BackupTimingSession(reason=reason_key, mods=1)
     session.t0 = time.perf_counter()
     t_sync = time.perf_counter()
     try:
-        sync_metadata_backup(root)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "backup sync failed mod_id=%s path=%s reason=%s: %s",
-            mid or "?",
-            root,
-            reason_key,
-            exc,
-        )
-        if mid.isdigit():
-            _record_status(mid, status="invalid")
-        return False
-    copy_ms = (time.perf_counter() - t_sync) * 1000.0
-    session.copied = True
-    session.add("backup", copy_ms, files=1)
-
-    if not mid.isdigit():
         try:
-            from services.file_ops import read_info_metadata_dict
-
-            data = read_info_metadata_dict(root) or {}
-            mid = str(data.get("published_file_id") or "").strip()
-        except Exception:  # noqa: BLE001
-            mid = root.name if root.name.isdigit() else ""
-
-    if mid.isdigit():
-        try:
-            from services.metadata_backup_validator import (
-                status_from_validation,
-                validate_backup,
-            )
-
-            t_persist = time.perf_counter()
-            result = validate_backup(mid)
-            status = status_from_validation(result)
-            _record_status(mid, status=status, validate=True)
-            persist_ms = (time.perf_counter() - t_persist) * 1000.0
-            session.add("persist", persist_ms, files=1)
-            total_ms = (time.perf_counter() - session.t0) * 1000.0
-            logger.info(
-                "backup synced mod_id=%s reason=%s status=%s issues=%s "
-                "elapsed_ms=%.1f copy_ms=%.1f persist_ms=%.1f",
-                mid,
-                reason_key,
-                status,
-                result.get("issues") or [],
-                total_ms,
-                copy_ms,
-                persist_ms,
-            )
+            note_backup_started()
+            note_mod_id(mid)
+            sync_metadata_backup(root)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("backup validate after sync failed: %s", exc)
-            _record_status(mid, status="partial")
+            logger.warning(
+                "backup sync failed mod_id=%s path=%s reason=%s: %s",
+                mid or "?",
+                root,
+                reason_key,
+                exc,
+            )
+            if mid.isdigit():
+                _record_status(mid, status="invalid")
+            return False
+        copy_ms = (time.perf_counter() - t_sync) * 1000.0
+        session.copied = True
+        session.add("backup", copy_ms, files=1)
+
+        if not mid.isdigit():
+            try:
+                from services.file_ops import read_info_metadata_dict
+
+                data = read_info_metadata_dict(root) or {}
+                mid = str(data.get("published_file_id") or "").strip()
+            except Exception:  # noqa: BLE001
+                mid = root.name if root.name.isdigit() else ""
+
+        if mid.isdigit():
+            try:
+                from services.metadata_backup_validator import (
+                    status_from_validation,
+                    validate_backup,
+                )
+
+                t_persist = time.perf_counter()
+                result = validate_backup(mid)
+                status = status_from_validation(result)
+                _record_status(mid, status=status, validate=True)
+                persist_ms = (time.perf_counter() - t_persist) * 1000.0
+                add_persist_ms(persist_ms)
+                session.add("persist", persist_ms, files=1)
+                total_ms = (time.perf_counter() - session.t0) * 1000.0
+                logger.info(
+                    "backup synced mod_id=%s reason=%s status=%s issues=%s "
+                    "elapsed_ms=%.1f copy_ms=%.1f persist_ms=%.1f",
+                    mid,
+                    reason_key,
+                    status,
+                    result.get("issues") or [],
+                    total_ms,
+                    copy_ms,
+                    persist_ms,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("backup validate after sync failed: %s", exc)
+                _record_status(mid, status="partial")
+                logger.info(
+                    "backup synced mod_id=%s reason=%s status=partial elapsed_ms=%.1f",
+                    mid,
+                    reason_key,
+                    (time.perf_counter() - session.t0) * 1000.0,
+                )
+        else:
             logger.info(
-                "backup synced mod_id=%s reason=%s status=partial elapsed_ms=%.1f",
-                mid,
+                "backup synced path=%s reason=%s (mod_id unresolved) elapsed_ms=%.1f",
+                root,
                 reason_key,
                 (time.perf_counter() - session.t0) * 1000.0,
             )
-    else:
-        logger.info(
-            "backup synced path=%s reason=%s (mod_id unresolved) elapsed_ms=%.1f",
-            root,
-            reason_key,
-            (time.perf_counter() - session.t0) * 1000.0,
-        )
-    return True
+        return True
+    finally:
+        pop_mod_timing()
 
 
 def rebuild_metadata_backup(
@@ -202,14 +229,25 @@ def rebuild_missing_metadata_backup(
     """
     logger.debug("rebuild_missing_metadata_backup enter")
     from core.paths import default_mod_library
+    from services.backup_observability import (
+        BackupTimingSession,
+        log_backup_result,
+        log_backup_start,
+        log_backup_stage,
+    )
 
     root = Path(library_root) if library_root else Path(default_mod_library())
+    session = BackupTimingSession(reason="repair", mods=0)
+    session.t0 = time.perf_counter()
+    log_backup_start(reason="repair", extra=f"root={root}")
     if not root.is_dir():
         logger.info("rebuild_missing_metadata_backup: library missing %s", root)
+        log_backup_result(session, status="skipped")
         return 0
 
     created = 0
     scanned = 0
+    t_discover = time.perf_counter()
     for meta_path in root.glob(f"*/*/{INFO_DIR_NAME}/{METADATA_FILENAME}"):
         scanned += 1
         managed = meta_path.parent.parent
@@ -233,12 +271,18 @@ def rebuild_missing_metadata_backup(
         if rebuild_metadata_backup(mid, managed, reason="repair"):
             created += 1
 
+    discover_ms = (time.perf_counter() - t_discover) * 1000.0
+    session.mods = created
+    session.add("discover", discover_ms, mods=scanned)
+    log_backup_stage("discover", elapsed_ms=discover_ms, mods=scanned)
+    session.add("backup", (time.perf_counter() - session.t0) * 1000.0, mods=created)
     logger.info(
         "rebuild_missing_metadata_backup done scanned=%s created=%s root=%s",
         scanned,
         created,
         root,
     )
+    log_backup_result(session, status="ok")
     return created
 
 

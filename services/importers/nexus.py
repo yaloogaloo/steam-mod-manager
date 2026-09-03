@@ -1,4 +1,9 @@
-"""Nexus Mods manual folder importer (multi-file → one Mod)."""
+"""Nexus Mods manual folder importer (multi-file → one Mod).
+
+Identity flow (do not invert):
+    Nexus Mod ID → external_id → workspace_id
+Internal PK is allocated separately and must never become Workspace ID.
+"""
 
 from __future__ import annotations
 
@@ -140,6 +145,9 @@ class NexusImporter(ModImporter):
                     url = f"https://www.nexusmods.com/mods/{ext}"
 
         name = (title or "").strip() or folder.name
+        # Canonical directory name is *name* (passed to materialize). For
+        # Nexus Offline HTML, callers must supply the parsed Mod title here.
+        # Empty Mod <random> stub folders are payload placeholders only.
 
         db = self._database()
         from services.importers.duplicate_check import check_import_duplicate

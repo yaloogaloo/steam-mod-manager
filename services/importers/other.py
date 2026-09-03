@@ -1,4 +1,8 @@
-"""「其它」来源 — 纯本地 Mod，源链接 / 离线页面均可选。"""
+"""「其它」来源 — 纯本地 Mod，源链接 / 离线页面均可选。
+
+Workspace ID is system-generated. Never ``workspace_id = internal_id``.
+``external_id`` is a local placeholder (``local/...``), not a user Mod ID.
+"""
 
 from __future__ import annotations
 

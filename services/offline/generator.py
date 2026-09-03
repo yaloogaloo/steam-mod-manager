@@ -85,6 +85,7 @@ def generate_offline_html(
     platform_label = _platform_label(plat)
     title_text = (title or "").strip() or "Untitled Mod"
     external_id = str(meta.get("external_id") or "").strip()
+    workspace_id = str(meta.get("workspace_id") or "").strip()
     source_url = str(meta.get("source_url") or "").strip()
     author = str(meta.get("author") or "").strip()
     repository = str(meta.get("repository") or external_id).strip()
@@ -131,12 +132,10 @@ def generate_offline_html(
             f'<div class="row"><span class="k">Repository</span>'
             f'<span class="v"><code>{_esc(repository)}</code></span></div>\n'
         )
-    id_label = {
-        "steam": "Workshop ID",
-        "nexus": "Nexus ID",
-        "github": "Repository",
-    }.get(plat, "External ID")
-    id_value = repository if plat == "github" and repository else external_id
+    id_label = "Workspace ID"
+    id_value = workspace_id or (
+        external_id if plat != "github" else ""
+    )
     id_block = (
         f'<div class="row"><span class="k">{_esc(id_label)}</span>'
         f'<span class="v"><code>{_esc(id_value)}</code></span></div>\n'

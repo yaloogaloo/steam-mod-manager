@@ -1,0 +1,28 @@
+---
+description: Steam Mod Manager ID architecture — Internal vs Workspace vs external_id
+alwaysApply: true
+---
+
+# ID Architecture Contract
+
+Three identities. Never merge them.
+
+- **Internal ID** (`mods.mod_id`): database PK only. Never user-facing, never search, never Workspace ID, never `external_id`, never a platform URL, never a folder name.
+- **Workspace ID** (`mods.workspace_id`): the ONLY user-facing Mod identifier.
+- **external_id**: platform-native ID (Steam Workshop ID, Nexus Mod ID). Not a second user Mod ID.
+
+Derivation (never invert):
+
+```
+Steam Workshop ID → external_id → workspace_id
+Nexus Mod ID     → external_id → workspace_id
+Other            → system-generated workspace_id (never from Internal ID)
+```
+
+Forbidden: `workspace_id = internal_id`, Internal ID in platform URLs, ordinary UI showing Internal ID / Steam Workshop ID / Nexus ID beside Workspace ID.
+
+Steam PK may numerically equal Workshop ID (historical). Same digits ≠ same semantics.
+
+Use names `internal_id`, `workspace_id`, `external_id`. Do not use ambiguous `mod_id` for more than one of these.
+
+Ordinary UI shows **Workspace ID** only. Debug UI may show **Internal Database ID**.

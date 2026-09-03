@@ -270,3 +270,42 @@ def test_materialize_import_triggers_backup(
     assert int(row["folder_present"]) == 1
     assert (backup_root("9000000000000100") / METADATA_FILENAME).is_file()
     assert dest.is_dir()
+
+
+def test_unchanged_cover_still_hashed_on_second_sync(
+    db: DatabaseManager, data_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P0-4: size-equal cover/offline still SHA256 on a no-op second sync."""
+    import logging
+
+    from services.metadata_backup_sync import sync_after_metadata_change
+
+    caplog.set_level(logging.INFO)
+    library = tmp_path / "mod"
+    folder = _write_mod(library, "GameA", "HashMod", "910009", meta_title="Hash Me")
+    info = folder / INFO_DIR_NAME
+    (info / "cover.png").write_bytes(b"\x89PNG" + b"cover-bytes" * 50)
+    offline = info / "offline"
+    offline.mkdir()
+    (offline / "index.html").write_text("<html>offline</html>", encoding="utf-8")
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="910009",
+            title="Hash Me",
+            game_name="GameA",
+            managed_path=str(folder),
+        )
+    )
+    assert sync_after_metadata_change("910009", folder, "import")
+    caplog.clear()
+    assert sync_after_metadata_change("910009", folder, "restore")
+    lines = [r.getMessage() for r in caplog.records if "[RECONCILE_TIMING]" in r.getMessage()]
+    assert lines
+    msg = lines[-1]
+    assert "hash_files=" in msg
+    hash_files = int(msg.split("hash_files=")[1].split()[0])
+    copy_files = int(msg.split("copy_files=")[1].split()[0])
+    assert hash_files >= 2
+    assert copy_files == 0
+    assert "size_match_then_hash=" in msg
+    assert int(msg.split("size_match_then_hash=")[1].split()[0]) >= 1

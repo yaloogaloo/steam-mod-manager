@@ -245,7 +245,12 @@ class ModDetailDialog(QDialog):
             self.steam_name_label.show()
         else:
             self.steam_name_label.hide()
-        self.id_label.setText(f"Mod ID: {meta.published_file_id}")
+        ws = ""
+        if info is not None:
+            ws = str(info.workspace_id or "").strip()
+        if not ws and resolved is not None:
+            ws = str(getattr(resolved, "workspace_id", "") or "").strip()
+        self.id_label.setText(f"Workspace ID: {ws or '—'}")
         game = (
             (resolved.game_name if resolved is not None else "")
             or meta.game_name

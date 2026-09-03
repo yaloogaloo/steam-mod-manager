@@ -11,7 +11,7 @@ import pytest
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
 from core.mod_platform import NON_STEAM_MOD_ID_BASE, PLATFORM_NEXUS, PLATFORM_STEAM
-from core.mod_status import CONFLICT_STATUS_CONFLICT
+from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
 from core.models import ModMetadata
 from services.archive import ARCHIVE_OUTCOME_FAILED, OfflinePageArchiver
 from services.conflict import ConflictClass, ConflictDetector
@@ -353,8 +353,10 @@ def test_file_overwrite_writes_decision_trace(db: DatabaseManager, tmp_path: Pat
         )
         db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=813780))
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["111"].status == CONFLICT_STATUS_CONFLICT
-    assert reports["222"].status == CONFLICT_STATUS_CONFLICT
+    assert reports["111"].status == CONFLICT_STATUS_NONE
+    assert reports["222"].status == CONFLICT_STATUS_NONE
+    assert reports["111"].conflicts
+    assert reports["111"].conflicts[0].conflict_type == ConflictClass.FILE_OVERWRITE.value
     traces = reports["111"].traces
     assert traces
     assert traces[0].conflict_type == ConflictClass.FILE_OVERWRITE.value
@@ -381,6 +383,9 @@ def test_archive_timeout_logs_archive_failure(
     text = caplog.text
     assert "[ARCHIVE_FAILURE]" in text
     assert "NETWORK_FAILURE" in text or "curl_code=28" in text
+    assert "proxy_source=" in text
+    assert "elapsed_ms=" in text
+    assert "failure_layer=" in text
     stub = (info / "index.html").read_text(encoding="utf-8")
     assert "data-archive-outcome=\"failed\"" in stub
     assert "不是成功页面" in stub
@@ -439,3 +444,192 @@ def test_ensure_mod_stub_missing_refuses(db: DatabaseManager) -> None:
         with db._lock:
             db._ensure_mod_stub(int(STEAM_ID))
     assert db.get_mod(STEAM_ID) is None
+
+
+def test_update_mod_status_cannot_mint_missing_mod(db: DatabaseManager) -> None:
+    ghost = str(NON_STEAM_MOD_ID_BASE + 349)
+    st = db.update_mod_status(
+        ghost,
+        conflict_status=CONFLICT_STATUS_CONFLICT,
+        conflict_note="should not insert",
+    )
+    assert st.conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod(ghost) is None
+
+
+def test_post_deploy_conflict_scan_cannot_recreate_0349(
+    db: DatabaseManager, tmp_path: Path
+) -> None:
+    from services.deploy_rules.manifest import (
+        DeployManifest,
+        ManifestFileEntry,
+        save_manifest,
+    )
+
+    ghost = str(NON_STEAM_MOD_ID_BASE + 349)
+    assert ghost == "9000000000000349"
+    library = tmp_path / "mod"
+    target = str((tmp_path / "shared" / "a.pak").resolve())
+    (tmp_path / "shared").mkdir()
+    live = "111"
+    db.upsert_mod(ModMetadata(published_file_id=live, title="Live", app_id=3167020))
+    for mid, name in ((ghost, "ghost-0349"), (live, "live")):
+        folder = library / "逃离鸭科夫" / name
+        info = folder / INFO_DIR_NAME
+        info.mkdir(parents=True)
+        (info / METADATA_FILENAME).write_text(
+            json.dumps({"published_file_id": mid, "title": name}),
+            encoding="utf-8",
+        )
+        save_manifest(
+            folder,
+            DeployManifest(
+                mod_id=mid,
+                deploy_time="t",
+                deploy_type="folder_copy",
+                files=[ManifestFileEntry(source="a.pak", target=target)],
+            ),
+        )
+    before = _count_mods(db)
+    reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
+    assert ghost not in reports
+    assert db.get_mod(ghost) is None
+    assert _count_mods(db) == before
+    from services.deploy import _schedule_post_deploy_conflict_scan
+
+    _schedule_post_deploy_conflict_scan(library, db=db)
+    import time as _time
+
+    _time.sleep(0.2)
+    assert db.get_mod(ghost) is None
+    assert _count_mods(db) == before
+
+
+def test_user_cleared_conflict_is_rewritten_by_file_overwrite_rescan(
+    db: DatabaseManager, tmp_path: Path
+) -> None:
+    from services.deploy_rules.manifest import (
+        DeployManifest,
+        ManifestFileEntry,
+        save_manifest,
+    )
+
+    library = tmp_path / "mod"
+    shared = str((tmp_path / "BG3" / "foo.dll").resolve())
+    (tmp_path / "BG3").mkdir()
+    for mid in ("801", "802"):
+        folder = library / "BG3" / mid
+        info = folder / INFO_DIR_NAME
+        info.mkdir(parents=True)
+        (info / METADATA_FILENAME).write_text(
+            f'{{"published_file_id":"{mid}","title":"M{mid}"}}',
+            encoding="utf-8",
+        )
+        save_manifest(
+            folder,
+            DeployManifest(
+                mod_id=mid,
+                deploy_time="t",
+                deploy_type="folder_copy",
+                files=[ManifestFileEntry(source="foo.dll", target=shared)],
+            ),
+        )
+        db.upsert_mod(ModMetadata(published_file_id=mid, title=f"M{mid}"))
+    det = ConflictDetector(library, db=db)
+    det.check_all_mods(persist=True)
+    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_NONE
+    db.update_mod_status(801, conflict_status=CONFLICT_STATUS_CONFLICT, conflict_note="user")
+    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_CONFLICT
+    det.check_all_mods(persist=True)
+    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_CONFLICT
+    db.update_mod_status(801, conflict_status=CONFLICT_STATUS_NONE, conflict_note="")
+    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_NONE
+    det.check_all_mods(persist=True)
+    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_NONE
+    traces = det.check_all_mods(persist=False)["801"].traces
+    assert traces
+    assert traces[0].rule_id == "FILE_OVERWRITE.identical_resolved_target"
+    assert traces[0].decision == "warn"
+
+
+def test_file_overwrite_is_path_identity_not_game_rule(
+    db: DatabaseManager, tmp_path: Path
+) -> None:
+    from services.conflict import ConflictDetector as Detector
+
+    src = Path(Detector.__doc__ or "")
+    text = Detector.__doc__ or ""
+    assert "Path.resolve()" in text
+    assert "load-order" not in text.lower()
+    assert "compatibility patch" not in text.lower()
+
+
+def test_curl_28_still_network_failure() -> None:
+    from services.archive_observability import NETWORK_FAILURE, classify_archive_error
+
+    assert (
+        classify_archive_error("curl: (28) Connection timed out after 15003 milliseconds")
+        == NETWORK_FAILURE
+    )
+
+
+def test_proxy_resolution_failure_does_not_create_identity(
+    db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services import archive as archive_mod
+    from services import proxy_resolver as pr
+
+    before = _count_mods(db)
+
+    def boom() -> list:
+        raise RuntimeError("system proxy exploded")
+
+    pr.clear_proxy_cache()
+    monkeypatch.setattr(
+        pr,
+        "_read_qsettings",
+        lambda: {"network/proxy_url": "", "network/proxy_mode": "auto"},
+    )
+    monkeypatch.setattr(pr, "default_system_detect", boom)
+    url = archive_mod._get_archive_proxy()
+    assert url is None or isinstance(url, str)
+    assert _count_mods(db) == before
+    assert db.get_mod(STEAM_ID) is None
+
+
+def test_backup_timing_tags_are_emitted(caplog: pytest.LogCaptureFixture) -> None:
+    import time as _time
+
+    caplog.set_level(logging.INFO)
+    from services.backup_observability import (
+        BackupTimingSession,
+        log_backup_result,
+        log_backup_start,
+        log_backup_stage,
+    )
+
+    log_backup_start(reason="repair", mods=1)
+    log_backup_stage("discover", elapsed_ms=1.5, mods=1)
+    session = BackupTimingSession(reason="repair", mods=1)
+    session.t0 = _time.perf_counter()
+    log_backup_result(session, status="ok")
+    text = caplog.text
+    assert "[BACKUP_START]" in text
+    assert "[BACKUP_STAGE]" in text
+    assert "[BACKUP_RESULT]" in text
+
+
+def test_reconcile_emits_aggregate_backup_result(
+    db: DatabaseManager, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    library = tmp_path / "mod"
+    library.mkdir()
+    from services.library_reconcile import reconcile_library
+
+    reconcile_library(library)
+    text = caplog.text
+    assert "[BACKUP_START]" in text
+    assert "reason=reconcile" in text
+    assert "[BACKUP_RESULT]" in text
+    assert "[RECONCILE_SUMMARY]" in text

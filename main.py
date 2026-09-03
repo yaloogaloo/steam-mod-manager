@@ -271,6 +271,12 @@ def launch_gui() -> int:
 def _probe_modio_playwright_runtime() -> None:
     """Non-blocking Chromium probe for mod.io offline archive."""
     try:
+        from services.startup_io_trace import begin as _io_begin
+
+        _io_begin("modio_probe")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from services.offline.modio_browser_snapshot import probe_modio_playwright_runtime
 
         ready, message = probe_modio_playwright_runtime()
@@ -282,6 +288,13 @@ def _probe_modio_playwright_runtime() -> None:
         logging.getLogger(__name__).debug(
             "mod.io playwright startup probe skipped: %s", exc
         )
+    finally:
+        try:
+            from services.startup_io_trace import end as _io_end
+
+            _io_end("modio_probe")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:

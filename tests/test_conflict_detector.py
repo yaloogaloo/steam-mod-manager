@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
+from core.mod_status import CONFLICT_STATUS_NONE
 from core.models import ModMetadata
 from services.conflict import ConflictDetector
 from services.deploy_rules.manifest import (
@@ -64,12 +64,13 @@ def test_same_target_is_conflict(tmp_path: Path, db: DatabaseManager) -> None:
     db.upsert_mod(ModMetadata(published_file_id="1002", title="B"))
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["1001"].status == CONFLICT_STATUS_CONFLICT
-    assert reports["1002"].status == CONFLICT_STATUS_CONFLICT
+    assert reports["1001"].status == CONFLICT_STATUS_NONE
+    assert reports["1002"].status == CONFLICT_STATUS_NONE
     assert len(reports["1001"].conflicts) == 1
     assert set(reports["1001"].conflicts[0].mods) == {"1001", "1002"}
-    assert db.get_mod_status(1001).conflict_status == CONFLICT_STATUS_CONFLICT
-    assert db.get_mod_status(1002).conflict_status == CONFLICT_STATUS_CONFLICT
+    assert reports["1001"].conflicts[0].conflict_type == "FILE_OVERWRITE"
+    assert db.get_mod_status(1001).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(1002).conflict_status == CONFLICT_STATUS_NONE
 
 
 def test_different_targets_none(tmp_path: Path, db: DatabaseManager) -> None:
@@ -95,6 +96,10 @@ def test_check_mod_subset(tmp_path: Path, db: DatabaseManager) -> None:
     b = _seed_mod(library, "3002")
     _write_manifest(a, "3001", [shared])
     _write_manifest(b, "3002", [shared])
+    db.upsert_mod(ModMetadata(published_file_id="3001", title="A"))
+    db.upsert_mod(ModMetadata(published_file_id="3002", title="B"))
     report = ConflictDetector(library, db=db).check_mod(3001, persist=False)
-    assert report.status == CONFLICT_STATUS_CONFLICT
+    assert report.status == CONFLICT_STATUS_NONE
+    assert report.conflicts
+    assert report.conflicts[0].conflict_type == "FILE_OVERWRITE"
     assert report.mod_id == "3001"

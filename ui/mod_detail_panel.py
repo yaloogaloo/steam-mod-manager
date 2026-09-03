@@ -99,7 +99,6 @@ from core.models import ModMetadata
 from services.file_ops import ModFileManager
 from services.mod_files import ModFileManager as ModFilesJsonManager
 from ui.platform_labels import (
-    format_external_id,
     format_mod_info_clipboard,
     format_platform_name,
     get_platform_metadata_labels,
@@ -1635,7 +1634,7 @@ class ModDetailPanel(QWidget):
         self.view_platform = QLabel()
         self.view_name_caption = QLabel("名称：")
         self.view_steam = QLabel()
-        self.view_id_caption = QLabel("ID：")
+        self.view_id_caption = QLabel("Workspace ID：")
         self.view_id = QLabel()
         self.view_external_id = QLabel()
         self.view_source_caption = QLabel("来源：")
@@ -2124,16 +2123,11 @@ class ModDetailPanel(QWidget):
 
         steam_name = (steam or "").strip()
 
-        id_value = format_external_id(
-            platform,
-            external_id,
-            source_url=source_url,
-            published_file_id=str(meta.published_file_id or ""),
-        )
+        id_value = str(workspace_id or "").strip()
         self._id_value = id_value
-        self.view_id_caption.setText(f"{labels.external_id}：")
+        self.view_id_caption.setText("Workspace ID：")
         self.view_id.setText(id_value or "—")
-        self.view_external_id.setText(f"外部 ID：{id_value or '—'}")
+        self.view_external_id.setText("")
         self.btn_copy_id.setEnabled(bool(id_value))
         self.btn_header_copy_id.setEnabled(bool(id_value))
 
@@ -2144,32 +2138,26 @@ class ModDetailPanel(QWidget):
             workspace_id = ""
             if info is not None:
                 workspace_id = str(info.workspace_id or "").strip()
-        from core.mod_platform import PLATFORM_STEAM as _STEAM, is_internal_mod_id as _is_internal
+            id_value = workspace_id
+            self._id_value = id_value
+            self.view_id.setText(id_value or "—")
+            self.btn_copy_id.setEnabled(bool(id_value))
+            self.btn_header_copy_id.setEnabled(bool(id_value))
+        from core.debug_config import debug_mode_enabled
 
         internal_id = str(
             (info.mod_id if info is not None else "")
             or (self.current_mod_id() or "")
-            or (
-                resolved.published_file_id
-                if resolved is not None and _is_internal(resolved.published_file_id)
-                else ""
-            )
-            or meta.published_file_id
             or ""
         ).strip()
-        workshop_id = ""
-        if platform == _STEAM or str(db_platform).lower() == _STEAM:
-            cand = str(external_id or meta.published_file_id or "").strip()
-            if cand and cand.isdigit() and not _is_internal(cand):
-                workshop_id = cand
-        if not _is_internal(internal_id) and internal_id.isdigit() and not workshop_id:
-            if platform == _STEAM:
-                workshop_id = internal_id
         self.meta_workspace_line.setText(
-            f"内部 ID: {internal_id or '—'}  |  "
-            f"Steam Workshop ID: {workshop_id or '—'}  |  "
             f"Workspace ID: {workspace_id or '—'}"
         )
+        if debug_mode_enabled() and internal_id:
+            self.meta_workspace_line.setText(
+                f"Workspace ID: {workspace_id or '—'}  |  "
+                f"Internal Database ID: {internal_id}"
+            )
         self._source_url_value = source_url
         self.view_source_caption.setText(f"{labels.source}：")
         if source_url:
@@ -2226,8 +2214,7 @@ class ModDetailPanel(QWidget):
             desc_text=desc_text,
             platform_name=platform_name,
             workspace_id=workspace_id,
-            internal_id=internal_id,
-            workshop_id=workshop_id,
+            internal_id=internal_id if debug_mode_enabled() else "",
             author=author,
             version=version,
             updated=updated,
@@ -2444,6 +2431,7 @@ class ModDetailPanel(QWidget):
         workshop_id: str = "",
     ) -> None:
         """Rich-text metadata block — bold prefixes, isolated long description."""
+        del workshop_id  # Platform Workshop ID is not a second user-facing Mod ID.
         esc = html_module.escape
 
         def _line(inner: str) -> str:
@@ -2465,11 +2453,14 @@ class ModDetailPanel(QWidget):
                 f"<div style='margin:0;padding:0;line-height:1.55;'>{desc_html}</div>"
             )
         parts.append(_line(f"<b>来源：</b> {esc(platform_name)}"))
-        parts.append(_line(f"<b>内部 ID:</b> {esc(internal_id or '—')}"))
-        parts.append(_line(f"<b>Steam Workshop ID:</b> {esc(workshop_id or '—')}"))
         parts.append(
             _line(f"<b>Workspace ID:</b> {esc(workspace_id or '—')}")
         )
+        debug_internal = str(internal_id or "").strip()
+        if debug_internal:
+            parts.append(
+                _line(f"<b>Internal Database ID:</b> {esc(debug_internal)}")
+            )
         if author:
             parts.append(_line(f"<b>作者：</b> {esc(author)}"))
         if version:
@@ -3960,6 +3951,17 @@ class ModDetailPanel(QWidget):
                 pass
             return label
 
+        def _workspace_for(mod_key: str) -> str:
+            try:
+                info = get_db().get_mod_display_info(mod_key)
+                if info is not None:
+                    ws = str(info.workspace_id or "").strip()
+                    if ws:
+                        return ws
+            except Exception:  # noqa: BLE001
+                pass
+            return "—"
+
         type_labels = {
             ConflictClass.FILE_OVERWRITE.value: "文件覆盖",
             ConflictClass.IDENTITY_CONFLICT.value: "身份冲突",
@@ -3983,7 +3985,9 @@ class ModDetailPanel(QWidget):
                     lines.append("代表性路径：")
                     for sample in trace.sample_paths[:5]:
                         lines.append(f"  · {sample}")
-                lines.append(f"内部 ID：{trace.mod_a} / {trace.mod_b}")
+                ws_a = _workspace_for(trace.mod_a)
+                ws_b = _workspace_for(trace.mod_b)
+                lines.append(f"Workspace ID：{ws_a} / {ws_b}")
                 lines.append("")
             return "\n".join(lines).strip()
 
@@ -4105,8 +4109,11 @@ class ModDetailPanel(QWidget):
             steam = info.steam_name
         elif meta:
             steam = (meta.title or "").strip()
+        ws_hint = ""
+        if info:
+            ws_hint = str(info.workspace_id or "").strip()
         self.edit_hint.setText(
-            f"Mod ID：{meta.published_file_id if meta else '—'}"
+            f"Workspace ID：{ws_hint or '—'}"
             + (f"\nSteam 原名：{steam}" if steam else "")
         )
         self.edit_display_name.setText(info.user_display_name if info else "")
@@ -4600,17 +4607,16 @@ class ModDetailPanel(QWidget):
             else getattr(self, "_current_platform", PLATFORM_STEAM)
         )
         name = (shown or steam or "").strip()
-        external_id = format_external_id(
-            platform,
-            (info.external_id if info else "") or "",
-            source_url=self._current_source_url(),
-            published_file_id=str(meta.published_file_id or ""),
-        )
+        workspace_id = ""
+        if info is not None:
+            workspace_id = str(info.workspace_id or "").strip()
+        if not workspace_id:
+            workspace_id = str(getattr(self, "_id_value", "") or "").strip()
         payload = format_mod_info_clipboard(
             name=name,
             platform=platform,
             source_url=self._current_source_url(),
-            external_id=external_id,
+            workspace_id=workspace_id,
             files=self._file_names_for_copy(),
         )
         if self._copy_to_clipboard(payload):

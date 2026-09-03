@@ -82,12 +82,14 @@ FILE_ROLE_ALIASES = {
     "source_archive": FILE_ROLE_GITHUB_SOURCE_ARCHIVE,
 }
 
-# Internal SQLite ``mod_id`` values for non-Steam Mods (avoid Workshop ID collisions).
+# Internal SQLite PK range for non-Steam Mods (avoid Workshop ID collisions).
+# This is Internal ID (database-only). It is NOT Workspace ID and MUST NEVER
+# be copied into workspace_id / external_id / platform URLs.
 NON_STEAM_MOD_ID_BASE = 9_000_000_000_000_000
 
 
 def is_internal_mod_id(mod_id: int | str) -> bool:
-    """True when *mod_id* is an app-allocated non-Steam SQLite primary key."""
+    """True when *mod_id* is an app-allocated non-Steam SQLite primary key (Internal ID)."""
     text = str(mod_id or "").strip()
     if not text.isdigit():
         return False
@@ -214,16 +216,18 @@ def _nexus_numeric_id_from_url(url: str) -> str:
 
 def generate_unique_workspace_id(existing: set[str] | None = None) -> str:
     """
-    Random unique digit string for GitHub / mod.io / 其它 (and Nexus fallback).
+    System-generated Workspace ID (GitHub / mod.io / 其它).
 
-    Uses millisecond timestamp + 4 random digits; retries on collision.
+    Never uses Internal ID. Stays below ``NON_STEAM_MOD_ID_BASE`` so the
+    digit string cannot be mistaken for an allocated SQLite PK.
     """
     taken = existing if existing is not None else set()
     for _ in range(64):
-        candidate = f"{int(time.time() * 1000)}{random.randint(1000, 9999)}"
-        if candidate not in taken:
+        candidate = f"{int(time.time() * 1000)}{random.randint(10, 99)}"
+        if candidate not in taken and not is_internal_mod_id(candidate):
             return candidate
-    return str(uuid.uuid4().int)[:18]
+    fallback = str(uuid.uuid4().int % (NON_STEAM_MOD_ID_BASE - 1) or 1)
+    return fallback
 
 
 def resolve_workspace_id(
@@ -233,36 +237,40 @@ def resolve_workspace_id(
     source_url: str = "",
     external_id: str = "",
     existing: str = "",
+    workshop_id: str = "",
 ) -> str:
     """
-    Resolve a persistent Workspace ID for a Mod.
+    Resolve Workspace ID from platform identity — NEVER from Internal ID.
 
-    - Steam → Steam Mod ID (``mod_id``)
-    - Nexus → trailing numeric id from source URL (``…/mods/1234`` → ``1234``)
-    - GitHub / mod.io / 其它 → empty (caller must generate via
-      :func:`generate_unique_workspace_id`)
+    ID contract:
+    - Steam → ``external_id`` / ``workshop_id`` (Steam Workshop ID)
+    - Nexus → ``/mods/<id>`` in URL, else numeric ``external_id``
+    - GitHub / mod.io / 其它 → empty (caller generates via
+      :func:`generate_unique_workspace_id`); never ``mod_id``
 
-    Non-empty ``existing`` is always kept (persist once assigned).
+    ``mod_id`` is the internal database PK. It is accepted only for API
+    compatibility and is ignored as a Workspace ID source.
+
+    Non-empty ``existing`` is kept unless it is an internal PK pollution.
     """
+    del mod_id  # Internal PK must never generate Workspace ID.
     kept = str(existing or "").strip()
     if kept:
         return kept
     key = normalize_platform(platform)
-    mid = str(mod_id or "").strip()
     ext = str(external_id or "").strip()
     url = str(source_url or "").strip()
+    workshop = str(workshop_id or "").strip()
     if key == PLATFORM_STEAM:
-        # Steam workspace == Workshop published_file_id. Never an internal pk.
-        if mid.isdigit() and not is_internal_mod_id(mid):
-            return mid
-        if ext.isdigit() and not is_internal_mod_id(ext):
-            return ext
+        for cand in (workshop, ext):
+            if cand.isdigit() and not is_internal_mod_id(cand):
+                return cand
         return ""
     if key == PLATFORM_NEXUS:
         nid = _nexus_numeric_id_from_url(url)
-        if nid:
+        if nid and not is_internal_mod_id(nid):
             return nid
-        if ext.isdigit():
+        if ext.isdigit() and not is_internal_mod_id(ext):
             return ext
         return ""
     return ""

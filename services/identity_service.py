@@ -1,8 +1,31 @@
 """Canonical Identity Service — sole production identity create/bind/persist gate.
 
-Internal ``mod_id``, platform identity, and workspace identity are distinct.
-No lifecycle helper may mint an internal id or copy it into platform fields
-except through this module.
+ID ARCHITECTURE CONTRACT (product semantics — do not reinterpret):
+
+* Internal ID (``mods.mod_id`` / code ``internal_id``)
+  Database-only identity. SQLite PK, Python lookups, workers, FKs.
+  NEVER user-facing. NEVER search. NEVER Workspace ID. NEVER external_id.
+  NEVER a platform URL. NEVER a folder name. NEVER user metadata.
+  MUST NEVER generate Workspace ID (no ``workspace_id = internal_id`` fallback).
+  Steam historically stores Workshop ID as the PK; that coincidence is an
+  implementation detail, not permission to treat Internal ID as Workspace ID.
+
+* Workspace ID (``mods.workspace_id``)
+  The ONLY user-facing Mod identifier. Search, metadata, lists, user ops.
+
+* external_id (``mods.external_id``)
+  Platform-native identity (Steam Workshop ID, Nexus Mod ID, …).
+  Not a second user Mod ID. Ordinary UI must not show it beside Workspace ID.
+
+Derivation (never invert):
+
+    Steam Workshop ID  → external_id → workspace_id
+    Nexus Mod ID       → external_id → workspace_id
+    Other (no stable numeric platform id) → system-generated workspace_id
+                                            (never from Internal ID)
+
+Use explicit names: ``internal_id``, ``workspace_id``, ``external_id``.
+Do not use ambiguous ``mod_id`` to mean more than one of these.
 """
 
 from __future__ import annotations
@@ -17,6 +40,9 @@ from enum import Enum
 from typing import Any, Iterator
 
 from core.mod_platform import (
+    PLATFORM_GITHUB,
+    PLATFORM_MODIO,
+    PLATFORM_OTHER,
     PLATFORM_STEAM,
     is_internal_mod_id,
     is_provisional_external_id,
@@ -177,6 +203,12 @@ def has_official_platform_identity(
         if cand and not is_internal_mod_id(cand):
             return True
         return False
+    if plat in (PLATFORM_OTHER, PLATFORM_GITHUB, PLATFORM_MODIO):
+        if ext.startswith("stub:") or is_internal_mod_id(ext):
+            return False
+        if ext or (url.lower().startswith("http") and "id=900000000000" not in url.replace(" ", "")):
+            return True
+        return False
     if not plat:
         return False
     if ext.startswith("stub:") or ext.startswith("local/") or is_internal_mod_id(ext):
@@ -319,15 +351,19 @@ def sidecar_published_file_id(
     platform: str = "",
     external_id: str = "",
 ) -> str:
-    """Sidecar ``published_file_id`` — never a Steam-polluted internal id."""
+    """Sidecar ``published_file_id`` is Steam Workshop ID (platform identity).
+
+    Never Internal ID. Non-Steam sidecars omit this field (empty string).
+    ``mod_id`` is accepted for API compatibility and is never written back.
+    """
     mid = str(mod_id or "").strip()
     plat = normalize_platform_if_known(platform)
     ext = sanitize_platform_external_id(plat or platform, external_id, mod_id=mid)
-    if is_internal_mod_id(mid) and plat == PLATFORM_STEAM:
-        if ext and not is_internal_mod_id(ext):
+    if plat == PLATFORM_STEAM:
+        if ext.isdigit() and not is_internal_mod_id(ext):
             return ext
         return ""
-    return mid
+    return ""
 
 
 def persist_workspace_id(
@@ -337,14 +373,39 @@ def persist_workspace_id(
     workspace_id: str = "",
     source_url: str = "",
     external_id: str = "",
+    workshop_id: str = "",
 ) -> str:
-    """Workspace for persistence: NULL when unresolved; never internal fallback."""
+    """Workspace for persistence: empty when unresolved; never Internal ID fallback."""
     return safe_workspace_id_for_deploy(
         platform=platform,
         workspace_id=workspace_id,
         mod_id=mod_id,
         source_url=source_url,
         external_id=external_id,
+        workshop_id=workshop_id,
+    )
+
+
+def resolve_workspace_id(
+    platform: str | None,
+    *,
+    internal_id: int | str = "",
+    source_url: str = "",
+    external_id: str = "",
+    existing: str = "",
+    workshop_id: str = "",
+    mod_id: int | str = "",
+) -> str:
+    """Canonical Workspace ID resolver. Internal ID is never a source."""
+    from core.mod_platform import resolve_workspace_id as _resolve_ws
+
+    return _resolve_ws(
+        platform,
+        source_url=source_url,
+        external_id=external_id,
+        existing=existing,
+        workshop_id=workshop_id or "",
+        mod_id=internal_id or mod_id,
     )
 
 
@@ -399,7 +460,9 @@ def create_mod_identity(
     mod_files: Any = None,
     operation: str = "",
 ) -> ResolvedIdentity:
-    """Create or reuse a Mod. The only supported identity-create entry."""
+    """Create internal row + bind platform identity. Workspace is derived from
+    platform identity (Steam/Nexus) or generated (other) — never from Internal ID.
+    """
     op = (operation or current_lifecycle() or LIFECYCLE_IMPORT).strip().lower()
     assert_lifecycle_may_create(op)
     display = str(title or "").strip()
@@ -494,21 +557,51 @@ def persist_identity(
     )
     url_in = fields.get("source_url")
     url = str(url_in).strip() if url_in is not None else None
-    if url and is_internal_mod_id(mid) and f"id={mid}" in url.replace(" ", ""):
-        url = ""
-        fields = dict(fields)
-        fields["source_url"] = ""
+    if url is not None:
+        from services.mod_identity import source_url_embeds_internal
+
+        if source_url_embeds_internal(url, internal_pk=mid):
+            # Refuse Internal-ID Steam URL rehydration; keep existing source_url.
+            fields = dict(fields)
+            fields.pop("source_url", None)
+            url = None
+
+    if fields.get("platform") is not None:
+        proposed = normalize_platform_if_known(fields.get("platform")) or normalize_platform(
+            str(fields.get("platform") or "")
+        )
+        existing_plat = normalize_platform_if_known(info.platform) or normalize_platform(
+            str(info.platform or "")
+        )
+        from services.mod_identity import source_url_embeds_internal as _embed
+
+        steam_url = url if url is not None else str(info.source_url or "")
+        if proposed == PLATFORM_STEAM and (
+            _embed(steam_url, internal_pk=mid)
+            or (existing_plat and existing_plat != PLATFORM_STEAM)
+        ):
+            fields = dict(fields)
+            fields.pop("platform", None)
+            plat = existing_plat
 
     ws_in = fields.get("workspace_id")
     if ws_in is not None:
         fields = dict(fields)
-        fields["workspace_id"] = persist_workspace_id(
-            platform=plat or str(info.platform or ""),
-            mod_id=mid,
-            workspace_id=str(ws_in or ""),
-            source_url=url if url is not None else (info.source_url or ""),
-            external_id=ext if ext is not None else (info.external_id or ""),
-        )
+        raw_ws = str(ws_in or "").strip()
+        if is_internal_mod_id(raw_ws) or raw_ws == mid:
+            fields.pop("workspace_id", None)
+        else:
+            new_ws = persist_workspace_id(
+                platform=plat or str(info.platform or ""),
+                mod_id=mid,
+                workspace_id=raw_ws,
+                source_url=url if url is not None else (info.source_url or ""),
+                external_id=ext if ext is not None else (info.external_id or ""),
+            )
+            if new_ws and not is_internal_mod_id(new_ws):
+                fields["workspace_id"] = new_ws
+            else:
+                fields.pop("workspace_id", None)
 
     if ext is not None:
         fields = dict(fields)
@@ -582,6 +675,34 @@ def bind_platform(
     return update_platform_identity(
         db,
         mod_id,
+        platform=platform,
+        external_id=external_id,
+        source_url=source_url,
+        app_id=app_id,
+        title=title,
+        source=source,
+        reason=reason,
+    )
+
+
+def bind_platform_identity(
+    db: Any,
+    internal_id: int | str,
+    *,
+    platform: str | None = None,
+    external_id: str | None = None,
+    source_url: str | None = None,
+    app_id: int | None = None,
+    title: str | None = None,
+    source: str = "identity_service",
+    reason: str = "bind_platform_identity",
+) -> Any:
+    """Bind platform identity onto an existing Internal ID. Does not mint Workspace
+    from Internal ID — Steam/Nexus Workspace comes from ``external_id``.
+    """
+    return bind_platform(
+        db,
+        internal_id,
         platform=platform,
         external_id=external_id,
         source_url=source_url,

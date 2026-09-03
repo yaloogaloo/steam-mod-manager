@@ -316,6 +316,70 @@ def test_import_dialog_empty_path_creates_missing_content(
     dlg.close()
 
 
+def test_import_dialog_offline_html_filename_does_not_widen_dialog(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Long offline-HTML filenames must not drive Import Dialog width."""
+    del db
+    lib = tmp_path / "library"
+    lib.mkdir()
+    dlg = ModImportDialog(
+        lib,
+        game_context={"game_id": 1623730, "game_name": "Palworld"},
+    )
+    assert dlg.radio_nexus is not None
+    dlg.radio_nexus.setChecked(True)
+    from PySide6.QtCore import Qt as QtCore
+
+    dlg.setAttribute(QtCore.WidgetAttribute.WA_DontShowOnScreen, True)
+    dlg.show()
+    qapp.processEvents()
+    dlg.adjustSize()
+    qapp.processEvents()
+
+    base_width = dlg.width()
+    assert base_width >= dlg.minimumWidth()
+    label_hint = dlg.offline_html_status.sizeHint().width()
+
+    short = tmp_path / "page.html"
+    long_name = (
+        "Tales-of-The-Witcher-NEW-WORLD-Cintra-DLC-EARLY-ACCESS-"
+        "at-The-Witcher-3-Nexus-Mods-and-community.html"
+    )
+    long_path = tmp_path / long_name
+    extra_name = ("Very-" * 40) + "Long-Nexus-Offline-Page.html"
+    extra_path = tmp_path / extra_name
+
+    widths: list[int] = []
+    for path in (short, long_path, extra_path):
+        dlg._set_offline_html_path(str(path))
+        qapp.processEvents()
+        dlg.adjustSize()
+        qapp.processEvents()
+        widths.append(dlg.width())
+        assert dlg.offline_html_status.sizeHint().width() == label_hint
+        assert dlg.offline_html_status.fullText() == path.name
+        assert dlg.offline_html_status.toolTip() == str(path)
+
+    assert widths[0] == widths[1] == widths[2]
+    assert widths[0] == base_width
+
+    # Layout-allocated width is far smaller than an extra-long filename.
+    assert dlg.offline_html_status.width() > 20
+    fm = dlg.offline_html_status.fontMetrics()
+    elided = fm.elidedText(
+        extra_name,
+        QtCore.TextElideMode.ElideRight,
+        max(1, dlg.offline_html_status.width()),
+    )
+    assert elided != extra_name
+    assert "..." in elided or "…" in elided
+
+    dlg._set_offline_html_path("")
+    assert dlg.offline_html_status.toolTip() == ""
+    dlg.close()
+
+
 def test_import_button_present(qapp: QApplication, tmp_path: Path, db: DatabaseManager) -> None:
     lib = tmp_path / "library"
     lib.mkdir()

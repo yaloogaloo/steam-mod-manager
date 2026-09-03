@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
@@ -182,6 +184,12 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
 
         page = int(self.settings.value(SETTING_PAGE, PAGE_SYNC))
         page = page if page in _VALID_PAGES else PAGE_SYNC
+        try:
+            from services.startup_io_trace import log_io_event
+
+            log_io_event("gui", "restore_page", page=page)
+        except Exception:  # noqa: BLE001
+            pass
         self.nav_list.setCurrentRow(page)
         if page == PAGE_LIBRARY:
             self.library_view.refresh(force=False)
@@ -204,7 +212,31 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
             )
 
         # Backfill missing metadata backups off the UI thread
+        QTimer.singleShot(0, self._refresh_system_proxy_on_startup)
         QTimer.singleShot(0, self._run_startup_backup_rebuild)
+
+    def _refresh_system_proxy_on_startup(self) -> None:
+        try:
+            from services.proxy_resolver import refresh_system_proxy
+
+            resolved = refresh_system_proxy()
+            logging.getLogger(__name__).info(
+                "[startup-timeline] system proxy refresh "
+                "source=%s url=%s detected_by=%s",
+                resolved.source,
+                resolved.url or "(direct)",
+                resolved.detected_by,
+            )
+            log_startup(
+                "system proxy refresh "
+                f"source={resolved.source} url={resolved.url or '(direct)'} "
+                f"detected_by={resolved.detected_by}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "[startup-timeline] system proxy refresh skip: %s", exc
+            )
+            log_startup(f"system proxy refresh skip: {exc}")
 
     def _run_startup_backup_rebuild(self) -> None:
         try:

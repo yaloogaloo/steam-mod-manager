@@ -1,4 +1,4 @@
-"""FILE_OVERWRITE status is ``conflict`` for both preview and post-deploy scan."""
+"""FILE_OVERWRITE is a diagnostic; persist must not write conflict_status."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
+from core.mod_status import CONFLICT_STATUS_NONE
 from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy import ModDeployer
@@ -64,14 +64,14 @@ def test_case1_identical_dll_persists_conflict(
     db.upsert_mod(ModMetadata(published_file_id="802", title="B"))
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["801"].status == CONFLICT_STATUS_CONFLICT
-    assert reports["802"].status == CONFLICT_STATUS_CONFLICT
+    assert reports["801"].status == CONFLICT_STATUS_NONE
+    assert reports["802"].status == CONFLICT_STATUS_NONE
     assert reports["801"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
-    assert db.get_mod_status(801).conflict_status == "conflict"
-    assert db.get_mod_status(802).conflict_status == "conflict"
+    assert db.get_mod_status(801).conflict_status == "none"
+    assert db.get_mod_status(802).conflict_status == "none"
 
 
-def test_case2_preview_status_is_conflict_not_warning(
+def test_case2_preview_reports_overwrite_not_relationship(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "mod"
@@ -82,16 +82,16 @@ def test_case2_preview_status_is_conflict_not_warning(
 
     det = ConflictDetector(library, db=db)
     preview = det.preview_targets("812", [shared])
-    assert preview.status == CONFLICT_STATUS_CONFLICT
-    assert preview.status != "warning"
+    assert preview.status == CONFLICT_STATUS_NONE
     assert preview.conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
     payload = ModDeployer(library_root=library, db=db).check_conflict_preview(
         "812", [shared]
     )
     assert payload is not None
-    assert payload["conflict"] is True
-    assert payload["status"] == "conflict"
+    assert payload["overwrite"] is True
+    assert payload["conflict"] is False
+    assert payload["status"] == "none"
     assert payload["conflicts"][0]["type"] == "FILE_OVERWRITE"
 
 

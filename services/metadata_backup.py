@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -45,31 +46,79 @@ def backup_root(mod_id: int | str) -> Path:
 
 
 def _resolve_mod_id(mod_path: Path, data: dict[str, Any] | None) -> str:
-    mid = ""
-    if data:
-        mid = str(data.get("published_file_id") or "").strip()
-    if not mid and mod_path.name.isdigit():
+    payload = dict(data or {})
+    try:
+        payload.setdefault(
+            "_managed_path",
+            str(mod_path.resolve()) if mod_path.exists() else str(mod_path),
+        )
+        payload.setdefault("_folder_name", mod_path.name)
+        from services.mod_identity import resolve_existing_mod_id
+
+        found = resolve_existing_mod_id(payload)
+        if found.isdigit():
+            return found
+    except Exception:  # noqa: BLE001
+        logger.debug("backup identity resolve failed for %s", mod_path, exc_info=True)
+    mid = str(payload.get("published_file_id") or "").strip()
+    if not mid.isdigit() and mod_path.name.isdigit():
         mid = mod_path.name
     return mid
 
 
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
+    nbytes = 0
+    t0 = time.perf_counter()
     with path.open("rb") as handle:
         while True:
             chunk = handle.read(65536)
             if not chunk:
                 break
+            nbytes += len(chunk)
             digest.update(chunk)
+    try:
+        from services.reconcile_observability import add_hash
+
+        add_hash(files=1, nbytes=nbytes, ms=(time.perf_counter() - t0) * 1000.0)
+    except Exception:  # noqa: BLE001
+        pass
     return digest.hexdigest()
 
 
 def _same_file_content(src: Path, dest: Path) -> bool:
+    t0 = time.perf_counter()
     if not src.is_file() or not dest.is_file():
+        try:
+            from services.reconcile_observability import add_compare_ms
+
+            add_compare_ms((time.perf_counter() - t0) * 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
         return False
     try:
-        if src.stat().st_size != dest.stat().st_size:
+        src_st = src.stat()
+        dest_st = dest.stat()
+        if src_st.st_size != dest_st.st_size:
+            try:
+                from services.reconcile_observability import add_compare_ms, note_size_mismatch
+
+                note_size_mismatch()
+                add_compare_ms((time.perf_counter() - t0) * 1000.0)
+            except Exception:  # noqa: BLE001
+                pass
             return False
+        mtime_equal = src_st.st_mtime == dest_st.st_mtime
+        try:
+            from services.reconcile_observability import (
+                add_compare_ms,
+                note_size_match_then_hash,
+            )
+
+            note_size_match_then_hash(mtime_equal=mtime_equal)
+            add_compare_ms((time.perf_counter() - t0) * 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
         return _file_sha256(src) == _file_sha256(dest)
     except OSError:
         return False
@@ -116,7 +165,18 @@ def _copy_cover(src: Path | None, dest_dir: Path) -> str:
     try:
         if _same_file_content(src, dest):
             return str(dest.resolve())
+        t_copy = time.perf_counter()
         shutil.copy2(src, dest)
+        try:
+            from services.reconcile_observability import add_copy
+
+            add_copy(
+                files=1,
+                nbytes=int(dest.stat().st_size) if dest.is_file() else 0,
+                ms=(time.perf_counter() - t_copy) * 1000.0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return str(dest.resolve())
     except OSError as exc:
         logger.warning("Failed to copy cover to backup %s: %s", dest, exc)
@@ -146,9 +206,26 @@ def _copy_offline_tree(src_offline: Path, dest_offline: Path) -> str:
     try:
         if backup_index.is_file() and _same_file_content(index, backup_index):
             return str(backup_index.resolve())
+        t_copy = time.perf_counter()
         if dest_offline.is_dir():
             shutil.rmtree(dest_offline)
         shutil.copytree(src_offline, dest_offline)
+        try:
+            from services.reconcile_observability import add_copy
+
+            nbytes = 0
+            try:
+                if backup_index.is_file():
+                    nbytes = int((dest_offline / BACKUP_OFFLINE_INDEX).stat().st_size)
+            except OSError:
+                nbytes = 0
+            add_copy(
+                files=1,
+                nbytes=nbytes,
+                ms=(time.perf_counter() - t_copy) * 1000.0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
         if backup_index.is_file():
             return str(backup_index.resolve())
     except OSError as exc:
@@ -168,8 +245,15 @@ def snapshot_from_mod_folder(mod_path: str | Path) -> BackupSnapshot | None:
     if not root.is_dir():
         return None
 
+    t_scan = time.perf_counter()
     data = read_info_metadata_dict(root) or {}
     mid = _resolve_mod_id(root, data)
+    try:
+        from services.reconcile_observability import add_scan_ms
+
+        add_scan_ms((time.perf_counter() - t_scan) * 1000.0)
+    except Exception:  # noqa: BLE001
+        pass
     if not mid.isdigit():
         return None
 
@@ -177,21 +261,60 @@ def snapshot_from_mod_folder(mod_path: str | Path) -> BackupSnapshot | None:
     dest.mkdir(parents=True, exist_ok=True)
 
     meta_file = dest / BACKUP_METADATA_NAME
+    t_meta = time.perf_counter()
     meta_text = json.dumps(data, ensure_ascii=False, indent=2)
     try:
         if meta_file.is_file():
             existing = meta_file.read_text(encoding="utf-8")
+            try:
+                from services.reconcile_observability import add_compare_ms
+
+                add_compare_ms((time.perf_counter() - t_meta) * 1000.0)
+            except Exception:  # noqa: BLE001
+                pass
             if existing != meta_text:
+                t_write = time.perf_counter()
                 meta_file.write_text(meta_text, encoding="utf-8")
+                try:
+                    from services.reconcile_observability import add_copy, note_metadata_rewritten
+
+                    note_metadata_rewritten()
+                    add_copy(
+                        files=1,
+                        nbytes=len(meta_text.encode("utf-8")),
+                        ms=(time.perf_counter() - t_write) * 1000.0,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
         else:
+            t_write = time.perf_counter()
             meta_file.write_text(meta_text, encoding="utf-8")
+            try:
+                from services.reconcile_observability import add_copy, note_metadata_rewritten
+
+                note_metadata_rewritten()
+                add_copy(
+                    files=1,
+                    nbytes=len(meta_text.encode("utf-8")),
+                    ms=(time.perf_counter() - t_write) * 1000.0,
+                )
+            except Exception:  # noqa: BLE001
+                pass
     except OSError as exc:
         logger.warning("Failed to write backup metadata for %s: %s", mid, exc)
         return None
 
     info_dir = root / INFO_DIR_NAME
-    cover_abs = _copy_cover(_find_info_cover(info_dir), dest)
+    t_assets = time.perf_counter()
+    cover_src = _find_info_cover(info_dir)
     offline_src = info_dir / OFFLINE_SNAPSHOT_DIR
+    try:
+        from services.reconcile_observability import add_scan_ms
+
+        add_scan_ms((time.perf_counter() - t_assets) * 1000.0)
+    except Exception:  # noqa: BLE001
+        pass
+    cover_abs = _copy_cover(cover_src, dest)
     offline_abs = _copy_offline_tree(offline_src, dest / BACKUP_OFFLINE_DIR)
 
     return BackupSnapshot(
@@ -344,6 +467,7 @@ def sync_metadata_backup(mod_path: str | Path) -> None:
     try:
         from core.db_manager import get_db
 
+        t_persist = time.perf_counter()
         get_db().update_mod_backup_snapshot(
             snapshot.mod_id,
             last_known_path=snapshot.last_known_path,
@@ -352,6 +476,12 @@ def sync_metadata_backup(mod_path: str | Path) -> None:
             backup_cover_path=snapshot.cover_path,
             backup_offline_path=snapshot.offline_path,
         )
+        try:
+            from services.reconcile_observability import add_persist_ms
+
+            add_persist_ms((time.perf_counter() - t_persist) * 1000.0)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "DB backup snapshot update failed for %s: %s", snapshot.mod_id, exc

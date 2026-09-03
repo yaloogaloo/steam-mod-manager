@@ -49,6 +49,44 @@ def _folder_exists(path: str | Path | None) -> bool:
         return False
 
 
+def _pick_canonical_visible_folder(mod_id: str, folders: list[Path]) -> Path:
+    """Choose one filesystem observation for a single Internal entity."""
+    from services.identity_service import is_empty_mod_placeholder
+
+    if len(folders) == 1:
+        return folders[0]
+    lkp = ""
+    try:
+        from core.db_manager import get_db
+
+        row = get_db().get_mod_backup_row(mod_id) or {}
+        lkp = str(row.get("last_known_path") or "").strip()
+    except Exception:  # noqa: BLE001
+        lkp = ""
+    ranked: list[tuple[int, int, int, str, Path]] = []
+    for folder in folders:
+        placeholder = 1 if is_empty_mod_placeholder(folder.name) else 0
+        path_match = 0
+        if lkp:
+            try:
+                path_match = 0 if str(folder.resolve()) == str(Path(lkp).resolve()) else 1
+            except OSError:
+                path_match = 1
+        content_missing = 1
+        try:
+            from services.local_file_index import has_local_mod_payload
+
+            content_missing = 0 if has_local_mod_payload(folder) else 1
+        except Exception:  # noqa: BLE001
+            try:
+                content_missing = 0 if any(folder.iterdir()) else 1
+            except OSError:
+                content_missing = 1
+        ranked.append((placeholder, content_missing, path_match, folder.name.lower(), folder))
+    ranked.sort()
+    return ranked[0][4]
+
+
 @dataclass
 class ResolvedModMetadata:
     """Display payload after applying .info / backup / SQLite priority."""
@@ -317,31 +355,46 @@ class ModMetadataResolver:
         library_root: str | Path,
         game_name: str | None = None,
     ) -> list[ResolvedModMetadata]:
-        """On-disk mods plus backup-only missing mods."""
+        """On-disk mods plus backup-only missing mods.
+
+        One Internal entity produces at most one user-facing card. Multiple
+        filesystem observations of the same entity are grouped; unresolved
+        folders (including Empty Mod placeholders without official identity)
+        are not extra cards.
+        """
+        from core.db_manager import get_db
         from services.file_ops import ModFileManager
+        from services.mod_identity import resolve_existing_mod_id
 
         root = Path(library_root)
         manager = ModFileManager(root)
         folders = manager.list_managed_mods(game_name=game_name)
+        try:
+            database = get_db()
+        except Exception:  # noqa: BLE001
+            database = None
+        grouped: dict[str, list[Path]] = {}
+        for folder in folders:
+            info = dict(read_info_metadata_dict(folder) or {})
+            info["_managed_path"] = str(folder.resolve())
+            info["_folder_name"] = folder.name
+            mid = resolve_existing_mod_id(info, db=database)
+            if not mid.isdigit():
+                continue
+            grouped.setdefault(mid, []).append(folder)
+
         seen: set[str] = set()
         out: list[ResolvedModMetadata] = []
-        for folder in folders:
-            info = read_info_metadata_dict(folder) or {}
-            mid = _first_text(
-                info.get("published_file_id"),
-                folder.name if folder.name.isdigit() else "",
-            )
-            resolved = self.resolve(mid or None, folder)
+        for mid, paths in grouped.items():
+            folder = _pick_canonical_visible_folder(mid, paths)
+            resolved = self.resolve(mid, folder)
             if resolved is None:
                 continue
             out.append(resolved)
-            if resolved.published_file_id.isdigit():
-                seen.add(resolved.published_file_id)
+            seen.add(mid)
 
         try:
-            from core.db_manager import get_db
-
-            rows = get_db().list_folder_missing_mods(
+            rows = (database or get_db()).list_folder_missing_mods(
                 game_folder=game_name,
                 library_root=root,
             )
@@ -367,11 +420,12 @@ class ModMetadataResolver:
         path = Path(managed_path) if managed_path is not None else None
         mid = _first_text(mod_id)
         if not mid.isdigit() and path is not None and path.is_dir():
-            info = read_info_metadata_dict(path) or {}
-            mid = _first_text(
-                info.get("published_file_id"),
-                path.name if path.name.isdigit() else "",
-            )
+            from services.mod_identity import resolve_existing_mod_id
+
+            info = dict(read_info_metadata_dict(path) or {})
+            info["_managed_path"] = str(path.resolve())
+            info["_folder_name"] = path.name
+            mid = resolve_existing_mod_id(info)
         if not mid.isdigit() and path is not None and not path.is_dir():
             row = self._sqlite_row_by_path(path)
             if row is not None:

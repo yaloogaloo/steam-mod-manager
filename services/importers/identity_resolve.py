@@ -5,6 +5,10 @@ Pipeline order (enforced by callers):
 
 Offline page snapshots are an identity *source*, not a post-import scrape step
 for the gate. Metadata scrape/attach may still run after a successful import.
+
+For Nexus Offline HTML, parsed title from ``parse_offline_page_identity``
+feeds ``canonical_nexus_offline_import_title`` so the library directory is
+named after the Mod title, not the ``Empty Mod <random>`` stub folder.
 """
 
 from __future__ import annotations
@@ -103,6 +107,50 @@ def parse_offline_page_identity(path: str | Path) -> ImportIdentity:
         source_url=str(getattr(candidates, "source_url", "") or "").strip(),
         external_id=str(getattr(candidates, "external_id", "") or "").strip(),
         title=str(getattr(candidates, "title", "") or "").strip(),
+    )
+
+
+def canonical_nexus_offline_import_title(
+    *,
+    user_title: str = "",
+    parsed_title: str = "",
+    folder_name: str = "",
+) -> str:
+    """Choose the title used for Nexus identity + canonical library directory name.
+
+    Why this order exists (do not drop it in a future import-flow refactor):
+
+    Offline HTML is an identity *source*. The parser runs before materialize.
+    A valid parsed Mod title MUST become the canonical directory name
+    (``<game>/<parsed title>/``). Temp stub folders named ``Empty Mod <random>``
+    exist only so an empty local path can still copy a payload; they are not
+    the final filesystem identity.
+
+    ``Empty Mod <random>`` remains a fallback only when no usable title exists.
+    Rename after materialize, if still needed, must go through path_lifecycle
+    so filesystem / DB / sidecar / identity stay aligned — never an isolated
+    ``os.rename`` / ``shutil.move``.
+    """
+    from core.models import is_unknown_mod_title
+    from services.identity_service import is_empty_mod_placeholder
+
+    def _usable(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if is_empty_mod_placeholder(text):
+            return ""
+        if is_unknown_mod_title(text):
+            return ""
+        return text
+
+    return (
+        _usable(user_title)
+        or _usable(parsed_title)
+        or _usable(folder_name)
+        or str(user_title or "").strip()
+        or str(parsed_title or "").strip()
+        or str(folder_name or "").strip()
     )
 
 

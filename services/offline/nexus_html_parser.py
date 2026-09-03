@@ -492,6 +492,12 @@ def apply_nexus_offline_candidates(
 
     This function MUST only be called from the offline-HTML-import path.
     NEVER call it from refresh_mod / reconcile / sync / show_mod.
+
+    Directory naming is intentionally *not* performed here. Filling title /
+    URL / id in DB + sidecar is a metadata merge. Canonical
+    ``Empty Mod <random>`` → parsed-title rename is owned by
+    ``attach_nexus_offline_page`` via path_lifecycle so filesystem, DB path,
+    sidecar, and identity stay aligned. Do not add an isolated rename here.
     """
     from core.db_manager import get_db
     from core.models import is_unknown_mod_title

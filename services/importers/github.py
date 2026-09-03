@@ -1,4 +1,8 @@
-"""GitHub importer — URL + local scan, no GitHub API."""
+"""GitHub importer — URL + local scan, no GitHub API.
+
+Workspace ID is system-generated. Never copied from Internal ID.
+``external_id`` is owner/repo (platform identity), not a user Mod ID.
+"""
 
 from __future__ import annotations
 

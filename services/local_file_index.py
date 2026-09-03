@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -171,11 +173,16 @@ def _list_root_archives(managed: Path, *, suffix: str = "") -> list[Path]:
     return out
 
 
-def _iter_loose_files(managed: Path) -> list[Path]:
+def _iter_loose_files(managed: Path) -> Iterator[Path]:
+    """Yield loose (non-archive) payload files under *managed*.
+
+    Lazy: callers may stop after the first hit. Filter rules match the
+    previous list-building implementation (skip ``SKIP_INDEX_PARTS`` and
+    archive filenames).
+    """
     root = Path(managed)
     if not root.is_dir():
-        return []
-    files: list[Path] = []
+        return
     try:
         for path in root.rglob("*"):
             if not path.is_file():
@@ -188,10 +195,9 @@ def _iter_loose_files(managed: Path) -> list[Path]:
                 continue
             if is_archive_path(path.name):
                 continue
-            files.append(path)
+            yield path
     except OSError:
-        return []
-    return files
+        return
 
 
 def _reference_hash(managed: Path, entry: ModFileEntry) -> str:
@@ -384,7 +390,25 @@ def has_local_mod_payload(
     root = Path(managed_path).expanduser()
     if not root.is_dir():
         return False
-    if _iter_loose_files(root):
+    t0 = time.perf_counter()
+    seen = 0
+    hit = False
+    try:
+        for _path in _iter_loose_files(root):
+            seen += 1
+            hit = True
+            break
+    finally:
+        try:
+            from services.reconcile_observability import add_payload_walk
+
+            add_payload_walk(
+                files=seen,
+                ms=(time.perf_counter() - t0) * 1000.0,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if hit:
         return True
     if _list_root_archives(root):
         return True

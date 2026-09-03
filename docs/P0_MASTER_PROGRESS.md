@@ -17,84 +17,118 @@ Evidence:
 
 - Prior identity repair apply: `2026-09-02T10:10:49Z` (parallel session).
 - This line of work has **not** run `--apply --yes`.
-- This line of work has **not** mutated the production database.
-- identity_repair audit fact (unchanged): CRITICAL=7 HIGH=0 — seven polluting Steam `source_url`s.
-- Readonly SQLite this session: ghosts `3438`–`3450` absent; nine invalid duplicates absent; `3451`/`3452` present; max_internal still `9000000000003452`; seven polluted URLs still present.
-- identity_invariants DB-only scan (empty tmp library, no FS walk): CRITICAL=11 HIGH=21 REQUIRES_REVIEW=10. This is a **different, broader scanner** than identity_repair `--audit`. Extra findings are pre-existing; they are not apply authorization.
+- This line of work has **not** mutated the production database, deleted mods, or quarantined mods.
+- This line of work **did** re-archive existing Workshop `3786388428` into its existing `.info/` (overwrite). Mod row count unchanged (1766). No new identity.
+- identity_repair audit fact (unchanged): CRITICAL=7 HIGH=0 — seven polluting Steam `source_url`s remain.
+- 3451 / 3452 still present (KEEP; Nexus official identity).
+- Related tests this round: **94 passed** (archive asset pipeline + cache + proxy fallback + rate limit + html parser + p0 governance + offline/modio archive tests). Not full-repo pytest.
+
+P0-2: Network **PASS**. Asset pipeline performance **PASS** vs the 419s blocker. Overall P0-2 **can close**. **RUNTIME_VERIFIED** for Workshop `3786388428`.
+
+This round: P0-2 asset-pipeline minimal fix + targeted tests + live re-archive. See `docs/P0_ARCHIVE_ASSET_PIPELINE_FORENSIC.md` §10.
 
 ---
 
-## This session (code, not production apply)
+## This round
 
-P0-1: Empty Mod **without** official identity still cannot mint. Empty Mod **with** official Nexus/Steam identity is allowed; placeholder title is stripped. Scanner flags leftover Empty Mod `title` even when `display_name` is real (`REQUIRES_REVIEW` + keep entity, not delete).
+P0-1: unchanged (CODE_IMPLEMENTED + TESTED; production repair waiting authorization).
 
-P0-4: Deploy stages include `extract` / `hash` / `manifest` / `persist`; `tests/test_deploy_stage_profiling.py` records stage names. Not a production bottleneck proof.
+P0-2: Asset pipeline fix **CODE_IMPLEMENTED + TESTED + RUNTIME_VERIFIED**. HTML 200. `.info/index.html` valid. First post-fix archive `assets=93.64s` (4.47× vs 419.01s); repeat archive `assets=0.16s`. `GLOBAL_ASSET_WORKERS` still 6. Residual: first CSS localize still 404s Steam-relative `url()` (~257 fails, not 15s timeouts). P0-2 **can close**.
 
-P0-CROSS: SAFE_DELETE three unreferenced scratch files. Dead duplicate statements after `return` removed from `allocate_internal_id`.
+P0-3: FORENSIC_COMPLETE. Scheme B **not** executed.
 
-Tests (not full-repo):
+P0-4: FORENSIC + INSTRUMENTATION. Waiting one real startup `[BACKUP_RESULT] reason=reconcile`. No concurrency change.
 
-- `tests/test_p0_system_governance.py` — 19 passed after the Empty Mod title/display_name scanner fix
-- Related set (identity lifecycle/governance/repair, sidecar, conflict, deploy_db, platform_persistence, import identity gate, deploy stage profiling) — 79 passed immediately before that last scanner tweak
+P0-5: DRY_RUN_PLANNED. Waiting `--apply --yes`.
+
+P0-CROSS Data Hygiene: **AUDIT_COMPLETE / CLEANUP_DEFERRED**. Not CLEAN. Not P0-6. `identity_repair_production_backup/` (~99.86 GiB) KEEP until P0-5 PRODUCTION_VERIFIED. SAFE_DELETE not executed.
 
 ---
 
 ## P0-1 Identity Governance
 
-**Status:** CODE_IMPLEMENTED + TESTED for mint guards. Production leftover entities not cleaned.
+**STATUS:** CODE_IMPLEMENTED + TESTED (guards). Production leftovers not repaired this round.
 
-**Done:** IdentityService gates; lifecycle scopes; `_ensure_mod_stub` / deploy / metadata missing-row refuse; Empty Mod without official identity cannot mint; Empty Mod **with** official identity strips placeholder title (import still allowed); scanner; runtime `[IDENTITY_GUARD]`.
+**WHAT_IS_SOLVED:** Missing-row status persist cannot mint. Conflict scan cannot recreate 0349. Empty Mod mint rules from prior round remain.
 
-**Not done:** Production scrub of 7 URLs (needs apply auth). 3451/3452 title/folder hygiene (KEEP entity; do not delete).
+**WHAT_IS_NOT_SOLVED:** 7 polluted URLs; 3451/3452 placeholder titles; production verification.
+
+**EVIDENCE:** `test_update_mod_status_cannot_mint_missing_mod`, `test_post_deploy_conflict_scan_cannot_recreate_0349`.
+
+**NEXT_STEP:** Do not apply URL scrub until authorized. Restart app is not an identity apply.
 
 ## P0-2 Archive
 
-**Status:** CODE_IMPLEMENTED observability. Network not “fixed”.
+**STATUS:** CODE_IMPLEMENTED + TESTED + RUNTIME_VERIFIED (`3786388428`). Asset-pipeline 419s blocker **closed**. `GLOBAL_ASSET_WORKERS` remains **6**.
 
-**Done:** ARCHIVE_* logs; curl 28 → NETWORK_FAILURE; failed stub marker; `python -m scripts.archive_diagnostics`.
+**WHAT_IS_SOLVED:** Windows LAN proxy; Steam HTML 200; valid `.info/index.html`; cache/seen no longer re-HTTP on hit; CSS localize-once (`/* smm-css-localized */`); asset timeout does not spend a second 15s direct retry; INFO distinguishes hit/miss/fail; nested CSS `url()` prefetch uses the existing 6-worker pool after the top-level pool.
 
-**Not done:** Environment/DNS/proxy recovery (not a code claim).
+**WHAT_IS_NOT_SOLVED (residual, not the 419s class):** Steam CSS relative `url()` often 404s (`.../public/css/skin_1/<hash>.png`). First localize of a page can still spend ~90s on those 404s. Repeat archive of the same `.info` is ~0.16s. Do **not** raise worker count for this.
+
+**EVIDENCE:** Live `3786388428` 2026-09-03: HTML 200, proxy `http://127.0.0.1:12450`. Run 1 `assets=93.64s` hit=38 miss=0 fail=257 top_ok=49 top_fail=0 nested_ok=0 nested_fail=257. Run 2 `assets=0.16s` hit=38 fail=0. vs old 419.01s. Tests: `tests/test_archive_asset_pipeline.py` + related archive tests, 94 passed. Forensic addendum: `docs/P0_ARCHIVE_ASSET_PIPELINE_FORENSIC.md` §10.
+
+**NEXT_STEP:** P0-2 can close. Optional later: CSS relative-url 404 path correction. Do not raise `GLOBAL_ASSET_WORKERS` first.
 
 ## P0-3 Conflict
 
-**Status:** CODE_IMPLEMENTED traces + UI distinction.
+**STATUS:** FORENSIC_COMPLETE. Scheme B **not** executed. Detector still auto-persists FILE_OVERWRITE as `conflict`.
 
-**Done:** FILE_OVERWRITE retained; decision trace; both owners persist; internal / workshop / workspace labels.
+**WHAT_IS_SOLVED:** Full semantic audit. Ghost mint already blocked (P0-1).
 
-**Not done:** Production sidecar/DB workspace_id drift for Anno 0362 (reconcile persist exists; production row still empty until a reconcile pass).
+**WHAT_IS_NOT_SOLVED:** Auto persist of FILE_OVERWRITE. No load-order/game rules for scheme A.
 
-## P0-4 Deploy
+**EVIDENCE:** `docs/P0_CONFLICT_DETECTOR_AUDIT.md`; `data/p0_anno_conflict_forensics.json`.
 
-**Status:** CODE_IMPLEMENTED instrumentation. Profiling started in tests, not production.
+**NEXT_STEP:** Authorize scheme B (diagnostic only) — not this round.
 
-**Done:** DEPLOY_START/STAGE/RESULT; stages include resolve, extract, plan, backup, copy, validate, hash, manifest, persist, conflict_scan.
+## P0-4 Deploy / Backup
 
-**Not done:** Production bottleneck proof from a real slow run. Do not optimize from guesses.
+**STATUS:** FORENSIC + INSTRUMENTATION. Production 5min+ **not** measured.
 
-## P0-5 Production Repair & Verification
+**WHAT_IS_SOLVED:** Reconcile already emits `[BACKUP_START] reason=reconcile` and `[BACKUP_RESULT] reason=reconcile total_elapsed_ms=...`. Per-mod `backup synced ... copy_ms= persist_ms=`. No extra instrumentation this round. Not multithreaded.
 
-**Status:** DRY_RUN_PLANNED for 7 URLs. APPLY not authorized this line. APPLY_UNVERIFIED overall.
+**WHAT_IS_NOT_SOLVED:** Which stage dominates a real 5min run.
 
-**Done:** Dry-run list in `data/p0_url_scrub_dry_run.json`. 3451/3452 forensic (KEEP).
+**EVIDENCE:** `docs/P0_BACKUP_FORENSIC.md`; `test_reconcile_emits_aggregate_backup_result`.
 
-**Not done:** Apply 7 URL scrubs. Full DB/FS/reference verification protocol. PRODUCTION_VERIFIED.
+**NEXT_STEP:** One real startup log with reconcile `[BACKUP_RESULT]`.
 
-## P0-CROSS Repository Hygiene
+## P0-5 Production Repair
 
-**Status:** Phase-local only. Full audit not started.
+**STATUS:** DRY_RUN_PLANNED. APPLY_UNVERIFIED. No apply this round.
 
-**This round (hygiene, phase-local):**
+**WHAT_IS_SOLVED:** Dry-run list still valid for 7 URL scrubs. 3451/3452 forensic KEEP.
 
-SAFE_DELETE:
+**WHAT_IS_NOT_SOLVED:** Production apply + verification protocol.
 
-- `_e2e_nexus_real_html.py` — unreferenced scratch; opened production DB
-- `_scan_imports_tmp.py` — unreferenced import-walker scratch
-- `_schema_dump_tmp.py` — unreferenced schema dump; hardcoded `E:\` path
+**EVIDENCE:** `data/p0_url_scrub_dry_run.json` (`applied: false`, CRITICAL=7).
 
-LIKELY_DELETE / REVIEW (not deleted): `scripts/_finalize_audit.py` (unreferenced; mutates production if run).
+**NEXT_STEP:** Wait for explicit `--apply --yes` authorization.
 
-KEEP: `tools/_p0_forensics_*.py`, `tools/deploy_smoke_runner.py`, all `__init__.py` / `_compat` style modules.
+## P0-CROSS Hygiene
+
+One horizontal track (repo + data). **Not P0-6.**
+
+### Repository hygiene (prior)
+
+**STATUS:** Phase-local.
+
+**WHAT_IS_SOLVED:** Resolver/archive/main_window/sync_view have no 7890/7897/12450 literals.
+
+**WHAT_IS_NOT_SOLVED:** `tools/_p0_forensics_readonly.py` still historically probes 7890/7897 (KEEP forensic). `scripts/_finalize_audit.py` still REVIEW.
+
+### Data Hygiene
+
+**STATUS:** **AUDIT_COMPLETE / CLEANUP_DEFERRED**. Not CLEAN. Not CLEANUP_COMPLETE.
+
+**WHAT_IS_SOLVED:** Audit report exists. No files deleted.
+
+**WHAT_IS_NOT_SOLVED:** Cleanup deferred. `identity_repair_production_backup/` (~99.86 GiB) KEEP until P0-5 is PRODUCTION_VERIFIED. SAFE_DELETE candidates untouched.
+
+**EVIDENCE:** `docs/P0_DATA_HYGIENE_AUDIT.md`.
+
+**NEXT_STEP:** Do **not** start Data Cleanup. P0-2 closed. Continue P0-4 runtime capture / P0-5 authorization.
 
 ---
 
-Do not read this file as FIXED / CLEAN / PRODUCTION_VERIFIED.
+Do not read this file as FIXED / CLEAN / PRODUCTION_VERIFIED for Identity apply. P0-2 Archive asset pipeline is RUNTIME_VERIFIED for `3786388428`.

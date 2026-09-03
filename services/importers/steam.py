@@ -1,4 +1,10 @@
-"""Steam Workshop importer — preserves existing Workshop ID identity."""
+"""Steam Workshop importer.
+
+Identity flow (do not invert):
+    Steam Workshop ID → external_id → workspace_id
+Internal PK (``mods.mod_id``) is database-only. For Steam the PK historically
+equals Workshop ID; that coincidence must not be treated as Internal → Workspace.
+"""
 
 from __future__ import annotations
 

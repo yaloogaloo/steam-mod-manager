@@ -28,6 +28,12 @@ def reset_cover_loader_stats() -> None:
     COVER_LOAD_REQUESTS = 0
     COVER_LOAD_COMPLETED = 0
     COVER_LOAD_MS_TOTAL = 0.0
+    try:
+        from services.startup_io_trace import reset_cover_wave
+
+        reset_cover_wave()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def resolve_cover_path(
@@ -144,6 +150,12 @@ class CoverLoadTask(QRunnable):
         finally:
             COVER_LOAD_COMPLETED += 1
             COVER_LOAD_MS_TOTAL += (time.perf_counter() - t0) * 1000.0
+            try:
+                from services.startup_io_trace import cover_wave_on_task_done
+
+                cover_wave_on_task_done(failed=image is None)
+            except Exception:  # noqa: BLE001
+                pass
             # Release path lock tracking on the pool thread (before GUI emit).
             cb = self._on_finished_path
             if cb is not None:
@@ -315,6 +327,12 @@ class CoverLoaderManager(QObject):
         # New request for this path clears a prior rename-cancel mark.
         self._cancelled_paths.discard(path_key)
         COVER_LOAD_REQUESTS += 1
+        try:
+            from services.startup_io_trace import cover_wave_on_request
+
+            cover_wave_on_request()
+        except Exception:  # noqa: BLE001
+            pass
         self._active_tokens.add(tok)
         self._token_paths[tok] = path_key
         self._inc_inflight(path_key)

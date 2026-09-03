@@ -6,7 +6,8 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -54,6 +55,57 @@ from ui.import_thread import ImportWorker
 def parse_archive_path_list(text: str) -> list[str]:
     """Split a multi-archive line edit (``;`` / newline separated)."""
     return [p.strip() for p in str(text or "").replace("\n", ";").split(";") if p.strip()]
+
+
+class _ElidingFileLabel(QLabel):
+    """Single-line filename label that cannot widen a ``SetFixedSize`` dialog.
+
+    QLabel's default sizeHint tracks the full string. Combined with
+    ``QLayout.SetFixedSize`` that grows the parent QDialog to the child's
+    sizeHint, a long offline-HTML filename would stretch Import Dialog.
+    Horizontal sizeHint is therefore a compact constant; paint elides to
+    the layout-allocated width. Full path belongs in the tooltip only.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
+        self.setFullText(text)
+
+    def setFullText(self, text: str) -> None:
+        self._full_text = str(text or "")
+        # Logical text for readers; paintEvent draws ElideRight.
+        super().setText(self._full_text)
+        self.update()
+
+    def fullText(self) -> str:
+        return self._full_text
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        metrics = QFontMetrics(self.font())
+        return QSize(40, metrics.height() + 2)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        metrics = QFontMetrics(self.font())
+        return QSize(0, metrics.height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        metrics = QFontMetrics(self.font())
+        elided = metrics.elidedText(
+            self._full_text, Qt.TextElideMode.ElideRight, max(0, self.width())
+        )
+        color = self.palette().color(self.foregroundRole())
+        painter.setPen(color)
+        align = self.alignment()
+        if not int(align):
+            align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        painter.drawText(self.contentsRect(), int(align), elided)
 
 
 class ModImportDialog(QDialog):
@@ -589,7 +641,7 @@ class ModImportDialog(QDialog):
         form = QFormLayout(wrap)
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
-        self.offline_html_status = QLabel("未选择")
+        self.offline_html_status = _ElidingFileLabel("未选择")
         self.offline_html_status.setObjectName("subtitleLabel")
         pick = QPushButton("选择HTML页面")
         pick.setObjectName("browseButton")
@@ -598,6 +650,7 @@ class ModImportDialog(QDialog):
         clear.setObjectName("browseButton")
         clear.clicked.connect(self._clear_offline_html)
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(self.offline_html_status, stretch=1)
         row.addWidget(pick)
         row.addWidget(clear)
@@ -616,15 +669,19 @@ class ModImportDialog(QDialog):
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
         form.addRow("", hint)
+        wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         wrap.setVisible(False)
         return wrap
 
     def _set_offline_html_path(self, path: str) -> None:
         self._offline_html_path = str(path or "").strip()
         if self._offline_html_path:
-            self.offline_html_status.setText(Path(self._offline_html_path).name)
+            self.offline_html_status.setFullText(Path(self._offline_html_path).name)
+            # Tooltip keeps the complete path; the label only paints an elided name.
+            self.offline_html_status.setToolTip(self._offline_html_path)
         else:
-            self.offline_html_status.setText("未选择")
+            self.offline_html_status.setFullText("未选择")
+            self.offline_html_status.setToolTip("")
 
     def _clear_offline_html(self) -> None:
         self._set_offline_html_path("")

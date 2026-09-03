@@ -60,7 +60,7 @@ def test_format_mod_info_clipboard_phase6() -> None:
     )
     assert "名称:\nPal Analyzer" in text
     assert "平台:\nNexus Mods" in text
-    assert "ID:\n336" in text
+    assert "Workspace ID:\n336" in text
     assert "来源:\nhttps://www.nexusmods.com/palworld/mods/336" in text
     assert "文件:\nmain.zip\noptional_hat.zip" in text
 
@@ -120,6 +120,6 @@ def test_copy_buttons_and_clipboard(
     panel._copy_mod_info()
     payload = copied[-1]
     assert "名称:\nPal Analyzer" in payload
-    assert "ID:\n336" in payload
+    assert "Workspace ID:\n336" in payload
     assert "main.zip" in payload
     assert "optional_hat.zip" in payload

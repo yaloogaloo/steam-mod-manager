@@ -1,0 +1,92 @@
+{
+  "generated_at": "2026-09-02T14:05:42Z",
+  "readonly": true,
+  "deleted_nothing": true,
+  "safe_delete_executed": false,
+  "status": "AUDIT_IN_PROGRESS",
+  "root": "data/",
+  "tool": "tools/p0_data_hygiene_audit.py",
+  "report": "docs/P0_DATA_HYGIENE_AUDIT.md",
+  "note": "Slim summary only. A prior full dump is not kept in git. Re-run the readonly tool for a fresh walk.",
+  "summary": {
+    "total_files": 340583,
+    "total_directories": 29358,
+    "total_bytes": 111588643717,
+    "top_level_count": 40,
+    "largest_directories": [
+      {"relative_path": "identity_repair_production_backup", "file_count": 300626, "total_size": 107228601061},
+      {"relative_path": "asset_cache", "file_count": 6708, "total_size": 2505417803},
+      {"relative_path": "mod_backup", "file_count": 32001, "total_size": 1750369073},
+      {"relative_path": "browser_profile", "file_count": 304, "total_size": 32490677},
+      {"relative_path": "identity_repair_quarantine", "file_count": 841, "total_size": 31613330},
+      {"relative_path": "import_cache", "file_count": 53, "total_size": 19426064},
+      {"relative_path": "_smoke_ws2", "file_count": 9, "total_size": 927403},
+      {"relative_path": "_smoke_ws", "file_count": 9, "total_size": 927398},
+      {"relative_path": "headers", "file_count": 1, "total_size": 69631}
+    ]
+  },
+  "mod_backup": {
+    "mod_count": 1758,
+    "total_files": 32001,
+    "total_size": 1750369073,
+    "duplicate_metadata_json": []
+  },
+  "classification": {
+    "PRODUCTION_RUNTIME": ["mod_manager.db", "mod_manager.db-wal", "mod_manager.db-shm", "headers", "asset_cache", "import_cache", ".gitkeep"],
+    "PRODUCTION_BACKUP": ["mod_backup", "identity_repair_production_backup"],
+    "P0_EVIDENCE": [
+      "p0_url_scrub_dry_run.json",
+      "p0_3451_3452_forensics.json",
+      "p0_anno_conflict_forensics.json",
+      "p0_archive_proxy_diagnostics.json",
+      "p0_forensics_snapshot.json",
+      "p0_forensics_followup.json",
+      "p0_forensics_verify.json",
+      "p0_post_apply_readonly_audit.json",
+      "identity_repair_apply.json",
+      "identity_repair_dry_run.json",
+      "identity_repair_preflight.json",
+      "identity_repair_idempotent.json",
+      "identity_audit_before.json",
+      "identity_audit_after.json",
+      "identity_repair_quarantine",
+      "gui_runtime_trace.log"
+    ],
+    "TEST_ARTIFACT": [
+      "_full_suite_clean.txt",
+      "_full_suite_phase5.txt",
+      "_full_suite_phase5_final.txt",
+      "_full_suite_phase5_timeout.txt",
+      "_full_suite_v2.txt",
+      "_fail_audit.txt",
+      "_fail_audit_phase5.txt",
+      "_test_list.txt",
+      "_deploy_smoke_report.json",
+      "_smoke_ws",
+      "_smoke_ws2"
+    ],
+    "TEMPORARY_ARTIFACT": ["relative_diag.log"],
+    "CACHE_REGENERABLE": ["asset_cache", "headers", "app_names.json", "game_info.json"],
+    "DUPLICATE": [],
+    "UNKNOWN_REVIEW": ["browser_profile"]
+  },
+  "SAFE_DELETE_candidates_not_executed": [
+    "_full_suite_clean.txt",
+    "_full_suite_phase5.txt",
+    "_full_suite_phase5_final.txt",
+    "_full_suite_phase5_timeout.txt",
+    "_full_suite_v2.txt",
+    "_fail_audit.txt",
+    "_fail_audit_phase5.txt",
+    "_test_list.txt",
+    "_deploy_smoke_report.json"
+  ],
+  "KEEP_critical": [
+    "mod_manager.db",
+    "mod_backup",
+    "identity_repair_production_backup",
+    "identity_repair_quarantine",
+    "p0_url_scrub_dry_run.json",
+    "asset_cache"
+  ]
+}

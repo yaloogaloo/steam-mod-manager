@@ -154,7 +154,7 @@ def find_duplicate_mod(
     plat = normalize_platform(platform)
     aid = int(app_id or 0)
     wid = str(workshop_id or "").strip()
-    if wid.isdigit():
+    if plat == "steam" and wid.isdigit() and not is_internal_mod_id(wid):
         existing = db.get_mod_display_info(wid)
         if existing is not None:
             return existing

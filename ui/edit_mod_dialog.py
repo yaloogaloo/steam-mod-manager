@@ -108,8 +108,18 @@ class EditModDialog(QDialog):
                 "批量模式下仅可统一修改「来源」；名称、介绍与源链接不会被改动。"
             )
         else:
+            ws = "—"
+            try:
+                from core.db_manager import get_db
+
+                mid0 = self._mod_ids[0] if self._mod_ids else ""
+                row = get_db().get_mod_display_info(mid0) if mid0 else None
+                if row is not None and str(row.workspace_id or "").strip():
+                    ws = str(row.workspace_id).strip()
+            except Exception:  # noqa: BLE001
+                ws = str(self._mod_ids[0] if self._mod_ids else "—")
             hint = QLabel(
-                f"Mod ID：{(self._mod_ids[0] if self._mod_ids else '—')}\n"
+                f"Workspace ID：{ws}\n"
                 "仅更新显示名称与元数据，不会重命名本地 Mod 目录。"
             )
         hint.setObjectName("subtitleLabel")

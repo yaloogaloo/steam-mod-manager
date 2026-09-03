@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
-from core.mod_status import CONFLICT_STATUS_CONFLICT
+from core.mod_status import CONFLICT_STATUS_NONE
 from core.models import ModMetadata
 from services.conflict import ConflictDetector
 from services.deploy import ModDeployer
@@ -63,11 +63,13 @@ def test_check_conflict_preview_reports_conflict(
             files=[ManifestFileEntry(source="payload.txt", target=shared)],
         ),
     )
+    db.upsert_mod(ModMetadata(published_file_id="501", title="M501"))
     deployer = ModDeployer(library_root=library, db=db)
     preview = deployer.check_conflict_preview("502", [shared])
     assert preview is not None
-    assert preview["conflict"] is True
-    assert preview["status"] == "conflict"
+    assert preview["overwrite"] is True
+    assert preview["conflict"] is False
+    assert preview["status"] == "none"
     assert preview["files"][0]["existing_mod"] == "501"
     assert preview["conflicts"][0]["type"] == "FILE_OVERWRITE"
 
@@ -201,5 +203,5 @@ def test_post_deploy_runs_check_all(
     out = deployer.deploy_mod(602)
     assert out.get("success") is True
     assert called["ok"] is True
-    assert db.get_mod_status(602).conflict_status == CONFLICT_STATUS_CONFLICT
-    assert db.get_mod_status(601).conflict_status == CONFLICT_STATUS_CONFLICT
+    assert db.get_mod_status(602).conflict_status == "none"
+    assert db.get_mod_status(601).conflict_status == "none"

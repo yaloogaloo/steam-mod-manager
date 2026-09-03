@@ -31,8 +31,9 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def test_resolve_workspace_id_rules() -> None:
     assert (
-        resolve_workspace_id(PLATFORM_STEAM, mod_id="3761838546") == "3761838546"
+        resolve_workspace_id(PLATFORM_STEAM, external_id="3761838546") == "3761838546"
     )
+    assert resolve_workspace_id(PLATFORM_STEAM, mod_id="3761838546") == ""
     assert (
         resolve_workspace_id(
             PLATFORM_NEXUS,

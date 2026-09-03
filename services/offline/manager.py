@@ -225,7 +225,10 @@ def attach_nexus_offline_page(
     from core.mod_platform import OFFLINE_STATUS_ARCHIVED
 
     if getattr(result, "status", None) == OFFLINE_STATUS_ARCHIVED and dest is not None:
-        _apply_nexus_offline_metadata(mod_id, dest)
+        parsed_title = _apply_nexus_offline_metadata(mod_id, dest)
+        dest = _maybe_rename_empty_mod_folder_to_parsed_title(
+            mod_id, dest, parsed_title
+        )
 
     try:
         from services.metadata_backup_sync import sync_after_metadata_change
@@ -240,7 +243,7 @@ def attach_nexus_offline_page(
 def _apply_nexus_offline_metadata(
     mod_id: str | int,
     managed_path: Path,
-) -> None:
+) -> str:
     """Parse the saved offline HTML and fill any missing Mod metadata.
 
     Failures are caught and logged as warnings — the offline HTML import must
@@ -248,6 +251,11 @@ def _apply_nexus_offline_metadata(
 
     This helper is intentionally private and called ONLY from
     ``attach_nexus_offline_page``.  No other code path may call it.
+
+    Returns the parsed Mod title (empty when parse/apply produced none).
+    Directory naming is *not* done here: a valid title is applied to DB /
+    sidecar first, then ``_maybe_rename_empty_mod_folder_to_parsed_title``
+    uses path_lifecycle so filesystem / DB / sidecar / identity stay aligned.
     """
     import logging as _logging
 
@@ -261,16 +269,16 @@ def _apply_nexus_offline_metadata(
 
     index_path = managed_path / ".info" / "offline" / "index.html"
     if not index_path.is_file():
-        return
+        return ""
 
     try:
         candidates: NexusOfflineCandidates = parse_nexus_offline_html(index_path)
     except Exception as exc:  # noqa: BLE001
         _logger.warning("[NEXUS_SCRAPER] parse_nexus_offline_html failed: %s", exc)
-        return
+        return ""
 
     if not candidates.any_useful():
-        return
+        return ""
 
     try:
         apply_nexus_offline_candidates(mod_id, managed_path, candidates)
@@ -278,6 +286,155 @@ def _apply_nexus_offline_metadata(
         _logger.warning(
             "[NEXUS_SCRAPER] apply_nexus_offline_candidates failed: %s", exc
         )
+        return str(getattr(candidates, "title", "") or "").strip()
+
+    return str(getattr(candidates, "title", "") or "").strip()
+
+
+def _folders_are_same_directory(source: Path, target: Path) -> bool:
+    try:
+        if source.resolve() == target.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        return source.is_dir() and target.exists() and source.samefile(target)
+    except OSError:
+        return False
+
+
+def _existing_target_identity_conflict(
+    mod_id: str,
+    target: Path,
+) -> str:
+    """Describe why an existing target directory must not be overwritten.
+
+    Never rmtree / merge / silently replace. Same-identity and unknown-identity
+    are both conflicts: keep both trees and report.
+    """
+    from services.file_ops import read_info_metadata_dict
+    from services.mod_identity import resolve_existing_mod_id
+
+    meta = read_info_metadata_dict(target) or {}
+    if not meta:
+        return (
+            "identity/path conflict: 目标目录已存在且无法确认身份，"
+            "已保留双方数据，未覆盖"
+        )
+    pub = str(meta.get("published_file_id") or "").strip()
+    if pub and pub == str(mod_id):
+        return (
+            "identity/path conflict: 目标目录已存在且属于同一 Mod，"
+            "已保留双方数据，未覆盖或合并"
+        )
+    try:
+        resolved = resolve_existing_mod_id(meta)
+    except Exception:  # noqa: BLE001
+        resolved = ""
+    if resolved and str(resolved) == str(mod_id):
+        return (
+            "identity/path conflict: 目标目录已存在且属于同一 Mod，"
+            "已保留双方数据，未覆盖或合并"
+        )
+    return (
+        "identity/path conflict: 目标目录已存在且身份不同或不明确，"
+        "已保留双方数据，未覆盖"
+    )
+
+
+def _maybe_rename_empty_mod_folder_to_parsed_title(
+    mod_id: str | int,
+    managed_path: Path,
+    parsed_title: str,
+) -> Path:
+    """Rename ``Empty Mod <random>`` to the parsed Mod title via path_lifecycle.
+
+    Why this exists (do not delete in a future import-flow refactor):
+
+    Import may create a temp ``Empty Mod <hex>`` folder before Offline HTML
+    metadata is fully applied. Once a valid parsed title exists, that title
+    is the canonical directory name. Isolated ``os.rename`` / ``shutil.move``
+    would desync DB path, sidecar, and identity — so rename +
+    ``record_filesystem_rename`` must stay together.
+
+    ``Empty Mod <random>`` remains valid only when no usable title exists.
+    An existing conflicting directory is never deleted or overwritten.
+    """
+    import logging as _logging
+
+    _logger = _logging.getLogger(__name__)
+    from core.models import is_unknown_mod_title
+    from core.sanitize import sanitize_folder_name
+    from services.identity_service import is_empty_mod_placeholder
+    from services.path_lifecycle import record_filesystem_rename
+
+    folder = Path(managed_path)
+    title = str(parsed_title or "").strip()
+    if not folder.is_dir():
+        return folder
+    if not is_empty_mod_placeholder(folder.name):
+        return folder
+    if not title or is_empty_mod_placeholder(title) or is_unknown_mod_title(title):
+        return folder
+
+    desired = sanitize_folder_name(title, fallback="")
+    if not desired or is_empty_mod_placeholder(desired) or desired == folder.name:
+        return folder
+
+    target = folder.parent / desired
+    if _folders_are_same_directory(folder, target):
+        return folder
+    if target.exists():
+        conflict = _existing_target_identity_conflict(str(mod_id), target)
+        _logger.error(
+            "[NEXUS_OFFLINE_IMPORT] %s source=%s target=%s",
+            conflict,
+            folder,
+            target,
+        )
+        return folder
+
+    try:
+        from services.directory_move import rename_directory_or_fallback
+        from services.metadata_refresh import (
+            prepare_managed_folder_for_rename,
+            safe_directory_rename,
+        )
+
+        prepare_managed_folder_for_rename(folder)
+
+        def _rename_once(src: Path, dst: Path) -> Path:
+            return safe_directory_rename(src, dst, attempts=1)
+
+        new_path = rename_directory_or_fallback(
+            folder, target, rename_once=_rename_once
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "[NEXUS_OFFLINE_IMPORT] canonical rename failed source=%s target=%s: %s",
+            folder,
+            target,
+            exc,
+        )
+        return folder
+
+    commit = record_filesystem_rename(
+        mod_id,
+        folder,
+        new_path,
+        reason="offline_html_import",
+    )
+    if not commit.success:
+        _logger.warning(
+            "[NEXUS_OFFLINE_IMPORT] path_lifecycle commit failed stage=%s error=%s "
+            "source=%s target=%s",
+            commit.stage,
+            commit.error,
+            folder,
+            new_path,
+        )
+        return Path(commit.new_path) if commit.new_path is not None else new_path
+    return Path(commit.new_path) if commit.new_path is not None else new_path
 
 
 # Backward-compatible alias.

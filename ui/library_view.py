@@ -445,7 +445,7 @@ class ModLibraryView(QWidget):
         self.search_box = QLineEdit()
         self.search_box.setObjectName("librarySearchBox")
         self.search_box.setPlaceholderText(
-            "搜索显示名 / Steam 名 / 备注 / Mod ID / 游戏名…"
+            "搜索显示名 / Steam 名 / 备注 / Workspace ID / 游戏名…"
         )
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setMinimumHeight(32)
@@ -794,6 +794,12 @@ class ModLibraryView(QWidget):
         # UI / show(). Startup and refresh only schedule the same work async.
         # Deduped inside start_reconcile_library_async.
         if force:
+            try:
+                from services.startup_io_trace import log_io_event
+
+                log_io_event("library_refresh", "start", force=1)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 from services.library_reconcile import start_reconcile_library_async
 
@@ -2085,6 +2091,7 @@ class ModLibraryView(QWidget):
         platform = "steam"
         source_url = ""
         external_id = ""
+        workspace_id = ""
         is_invalid = False
         conflict_status = "none"
         enabled = True
@@ -2093,6 +2100,7 @@ class ModLibraryView(QWidget):
             platform = getattr(db_fields, "platform", "steam") or "steam"
             source_url = getattr(db_fields, "source_url", "") or ""
             external_id = getattr(db_fields, "external_id", "") or ""
+            workspace_id = getattr(db_fields, "workspace_id", "") or ""
             is_invalid = bool(getattr(db_fields, "is_invalid", False))
             conflict_status = getattr(db_fields, "conflict_status", "none") or "none"
             enabled = bool(getattr(db_fields, "enabled", True))
@@ -2166,6 +2174,7 @@ class ModLibraryView(QWidget):
             platform=platform,
             source_url=source_url,
             external_id=external_id,
+            workspace_id=workspace_id,
             is_invalid=is_invalid or invalid,
             conflict_status=conflict_status,
             enabled=enabled,
@@ -3285,6 +3294,7 @@ class ModLibraryView(QWidget):
             platform=data.platform,
             source_url=data.source_url,
             external_id=data.external_id,
+            workspace_id=str(getattr(data, "workspace_id", "") or ""),
             is_invalid=data.invalid,
             conflict_status=data.conflict_status,
             enabled=data.enabled,

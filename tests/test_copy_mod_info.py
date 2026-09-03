@@ -62,7 +62,7 @@ def test_format_mod_info_clipboard() -> None:
     assert "名称:\nPal Analyzer" in text
     assert "平台:\nNexus Mods" in text
     assert "来源:\nhttps://www.nexusmods.com/palworld/mods/336" in text
-    assert "ID:\n336" in text
+    assert "Workspace ID:\n336" in text
     assert "文件:\nPal Analyzer.pak" in text
 
 

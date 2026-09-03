@@ -1,0 +1,398 @@
+{
+  "plan_id": "P0-IDENTITY-LIFECYCLE-PRODUCTION-REPAIR-PLAN",
+  "generated_at": "2026-09-02T18:50:25+00:00",
+  "updated_at": "2026-09-03T05:32:06+00:00",
+  "isolated_reconcile_safe": true,
+  "isolated_safe_test": {
+    "path": "tools/_p0_identity_lifecycle_iso_safe.py",
+    "PASS_REHYDRATE": true,
+    "PASS_10782": true,
+    "PASS_VISIBLE_10782": true,
+    "note": "First isolate used production last_known_path (unsafe). Second isolate rewrote paths on a copy, scrubbed 3054 URL in the copy, then sidecar reload + two reconciles. Invalid Steam URL did not reappear. Steam PK 10782 was not created."
+  },
+  "apply_status": "PRODUCTION_REPAIRED",
+  "apply_block_reason": [],
+  "apply_backup": "data/identity_lifecycle_production_backup/20260903T053206Z",
+  "apply_mutations": 7,
+  "apply_note": "Phase C applied 7 SCRUB_INVALID_SOURCE_URL rows (DB + sidecar). 3054 controlled apply_sidecar_to_db did not rehydrate Internal-ID Steam URL. Steam PK 10782 remains ABSENT. 3460 / collisions / Empty Mod folders NO_ACTION.",
+  "apply_authorized_if_isolated_safe": false,
+  "automatic_apply_classifications": [
+    "SCRUB_INVALID_SOURCE_URL",
+    "SCRUB_INVALID_LEGACY_FIELD"
+  ],
+  "forbidden_without_manual_approval": [
+    "REMOVE_INVALID_DUPLICATE",
+    "REBIND_EXISTING_ENTITY",
+    "RESTORE_EXISTING_IDENTITY",
+    "QUARANTINE_UNRESOLVED"
+  ],
+  "actions": [
+    {
+      "internal_id": "9000000000003456",
+      "workspace_id": "10782",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Flashbacks - Something you've already seen",
+      "sidecar_path": "",
+      "current_values": {
+        "workspace_id": "10782",
+        "platform": "nexus",
+        "external_id": "10782",
+        "source_url": "https://www.nexusmods.com/witcher3/mods/10782"
+      },
+      "detected_problem": "none — legal Nexus Workspace ID 10782",
+      "classification": "NO_ACTION",
+      "proposed_mutation": "none",
+      "evidence": "platform=nexus workspace_id=10782 is the user-facing Mod ID; Steam PK 10782 is ABSENT",
+      "confidence": "high",
+      "mutation_risk": "none"
+    },
+    {
+      "internal_id": "10782",
+      "workspace_id": "10782",
+      "platform": "steam",
+      "app_id": null,
+      "filesystem_path": "",
+      "sidecar_path": "",
+      "current_values": {
+        "mods_row": "ABSENT"
+      },
+      "detected_problem": "none — Steam PK 10782 does not exist",
+      "classification": "NO_ACTION",
+      "proposed_mutation": "none; do not create",
+      "evidence": "isolated reconcile steam_pk_10782_created=False",
+      "confidence": "high",
+      "mutation_risk": "none"
+    },
+    {
+      "internal_id": "9000000000003054",
+      "workspace_id": "17870313801551871",
+      "platform": "nexus",
+      "app_id": 0,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面",
+      "sidecar_path": "",
+      "current_values": {
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "platform": "nexus",
+        "workspace_id": "17870313801551871",
+        "external_id": "更好的角色装备展示界面"
+      },
+      "detected_problem": "DB source_url embeds Internal ID as Steam filedetails id",
+      "classification": "SCRUB_INVALID_SOURCE_URL",
+      "proposed_mutation": "set mods.source_url='' ; do not change workspace_id/platform",
+      "evidence": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+      "confidence": "high",
+      "mutation_risk": "low — field scrub only"
+    },
+    {
+      "internal_id": "9000000000003054",
+      "workspace_id": "17870313801551871",
+      "platform": "nexus",
+      "app_id": 0,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\更好的角色装备展示界面\\.info\\metadata.json",
+      "current_values": {
+        "sidecar_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=9000000000003054",
+        "published_file_id": ""
+      },
+      "detected_problem": "sidecar url is Internal-ID Steam filedetails; historical rehydrate source after P0-1B DB scrub",
+      "classification": "SCRUB_INVALID_SOURCE_URL",
+      "proposed_mutation": "clear sidecar url; do not change workspace_id/platform; do not invent Nexus URL from title",
+      "evidence": "DB audit 2026-09-02T17:43:25 scrubbed source_url to empty; live sidecar still has Internal-ID Steam URL; isolated apply_sidecar_to_db did not restore it once DB was empty",
+      "confidence": "high",
+      "mutation_risk": "low — sidecar URL only"
+    },
+    {
+      "internal_id": "9000000000003456",
+      "workspace_id": "10782",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "",
+      "sidecar_path": "",
+      "current_values": {
+        "folder": "Empty Mod 0798b9fd"
+      },
+      "detected_problem": "historical leftover folder is absent from current filesystem",
+      "classification": "NO_ACTION",
+      "proposed_mutation": "none — do not recreate or delete; Flashbacks folder is the live observation",
+      "evidence": "library walk found no Empty Mod 0798b9fd; 巫师三 live folder is Flashbacks - Something you've already seen",
+      "confidence": "high",
+      "mutation_risk": "none"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "8556",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 6dec21cd",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 6dec21cd\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "8556",
+        "internal_id": "544925a1-57ea-4224-8f54-e9637d12c192",
+        "content_count": 2,
+        "title": "Mix armour - Vanilla and SBBF and Beautiful Curvy body"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"8556\", \"content\": [\"MIXARMOUR 2-8556-0-9-1720784242.zip\", \"MIXARMOUR complete version-8556-5-3-1717731296.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "14819",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 9ec8fa2e",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Empty Mod 9ec8fa2e\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "14819",
+        "internal_id": "1f68a8e8-72b7-4371-904b-7f1b059eb057",
+        "content_count": 16,
+        "title": "Luminous Threads"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"14819\", \"content\": [\"Arcane Aegis-14819-1-0-1738061345.zip\", \"Athena's Chiton (Camp Clothes)-14819-1-1-1738494865.zip\", \"Athena's Chiton-14819-1-0-1738492307.zip\", \"Blood Hunter's Armour-14819-1-0-1738060995.zip\", \"BloomCore Outfit-14819-1-0-1738061268.zip\", \"Dragon's Snare-14819-1-1-1739898846.zip\", \"Hiwar Al Turab-14819-1-0-1739380554.zip\", \"Lady of the Orchids Dress-14819-1-1756829821.zip\", \"Lady of the Spores Dress-14819-1-0-1738060928.zip\", \"Lightcrown Dress-14819-1-0-1738061472.zip\", \"Luminous SBBF Conversions-14819-1-1740835741.zip\", \"Persephone's Gift-14819-1-0-1738060877.zip\", \"Sylfina's Bodysuit-14819-1-0-1738061191.zip\", \"Sylfina's Camp Clothes-14819-1-0-1738061108.zip\", \"Sylvan Songweave Dress-14819-1-0-1738061398.zip\", \"Xena's Armour-14819-1-0-1738061038.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "9788",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Empty Mod fe039b69",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\巫师三\\Empty Mod fe039b69\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "9788",
+        "internal_id": "faf59a68-b84a-4ece-a55f-fe6178f25059",
+        "content_count": 3,
+        "title": "The Legend of the West's Spirit - Treasure Hunt Quest"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"9788\", \"content\": [\"Autogen rewards-9788-1-9-1741891578.zip\", \"The Legend Of The West's Spirit-9788-2-2-5-1772456033.zip\", \"The Legend Of The West's Spirit_Translation-9788-2-2-1-1765906261.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "2213",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 40938d22",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 40938d22\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "2213",
+        "internal_id": "c7ebace3-e2bf-46e4-b7fe-c083fc4b0e43",
+        "content_count": 1,
+        "title": "Unlimited Players"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"2213\", \"content\": [\"2024_04_16_UnlimitedPlayers-2213-2024-4-16-1713288327.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "9247",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 96215ee0",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod 96215ee0\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "9247",
+        "internal_id": "e8cf3931-8749-419e-bdaf-7d6c0b88d5e2",
+        "content_count": 1,
+        "title": "Ridgeside Village - Chinese"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"9247\", \"content\": [\"Ridgeside Village chinese-9247-2-5-17-1732449848.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "6358",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod bb554d94",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Empty Mod bb554d94\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "6358",
+        "internal_id": "48f66681-d087-416d-8b61-c556cf56a0de",
+        "content_count": 2,
+        "title": "Custom Fixed Dialogue"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"6358\", \"content\": [\"Custom Fixed Dialog-20938-2-4-2-reupload-1711359357.zip\", \"[已损坏？]\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "4198",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 1702b3d1",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 1702b3d1\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "4198",
+        "internal_id": "1a55adae-617d-4c6d-bb02-f15b87ef17ad",
+        "content_count": 1,
+        "title": "ArchiveXL"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"4198\", \"content\": [\"ArchiveXL 4198 1.27.1 2026-07-30T19-32Z k8Iw8mCEv.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "",
+      "workspace_id": "2675",
+      "platform": "nexus",
+      "app_id": 292030,
+      "filesystem_path": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 236caa23",
+      "sidecar_path": "D:\\project\\steam-mod-manager\\mod\\赛博朋克2077\\Empty Mod 236caa23\\.info\\metadata.json",
+      "current_values": {
+        "published_file_id": "",
+        "workspace_id": "2675",
+        "internal_id": "53ca4841-e68d-41da-b41c-ea61b4f82335",
+        "content_count": 1,
+        "title": "Immersive First Person v2.0 - Native Height and Camera Rework"
+      },
+      "detected_problem": "Empty Mod folder classified as MANUAL_REVIEW",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "do not delete without operator confirmation",
+      "evidence": "{\"pub\": \"\", \"ws\": \"2675\", \"content\": [\"Immersive First Person 2675 2.1.2 2026-08-05T20-25Z tvQTvs5Cv.zip\"]}",
+      "confidence": "low",
+      "mutation_risk": "high if deleted — forbidden without explicit Empty Mod approval"
+    },
+    {
+      "internal_id": "9000000000000394,9000000000003381",
+      "workspace_id": "1720",
+      "platform": "nexus",
+      "app_id": null,
+      "filesystem_path": "",
+      "sidecar_path": "",
+      "current_values": {
+        "rows": [
+          {
+            "internal_id": "9000000000000394",
+            "platform": "nexus",
+            "app_id": 0,
+            "external_id": "【必备】Json Assets at Stardew Valley",
+            "last_known_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Json Assets at Stardew Valley"
+          },
+          {
+            "internal_id": "9000000000003381",
+            "platform": "nexus",
+            "app_id": 0,
+            "external_id": "1720",
+            "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Variant of the Barbarian's outfit"
+          }
+        ]
+      },
+      "detected_problem": "workspace_id shared by multiple internal rows",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "none — collision is not proof of duplicate entity; do not merge/delete/mint",
+      "evidence": "platforms=['nexus'] app_ids=[''] same_context=True",
+      "confidence": "low",
+      "mutation_risk": "high"
+    },
+    {
+      "internal_id": "9000000000003091,9000000000003222",
+      "workspace_id": "6183",
+      "platform": "nexus",
+      "app_id": null,
+      "filesystem_path": "",
+      "sidecar_path": "",
+      "current_values": {
+        "rows": [
+          {
+            "internal_id": "9000000000003091",
+            "platform": "nexus",
+            "app_id": 0,
+            "external_id": "6183",
+            "last_known_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Train-Station-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com"
+          },
+          {
+            "internal_id": "9000000000003222",
+            "platform": "nexus",
+            "app_id": 1086940,
+            "external_id": "6183",
+            "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Sit This One Out 2"
+          }
+        ]
+      },
+      "detected_problem": "workspace_id shared by multiple internal rows",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "none — collision is not proof of duplicate entity; do not merge/delete/mint",
+      "evidence": "platforms=['nexus'] app_ids=['', '1086940'] same_context=False",
+      "confidence": "low",
+      "mutation_risk": "high"
+    },
+    {
+      "internal_id": "9000000000003204,9000000000003331",
+      "workspace_id": "97",
+      "platform": "nexus",
+      "app_id": null,
+      "filesystem_path": "",
+      "sidecar_path": "",
+      "current_values": {
+        "rows": [
+          {
+            "internal_id": "9000000000003204",
+            "platform": "nexus",
+            "app_id": 0,
+            "external_id": "97",
+            "last_known_path": "D:\\project\\steam-mod-manager\\mod\\星露谷物语\\Villagers-Anime-Portrait-at-Stardew-Valley-Nexus-Mods-and-community-www.nexusmods.com"
+          },
+          {
+            "internal_id": "9000000000003331",
+            "platform": "nexus",
+            "app_id": 1086940,
+            "external_id": "97",
+            "last_known_path": "D:\\project\\steam-mod-manager\\mod\\博德之门Ⅲ\\Basket Full of Equipment"
+          }
+        ]
+      },
+      "detected_problem": "workspace_id shared by multiple internal rows",
+      "classification": "MANUAL_REVIEW",
+      "proposed_mutation": "none — collision is not proof of duplicate entity; do not merge/delete/mint",
+      "evidence": "platforms=['nexus'] app_ids=['', '1086940'] same_context=False",
+      "confidence": "low",
+      "mutation_risk": "high"
+    }
+  ],
+  "other_internal_id_steam_urls_same_class": [
+    {"internal_id": "9000000000000354", "platform": "other", "classification": "SCRUB_INVALID_SOURCE_URL"},
+    {"internal_id": "9000000000000360", "platform": "other", "classification": "SCRUB_INVALID_SOURCE_URL"},
+    {"internal_id": "9000000000000361", "platform": "other", "classification": "SCRUB_INVALID_SOURCE_URL"},
+    {"internal_id": "9000000000000362", "platform": "other", "classification": "SCRUB_INVALID_SOURCE_URL"},
+    {"internal_id": "9000000000003031", "platform": "other", "classification": "SCRUB_INVALID_SOURCE_URL"},
+    {"internal_id": "9000000000003225", "platform": "other", "classification": "SCRUB_INVALID_SOURCE_URL"}
+  ],
+  "automatic_count": 2,
+  "manual_review_count": 11,
+  "no_action_count": 2
+}

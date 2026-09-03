@@ -136,7 +136,7 @@ class SyncCenterView(QWidget):
 
         self.proxy_edit = QLineEdit()
         self.proxy_edit.setPlaceholderText(
-            "可选，例如 http://127.0.0.1:7890（本地加速器/梯子端口）"
+            "留空则自动检测系统代理；也可手动填写 http://127.0.0.1:<端口> 或 socks5://127.0.0.1:<端口>"
         )
         self.proxy_edit.editingFinished.connect(self._save_proxy_setting)
         proxy_col = QVBoxLayout()
@@ -294,7 +294,20 @@ class SyncCenterView(QWidget):
             self.proxy_edit.setText(saved)
 
     def _save_proxy_setting(self) -> None:
-        self._settings.setValue(_SETTING_PROXY, self.proxy_url())
+        url = self.proxy_url()
+        self._settings.setValue(_SETTING_PROXY, url)
+        from services.proxy_resolver import (
+            MODE_AUTO,
+            MODE_MANUAL,
+            SETTING_PROXY_MODE,
+            refresh_system_proxy,
+        )
+
+        self._settings.setValue(SETTING_PROXY_MODE, MODE_MANUAL if url else MODE_AUTO)
+        try:
+            refresh_system_proxy()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _restore_steam_cookie_setting(self) -> None:
         saved = self._settings.value(_SETTING_STEAM_COOKIE, "", str)

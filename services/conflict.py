@@ -68,6 +68,8 @@ class ConflictDecisionTrace:
     conflict_type: str = ConflictClass.FILE_OVERWRITE.value
     mod_a: str = ""
     mod_b: str = ""
+    workspace_a: str = ""
+    workspace_b: str = ""
     source_a: str = ""
     source_b: str = ""
     target_a: str = ""
@@ -88,13 +90,17 @@ class ConflictEntry:
     file: str
     mods: list[str] = field(default_factory=list)
     conflict_type: str = ConflictType.FILE_OVERWRITE.value
+    workspace_ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "file": self.file,
             "mods": list(self.mods),
             "type": self.conflict_type,
         }
+        if self.workspace_ids:
+            payload["workspace_ids"] = list(self.workspace_ids)
+        return payload
 
 
 @dataclass
@@ -117,16 +123,25 @@ class ConflictDetector:
     """
     Detect deploy *target* path issues via ``.info/deploy_manifest.json``.
 
-    Automatic path rule (``preview_targets`` and ``check_all_mods``):
-    - FILE_OVERWRITE: identical normalized target (``Path.resolve()``) claimed by
-      multiple enabled Mods → status ``conflict`` (preview and post agree)
+    Scheme B — two layers:
+
+    Layer A (diagnostic, deterministic, Path.resolve() equality only):
+    - FILE_OVERWRITE / PATH_OVERLAP: identical normalized target claimed by
+      multiple enabled Mods. This is a filesystem fact, not a conflict
+      relationship. No filename heuristic and no last-deploy winner guess.
+
+    Layer B (conflict relationship):
+    - Only a user-declared ``mod_relationships`` row of type conflict, or an
+      explicit user ``conflict_status`` write, is a conflict relationship.
+    - FILE_OVERWRITE must not auto-write ``conflict_status=conflict``.
+    - ``persist=True`` must not restore conflict_status from path overlap after
+      the user resolved / cleared it.
 
     ``ConflictType.PAK_OVERLAP`` is retained for compatibility but is **not**
-    generated or persisted (same-dir distinct ``.pak`` files are legal).
+    generated (same-dir distinct ``.pak`` files are legal).
 
-    User-declared ``mod_relationships`` (conflict) remain a separate signal and
-    do not participate in file-overwrite detection.
     Disabled Mods are excluded from path detection.
+    Detector never creates Mods, identities, workspace_ids, or relationships.
     """
 
     def __init__(
@@ -202,13 +217,68 @@ class ConflictDetector:
                 bucket.append(mid)
         return owners
 
+    def _workspace_id(self, mid: str) -> str:
+        """Read existing Workspace ID only. Never mint or rewrite identity."""
+        try:
+            info = self._database().get_mod_display_info(mid)
+        except Exception:  # noqa: BLE001
+            return ""
+        if info is None:
+            return ""
+        return str(info.workspace_id or "").strip()
+
+    def _workspace_ids_for(self, mids: list[str]) -> list[str]:
+        return [self._workspace_id(m) for m in mids]
+
+    @staticmethod
+    def _relationship_entries(conflicts: list[ConflictEntry]) -> list[ConflictEntry]:
+        return [
+            c
+            for c in conflicts
+            if c.conflict_type == ConflictType.RELATIONSHIP.value
+        ]
+
+    def _relationship_status(
+        self, conflicts: list[ConflictEntry]
+    ) -> tuple[str, str]:
+        """Layer B only: RELATIONSHIP is a conflict; FILE_OVERWRITE is not."""
+        rel = self._relationship_entries(conflicts)
+        if rel:
+            return CONFLICT_STATUS_CONFLICT, self._summarize(rel)
+        return CONFLICT_STATUS_NONE, ""
+
+    def _persist_allowed(
+        self,
+        mid: str,
+        *,
+        relationship: list[ConflictEntry],
+    ) -> None:
+        """Persist allowed facts only. Never promote path overlap to conflict."""
+        if not mid.isdigit():
+            return
+        if self._database().get_mod(mid) is None:
+            logger.info(
+                "[CONFLICT_SKIP] persist skipped missing mod_id=%s",
+                mid,
+            )
+            return
+        if relationship:
+            self._database().update_mod_status(
+                mid,
+                conflict_status=CONFLICT_STATUS_CONFLICT,
+                conflict_note=self._summarize(relationship),
+                touch_check_time=True,
+            )
+            return
+        # Diagnostic last_check_time only — leave user conflict_status unchanged.
+        self._database().update_mod_status(mid, touch_check_time=True)
+
     def check_all_mods(self, *, persist: bool = True) -> dict[str, ConflictReport]:
         owners = self._collect_target_owners()
         per_mod: dict[str, list[ConflictEntry]] = {}
         all_manifest_mods: set[str] = set()
 
-        # Automatic path conflict — exact target overwrite only
-        # (same-dir distinct .pak / .dll / etc. are NOT conflicts)
+        # Layer A — exact target overwrite only (diagnostic, not a relationship)
         for target, mods in owners.items():
             for mid in mods:
                 all_manifest_mods.add(mid)
@@ -218,11 +288,12 @@ class ConflictDetector:
                 file=target,
                 mods=list(mods),
                 conflict_type=ConflictType.FILE_OVERWRITE.value,
+                workspace_ids=self._workspace_ids_for(mods),
             )
             for mid in mods:
                 per_mod.setdefault(mid, []).append(entry)
 
-        # User-declared conflict relationships (separate from file overwrite)
+        # Layer B — user-declared conflict relationships (never auto-inserted)
         try:
             with self._database()._lock:
                 rel_rows = self._database()._conn.execute(
@@ -240,10 +311,12 @@ class ConflictDetector:
             tgt = str(row["target_mod_id"])
             if not self._is_enabled(src):
                 continue
+            pair = [src, tgt]
             entry = ConflictEntry(
                 file=f"relationship:{src}->{tgt}",
-                mods=[src, tgt],
+                mods=pair,
                 conflict_type=ConflictType.RELATIONSHIP.value,
+                workspace_ids=self._workspace_ids_for(pair),
             )
             all_manifest_mods.add(src)
             existing = per_mod.setdefault(src, [])
@@ -258,37 +331,15 @@ class ConflictDetector:
         traces_by_mod = self._build_decision_traces(per_mod)
         for mid in sorted(all_manifest_mods):
             conflicts = per_mod.get(mid) or []
-            hard = [
-                c
-                for c in conflicts
-                if c.conflict_type
-                in (
-                    ConflictType.FILE_OVERWRITE.value,
-                    ConflictType.RELATIONSHIP.value,
-                )
-            ]
-            if hard:
-                status = CONFLICT_STATUS_CONFLICT
-                note = self._summarize(hard)
-            else:
-                status = CONFLICT_STATUS_NONE
-                note = ""
+            status, note = self._relationship_status(conflicts)
             traces = traces_by_mod.get(mid) or []
             reports[mid] = ConflictReport(
                 status=status, conflicts=conflicts, mod_id=mid, traces=traces
             )
-            if persist and mid.isdigit():
-                if self._database().get_mod(mid) is None:
-                    logger.info(
-                        "[CONFLICT_SKIP] persist skipped missing mod_id=%s",
-                        mid,
-                    )
-                    continue
-                self._database().update_mod_status(
+            if persist:
+                self._persist_allowed(
                     mid,
-                    conflict_status=status,
-                    conflict_note=note,
-                    touch_check_time=True,
+                    relationship=self._relationship_entries(conflicts),
                 )
         if persist:
             self._write_conflict_traces(reports)
@@ -301,24 +352,14 @@ class ConflictDetector:
                 status=CONFLICT_STATUS_NONE, conflicts=[], mod_id=mid
             )
             if persist:
-                self._database().update_mod_status(
-                    mid,
-                    conflict_status=CONFLICT_STATUS_NONE,
-                    conflict_note="",
-                    touch_check_time=True,
-                )
+                self._persist_allowed(mid, relationship=[])
             return report
         all_reports = self.check_all_mods(persist=persist)
         if mid in all_reports:
             return all_reports[mid]
         report = ConflictReport(status=CONFLICT_STATUS_NONE, conflicts=[], mod_id=mid)
-        if persist and mid.isdigit():
-            self._database().update_mod_status(
-                mid,
-                conflict_status=CONFLICT_STATUS_NONE,
-                conflict_note="",
-                touch_check_time=True,
-            )
+        if persist:
+            self._persist_allowed(mid, relationship=[])
         return report
 
     def preview_targets(
@@ -334,14 +375,17 @@ class ConflictDetector:
             others = [m for m in (owners.get(key) or []) if m != mid]
             if not others:
                 continue
+            owners_list = [mid, *others]
             conflicts.append(
                 ConflictEntry(
                     file=key,
-                    mods=[mid, *others],
+                    mods=owners_list,
                     conflict_type=ConflictType.FILE_OVERWRITE.value,
+                    workspace_ids=self._workspace_ids_for(owners_list),
                 )
             )
-        status = CONFLICT_STATUS_CONFLICT if conflicts else CONFLICT_STATUS_NONE
+        # Preview is diagnostic-only; overlap does not mint a conflict relationship.
+        status, _note = self._relationship_status(conflicts)
         traces: list[ConflictDecisionTrace] = []
         if conflicts:
             paths = [c.file for c in conflicts]
@@ -356,6 +400,8 @@ class ConflictDetector:
                     conflict_type=ConflictClass.FILE_OVERWRITE.value,
                     mod_a=mid,
                     mod_b=partner,
+                    workspace_a=self._workspace_id(mid),
+                    workspace_b=self._workspace_id(partner) if partner else "",
                     source_a=mid,
                     source_b=partner,
                     target_a=paths[0] if paths else "",
@@ -413,6 +459,8 @@ class ConflictDetector:
                     conflict_type=ConflictClass.FILE_OVERWRITE.value,
                     mod_a=mid,
                     mod_b=other,
+                    workspace_a=self._workspace_id(mid),
+                    workspace_b=self._workspace_id(other),
                     source_a=mid,
                     source_b=other,
                     target_a=sample[0] if sample else "",
@@ -441,6 +489,8 @@ class ConflictDetector:
                     conflict_type=ConflictClass.GAME_RULE_CONFLICT.value,
                     mod_a=mid,
                     mod_b=other,
+                    workspace_a=self._workspace_id(mid),
+                    workspace_b=self._workspace_id(other),
                     source_a=mid,
                     source_b=other,
                     overlap_count=1,

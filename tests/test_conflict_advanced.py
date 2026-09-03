@@ -55,7 +55,7 @@ def test_same_target_file_overwrite(tmp_path: Path, db: DatabaseManager) -> None
         )
         db.upsert_mod(ModMetadata(published_file_id=mid, title=mid))
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["1"].status == CONFLICT_STATUS_CONFLICT
+    assert reports["1"].status == CONFLICT_STATUS_NONE
     assert reports["1"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
 

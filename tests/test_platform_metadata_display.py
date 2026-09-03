@@ -60,9 +60,9 @@ def _mod_folder(root: Path, *, pub_id: str, title: str) -> Path:
 
 
 def test_label_helpers() -> None:
-    assert platform_id_label(PLATFORM_STEAM) == "Workshop ID"
-    assert platform_id_label(PLATFORM_NEXUS) == "Nexus Mod ID"
-    assert platform_id_label(PLATFORM_GITHUB) == "GitHub Repository"
+    assert platform_id_label(PLATFORM_STEAM) == "Workspace ID"
+    assert platform_id_label(PLATFORM_NEXUS) == "Workspace ID"
+    assert platform_id_label(PLATFORM_GITHUB) == "Workspace ID"
     assert platform_title_label(PLATFORM_STEAM) == "名称"
     assert platform_title_label(PLATFORM_NEXUS) == "名称"
     assert platform_title_label(PLATFORM_GITHUB) == "名称"
@@ -91,7 +91,7 @@ def test_steam_workshop_id_label(
     db.upsert_mod(ModMetadata(published_file_id="3761838546", title="Steam Mod"))
     panel = ModDetailPanel()
     panel.show_mod(folder)
-    assert panel.view_id_caption.text().startswith("Workshop ID")
+    assert panel.view_id_caption.text().startswith("Workspace ID")
     assert "3761838546" in panel.view_id.text()
     assert panel.view_name_caption.text().startswith("名称")
 
@@ -110,7 +110,7 @@ def test_nexus_mod_id_not_internal_id(
     folder = _mod_folder(tmp_path, pub_id=info.mod_id, title="Pal Analyzer")
     panel = ModDetailPanel()
     panel.show_mod(folder)
-    assert panel.view_id_caption.text().startswith("Nexus Mod ID")
+    assert panel.view_id_caption.text().startswith("Workspace ID")
     assert "336" in panel.view_id.text()
     assert "9000" not in panel.view_id.text()
     assert panel.view_steam.text() == "Pal Analyzer"
@@ -132,6 +132,7 @@ def test_github_repository_label(
     folder = _mod_folder(tmp_path, pub_id=info.mod_id, title="Cool Tool")
     panel = ModDetailPanel()
     panel.show_mod(folder)
-    assert panel.view_id_caption.text().startswith("GitHub Repository")
-    assert "owner/project" in panel.view_id.text()
+    assert panel.view_id_caption.text().startswith("Workspace ID")
+    assert info.workspace_id in panel.view_id.text()
+    assert "9000" not in panel.view_id.text()
     assert panel.view_name_caption.text().startswith("名称")

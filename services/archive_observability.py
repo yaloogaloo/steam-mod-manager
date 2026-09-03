@@ -18,6 +18,39 @@ CONFIG_FAILURE = "CONFIG_FAILURE"
 APPLICATION_FAILURE = "APPLICATION_FAILURE"
 
 
+def classify_failure_layer(diag: dict[str, Any]) -> str:
+    """Map layered diagnostic results to a single failure_layer name."""
+    dns = diag.get("dns") or {}
+    tcp = diag.get("tcp") or {}
+    tls = diag.get("tls") or {}
+    http = diag.get("steam_http") or {}
+    curl_cffi = str(diag.get("curl_cffi_version") or "")
+    proxy = str(diag.get("proxy_config") or diag.get("resolved_proxy_url") or "")
+    if str(curl_cffi).startswith("unavailable"):
+        return "curl_cffi"
+    if dns and not dns.get("ok"):
+        return "DNS"
+    if tcp and not tcp.get("ok"):
+        return "TCP"
+    if tls and not tls.get("ok"):
+        return "TLS"
+    err = str(http.get("error") or "")
+    if "(28)" in err or "timed out" in err.lower() or "timeout" in err.lower():
+        if proxy and "direct" not in str(proxy).lower():
+            return "Proxy"
+        return "HTTP"
+    if http and not http.get("ok"):
+        status = int(http.get("status") or 0)
+        if status in (401, 403, 404, 429, 500, 502, 503):
+            return "Steam"
+        if err:
+            return "HTTP"
+        return "Steam"
+    if http.get("ok"):
+        return "Application"
+    return "NETWORK"
+
+
 def classify_archive_error(exc: BaseException | str, *, proxy: str = "") -> str:
     """Map archive exceptions. curl (28) is NETWORK, never APPLICATION."""
     text = str(exc or "")
@@ -71,15 +104,25 @@ def log_archive_start(
     url: str,
     source: str = "steam_workshop",
     proxy: str = "",
+    proxy_source: str = "",
+    proxy_scheme: str = "",
+    proxy_host: str = "",
+    proxy_port: int | str = "",
     timeout: float | None = None,
     impersonate: str = "",
 ) -> None:
     logger.info(
-        "[ARCHIVE_START] mod_id=%s url=%s source=%s proxy=%s timeout=%s impersonate=%s",
+        "[ARCHIVE_START] mod_id=%s url=%s source=%s proxy=%s "
+        "proxy_source=%s proxy_scheme=%s proxy_host=%s proxy_port=%s "
+        "timeout=%s impersonate=%s",
         mod_id,
         url,
         source,
         proxy or "(direct)",
+        proxy_source or "none",
+        proxy_scheme or "",
+        proxy_host or "",
+        proxy_port if proxy_port not in ("", 0, None) else "",
         timeout if timeout is not None else "",
         impersonate,
     )
@@ -106,12 +149,21 @@ def log_archive_success(
     status: int | str,
     bytes_count: int = 0,
     elapsed_ms: float = 0.0,
+    proxy: str = "",
+    proxy_source: str = "",
+    proxy_scheme: str = "",
+    failure_layer: str = "",
 ) -> None:
     logger.info(
-        "[ARCHIVE_SUCCESS] status=%s bytes=%s elapsed_ms=%.1f",
+        "[ARCHIVE_SUCCESS] status=%s bytes=%s elapsed_ms=%.1f proxy=%s "
+        "proxy_source=%s proxy_scheme=%s failure_layer=%s",
         status,
         bytes_count,
         elapsed_ms,
+        proxy or "(direct)",
+        proxy_source or "none",
+        proxy_scheme or "",
+        failure_layer or "none",
     )
 
 
@@ -122,18 +174,29 @@ def log_archive_failure(
     http_status: str = "",
     elapsed_ms: float = 0.0,
     proxy: str = "",
+    proxy_source: str = "",
+    proxy_scheme: str = "",
+    proxy_host: str = "",
+    proxy_port: int | str = "",
+    failure_layer: str = "",
     host: str = "",
     retry_count: int = 0,
     error: str = "",
 ) -> None:
     logger.warning(
-        "[ARCHIVE_FAILURE] error_type=%s curl_code=%s http_status=%s "
-        "elapsed_ms=%.1f proxy=%s host=%s retry_count=%s error=%s",
+        "[ARCHIVE_FAILURE] error_type=%s failure_layer=%s curl_code=%s "
+        "http_status=%s elapsed_ms=%.1f proxy=%s proxy_source=%s "
+        "proxy_scheme=%s proxy_host=%s proxy_port=%s host=%s retry_count=%s error=%s",
         error_type,
+        failure_layer or "",
         curl_code or "",
         http_status or "",
         elapsed_ms,
         proxy or "(direct)",
+        proxy_source or "none",
+        proxy_scheme or "",
+        proxy_host or "",
+        proxy_port if proxy_port not in ("", 0, None) else "",
         host,
         retry_count,
         error,

@@ -93,6 +93,7 @@ class ModCardData:
     enabled: bool = True
     source_url: str = ""
     external_id: str = ""
+    workspace_id: str = ""
     category_tags: str = ""
     tag_values: str = ""
     folder_absent: bool = False
@@ -252,6 +253,16 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
     root.mkdir(parents=True, exist_ok=True)
     manager = ModFileManager(root)
     resolved_list = list_visible_mods(root, None)
+    try:
+        from services.startup_io_trace import log_io_event
+
+        log_io_event(
+            "library_load",
+            "snapshot",
+            mods_seen=len(resolved_list),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     mod_ids: list[str] = []
     for item in resolved_list:
@@ -300,6 +311,7 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
         platform = ""
         source_url = str(resolved.source_url or "").strip()
         external_id = ""
+        workspace_id = ""
         is_invalid = False
         conflict_status = "none"
         enabled = True
@@ -320,6 +332,7 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
             category_tags = str(fields.category_tags or "")
             if not source_url:
                 source_url = str(fields.source_url or "").strip()
+            workspace_id = str(getattr(fields, "workspace_id", "") or "").strip()
 
         from services.platform_identity import resolve_display_platform
 
@@ -400,6 +413,7 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
                 enabled=enabled,
                 source_url=source_url,
                 external_id=external_id,
+                workspace_id=workspace_id,
                 category_tags=category_tags,
                 tag_values=tag_values,
                 folder_absent=folder_absent,

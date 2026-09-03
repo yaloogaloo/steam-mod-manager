@@ -105,6 +105,13 @@ def _isolate_production_data(
 
     DatabaseManager.reset_instance()
     DatabaseManager.instance(db_file)
+    try:
+        from services.identity_service import _ALLOW_INTERNAL_CREATE, _LIFECYCLE
+
+        _LIFECYCLE.set("")
+        _ALLOW_INTERNAL_CREATE.set(False)
+    except Exception:  # noqa: BLE001
+        pass
     yield
     # Drain cover-loader pool before processEvents — avoids Qt native heap
     # corruption (0xc0000374) when late cover callbacks touch freed QObjects.
