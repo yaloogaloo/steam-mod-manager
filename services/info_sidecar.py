@@ -82,6 +82,9 @@ class InfoSidecar:
     # Workspace IDs this Mod depends on (deploy-before list).
     dependencies: list[str] = field(default_factory=list)
     file_roles: dict[str, str] = field(default_factory=dict)
+    # Witcher 3 ONLY: original | next_gen | remake. Omit when empty (other games).
+    # Never confuse with Mod.io ``version`` / Steam revision / mod_version.
+    game_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -98,6 +101,11 @@ class InfoSidecar:
             for x in deps
             if str(x or "").strip()
         ]
+        gv = str(data.get("game_version") or "").strip()
+        if gv:
+            data["game_version"] = gv
+        else:
+            data.pop("game_version", None)
         return data
 
     @classmethod
@@ -132,6 +140,11 @@ class InfoSidecar:
                     wid = str(item or "").strip()
                 if wid and wid not in dependencies:
                     dependencies.append(wid)
+        from core.witcher3_game_version import is_valid_witcher3_game_version
+
+        raw_gv = str(raw.get("game_version") or "").strip()
+        # Never read Mod.io / Steam ``version`` into this field.
+        game_version = raw_gv if is_valid_witcher3_game_version(raw_gv) else ""
         return cls(
             display_name=str(raw.get("display_name") or "").strip(),
             description=str(raw.get("description") or "").strip(),
@@ -152,6 +165,7 @@ class InfoSidecar:
             category=str(raw.get("category") or "").strip(),
             dependencies=dependencies,
             file_roles=roles,
+            game_version=game_version,
         )
 
 
@@ -264,6 +278,7 @@ def build_sidecar_from_db(
     category = ""
     dependencies: list[str] = []
     bundle = None
+    game_version = ""
     if info is not None:
         # Only the raw user override — never the resolved steam/unknown label.
         display_name = str(info.user_display_name or "").strip()
@@ -320,6 +335,15 @@ def build_sidecar_from_db(
                     dependencies.append(wid)
         except Exception:  # noqa: BLE001
             pass
+        from core.witcher3_game_version import (
+            is_valid_witcher3_game_version,
+            is_witcher3_game,
+        )
+
+        if is_witcher3_game("", getattr(info, "app_id", 0)) and is_valid_witcher3_game_version(
+            getattr(info, "game_version", "")
+        ):
+            game_version = str(info.game_version).strip()
     if meta is not None:
         if not display_name:
             candidate = str(meta.effective_title() or "").strip()
@@ -366,6 +390,7 @@ def build_sidecar_from_db(
         category=category,
         dependencies=dependencies,
         file_roles=file_roles_from_bundle(bundle),
+        game_version=game_version,
     )
 
 
@@ -503,6 +528,17 @@ def apply_sidecar_to_db(
         patch["custom_deploy_path"] = sidecar.custom_deploy_path
     elif existing is not None:
         patch["custom_deploy_path"] = existing.custom_deploy_path or ""
+    from core.witcher3_game_version import (
+        is_valid_witcher3_game_version,
+        is_witcher3_game,
+    )
+
+    if (
+        existing is not None
+        and is_witcher3_game("", getattr(existing, "app_id", 0))
+        and is_valid_witcher3_game_version(sidecar.game_version)
+    ):
+        patch["game_version"] = sidecar.game_version
     try:
         database.update_mod_user_metadata(mid, patch)
     except Exception as exc:  # noqa: BLE001

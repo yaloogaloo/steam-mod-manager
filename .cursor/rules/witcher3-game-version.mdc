@@ -1,0 +1,25 @@
+---
+description: Witcher 3 ONLY Mod game_version dimension — do not generalize
+alwaysApply: true
+---
+
+# Witcher 3 game_version contract
+
+`mods.game_version` is a **Witcher 3 ONLY** game-compatibility dimension.
+
+- Legal tokens: `original` | `next_gen` | `remake`
+- Default for Witcher 3: `next_gen`
+- All other games: SQL `NULL`, no UI
+- Identify Witcher 3 via `is_witcher3_game` / App ID `292030`, not folder or Mod title matching
+
+`game_version` is **not** `mod_version`, Mod.io `version`, Steam revision, `mod_id`, `external_id`, `workspace_id`, or `source_url`.
+
+Changing game_version must not create a new Mod entity or rewrite identity.
+
+Refresh / rename / move / reconcile must preserve the stored value.
+
+Do not auto-assign `next_gen` to non-Witcher-3 Mods.
+
+Future games with a version dimension require a new product spec — do not generalize this field.
+
+See `docs/MOD_GAME_VERSION_RULES.md`.

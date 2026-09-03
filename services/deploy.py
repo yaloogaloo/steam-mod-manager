@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,9 @@ from services.file_ops import (
 from services.metadata_backup import is_mod_folder_absent
 
 logger = logging.getLogger(__name__)
+
+_conflict_scan_thread: threading.Thread | None = None
+_conflict_scan_shutdown = False
 
 MISSING_CONTENT_DEPLOY_ERROR = DEPLOY_BLOCKED_CONTENT_MISSING
 
@@ -813,6 +817,8 @@ def _schedule_post_deploy_conflict_scan(
 
     root = Path(library_root)
     prefix = log_prefix or "[DEPLOY]"
+    if _conflict_scan_shutdown:
+        return
 
     def _run() -> None:
         try:
@@ -820,11 +826,33 @@ def _schedule_post_deploy_conflict_scan(
         except Exception:  # noqa: BLE001
             logger.exception("%s post-deploy conflict scan failed (async)", prefix)
 
-    threading.Thread(
+    global _conflict_scan_thread
+    thread = threading.Thread(
         target=_run,
         name="deploy-conflict-scan",
         daemon=True,
-    ).start()
+    )
+    _conflict_scan_thread = thread
+    thread.start()
+
+
+def request_deploy_conflict_scan_shutdown() -> None:
+    global _conflict_scan_shutdown
+    _conflict_scan_shutdown = True
+
+
+def join_deploy_conflict_scan(timeout: float) -> bool:
+    thread = _conflict_scan_thread
+    if thread is None or not thread.is_alive():
+        return True
+    thread.join(timeout)
+    return not thread.is_alive()
+
+
+def reset_deploy_conflict_scan_state() -> None:
+    global _conflict_scan_thread, _conflict_scan_shutdown
+    _conflict_scan_shutdown = False
+    _conflict_scan_thread = None
 
 
 class ModDeployer:

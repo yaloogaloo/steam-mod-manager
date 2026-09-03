@@ -244,6 +244,8 @@ def _patch_metadata_json(
     if name_id:
         data["modio_name_id"] = name_id
     data.pop("fetch_error", None)
+    # Witcher 3 ONLY: Mod.io ``version`` is NOT ``game_version``. Leave any
+    # existing sidecar game_version untouched (never copy API version here).
 
     final = Path(managed_path)
     data["managed_path"] = str(final)

@@ -190,6 +190,7 @@ class ModCardWidget(QFrame):
         self.cover_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
         self._cover_token = ""
+        self._cover_applied_token = ""
         layout.addWidget(self.cover_label)
 
         # Cover overlays (do not affect card height).
@@ -338,7 +339,13 @@ class ModCardWidget(QFrame):
             self._on_cover_path_release_requested
         )
         self.destroyed.connect(self._on_card_destroyed)
-        self._request_cover()
+
+    def _internal_entity_id(self) -> str:
+        """Card entity id from snapshot Internal ID only — never platform IDs."""
+        data = getattr(self, "_card_data", None)
+        if data is None:
+            return ""
+        return str(getattr(data, "id", "") or "").strip()
 
     def _on_cover_path_release_requested(self, path_key: str) -> None:
         """Cancel cover token and clear pixmap when this card's folder renames."""
@@ -360,6 +367,7 @@ class ModCardWidget(QFrame):
         if tok:
             CoverLoaderManager.instance().cancel(tok)
         self._cover_token = ""
+        self._cover_applied_token = ""
         self.cover_label.clear()
         self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
 
@@ -398,16 +406,25 @@ class ModCardWidget(QFrame):
             new_ref = str(getattr(card_data, "cover", "") or new_ref).strip()
         path_changed = new_path != self.managed_path
         cover_changed = path_changed or (new_ref != old_ref)
+        old_id = self._internal_entity_id()
+        old_token = getattr(self, "_cover_token", "") or ""
 
         self.managed_path = new_path
         self.metadata = metadata
         if card_data is not None:
             self._card_data = card_data
+        new_id = self._internal_entity_id()
+        identity_changed = path_changed or cover_changed or (new_id != old_id)
         self.clear_record_overlay()
         self.refresh_display()
-        if cover_changed:
+        if identity_changed:
+            if old_token:
+                from services.cover_loader import CoverLoaderManager
+
+                CoverLoaderManager.instance().cancel(old_token)
+            self._cover_token = ""
+            self._cover_applied_token = ""
             self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
-            self._request_cover()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1265,21 +1282,86 @@ class ModCardWidget(QFrame):
         self.setToolTip(tip)
         self.title_label.setToolTip(tip)
 
+    def _cover_token_for_current(self) -> str:
+        iid = self._internal_entity_id()
+        try:
+            path = (
+                str(self.managed_path.resolve())
+                if self.managed_path.exists()
+                else str(self.managed_path)
+            )
+        except OSError:
+            path = str(self.managed_path)
+        return f"{id(self)}:{iid}:{path}"
+
+    def _cover_file_hint(self) -> Path | None:
+        data = getattr(self, "_card_data", None)
+        ref = str(getattr(data, "cover", "") or "").strip() if data is not None else ""
+        if not ref:
+            return None
+        direct = Path(ref)
+        try:
+            if direct.is_file():
+                return direct
+        except OSError:
+            pass
+        rel = self.managed_path / ref
+        try:
+            if rel.is_file():
+                return rel
+        except OSError:
+            pass
+        return None
+
+    def ensure_cover(self) -> bool:
+        """Load cover for the current entity if not already painted.
+
+        Returns True when a pool task was submitted.
+        """
+        token = self._cover_token_for_current()
+        if getattr(self, "_cover_applied_token", "") == token:
+            return False
+        hint = self._cover_file_hint()
+        if hint is not None:
+            try:
+                from services.cover_cache import get_cover_image
+                from services.cover_loader import note_cover_cache_hit
+
+                cached = get_cover_image(hint, COVER_WIDTH, COVER_HEIGHT)
+            except Exception:  # noqa: BLE001
+                cached = None
+            if cached is not None:
+                note_cover_cache_hit()
+                self._cover_token = token
+                self._cover_applied_token = token
+                self._apply_cover_image(cached)
+                return False
+        self._request_cover()
+        return True
+
+    def cancel_pending_cover(self, *, keep_pixmap: bool = True) -> None:
+        tok = getattr(self, "_cover_token", "") or ""
+        if tok:
+            from services.cover_loader import CoverLoaderManager
+
+            CoverLoaderManager.instance().cancel(tok)
+        self._cover_token = ""
+        if not keep_pixmap:
+            self._cover_applied_token = ""
+            self.cover_label.setPixmap(_placeholder_cover(COVER_WIDTH, COVER_HEIGHT))
+
     def _request_cover(self) -> None:
         from services.cover_loader import CoverLoaderManager
 
         data = getattr(self, "_card_data", None)
         cover_ref = str(getattr(data, "cover", "") or "").strip() if data is not None else ""
-        if not cover_ref:
-            found = self._resolve_cover()
-            cover_ref = str(found) if found is not None else ""
         if not cover_ref and self.metadata and self.metadata.cover_path:
             cover_ref = str(self.metadata.cover_path).strip()
-        token = f"{id(self)}:{self.managed_path.resolve() if self.managed_path.exists() else self.managed_path}"
+        token = self._cover_token_for_current()
         prev = self._cover_token
         self._cover_token = token
         mgr = CoverLoaderManager.instance()
-        if prev:
+        if prev and prev != token:
             mgr.cancel(prev)
         mgr.request(
             token,
@@ -1292,10 +1374,13 @@ class ModCardWidget(QFrame):
     def _on_cover_image_ready(self, token: str, image: object) -> None:
         if str(token) != getattr(self, "_cover_token", ""):
             return
+        if str(token) != self._cover_token_for_current():
+            return
         if not isinstance(image, QImage) or image.isNull():
             return
         if not self._cover_widget_alive():
             return
+        self._cover_applied_token = str(token)
         self._apply_cover_image(image)
 
     def _cover_widget_alive(self) -> bool:

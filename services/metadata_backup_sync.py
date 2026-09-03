@@ -39,6 +39,8 @@ VALID_REASONS: frozenset[str] = frozenset(
 
 _rebuild_lock = threading.Lock()
 _rebuild_running = False
+_rebuild_shutdown = False
+_rebuild_thread: threading.Thread | None = None
 
 
 def sync_after_metadata_change(
@@ -295,8 +297,11 @@ def start_rebuild_missing_metadata_backup_async(
     Returns False if a rebuild is already running.
     """
     logger.debug("start_rebuild_missing_metadata_backup_async enter")
-    global _rebuild_running
+    global _rebuild_running, _rebuild_thread
     with _rebuild_lock:
+        if _rebuild_shutdown:
+            logger.info("rebuild_missing_metadata_backup skipped; shutdown in progress")
+            return False
         if _rebuild_running:
             logger.info("rebuild_missing_metadata_backup already running; skip")
             return False
@@ -319,9 +324,34 @@ def start_rebuild_missing_metadata_backup_async(
         name="rebuild-missing-metadata-backup",
         daemon=True,
     )
+    _rebuild_thread = thread
     thread.start()
     logger.info("rebuild_missing_metadata_backup started in background")
     return True
+
+
+def request_backup_rebuild_shutdown() -> None:
+    """Refuse new backup rebuilds. Does not abort an in-flight pass."""
+    global _rebuild_shutdown
+    with _rebuild_lock:
+        _rebuild_shutdown = True
+
+
+def join_backup_rebuild_thread(timeout: float) -> bool:
+    thread = _rebuild_thread
+    if thread is None or not thread.is_alive():
+        return True
+    thread.join(timeout)
+    return not thread.is_alive()
+
+
+def reset_backup_rebuild_async_state() -> None:
+    """Test helper. Does not stop an in-flight rebuild thread."""
+    global _rebuild_running, _rebuild_shutdown, _rebuild_thread
+    with _rebuild_lock:
+        _rebuild_running = False
+        _rebuild_shutdown = False
+        _rebuild_thread = None
 
 
 def _record_status(

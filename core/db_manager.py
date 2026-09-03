@@ -98,6 +98,9 @@ CREATE TABLE IF NOT EXISTS mods (
     offline_provider TEXT NOT NULL DEFAULT '',
     offline_updated_at TEXT NOT NULL DEFAULT '',
     cover_path TEXT NOT NULL DEFAULT '',
+    -- Witcher 3 ONLY: original | next_gen | remake. NULL for every other game.
+    -- Not mod_version, not Mod.io version, not Steam revision, not identity.
+    game_version TEXT,
     updated_at  TEXT NOT NULL,
     FOREIGN KEY (app_id) REFERENCES games(app_id)
 );
@@ -252,6 +255,9 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("content_status", "TEXT NOT NULL DEFAULT ''"),
     ("official_metadata_synced", "INTEGER NOT NULL DEFAULT 0"),
     ("user_override_fields", "TEXT NOT NULL DEFAULT '{}'"),
+    # Witcher 3 ONLY compatibility edition. NULL = not applicable (non-Witcher 3).
+    # Never DEFAULT 'next_gen' — that would stamp every game.
+    ("game_version", "TEXT"),
 )
 
 DEPLOY_STATUS_NOT_DEPLOYED = "not_deployed"
@@ -289,6 +295,7 @@ _MOD_SELECT_COLS = (
     "enabled, "
     "offline_status, offline_provider, offline_updated_at, "
     "cover_path, "
+    "game_version, "
     "updated_at"
 )
 
@@ -369,6 +376,8 @@ class ModDisplayInfo:
     offline_provider: str = ""
     offline_updated_at: str = ""
     cover_path: str = ""
+    # Witcher 3 ONLY: original | next_gen | remake. Empty = NULL / not applicable.
+    game_version: str = ""
 
     @property
     def mod_files(self) -> ModFilesBundle:
@@ -523,6 +532,10 @@ class IdentityIntegrityError(RuntimeError):
     """Raised when identity UNIQUE constraints cannot be enforced (duplicates)."""
 
 
+class DatabaseShutdownError(RuntimeError):
+    """Raised when ``get_db()`` would otherwise reopen a connection during shutdown."""
+
+
 class DatabaseManager:
     """
     Thread-safe SQLite access for permanent AppID / ModID snapshots.
@@ -536,11 +549,13 @@ class DatabaseManager:
 
     _instance: DatabaseManager | None = None
     _instance_lock = threading.Lock()
+    _app_shutdown = False
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = Path(db_path) if db_path else database_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._closed = False
         self._conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
@@ -556,6 +571,7 @@ class DatabaseManager:
                 self._conn.close()
             except Exception:  # noqa: BLE001
                 pass
+            self._closed = True
             raise
 
     # ------------------------------------------------------------------
@@ -571,6 +587,12 @@ class DatabaseManager:
         Omitting *db_path* keeps the existing instance (production GUI path).
         """
         with cls._instance_lock:
+            if cls._app_shutdown:
+                if cls._instance is None:
+                    raise DatabaseShutdownError(
+                        "DatabaseManager is shut down; refusing new connection"
+                    )
+                return cls._instance
             if cls._instance is None:
                 if db_path is None:
                     test_db = os.environ.get("SMM_TEST_DB", "").strip()
@@ -587,22 +609,45 @@ class DatabaseManager:
             return cls._instance
 
     @classmethod
+    def begin_app_shutdown(cls) -> None:
+        """Refuse opening a new singleton connection (process shutdown)."""
+        cls._app_shutdown = True
+
+    @classmethod
+    def close_singleton(cls) -> None:
+        """Close the process singleton once. Does not drop the instance."""
+        with cls._instance_lock:
+            if cls._instance is not None:
+                cls._instance.close()
+
+    @classmethod
     def reset_instance(cls) -> None:
         """Close and drop the process-wide singleton (tests / shutdown)."""
         with cls._instance_lock:
+            cls._app_shutdown = False
             if cls._instance is not None:
                 cls._instance.close()
                 cls._instance = None
 
+    def is_closed(self) -> bool:
+        return bool(self._closed)
+
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate_games_table()
             self._migrate_mods_table()
+            self._backfill_witcher3_game_version()
             self._backfill_steam_platform_fields()
             self._backfill_workspace_ids()
             self._conn.execute(
@@ -643,6 +688,77 @@ class DatabaseManager:
         for name, decl in _MODS_MIGRATIONS:
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE mods ADD COLUMN {name} {decl}")
+
+    def _backfill_witcher3_game_version(self) -> None:
+        """Witcher 3 ONLY: NULL/empty/invalid → next_gen. Other games stay NULL.
+
+        Idempotent. Never stamps next_gen onto a non-Witcher-3 row.
+        Does not recreate Mod entities.
+        """
+        from core.witcher3_game_version import (
+            WITCHER3_APP_IDS,
+            WITCHER3_DEFAULT_VERSION,
+            WITCHER3_GAME_VERSIONS,
+        )
+
+        cols = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(mods)").fetchall()
+        }
+        if "game_version" not in cols:
+            return
+        ids = ",".join(str(i) for i in sorted(WITCHER3_APP_IDS))
+        legal = ",".join(f"'{v}'" for v in sorted(WITCHER3_GAME_VERSIONS))
+        self._conn.execute(
+            f"""
+            UPDATE mods SET game_version = ?
+            WHERE app_id IN ({ids})
+              AND (
+                game_version IS NULL
+                OR TRIM(game_version) = ''
+                OR game_version NOT IN ({legal})
+              )
+            """,
+            (WITCHER3_DEFAULT_VERSION,),
+        )
+        self._conn.execute(
+            f"""
+            UPDATE mods SET game_version = NULL
+            WHERE app_id NOT IN ({ids})
+              AND game_version IS NOT NULL
+            """
+        )
+
+    def _ensure_witcher3_game_version_default_locked(
+        self, mod_id: int, app_id: int = 0
+    ) -> None:
+        """Witcher 3 ONLY: fill empty game_version with next_gen. Caller holds lock."""
+        from core.witcher3_game_version import (
+            WITCHER3_DEFAULT_VERSION,
+            is_valid_witcher3_game_version,
+            is_witcher3_game,
+        )
+
+        mid = int(mod_id)
+        row = self._conn.execute(
+            "SELECT app_id, game_version FROM mods WHERE mod_id = ?",
+            (mid,),
+        ).fetchone()
+        if row is None:
+            return
+        keys = set(row.keys()) if hasattr(row, "keys") else set()
+        if "game_version" not in keys:
+            return
+        gid = int(app_id or 0) or int(row["app_id"] or 0)
+        if not is_witcher3_game("", gid):
+            return
+        current = str(row["game_version"] or "").strip()
+        if is_valid_witcher3_game_version(current):
+            return
+        self._conn.execute(
+            "UPDATE mods SET game_version = ? WHERE mod_id = ?",
+            (WITCHER3_DEFAULT_VERSION, mid),
+        )
 
     def _backfill_steam_platform_fields(self) -> None:
         """
@@ -1260,6 +1376,9 @@ class DatabaseManager:
                     _utc_now(),
                 ),
             )
+            self._ensure_witcher3_game_version_default_locked(
+                mid, int(meta.app_id or 0)
+            )
             self._conn.commit()
 
     def upsert_mods(self, metas: Iterable[ModMetadata]) -> int:
@@ -1317,6 +1436,10 @@ class DatabaseManager:
                 """,
                 rows,
             )
+            for row in rows:
+                self._ensure_witcher3_game_version_default_locked(
+                    int(row[0]), int(row[1] or 0)
+                )
             self._conn.commit()
         return len(rows)
 
@@ -1724,6 +1847,15 @@ class DatabaseManager:
                         (plat, url, ext, new_title, new_title, new_app, now, mid),
                     )
                 self._ensure_mod_workspace_id_locked(mid)
+                from core.witcher3_game_version import is_witcher3_game
+
+                if is_witcher3_game("", new_app):
+                    self._ensure_witcher3_game_version_default_locked(mid, new_app)
+                else:
+                    self._conn.execute(
+                        "UPDATE mods SET game_version = NULL WHERE mod_id = ?",
+                        (mid,),
+                    )
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
@@ -2256,7 +2388,17 @@ class DatabaseManager:
             self.set_mod_files(mid, mod_files)
             refreshed = self.get_mod_display_info(mid)
             if refreshed is not None:
+                from core.witcher3_game_version import ensure_witcher3_game_version_default
+
+                ensure_witcher3_game_version_default(
+                    self, mid, app_id=resolved_app, game_name=resolved_game
+                )
                 return refreshed
+        from core.witcher3_game_version import ensure_witcher3_game_version_default
+
+        ensure_witcher3_game_version_default(
+            self, mid, app_id=resolved_app, game_name=resolved_game
+        )
         return info
 
     # ------------------------------------------------------------------
@@ -2811,6 +2953,10 @@ class DatabaseManager:
                         """,
                         (custom_deploy_path or "", now, mid),
                     )
+                if "game_version" in data:
+                    self._apply_mod_game_version_locked(
+                        mid, data.get("game_version")
+                    )
                 self._ensure_mod_workspace_id_locked(mid)
             self._apply_user_override_flags_from_save(
                 mid,
@@ -2824,6 +2970,59 @@ class DatabaseManager:
             ).fetchone()
         assert row is not None
         return _display_info_from_row(row)
+
+    def set_mod_game_version(
+        self, mod_id: int | str, value: str | None
+    ) -> ModDisplayInfo:
+        """Persist Witcher 3 game_version. Non-Witcher-3 rows are forced to NULL.
+
+        Does not change mod_id / external_id / workspace_id / source_url.
+        Invalid tokens raise ValueError (no silent fallback).
+        """
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT mod_id FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+            if existing is None:
+                raise RuntimeError(f"set_mod_game_version: no mods row for {mid}")
+            self._apply_mod_game_version_locked(mid, value)
+            self._conn.commit()
+            row = self._conn.execute(
+                f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+        assert row is not None
+        return _display_info_from_row(row)
+
+    def _apply_mod_game_version_locked(self, mid: int, value: Any) -> None:
+        """Witcher 3 ONLY writer. Caller holds lock. Invalid values raise."""
+        from core.witcher3_game_version import (
+            WITCHER3_DEFAULT_VERSION,
+            is_witcher3_game,
+            validate_witcher3_game_version,
+        )
+
+        row = self._conn.execute(
+            "SELECT app_id FROM mods WHERE mod_id = ?",
+            (mid,),
+        ).fetchone()
+        if row is None:
+            return
+        app_id = int(row["app_id"] or 0)
+        if not is_witcher3_game("", app_id):
+            self._conn.execute(
+                "UPDATE mods SET game_version = NULL, updated_at = ? WHERE mod_id = ?",
+                (_utc_now(), mid),
+            )
+            return
+        text = "" if value is None else str(value).strip()
+        stored = WITCHER3_DEFAULT_VERSION if not text else validate_witcher3_game_version(text)
+        self._conn.execute(
+            "UPDATE mods SET game_version = ?, updated_at = ? WHERE mod_id = ?",
+            (stored, _utc_now(), mid),
+        )
 
     def get_user_override_fields(self, mod_id: int | str) -> dict[str, bool]:
         from services.metadata_ownership import parse_user_override_fields
@@ -4439,6 +4638,10 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
         else ""
     )
     cover_path = str(row["cover_path"] or "") if "cover_path" in keys else ""
+    # Witcher 3 ONLY. Empty string in the dataclass == SQL NULL / not applicable.
+    game_version = ""
+    if "game_version" in keys and row["game_version"] is not None:
+        game_version = str(row["game_version"] or "").strip()
     workspace_id = (
         str(row["workspace_id"] or "") if "workspace_id" in keys else ""
     )
@@ -4478,6 +4681,7 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
         offline_provider=offline_provider,
         offline_updated_at=offline_updated_at,
         cover_path=cover_path,
+        game_version=game_version,
     )
 
 

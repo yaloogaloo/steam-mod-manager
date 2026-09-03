@@ -154,6 +154,7 @@ def test_mod_card_uses_cover_loader_not_threading(
     folder = tmp_path / "Game" / "Mod"
     _write_cover(folder)
     card = ModCardWidget(folder)
+    card.ensure_cover()
     deadline = time.time() + 3.0
     while time.time() < deadline:
         qapp.processEvents()

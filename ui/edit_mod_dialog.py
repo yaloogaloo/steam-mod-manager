@@ -27,6 +27,12 @@ from core.mod_platform import (
     normalize_platform,
     platform_requires_source_url,
 )
+from core.witcher3_game_version import (
+    WITCHER3_DEFAULT_VERSION,
+    WITCHER3_GAME_VERSION_CHOICES,
+    is_valid_witcher3_game_version,
+    is_witcher3_game,
+)
 from services.deploy_status import resolve_game_install_path
 
 _BATCH_PLACEHOLDER = "<批量模式下不可用>"
@@ -59,6 +65,7 @@ class EditModDialog(QDialog):
         game_root: str = "",
         game_install_path: str = "",
         custom_deploy_path: str = "",
+        game_version: str = "",
     ) -> None:
         super().__init__(parent)
         self._game_name = str(game_name or "").strip()
@@ -168,6 +175,22 @@ class EditModDialog(QDialog):
         self.source_url_edit.setText(str(source_url or ""))
         form.addRow("源链接", self.source_url_edit)
         self._on_platform_changed()
+
+        # Witcher 3 ONLY — never show this dimension for other games.
+        self._game_version_combo: QComboBox | None = None
+        if is_witcher3_game(self._game_name, self._game_id) and not self._batch_mode:
+            self._game_version_combo = QComboBox()
+            self._game_version_combo.setObjectName("witcher3GameVersionCombo")
+            for token, label in WITCHER3_GAME_VERSION_CHOICES:
+                self._game_version_combo.addItem(label, token)
+            current_gv = str(game_version or "").strip()
+            if not is_valid_witcher3_game_version(current_gv):
+                current_gv = WITCHER3_DEFAULT_VERSION
+            gv_idx = self._game_version_combo.findData(current_gv)
+            if gv_idx < 0:
+                gv_idx = self._game_version_combo.findData(WITCHER3_DEFAULT_VERSION)
+            self._game_version_combo.setCurrentIndex(max(gv_idx, 0))
+            form.addRow("版本", self._game_version_combo)
 
         deploy_row = QHBoxLayout()
         self.custom_deploy_edit = QLineEdit()
@@ -293,11 +316,14 @@ class EditModDialog(QDialog):
         # 「其它」and other URL-optional platforms keep empty string as-is.
         if not url and not platform_requires_source_url(plat):
             url = ""
-        return {
+        out = {
             "display_name": self.display_name_edit.text().strip(),
             "custom_description": self.description_edit.toPlainText(),
             "platform": plat,
             "source_url": url,
             "custom_deploy_path": self.custom_deploy_edit.text().strip(),
         }
+        if self._game_version_combo is not None:
+            out["game_version"] = str(self._game_version_combo.currentData() or "")
+        return out
 

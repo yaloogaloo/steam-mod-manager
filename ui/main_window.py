@@ -141,10 +141,12 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
             self.library_view.set_target_root(self.sync_view.target_path())
             # Soft reload — reuse warm snapshot; Refresh button still forces
             self.library_view.refresh(force=False)
-        elif row == PAGE_DEPLOY:
-            self.deploy_view.refresh()
-        elif row == PAGE_SYNC:
-            self.sync_view.refresh_games()
+        else:
+            self.library_view.cancel_pending_library_load()
+            if row == PAGE_DEPLOY:
+                self.deploy_view.refresh()
+            elif row == PAGE_SYNC:
+                self.sync_view.refresh_games()
         self.settings.setValue(SETTING_PAGE, row)
 
     def _goto_page(self, index: int) -> None:
@@ -188,6 +190,12 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
             from services.startup_io_trace import log_io_event
 
             log_io_event("gui", "restore_page", page=page)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from services.library_reconcile import hold_library_load_until_reconcile_idle
+
+            hold_library_load_until_reconcile_idle()
         except Exception:  # noqa: BLE001
             pass
         self.nav_list.setCurrentRow(page)
@@ -248,6 +256,12 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
         except Exception as exc:  # noqa: BLE001
             log_startup(f"reconcile_library skip: {exc}")
             try:
+                from services.library_reconcile import release_startup_library_hold
+
+                release_startup_library_hold()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
                 from services.metadata_backup_sync import (
                     start_rebuild_missing_metadata_backup_async,
                 )
@@ -262,5 +276,7 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
         self.settings.setValue(SETTING_GEOMETRY, self.saveGeometry())
         self.settings.setValue(SETTING_PAGE, self.stack.currentIndex())
         self.settings.setValue(SETTING_GAME_FILTER, self.library_view.current_filter())
-        self.sync_view.shutdown()
+        from services.app_shutdown import shutdown_runtime
+
+        shutdown_runtime(self)
         super().closeEvent(event)

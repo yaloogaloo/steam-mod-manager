@@ -867,6 +867,8 @@ def refresh_steam_mod_metadata(
                 from services.importers.image_picker import relative_cover_path
 
                 cover_rel = relative_cover_path(new_path, Path(cover_path))
+            # Preserve sidecar keys not in the official Steam payload
+            # (including Witcher 3 ONLY game_version — never a Workshop field).
             merged_sidecar = merge_official_sidecar_fields(
                 read_info_metadata_dict(new_path) or {},
                 mod_id=mid,

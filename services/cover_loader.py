@@ -20,13 +20,18 @@ CANCEL_WAIT_MS_DEFAULT = 2500
 # Profiling counters (tests / diagnostics).
 COVER_LOAD_REQUESTS = 0
 COVER_LOAD_COMPLETED = 0
+COVER_LOAD_CANCELLED = 0
+COVER_LOAD_CACHE_HITS = 0
 COVER_LOAD_MS_TOTAL = 0.0
 
 
 def reset_cover_loader_stats() -> None:
-    global COVER_LOAD_REQUESTS, COVER_LOAD_COMPLETED, COVER_LOAD_MS_TOTAL
+    global COVER_LOAD_REQUESTS, COVER_LOAD_COMPLETED, COVER_LOAD_CANCELLED
+    global COVER_LOAD_CACHE_HITS, COVER_LOAD_MS_TOTAL
     COVER_LOAD_REQUESTS = 0
     COVER_LOAD_COMPLETED = 0
+    COVER_LOAD_CANCELLED = 0
+    COVER_LOAD_CACHE_HITS = 0
     COVER_LOAD_MS_TOTAL = 0.0
     try:
         from services.startup_io_trace import reset_cover_wave
@@ -34,6 +39,16 @@ def reset_cover_loader_stats() -> None:
         reset_cover_wave()
     except Exception:  # noqa: BLE001
         pass
+
+
+def note_cover_cache_hit() -> None:
+    global COVER_LOAD_CACHE_HITS
+    COVER_LOAD_CACHE_HITS += 1
+
+
+def note_cover_cancelled() -> None:
+    global COVER_LOAD_CANCELLED
+    COVER_LOAD_CANCELLED += 1
 
 
 def resolve_cover_path(
@@ -354,6 +369,8 @@ class CoverLoaderManager(QObject):
     def cancel(self, token: str) -> None:
         """Mark token inactive so late results are ignored by cards."""
         tok = str(token)
+        if tok in self._active_tokens or tok in self._token_paths:
+            note_cover_cancelled()
         self._active_tokens.discard(tok)
         self._token_paths.pop(tok, None)
 

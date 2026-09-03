@@ -7,7 +7,7 @@ import os
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -284,6 +284,7 @@ class ModLibraryView(QWidget):
 
     filter_changed = Signal(str)
     request_open_sync = Signal()  # optional: MainWindow may ignore
+    _reconcile_idle = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -318,6 +319,7 @@ class ModLibraryView(QWidget):
         self._splitter_defaults_applied = False
         self._load_worker = None
         self._load_gen = 0
+        self._library_load_pending = False
         self._library_snapshot = None
         self._pending_restore: dict | None = None
         # _snapshot_dirty means the cached library snapshot is stale and needs
@@ -337,8 +339,23 @@ class ModLibraryView(QWidget):
         self._search_debounce.setSingleShot(True)
         self._search_debounce.setInterval(150)
         self._search_debounce.timeout.connect(self._apply_view_filter)
+        self._cover_sched = QTimer(self)
+        self._cover_sched.setSingleShot(True)
+        self._cover_sched.setInterval(40)
+        self._cover_sched.timeout.connect(self._load_viewport_covers)
 
         self._build_ui()
+        self._reconcile_idle.connect(
+            self._flush_pending_library_load,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        if not _library_load_sync():
+            try:
+                from services.library_reconcile import add_reconcile_idle_listener
+
+                add_reconcile_idle_listener(self._on_reconcile_idle)
+            except Exception:  # noqa: BLE001
+                logger.debug("reconcile idle listener not registered", exc_info=True)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -627,6 +644,9 @@ class ModLibraryView(QWidget):
         # range shrinks when switching to a smaller Mod set.
         self.library_layout.heightChanged.connect(self._on_library_flow_height)
         self.scroll.setWidget(self.library_host)
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            self._on_library_scroll_covers
+        )
         center_layout.addWidget(self.scroll, stretch=1)
         self._shortcut_select_all = QShortcut(QKeySequence.StandardKey.SelectAll, self)
         self._shortcut_select_all.setContext(
@@ -793,6 +813,9 @@ class ModLibraryView(QWidget):
         # Reconcile syncs backup (sha256/copytree) for every mod — never block
         # UI / show(). Startup and refresh only schedule the same work async.
         # Deduped inside start_reconcile_library_async.
+        # LibraryLoadWorker must not overlap library-reconcile: pytest/sync
+        # still starts reconcile first (existing tests); the async worker
+        # path sets pending *before* starting reconcile to avoid a missed idle.
         if force:
             try:
                 from services.startup_io_trace import log_io_event
@@ -800,12 +823,13 @@ class ModLibraryView(QWidget):
                 log_io_event("library_refresh", "start", force=1)
             except Exception:  # noqa: BLE001
                 pass
-            try:
-                from services.library_reconcile import start_reconcile_library_async
+            if _library_load_sync():
+                try:
+                    from services.library_reconcile import start_reconcile_library_async
 
-                start_reconcile_library_async(root)
-            except Exception:  # noqa: BLE001
-                logger.debug("start_reconcile_library_async failed", exc_info=True)
+                    start_reconcile_library_async(root)
+                except Exception:  # noqa: BLE001
+                    logger.debug("start_reconcile_library_async failed", exc_info=True)
 
         if not force:
             try:
@@ -814,6 +838,7 @@ class ModLibraryView(QWidget):
                 cache = get_library_cache()
                 snap = cache.peek_snapshot(root)
                 if snap is not None:
+                    self._library_load_pending = False
                     self._apply_library_snapshot(snap)
                     self._finish_library_load()
                     return
@@ -827,9 +852,32 @@ class ModLibraryView(QWidget):
                 snapshot = get_library_cache().load_snapshot(root, force=True)
                 self._apply_library_snapshot(snapshot)
             finally:
+                self._library_load_pending = False
                 self._finish_library_load()
             return
-        self._start_library_worker(root, force=True)
+
+        self._library_load_pending = True
+        if force:
+            try:
+                from services.library_reconcile import start_reconcile_library_async
+
+                start_reconcile_library_async(root)
+            except Exception:  # noqa: BLE001
+                logger.debug("start_reconcile_library_async failed", exc_info=True)
+        try:
+            from services.library_reconcile import library_load_must_wait
+        except Exception:  # noqa: BLE001
+            def library_load_must_wait() -> bool:
+                return False
+        if library_load_must_wait():
+            try:
+                from services.startup_io_trace import log_io_event
+
+                log_io_event("library_load", "deferred", waiting="reconcile")
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        self._flush_pending_library_load()
 
     def _start_library_worker(self, root: Path, *, force: bool = True) -> None:
         from ui.library_load_thread import LibraryLoadWorker
@@ -852,6 +900,87 @@ class ModLibraryView(QWidget):
         worker.failed.connect(lambda msg, g=gen: self._on_library_failed(msg, g))
         self._load_worker = worker
         worker.start()
+
+    def cancel_pending_library_load(self) -> None:
+        """Drop a deferred snapshot if Library is no longer the active page."""
+        if not self._library_load_pending:
+            return
+        self._library_load_pending = False
+        running = self._load_worker is not None and self._load_worker.isRunning()
+        if not running:
+            self._set_loading(False)
+
+    def library_load_is_running(self) -> bool:
+        worker = self._load_worker
+        return worker is not None and worker.isRunning()
+
+    def shutdown_workers(self) -> None:
+        """Stop LibraryLoadWorker and pending cover tasks. Does not change lazy-load policy."""
+        self._library_load_pending = False
+        worker = self._load_worker
+        if worker is not None and worker.isRunning():
+            try:
+                worker.requestInterruption()
+            except Exception:  # noqa: BLE001
+                pass
+            worker.wait(3000)
+        self._cancel_all_pending_covers()
+        try:
+            from services.cover_loader import CoverLoaderManager
+
+            mgr = CoverLoaderManager._instance
+            if mgr is not None:
+                pool = getattr(mgr, "_pool", None)
+                if pool is not None:
+                    pool.clear()
+                    pool.waitForDone(2000)
+        except Exception:  # noqa: BLE001
+            logger.debug("cover pool drain failed", exc_info=True)
+
+    def _on_reconcile_idle(self) -> None:
+        self._reconcile_idle.emit()
+
+    @Slot()
+    def _flush_pending_library_load(self) -> None:
+        if _library_load_sync():
+            self._library_load_pending = False
+            return
+        try:
+            from services.startup_io_trace import log_io_event
+
+            log_io_event(
+                "library_load",
+                "flush",
+                pending=int(self._library_load_pending),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from services.library_reconcile import library_load_must_wait
+        except Exception:  # noqa: BLE001
+            def library_load_must_wait() -> bool:
+                return False
+        if library_load_must_wait():
+            return
+        if not self._library_page_wants_snapshot():
+            if self._library_load_pending:
+                self._library_load_pending = False
+                running = (
+                    self._load_worker is not None and self._load_worker.isRunning()
+                )
+                if not running:
+                    self._set_loading(False)
+            return
+        if self._load_worker is not None and self._load_worker.isRunning():
+            self._library_load_pending = False
+            return
+        self._library_load_pending = False
+        self._start_library_worker(Path(self._target_root), force=True)
+
+    def _library_page_wants_snapshot(self) -> bool:
+        # Nav-away calls cancel_pending_library_load(); do not use isVisible()
+        # here — the stacked page can report hidden during early show().
+        return bool(self._library_load_pending)
 
     def _on_library_loaded(self, snapshot, generation: int) -> None:
         if int(generation) != self._load_gen:
@@ -913,6 +1042,7 @@ class ModLibraryView(QWidget):
     def _on_library_flow_height(self, height: int) -> None:
         """Shrink/grow library_host with FlowLayout content (scrollbar range)."""
         self.library_host.setMinimumHeight(max(0, int(height)))
+        self._schedule_visible_covers()
 
     def _sync_library_host_size(self) -> None:
         """Force scroll host height to match current flow content width."""
@@ -2300,6 +2430,7 @@ class ModLibraryView(QWidget):
             self.library_host.setUpdatesEnabled(True)
             self.scroll.setUpdatesEnabled(True)
             self._set_scroll_value(scroll)
+        self._schedule_visible_covers()
 
     def _reveal_card(self, card: ModCardWidget) -> None:
         """Put ``card`` into the flow layout, then show — never parentless show()."""
@@ -2312,6 +2443,65 @@ class ModLibraryView(QWidget):
             )
             return
         card.show()
+
+    def _on_library_scroll_covers(self, *_args) -> None:
+        self._schedule_visible_covers()
+
+    def _schedule_visible_covers(self) -> None:
+        timer = getattr(self, "_cover_sched", None)
+        if timer is None:
+            self._load_viewport_covers()
+            return
+        timer.start()
+
+    def iter_viewport_cover_cards(self, *, preload_px: int = 200) -> list:
+        """Cards intersecting the scroll viewport (plus a preload band)."""
+        shown = [
+            card
+            for card in self._cards
+            if isinstance(card, ModCardWidget) and not card.isHidden()
+        ]
+        vp = self.scroll.viewport()
+        if vp is None or int(vp.height()) <= 1 or int(vp.width()) <= 1:
+            cap = LIBRARY_CARDS_PER_ROW * 3
+            return shown[:cap]
+        band = vp.rect().adjusted(0, -int(preload_px), 0, int(preload_px))
+        hit: list[ModCardWidget] = []
+        for card in shown:
+            top_left = card.mapTo(vp, QPoint(0, 0))
+            crect = QRect(top_left, card.size())
+            if band.intersects(crect):
+                hit.append(card)
+        return hit
+
+    def _load_viewport_covers(self) -> None:
+        visible = self.iter_viewport_cover_cards()
+        visible_set = set(visible)
+        submitted = 0
+        for card in self._cards:
+            if not isinstance(card, ModCardWidget) or card.isHidden():
+                continue
+            if card in visible_set:
+                if card.ensure_cover():
+                    submitted += 1
+            else:
+                card.cancel_pending_cover(keep_pixmap=True)
+        try:
+            from services.startup_io_trace import log_io_event
+
+            log_io_event(
+                "cover_loader",
+                "visible_schedule",
+                cards=len(visible),
+                submitted=submitted,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _cancel_all_pending_covers(self) -> None:
+        for card in list(getattr(self, "_card_cache", {}).values()):
+            if isinstance(card, ModCardWidget):
+                card.cancel_pending_cover(keep_pixmap=True)
 
     # ------------------------------------------------------------------
     # Selection
@@ -3535,6 +3725,11 @@ class ModLibraryView(QWidget):
         center = max(LIBRARY_CENTER_MIN_WIDTH, total - left - right)
         self.splitter.setSizes([left, center, right])
         self._splitter_defaults_applied = True
+        self._schedule_visible_covers()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._cancel_all_pending_covers()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -3542,3 +3737,4 @@ class ModLibraryView(QWidget):
             self.empty_overlay.setGeometry(self.library_host.rect())
         if self.loading_overlay.isVisible():
             self.loading_overlay.setGeometry(self.scroll.viewport().rect())
+        self._schedule_visible_covers()

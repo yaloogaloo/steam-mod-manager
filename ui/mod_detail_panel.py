@@ -96,6 +96,10 @@ from core.mod_status import (
     ModStatus,
 )
 from core.models import ModMetadata
+from core.witcher3_game_version import (
+    is_witcher3_game,
+    witcher3_game_version_label,
+)
 from services.file_ops import ModFileManager
 from services.mod_files import ModFileManager as ModFilesJsonManager
 from ui.platform_labels import (
@@ -784,6 +788,7 @@ class ModDetailPanel(QWidget):
             custom_deploy_path=(
                 info.custom_deploy_path if info else ""
             ),
+            game_version=(info.game_version if info else ""),
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -793,19 +798,19 @@ class ModDetailPanel(QWidget):
             QMessageBox.warning(self, "保存失败", "缺少有效的 Mod ID。")
             return
         try:
-            self._display_info = get_db().update_mod_user_metadata(
-                mid,
-                {
-                    "display_name": values["display_name"],
-                    "custom_description": values["custom_description"],
-                    "user_notes": (info.user_notes if info else "")
-                    or (meta.custom_notes or ""),
-                    "favorite": bool(info.favorite) if info else False,
-                    "platform": values["platform"],
-                    "source_url": values["source_url"],
-                    "custom_deploy_path": values.get("custom_deploy_path", ""),
-                },
-            )
+            payload = {
+                "display_name": values["display_name"],
+                "custom_description": values["custom_description"],
+                "user_notes": (info.user_notes if info else "")
+                or (meta.custom_notes or ""),
+                "favorite": bool(info.favorite) if info else False,
+                "platform": values["platform"],
+                "source_url": values["source_url"],
+                "custom_deploy_path": values.get("custom_deploy_path", ""),
+            }
+            if "game_version" in values:
+                payload["game_version"] = values["game_version"]
+            self._display_info = get_db().update_mod_user_metadata(mid, payload)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "保存失败", str(exc))
             return
@@ -2208,6 +2213,25 @@ class ModDetailPanel(QWidget):
         else:
             self.meta_updated_line.clear()
 
+        # Witcher 3 ONLY game_version (App ID 292030). Not mod_version / Mod.io version.
+        game_version_label = ""
+        app_id = 0
+        if info is not None:
+            try:
+                app_id = int(info.app_id or 0)
+            except (TypeError, ValueError):
+                app_id = 0
+        if not app_id and meta is not None:
+            try:
+                app_id = int(getattr(meta, "app_id", 0) or 0)
+            except (TypeError, ValueError):
+                app_id = 0
+        if is_witcher3_game("", app_id):
+            raw_gv = ""
+            if info is not None:
+                raw_gv = str(getattr(info, "game_version", "") or "").strip()
+            game_version_label = witcher3_game_version_label(raw_gv)
+
         self._render_metadata_rich_block(
             name_value=name_value,
             original_name=steam_name,
@@ -2218,6 +2242,7 @@ class ModDetailPanel(QWidget):
             author=author,
             version=version,
             updated=updated,
+            game_version_label=game_version_label,
         )
 
         self._refresh_offline_status_label()
@@ -2429,6 +2454,7 @@ class ModDetailPanel(QWidget):
         updated: str,
         internal_id: str = "",
         workshop_id: str = "",
+        game_version_label: str = "",
     ) -> None:
         """Rich-text metadata block — bold prefixes, isolated long description."""
         del workshop_id  # Platform Workshop ID is not a second user-facing Mod ID.
@@ -2461,9 +2487,12 @@ class ModDetailPanel(QWidget):
             parts.append(
                 _line(f"<b>Internal Database ID:</b> {esc(debug_internal)}")
             )
+        # Witcher 3 ONLY — mapped label, never a raw token / Mod.io version string.
+        if game_version_label:
+            parts.append(_line(f"<b>版本：</b> {esc(game_version_label)}"))
         if author:
             parts.append(_line(f"<b>作者：</b> {esc(author)}"))
-        if version:
+        if version and not game_version_label:
             parts.append(_line(f"<b>版本：</b> {esc(version)}"))
         if updated:
             parts.append(_line(f"<b>更新时间：</b> {esc(updated)}"))

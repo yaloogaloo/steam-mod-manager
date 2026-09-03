@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,11 +65,25 @@ __all__ = [
     "reconcile_library",
     "start_reconcile_library_async",
     "resolve_library_games",
+    "hold_library_load_until_reconcile_idle",
+    "release_startup_library_hold",
+    "library_load_must_wait",
+    "is_reconcile_running",
+    "add_reconcile_idle_listener",
+    "request_reconcile_shutdown",
+    "join_reconcile_thread",
 ]
 
 _reconcile_lock = threading.Lock()
 _reconcile_running = False
 _reconcile_pending_root: str | None = None
+# True after MainWindow schedules the startup reconcile QTimer, until that
+# run actually starts (or is released). Prevents LibraryLoadWorker from
+# racing the first QTimer.singleShot(0) reconcile.
+_startup_hold = False
+_idle_listeners: list = []
+_shutdown_requested = False
+_reconcile_thread: threading.Thread | None = None
 
 
 @dataclass
@@ -673,15 +689,106 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
     return result
 
 
+def _weak_idle_ref(callback: Callable[[], None]) -> weakref.ref:
+    if getattr(callback, "__self__", None) is not None:
+        return weakref.WeakMethod(callback)  # type: ignore[return-value]
+    return weakref.ref(callback)
+
+
+def add_reconcile_idle_listener(callback: Callable[[], None]) -> None:
+    """Invoke *callback* when a reconcile run (including queued follow-up) ends."""
+    ref = _weak_idle_ref(callback)
+    with _reconcile_lock:
+        _idle_listeners.append(ref)
+
+
+def hold_library_load_until_reconcile_idle() -> None:
+    """Defer LibraryLoadWorker until the upcoming startup reconcile is idle."""
+    global _startup_hold
+    with _reconcile_lock:
+        _startup_hold = True
+
+
+def release_startup_library_hold() -> None:
+    """Drop the startup hold; notify listeners if reconcile is not running."""
+    global _startup_hold
+    fire = False
+    with _reconcile_lock:
+        if _startup_hold:
+            _startup_hold = False
+            fire = not _reconcile_running
+    if fire:
+        _notify_reconcile_idle()
+
+
+def is_reconcile_running() -> bool:
+    with _reconcile_lock:
+        return bool(_reconcile_running)
+
+
+def library_load_must_wait() -> bool:
+    """True while startup reconcile is pending or a reconcile thread is active."""
+    with _reconcile_lock:
+        return bool(_reconcile_running or _startup_hold)
+
+
+def reset_reconcile_async_state() -> None:
+    """Test helper. Does not stop an in-flight reconcile thread."""
+    global _reconcile_running, _reconcile_pending_root, _startup_hold
+    global _shutdown_requested, _reconcile_thread
+    with _reconcile_lock:
+        _reconcile_running = False
+        _reconcile_pending_root = None
+        _startup_hold = False
+        _shutdown_requested = False
+        _reconcile_thread = None
+        _idle_listeners.clear()
+
+
+def request_reconcile_shutdown() -> None:
+    """Refuse new / queued reconcile runs. Does not abort an in-flight pass."""
+    global _shutdown_requested, _reconcile_pending_root
+    with _reconcile_lock:
+        _shutdown_requested = True
+        _reconcile_pending_root = None
+
+
+def join_reconcile_thread(timeout: float) -> bool:
+    """Wait for the daemon worker. True when it is not alive."""
+    thread = _reconcile_thread
+    if thread is None or not thread.is_alive():
+        return True
+    thread.join(timeout)
+    return not thread.is_alive()
+
+
+def _notify_reconcile_idle() -> None:
+    with _reconcile_lock:
+        refs = list(_idle_listeners)
+    for ref in refs:
+        callback = ref()
+        if callback is None:
+            continue
+        try:
+            callback()
+        except Exception:  # noqa: BLE001
+            logger.exception("reconcile idle listener failed")
+
+
 def start_reconcile_library_async(library_root: str | Path | None = None) -> bool:
     """Run :func:`reconcile_library` on a daemon thread (non-blocking).
 
     Concurrent callers are coalesced: if a run is in progress, the latest
     *library_root* is queued and executed once after the current run finishes.
     """
-    global _reconcile_running, _reconcile_pending_root
+    global _reconcile_running, _reconcile_pending_root, _startup_hold
+    global _reconcile_thread
     root = str(library_root) if library_root else None
     with _reconcile_lock:
+        if _shutdown_requested:
+            logger.info("reconcile_library skipped; shutdown in progress")
+            return False
+        _startup_hold = False
         if _reconcile_running:
             _reconcile_pending_root = root
             logger.info("reconcile_library already running; queued follow-up")
@@ -696,7 +803,7 @@ def start_reconcile_library_async(library_root: str | Path | None = None) -> boo
         _reconcile_pending_root = None
 
     def _worker() -> None:
-        global _reconcile_running, _reconcile_pending_root
+        global _reconcile_running, _reconcile_pending_root, _startup_hold
         current = root
         while True:
             try:
@@ -706,14 +813,18 @@ def start_reconcile_library_async(library_root: str | Path | None = None) -> boo
             with _reconcile_lock:
                 pending = _reconcile_pending_root
                 _reconcile_pending_root = None
-                if pending is None:
+                if pending is None or _shutdown_requested:
                     _reconcile_running = False
-                    return
+                    _startup_hold = False
+                    break
                 current = pending
+        _notify_reconcile_idle()
 
-    threading.Thread(
+    thread = threading.Thread(
         target=_worker, name="library-reconcile", daemon=True
-    ).start()
+    )
+    _reconcile_thread = thread
+    thread.start()
     logger.info("reconcile_library started in background")
     return True
 

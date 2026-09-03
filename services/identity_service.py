@@ -519,6 +519,13 @@ def create_mod_identity(
         )
         if mod_files is not None and out.mod_id:
             db.set_mod_files(out.mod_id, mod_files)
+    from core.witcher3_game_version import ensure_witcher3_game_version_default
+
+    # Witcher 3 ONLY metadata default — not identity. Existing original/remake kept.
+    if out.mod_id:
+        ensure_witcher3_game_version_default(
+            db, out.mod_id, app_id=app_id, game_name=game_name
+        )
     return out
 
 

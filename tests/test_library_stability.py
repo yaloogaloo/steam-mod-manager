@@ -244,6 +244,7 @@ def test_cover_late_callback_safe_after_destroy(
 
     host = QApplication.activeWindow()
     card = ModCardWidget(folder, parent=None)
+    card.ensure_cover()
     token = card._cover_token
     mgr = CoverLoaderManager.instance()
 

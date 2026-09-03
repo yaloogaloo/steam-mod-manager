@@ -167,7 +167,38 @@ def cmd_backfill(target_dir: str | None) -> int:
     return 0
 
 
+def _notify_already_running() -> None:
+    """Tell the user a GUI is already open — no DB, no MainWindow."""
+    logging.getLogger(__name__).error("Steam Mod Manager 已经运行")
+    import os
+
+    if os.environ.get("SMM_TEST_DB", "").strip():
+        return
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+        QMessageBox.information(
+            None,
+            "Steam Mod Manager",
+            "Steam Mod Manager 已经运行",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def launch_gui() -> int:
+    from services.app_instance import acquire_instance_lock
+
+    if not acquire_instance_lock():
+        _notify_already_running()
+        return 1
+    return _run_gui()
+
+
+def _run_gui() -> int:
     from PySide6.QtWidgets import QApplication
 
     from core.db_manager import get_db
@@ -194,6 +225,15 @@ def launch_gui() -> int:
 
     reset_startup_timeline()
     app = QApplication(sys.argv)
+
+    def _on_about_to_quit() -> None:
+        from services.app_shutdown import shutdown_runtime
+        from services.app_instance import release_instance_lock
+
+        shutdown_runtime()
+        release_instance_lock()
+
+    app.aboutToQuit.connect(_on_about_to_quit)
     mark_qapplication_created()
 
     from services.runtime.dependency_check import (
@@ -248,6 +288,9 @@ def launch_gui() -> int:
     log_startup("MainWindow construct begin")
     _boot("before MainWindow")
     window = MainWindow()
+    from services.app_shutdown import register_main_window
+
+    register_main_window(window)
     _boot("MainWindow created")
     log_startup("MainWindow construct end")
     if ui_trace_enabled():
