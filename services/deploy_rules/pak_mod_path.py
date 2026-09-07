@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult, is_rel_path_allowed
+from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult, is_rel_path_allowed, inert_strategy_deploy
 from services.deploy_rules.generic import FolderCopyStrategy
 from services.deploy_rules.manifest import (
     DeployManifest,
@@ -26,11 +25,6 @@ ENTRY_TYPE_FOLDER = "folder_copy"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _copy_file(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
 
 
 def _iter_pak_files(
@@ -167,76 +161,9 @@ class PakModPathStrategy(DeployStrategy):
             files=entries,
         )
 
-    def _copy_entries(
-        self, entries: list[ManifestFileEntry]
-    ) -> StrategyResult | list[ManifestFileEntry]:
-        out: list[ManifestFileEntry] = []
-        for entry in entries:
-            src = Path(entry.source)
-            dst = Path(entry.target)
-            try:
-                _copy_file(src, dst)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False,
-                        error=f"Permission denied：{src} → {dst}（{exc}）",
-                        deploy_type=self.deploy_type,
-                    )
-                return StrategyResult(
-                    success=False,
-                    error=f"复制失败：{src} → {dst}（{exc}）",
-                    deploy_type=self.deploy_type,
-                )
-            out.append(
-                ManifestFileEntry(
-                    source=str(src.resolve()),
-                    target=str(dst.resolve()),
-                    type=entry.type,
-                )
-            )
-        return out
-
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        mod_path = self._mod_path(ctx)
-        if isinstance(mod_path, StrategyResult):
-            return mod_path
-
-        try:
-            mod_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            err = str(exc).lower()
-            if "permission" in err or "denied" in err or "拒绝" in str(exc):
-                msg = f"Permission denied：无法创建 Mod 部署目录（{exc}）"
-            else:
-                msg = f"无法创建 Mod 部署目录：{mod_path}（{exc}）"
-            return StrategyResult(success=False, error=msg, deploy_type=self.deploy_type)
-
-        planned = self.plan(ctx)
-        if not planned.success:
-            return planned
-
-        copied = self._copy_entries(planned.files)
-        if isinstance(copied, StrategyResult):
-            return copied
-
-        when = _utc_now()
-        manifest = DeployManifest(
-            mod_id=ctx.mod_id,
-            deploy_time=when,
-            deploy_type=self.deploy_type,
-            files=copied,
-        )
-        return StrategyResult(
-            success=True,
-            target=str(mod_path.resolve()),
-            copied_files=len(copied),
-            deploy_type=self.deploy_type,
-            deploy_time=when,
-            files=copied,
-            manifest=manifest,
-        )
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

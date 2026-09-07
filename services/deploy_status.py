@@ -26,10 +26,14 @@ from services.deploy_rules.manifest import DeployManifest, load_manifest
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, ModFileManager
 from services.importers.local_scanner import is_skipped_mod_path_part
 from services.library_status import (
-    CONTENT_BACKUP_INVALID,
-    CONTENT_FOLDER_MISSING,
-    CONTENT_IDENTITY_CONFLICT,
+    CONTENT_CONTENT_MISSING,
     row_content_status,
+    row_identity_status,
+)
+from services.status_authority import (
+    IDENTITY_STATUS_CONFLICT,
+    normalize_content_axis,
+    normalize_identity_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +52,12 @@ DEPLOY_BLOCKED_BACKUP_INVALID = "Backup 无效，无法部署"
 DEPLOY_BLOCKED_IDENTITY_CONFLICT = "身份冲突，无法部署"
 DEPLOY_BLOCKED_CONTENT_MISSING = "该 Mod 内容缺失，无法部署"
 DEPLOY_ERR_MOD_PATH_MISSING = "Mod 安装目录不存在，请检查游戏设置"
+# Path-lifecycle specifics (prefer these over DEPLOY_ERR_MOD_PATH_MISSING).
+DEPLOY_ERR_CUSTOM_PATH_MISSING = "Mod自定义部署路径不存在"
+DEPLOY_ERR_GAME_INSTALL_MISSING = "游戏安装目录不存在"
+DEPLOY_ERR_GAME_MOD_PATH_MISSING = "游戏Mod部署目录不存在"
+DEPLOY_ERR_IDENTITY_RESOLVE = "Identity解析失败"
+DEPLOY_ERR_ENTITY_DISK_MISSING = "Mod实体存在，但磁盘目录缺失"
 DEPLOY_ERR_TARGET_FOREIGN = "目标目录已存在其他内容，无法部署"
 DEPLOY_ERR_PERMISSION = "无法写入游戏 Mod 目录，请检查权限"
 DEPLOY_ERR_COPY = "部署失败：文件复制错误"
@@ -57,24 +67,36 @@ _IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版�
 
 
 def deploy_block_reason_for_content_status(content_status: str | None) -> str | None:
-    """Return a deploy-blocking error for unhealthy content, else None."""
-    key = str(content_status or "").strip()
-    if key == CONTENT_FOLDER_MISSING:
-        return DEPLOY_BLOCKED_FOLDER_MISSING
-    if key == CONTENT_BACKUP_INVALID:
-        return DEPLOY_BLOCKED_BACKUP_INVALID
-    if key == CONTENT_IDENTITY_CONFLICT:
+    """Return a deploy-blocking error for content_missing, else None."""
+    if normalize_content_axis(content_status) == CONTENT_CONTENT_MISSING:
+        return DEPLOY_BLOCKED_CONTENT_MISSING
+    return None
+
+
+def deploy_block_reason_for_identity_status(identity_status: str | None) -> str | None:
+    """Return a deploy-blocking error for identity conflicts, else None."""
+    if normalize_identity_status(identity_status) == IDENTITY_STATUS_CONFLICT:
         return DEPLOY_BLOCKED_IDENTITY_CONFLICT
     return None
 
 
+def deploy_block_reason_for_mod_row(row: dict[str, Any] | None) -> str | None:
+    """Combined content + identity deploy gate from a DB backup row."""
+    if not row:
+        return None
+    return (
+        deploy_block_reason_for_content_status(row_content_status(row))
+        or deploy_block_reason_for_identity_status(row_identity_status(row))
+    )
+
+
 def content_status_for_mod(
-    mod_id: int | str,
+    internal_id: int | str,
     *,
     db: DatabaseManager | None = None,
 ) -> str:
     database = db if db is not None else get_db()
-    mid = str(mod_id).strip()
+    mid = str(internal_id).strip()
     try:
         row = database.get_mod_backup_row(mid)
     except Exception:  # noqa: BLE001
@@ -174,7 +196,7 @@ def manifest_owns_target(manifest: DeployManifest | None, target: Path) -> bool:
 
 def classify_folder_copy_target(
     *,
-    mod_id: str,
+    internal_id: str,
     managed: Path,
     mod_path: str | Path,
     library_root: str | Path | None = None,
@@ -184,7 +206,7 @@ def classify_folder_copy_target(
 
     Returns: ``absent`` | ``empty`` | ``ours`` | ``foreign``
     """
-    mid = str(mod_id).strip()
+    mid = str(internal_id).strip()
     target = folder_copy_target_for(managed, mod_path=mod_path)
     if not target.exists():
         return "absent"
@@ -192,12 +214,12 @@ def classify_folder_copy_target(
         return "empty"
 
     our = load_manifest(managed)
-    if our is not None and str(our.mod_id or "").strip() in ("", mid):
+    if our is not None and str(our.internal_id or "").strip() in ("", mid):
         if manifest_owns_target(our, target):
             return "ours"
         # Manifest for this mod exists but does not claim target — still ours if
         # deploy_path folder name matches and no other owner.
-        if str(our.mod_id or "").strip() == mid and not our.files:
+        if str(our.internal_id or "").strip() == mid and not our.files:
             pass
 
     # Other Mods' manifests claiming files under target?
@@ -210,7 +232,7 @@ def classify_folder_copy_target(
                 other = load_manifest(folder)
                 if other is None:
                     continue
-                other_id = str(other.mod_id or "").strip()
+                other_id = str(other.internal_id or "").strip()
                 if other_id and other_id == mid:
                     continue
                 if manifest_owns_target(other, target):
@@ -218,7 +240,7 @@ def classify_folder_copy_target(
         except Exception:  # noqa: BLE001
             logger.debug("foreign ownership scan failed", exc_info=True)
 
-    if our is not None and str(our.mod_id or "").strip() == mid:
+    if our is not None and str(our.internal_id or "").strip() == mid:
         # Previously deployed by us but fingerprint/targets drifted — allow update
         if any(
             _norm(e.target).startswith(_norm(target)) for e in (our.files or [])
@@ -232,7 +254,7 @@ def classify_folder_copy_target(
 
 
 def resolve_deployment_status(
-    mod_id: int | str,
+    internal_id: int | str,
     *,
     library_root: str | Path | None = None,
     db: DatabaseManager | None = None,
@@ -245,8 +267,13 @@ def resolve_deployment_status(
     This may scan the managed folder (``content_fingerprint``) and walk other Mod
     manifests. Do not call from the Qt GUI thread — use a worker (see Detail panel).
     """
-    mid = str(mod_id).strip()
+    from services.deploy_paths import (
+        resolve_deploy_identity,
+        resolve_deploy_managed_path,
+    )
+
     database = db if db is not None else get_db()
+    mid = resolve_deploy_identity(internal_id, db=database)
     info = database.get_mod_deploy_info(mid) if mid.isdigit() else None
     db_status = (
         str(info.deploy_status or "").strip() if info else DEPLOY_STATUS_NOT_DEPLOYED
@@ -260,8 +287,13 @@ def resolve_deployment_status(
 
     root = Path(library_root) if library_root else None
     source = managed_path
-    if source is None and root is not None:
-        source = ModFileManager(root).find_by_published_id(mid)
+    if source is None:
+        source = resolve_deploy_managed_path(
+            mid,
+            db=database,
+            library_root=root,
+            file_manager=ModFileManager(root) if root is not None else None,
+        )
 
     # Conflict: configured folder_copy target exists but is foreign (deployed only).
     if source is not None and Path(source).is_dir() and info is not None:
@@ -273,7 +305,7 @@ def resolve_deployment_status(
                 cfg = None
             if cfg and str(cfg.mod_path or "").strip():
                 kind = classify_folder_copy_target(
-                    mod_id=mid,
+                    internal_id=mid,
                     managed=Path(source),
                     mod_path=cfg.mod_path,
                     library_root=root,
@@ -332,7 +364,7 @@ def install_path_missing(install_path: str | None) -> bool:
 
 def resolve_game_install_path(
     *,
-    mod_id: str | int | None = None,
+    internal_id: str | int | None = None,
     app_id: int | str | None = None,
     db: DatabaseManager | None = None,
 ) -> str:
@@ -351,7 +383,7 @@ def resolve_game_install_path(
     except (TypeError, ValueError):
         aid = 0
 
-    mid = str(mod_id or "").strip()
+    mid = str(internal_id or "").strip()
     if not aid and mid.isdigit():
         try:
             info = database.get_mod_display_info(mid)
@@ -388,6 +420,3 @@ def enrich_manifest_fingerprint(
     setattr(manifest, "source_path", str(root.resolve()))
     return manifest
 
-
-def as_public_status(status: str) -> dict[str, Any]:
-    return {"deployment_status": str(status or DEPLOYMENT_NOT_DEPLOYED)}

@@ -102,7 +102,7 @@ def test_resolve_game_install_path_from_mod(db: DatabaseManager, tmp_path: Path)
     db.upsert_mod(
         ModMetadata(published_file_id="88001", title="PakMod", app_id=BG3_APP_ID)
     )
-    assert resolve_game_install_path(mod_id="88001", db=db) == str(install)
+    assert resolve_game_install_path(internal_id="88001", db=db) == str(install)
     assert resolve_game_install_path(app_id=BG3_APP_ID, db=db) == str(install)
 
 
@@ -209,10 +209,10 @@ def test_multi_game_mods_open_different_install_roots(
     assert bg3_cap["install"] != anno_cap["install"]
 
 
-def test_dialog_resolves_install_path_from_mod_id_alone(
+def test_dialog_resolves_install_path_from_internal_id_alone(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """Even if caller forgets game_install_path, mod_id alone is enough."""
+    """Even if caller forgets game_install_path, internal_id alone is enough."""
     install = tmp_path / "GameRoot"
     install.mkdir()
     _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
@@ -223,3 +223,44 @@ def test_dialog_resolves_install_path_from_mod_id_alone(
     dlg = EditModDialog(mod_id="88041")  # no game_install_path / game_id
     assert dlg.browse_start_directory() == str(install)
     dlg.close()
+
+
+def test_open_edit_info_opens_when_metadata_and_managed_path_exist(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
+) -> None:
+    """Edit Info must open EditModDialog when metadata + managed_path are present."""
+    install = tmp_path / "BG3Root"
+    install.mkdir()
+    _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
+    folder = _mod_folder(
+        tmp_path / "library",
+        game="BG3",
+        mid="88051",
+        title="HasMetaAndPath",
+        app_id=BG3_APP_ID,
+    )
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="88051", title="HasMetaAndPath", app_id=BG3_APP_ID
+        )
+    )
+
+    panel = ModDetailPanel()
+    panel.show_mod(folder, mod_id="88051", game_id=BG3_APP_ID)
+    assert panel._managed_path is not None
+    assert panel._metadata is not None
+
+    opened: dict[str, object] = {}
+
+    def _fake_exec(self: EditModDialog) -> int:
+        opened["ok"] = True
+        opened["dialog"] = self
+        opened["game_id"] = self._game_id
+        return int(QDialog.DialogCode.Rejected)
+
+    monkeypatch.setattr(EditModDialog, "exec", _fake_exec)
+    panel.open_edit_info_dialog()
+
+    assert opened.get("ok") is True
+    assert isinstance(opened.get("dialog"), EditModDialog)
+    assert opened.get("game_id") == BG3_APP_ID

@@ -196,6 +196,8 @@ class BackupManager:
     def prepare_overwrite(
         self,
         targets: Iterable[str | Path],
+        *,
+        mod_id: str = "",
     ) -> OverwritePrep:
         """
         For each planned target that already exists as a file, copy it into
@@ -209,6 +211,14 @@ class BackupManager:
         transaction is marked ``failed`` (never left as ``prepared`` /
         ``backup_done``).
         """
+        from services.deploy_txn import (
+            PHASE_BACKUP_DONE,
+            PHASE_BEGIN,
+            log_txn_phase,
+            register_active_deploy_transaction,
+            unregister_active_deploy_transaction,
+        )
+
         prep = OverwritePrep(managed=self.managed)
         unique_targets: list[Path] = []
         seen: set[str] = set()
@@ -221,13 +231,18 @@ class BackupManager:
 
         target_keys = [_norm_target(t) for t in unique_targets]
         recorded: list[dict[str, Any]] = []
+        mid = str(mod_id or "").strip()
 
         try:
+            register_active_deploy_transaction(self.managed, internal_id=mid)
             self.write_transaction(
                 status=TXN_PREPARED,
                 targets=target_keys,
                 backups=[],
+                mod_id=mid,
+                phase=PHASE_BEGIN,
             )
+            log_txn_phase(PHASE_BEGIN, internal_id=mid, managed=self.managed)
 
             prior_by_target = self._prior_valid_backups()
             backup_root = self.backups_root()
@@ -253,10 +268,21 @@ class BackupManager:
                 except OSError:
                     exists = False
                 if not exists:
+                    # Missing destination is a valid deploy state (first deploy /
+                    # partial game tree). Skip backup — do not fail the stage.
                     prep.by_target[key] = None
                     continue
 
-                info = self._backup_one(target, backup_root)
+                try:
+                    info = self._backup_one(target, backup_root)
+                except FileNotFoundError:
+                    # TOCTOU / vanished target between exists check and open —
+                    # treat as missing original, not a deploy failure.
+                    logger.info(
+                        "backup skipped; destination missing target=%s", key
+                    )
+                    prep.by_target[key] = None
+                    continue
                 prep.by_target[key] = info
                 recorded.append(
                     {
@@ -271,7 +297,10 @@ class BackupManager:
                 status=TXN_BACKUP_DONE,
                 targets=list(prep.by_target.keys()),
                 backups=recorded,
+                mod_id=mid,
+                phase=PHASE_BACKUP_DONE,
             )
+            log_txn_phase(PHASE_BACKUP_DONE, internal_id=mid, managed=self.managed)
             return prep
         except (OSError, BackupIntegrityError, BackupRestoreError):
             try:
@@ -279,6 +308,7 @@ class BackupManager:
                     status=TXN_FAILED,
                     targets=target_keys or list(prep.by_target.keys()),
                     backups=recorded,
+                    mod_id=mid,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -290,6 +320,7 @@ class BackupManager:
                     logger.exception(
                         "Failed to clear deploy transaction after prepare_overwrite error"
                     )
+            unregister_active_deploy_transaction(self.managed)
             raise
 
     def _prior_valid_backups(self) -> dict[str, ManifestBackupInfo]:
@@ -510,16 +541,20 @@ class BackupManager:
         targets: list[str],
         backups: list[Mapping[str, Any]],
         mod_id: str = "",
+        phase: str = "",
     ) -> Path:
         path = transaction_path_for(self.managed)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+        payload: dict[str, Any] = {
             "mod_id": str(mod_id or ""),
             "status": str(status or ""),
             "updated_at": _utc_now(),
             "targets": list(targets),
             "backups": [dict(item) for item in backups],
         }
+        phase_s = str(phase or "").strip()
+        if phase_s:
+            payload["phase"] = phase_s
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -546,6 +581,9 @@ class BackupManager:
         return data if isinstance(data, dict) else None
 
     def mark_deployed(self, prep: OverwritePrep, *, mod_id: str = "") -> None:
+        """Commit transaction: mark deployed then clear txn file (success gate)."""
+        from services.deploy_txn import PHASE_COMMITTED, log_txn_phase
+
         keep_paths = {
             str(b.path).replace("\\", "/")
             for b in prep.by_target.values()
@@ -565,6 +603,10 @@ class BackupManager:
                 if b is not None
             ],
             mod_id=mod_id,
+            phase=PHASE_COMMITTED,
+        )
+        log_txn_phase(
+            PHASE_COMMITTED, internal_id=str(mod_id or ""), managed=self.managed
         )
         # Successful deploy keeps referenced backups for undeploy; drop txn + orphans.
         self.clear_transaction()
@@ -686,10 +728,24 @@ class BackupManager:
             )
         try:
             self.rollback(prep)
+            from services.deploy_txn import (
+                PHASE_ROLLBACK,
+                compose_recover_deploy_error,
+                log_txn_phase,
+                unregister_active_deploy_transaction,
+            )
+
+            log_txn_phase(
+                PHASE_ROLLBACK,
+                internal_id=str(txn.get("mod_id") or ""),
+                managed=self.managed,
+                extra=f"from_status={status}",
+            )
+            unregister_active_deploy_transaction(self.managed)
             return {
                 "action": "rolled_back",
                 "status": status,
-                "message": "interrupted deploy rolled back from transaction",
+                "message": compose_recover_deploy_error(""),
             }
         except BackupRestoreError as exc:
             return {

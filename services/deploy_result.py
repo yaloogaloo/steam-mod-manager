@@ -21,7 +21,7 @@ class DeployResult:
     """Normalized deploy outcome (maps to legacy dict for Qt signals)."""
 
     status: DeployStatus
-    mod_id: str = ""
+    internal_id: str = ""
     app_id: int = 0
     source: str = ""
     target: str = ""
@@ -30,6 +30,12 @@ class DeployResult:
     copied_files: int = 0
     copied_bytes: int = 0
     elapsed_ms: float = 0.0
+    # FilePlan pipeline diagnostics (always meaningful when a plan existed)
+    planned_files: int = 0
+    backed_up_files: int = 0
+    applied_files: int = 0
+    verified_files: int = 0
+    failed_files: int = 0
     error: str = ""
     error_code: str = ""
     warnings: list[str] = field(default_factory=list)
@@ -43,7 +49,12 @@ class DeployResult:
         out: dict[str, Any] = {
             "success": self.success,
             "status": self.status.value,
-            "mod_id": self.mod_id,
+            "mod_id": self.internal_id,
+            "planned_files": self.planned_files,
+            "backed_up_files": self.backed_up_files,
+            "applied_files": self.applied_files,
+            "verified_files": self.verified_files,
+            "failed_files": self.failed_files,
         }
         if self.app_id:
             out["app_id"] = self.app_id
@@ -56,8 +67,10 @@ class DeployResult:
             out["deploy_type"] = self.strategy
         if self.stage:
             out["stage"] = self.stage
-        if self.copied_files:
-            out["copied_files"] = self.copied_files
+        # Prefer applied_files when present; keep copied_files for legacy callers.
+        copied = self.copied_files or self.applied_files
+        if copied:
+            out["copied_files"] = copied
         if self.copied_bytes:
             out["copied_bytes"] = self.copied_bytes
         if self.elapsed_ms:
@@ -100,6 +113,11 @@ class DeployResult:
             "copied_files",
             "copied_bytes",
             "elapsed_ms",
+            "planned_files",
+            "backed_up_files",
+            "applied_files",
+            "verified_files",
+            "failed_files",
             "error",
             "error_code",
             "warnings",
@@ -107,7 +125,7 @@ class DeployResult:
             extra.pop(key, None)
         return cls(
             status=status,
-            mod_id=str(data.get("mod_id") or ""),
+            internal_id=str(data.get("internal_id") or data.get("mod_id") or ""),
             app_id=int(data.get("app_id") or 0),
             source=str(data.get("source") or ""),
             target=str(data.get("target") or ""),
@@ -116,6 +134,11 @@ class DeployResult:
             copied_files=int(data.get("copied_files") or 0),
             copied_bytes=int(data.get("copied_bytes") or 0),
             elapsed_ms=float(data.get("elapsed_ms") or 0.0),
+            planned_files=int(data.get("planned_files") or 0),
+            backed_up_files=int(data.get("backed_up_files") or 0),
+            applied_files=int(data.get("applied_files") or 0),
+            verified_files=int(data.get("verified_files") or 0),
+            failed_files=int(data.get("failed_files") or 0),
             error=str(data.get("error") or ""),
             error_code=str(data.get("error_code") or ""),
             warnings=list(data.get("warnings") or []),
@@ -131,13 +154,13 @@ def normalize_deploy_dict(data: dict[str, Any]) -> dict[str, Any]:
 def terminal_failed(
     error: str,
     *,
-    mod_id: str = "",
+    internal_id: str = "",
     error_code: str = "deploy_failed",
     **extra: Any,
 ) -> dict[str, Any]:
     return DeployResult(
         status=DeployStatus.FAILED,
-        mod_id=mod_id,
+        internal_id=internal_id,
         error=error,
         error_code=error_code,
         extra=extra,

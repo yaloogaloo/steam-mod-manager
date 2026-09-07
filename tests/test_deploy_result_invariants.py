@@ -24,7 +24,7 @@ def test_legacy_success_without_status() -> None:
 
 def test_cancelled_and_timeout_terminal() -> None:
     for status in (DeployStatus.CANCELLED, DeployStatus.TIMEOUT):
-        dr = DeployResult(status=status, mod_id="3", error="e")
+        dr = DeployResult(status=status, internal_id="3", error="e")
         out = dr.to_dict()
         assert out["success"] is False
         assert out["status"] == status.value

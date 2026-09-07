@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult
-from services.deploy_rules.generic import _deploy_ignore, _iter_deployable_files
-from services.deploy_rules.manifest import (
-    DeployManifest,
-    ManifestFileEntry,
-    remove_empty_parents,
+from services.deploy_rules.base import (
+    DeployContext,
+    DeployStrategy,
+    StrategyResult,
+    inert_strategy_deploy,
 )
+from services.deploy_rules.generic import _iter_deployable_files
+from services.deploy_rules.manifest import ManifestFileEntry, remove_empty_parents
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 
 logger = logging.getLogger(__name__)
@@ -28,11 +28,11 @@ def _utc_now() -> str:
 
 class CustomPathStrategy(DeployStrategy):
     """
-    Copy Mod *contents* into a user-specified absolute directory.
+    Path mapping into a user-specified absolute directory.
 
-    Never wraps the payload in the managed folder name — merges file/dir
-    children into ``ctx.custom_deploy_path`` (like ``copytree(..., dirs_exist_ok)``).
-    Skips ``.info`` / ``info``. Overrides Anno / Palworld / folder_copy rules.
+    Never wraps the payload in the managed folder name — maps content files
+    into ``ctx.custom_deploy_path``. Skips ``.info`` / ``info``.
+    Deployment I/O is owned by ModDeployer Core Apply (Phase 3).
     """
 
     deploy_type = DEPLOY_TYPE_CUSTOM_PATH
@@ -70,6 +70,8 @@ class CustomPathStrategy(DeployStrategy):
                 source=str(src_file),
                 target=str((target / src_file.relative_to(source)).resolve()),
                 type=self.deploy_type,
+                source_relative=src_file.relative_to(source).as_posix(),
+                relative=src_file.relative_to(source).as_posix(),
             )
             for src_file in files
         ]
@@ -82,122 +84,13 @@ class CustomPathStrategy(DeployStrategy):
         )
 
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        planned = self.plan(ctx)
-        if not planned.success:
-            return planned
-
-        target = Path(planned.target)
-        source = ctx.content_root().resolve()
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            err = str(exc).lower()
-            if "permission" in err or "denied" in err or "拒绝" in str(exc):
-                msg = f"Permission denied：无法创建自定义部署目录（{exc}）"
-            else:
-                msg = f"无法创建自定义部署目录：{target}（{exc}）"
-            return StrategyResult(
-                success=False, error=msg, deploy_type=self.deploy_type
-            )
-
-        # Merge content of source into target — never nest the managed shell folder.
-        if ctx.allowed_rel_paths is None:
-            try:
-                for child in source.iterdir():
-                    if child.name in _IGNORE_DIR_NAMES:
-                        continue
-                    dest = target / child.name
-                    if child.is_dir():
-                        shutil.copytree(
-                            child,
-                            dest,
-                            dirs_exist_ok=True,
-                            ignore=_deploy_ignore,
-                        )
-                    elif child.is_file():
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(child, dest)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False,
-                        error=f"Permission denied：{exc}",
-                        deploy_type=self.deploy_type,
-                    )
-                return StrategyResult(
-                    success=False,
-                    error=f"复制失败：{exc}",
-                    deploy_type=self.deploy_type,
-                )
-        else:
-            for entry in planned.files:
-                src = Path(entry.source)
-                dst = Path(entry.target)
-                try:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-                except OSError as exc:
-                    err = str(exc).lower()
-                    if "permission" in err or "denied" in err:
-                        return StrategyResult(
-                            success=False,
-                            error=f"Permission denied：{exc}",
-                            deploy_type=self.deploy_type,
-                        )
-                    return StrategyResult(
-                        success=False,
-                        error=f"复制失败：{exc}",
-                        deploy_type=self.deploy_type,
-                    )
-
-        for banned in _IGNORE_DIR_NAMES:
-            if (target / banned).exists():
-                return StrategyResult(
-                    success=False,
-                    error=f"部署异常：目标不应包含 {banned}",
-                    deploy_type=self.deploy_type,
-                )
-
-        when = _utc_now()
-        # Rebuild file list after copy so manifest matches on-disk payload.
-        files = _iter_deployable_files(
-            source, allowed_rel_paths=ctx.allowed_rel_paths
-        )
-        entries = [
-            ManifestFileEntry(
-                source=str(src_file),
-                target=str((target / src_file.relative_to(source)).resolve()),
-                type=self.deploy_type,
-            )
-            for src_file in files
-        ]
-        manifest = DeployManifest(
-            mod_id=ctx.mod_id,
-            deploy_time=when,
-            deploy_type=self.deploy_type,
-            files=entries,
-        )
-        logger.info(
-            "[DEPLOY] custom_path mod_id=%s target=%s files=%s",
-            ctx.mod_id,
-            target,
-            len(entries),
-        )
-        return StrategyResult(
-            success=True,
-            target=str(target),
-            copied_files=len(entries),
-            deploy_type=self.deploy_type,
-            deploy_time=when,
-            files=entries,
-            manifest=manifest,
-        )
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,
         ctx: DeployContext,
-        manifest: DeployManifest | None,
+        manifest,
     ) -> StrategyResult:
         if manifest is None or not manifest.files:
             return StrategyResult(
@@ -223,17 +116,21 @@ class CustomPathStrategy(DeployStrategy):
                 errors.append(f"{target}: {exc}")
                 continue
             if stop_at is not None:
-                remove_empty_parents(target, stop_at=stop_at)
+                try:
+                    if target.resolve().is_relative_to(stop_at):
+                        remove_empty_parents(target, stop_at=stop_at)
+                except (ValueError, OSError):
+                    pass
 
         if errors:
             return StrategyResult(
                 success=False,
-                error="; ".join(errors[:5]),
-                deploy_type=self.deploy_type,
+                error="部分文件删除失败：" + "; ".join(errors[:3]),
                 copied_files=removed,
+                deploy_type=self.deploy_type,
             )
         return StrategyResult(
             success=True,
-            deploy_type=self.deploy_type,
             copied_files=removed,
+            deploy_type=self.deploy_type,
         )

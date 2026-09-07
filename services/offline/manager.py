@@ -183,6 +183,7 @@ def attach_nexus_offline_page(
     managed_path: str | Path | None = None,
     library_root: str | Path | None = None,
     clean: bool = True,
+    merge_mode: str = "fill_missing",
 ) -> OfflineUpdateResult:
     """
     Shared entry for Nexus offline page attach (HTML or MHTML).
@@ -225,7 +226,9 @@ def attach_nexus_offline_page(
     from core.mod_platform import OFFLINE_STATUS_ARCHIVED
 
     if getattr(result, "status", None) == OFFLINE_STATUS_ARCHIVED and dest is not None:
-        parsed_title = _apply_nexus_offline_metadata(mod_id, dest)
+        parsed_title = _apply_nexus_offline_metadata(
+            mod_id, dest, merge_mode=merge_mode
+        )
         dest = _maybe_rename_empty_mod_folder_to_parsed_title(
             mod_id, dest, parsed_title
         )
@@ -243,8 +246,10 @@ def attach_nexus_offline_page(
 def _apply_nexus_offline_metadata(
     mod_id: str | int,
     managed_path: Path,
+    *,
+    merge_mode: str = "fill_missing",
 ) -> str:
-    """Parse the saved offline HTML and fill any missing Mod metadata.
+    """Parse the saved offline HTML and apply Mod metadata.
 
     Failures are caught and logged as warnings — the offline HTML import must
     succeed regardless of scraper errors.
@@ -253,9 +258,6 @@ def _apply_nexus_offline_metadata(
     ``attach_nexus_offline_page``.  No other code path may call it.
 
     Returns the parsed Mod title (empty when parse/apply produced none).
-    Directory naming is *not* done here: a valid title is applied to DB /
-    sidecar first, then ``_maybe_rename_empty_mod_folder_to_parsed_title``
-    uses path_lifecycle so filesystem / DB / sidecar / identity stay aligned.
     """
     import logging as _logging
 
@@ -281,7 +283,9 @@ def _apply_nexus_offline_metadata(
         return ""
 
     try:
-        apply_nexus_offline_candidates(mod_id, managed_path, candidates)
+        apply_nexus_offline_candidates(
+            mod_id, managed_path, candidates, merge_mode=merge_mode
+        )
     except Exception as exc:  # noqa: BLE001
         _logger.warning(
             "[NEXUS_SCRAPER] apply_nexus_offline_candidates failed: %s", exc

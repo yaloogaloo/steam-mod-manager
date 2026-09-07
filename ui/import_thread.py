@@ -99,7 +99,9 @@ class ImportWorker(QThread):
         offline_html: str = "",
     ) -> ImportResult:
         """After a successful Nexus import, optionally attach user-saved HTML/MHTML."""
-        if not result.success:
+        if not result.mod_id:
+            return result
+        if not result.success and not result.is_duplicate:
             return result
         if self.platform != PLATFORM_NEXUS:
             return result
@@ -117,6 +119,7 @@ class ImportWorker(QThread):
                 managed_path=result.managed_path or None,
                 library_root=self.library_root,
                 clean=bool(clean),
+                merge_mode="import_overwrite",
             )
         except Exception:  # noqa: BLE001
             # Missing / invalid offline pages must never fail the Mod import.
@@ -216,6 +219,7 @@ class ImportWorker(QThread):
             source_url=resolved.source_url,
             workshop_id=resolved.workshop_id,
             app_id=app_id,
+            title=str(resolved.title or self.params.get("title") or "").strip(),
         )
         if dup is not None:
             return dup
@@ -253,6 +257,11 @@ class ImportWorker(QThread):
             ),
         )
         if isinstance(prepared, ImportResult):
+            # Same-scope duplicate still accepts offline HTML overwrite refresh.
+            if prepared.is_duplicate and prepared.mod_id:
+                return self._maybe_attach_nexus_offline(
+                    prepared, offline_html=offline
+                )
             return prepared
 
         from services.importers.identity_resolve import (
@@ -299,6 +308,13 @@ class ImportWorker(QThread):
 
         if self.platform == PLATFORM_GITHUB:
             github_url = prepared.source_url or str(params.get("github_url") or "").strip()
+            local_ext = str(prepared.external_id or "").strip()
+            # Path-stable local/… suffix — never bare folder.name.
+            local_suffix = (
+                local_ext.removeprefix("local/")
+                if local_ext.startswith("local/")
+                else ""
+            )
             result = GithubImporter(db=db).import_mod(
                 github_url=github_url,
                 source_folder=str(folder),
@@ -308,8 +324,7 @@ class ImportWorker(QThread):
                 app_id=int(params.get("game_id") or params.get("app_id") or 0),
                 context=context,
                 cover_source=cover,
-                # Batch: allow unique external ids via folder name suffix.
-                external_id_suffix=folder.name if batch else "",
+                external_id_suffix=local_suffix if (batch or not github_url) else "",
                 is_batch_mode=batch or bool(params.get("is_batch_mode")),
             )
             return result
@@ -325,7 +340,7 @@ class ImportWorker(QThread):
                 ),
                 modio_id=(
                     prepared.external_id
-                    or (folder.name if batch else str(params.get("modio_id") or ""))
+                    or ("" if batch else str(params.get("modio_id") or ""))
                 ),
                 library_root=self.library_root,
                 game_name=str(params.get("game_name") or ""),
@@ -337,6 +352,12 @@ class ImportWorker(QThread):
             return result
 
         if self.platform == PLATFORM_OTHER:
+            local_ext = str(prepared.external_id or "").strip()
+            local_suffix = (
+                local_ext.removeprefix("local/")
+                if local_ext.startswith("local/")
+                else ""
+            )
             result = OtherImporter(db=db).import_mod(
                 source_folder=str(folder),
                 title=folder_title,
@@ -355,13 +376,13 @@ class ImportWorker(QThread):
                 app_id=int(params.get("game_id") or params.get("app_id") or 0),
                 context=context,
                 cover_source=cover,
-                external_id_suffix=folder.name if batch else "",
+                external_id_suffix=local_suffix,
                 is_batch_mode=batch or bool(params.get("is_batch_mode")),
             )
             return result
 
-        # Nexus — unified identity (official URL/id, else folder.name).
-        nexus_id = str(prepared.external_id or "").strip() or folder.name
+        # Nexus — unified identity (official URL/id, else local/…).
+        nexus_id = str(prepared.external_id or "").strip()
         nexus_url = "" if batch else str(prepared.source_url or "").strip()
         result = NexusImporter(db=db).import_mod(
             source_folder=str(folder),

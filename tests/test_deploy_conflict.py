@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -30,13 +31,34 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed_mod(library: Path, mod_id: str) -> Path:
+def _prove_managed_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
+    """Stamp ``.info.internal_id`` so Deploy path resolve accepts the folder."""
+    proof = str(mid)
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True, exist_ok=True)
+    meta_path = info / METADATA_FILENAME
+    payload: dict = {}
+    if meta_path.is_file():
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    payload["internal_id"] = proof
+    payload.setdefault("published_file_id", mid)
+    meta_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    db.update_mod_identity_fields(
+        mid,
+        internal_id=proof,
+        last_known_path=str(folder),
+        folder_present=True,
+    )
+
+
+def _seed_mod(library: Path, mod_id: str, db: DatabaseManager | None = None) -> Path:
     folder = library / "Game" / mod_id
     folder.mkdir(parents=True, exist_ok=True)
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mod_id}",\n'
         f'  "published_file_id": "{mod_id}",\n'
         f'  "title": "M{mod_id}",\n'
         '  "app_id": 1,\n'
@@ -45,6 +67,8 @@ def _seed_mod(library: Path, mod_id: str) -> Path:
         encoding="utf-8",
     )
     (folder / "payload.txt").write_text("x", encoding="utf-8")
+    if db is not None:
+        _prove_managed_folder(db, mod_id, folder)
     return folder
 
 
@@ -114,6 +138,8 @@ def test_post_deploy_runs_check_all(
     )
     db.upsert_mod(ModMetadata(published_file_id="601", title="A", app_id=1))
     db.upsert_mod(ModMetadata(published_file_id="602", title="B", app_id=1))
+    _prove_managed_folder(db, "601", a)
+    _prove_managed_folder(db, "602", b)
 
     called = {"ok": False}
     real_check = ConflictDetector.check_all_mods
@@ -183,7 +209,7 @@ def test_post_deploy_runs_check_all(
     assert cfg is not None
 
     ctx = DeployContext(
-        mod_id="602",
+        internal_id="602",
         app_id=1,
         source=b,
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,

@@ -50,7 +50,7 @@ def _make_ctx(
     cfg = db.get_game_deploy_config(app_id)
     assert cfg is not None
     return DeployContext(
-        mod_id="10001",
+        internal_id="10001",
         app_id=app_id,
         source=source,
         deploy_type=deploy_type,

@@ -43,7 +43,7 @@ class ModRemover:
         undeploy_ok = bool(und.get("success"))
 
         # 2) Delete only this Mod's managed library folder
-        folder = self.files.find_by_published_id(mid)
+        folder = self.files.find_by_internal_id(mid)
         deleted_path = ""
         if folder is not None:
             try:

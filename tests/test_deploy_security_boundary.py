@@ -46,6 +46,7 @@ def _meta(mod: Path, *, mid: str, title: str, app_id: int = 4242) -> None:
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": mid,
                 "published_file_id": mid,
                 "title": title,
                 "app_id": app_id,
@@ -53,6 +54,26 @@ def _meta(mod: Path, *, mid: str, title: str, app_id: int = 4242) -> None:
             }
         ),
         encoding="utf-8",
+    )
+
+
+def _prove_managed_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
+    """Stamp ``.info.internal_id`` so Deploy path resolve accepts the folder."""
+    proof = str(mid)
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True, exist_ok=True)
+    payload = json.loads((info / METADATA_FILENAME).read_text(encoding="utf-8"))
+    payload["internal_id"] = proof
+    payload.setdefault("published_file_id", mid)
+    (info / METADATA_FILENAME).write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    db.update_mod_identity_fields(
+        mid,
+        internal_id=proof,
+        last_known_path=str(folder),
+        folder_present=True,
     )
 
 
@@ -87,6 +108,7 @@ def _add_mod(
         path.write_text(text, encoding="utf-8")
     _meta(mod, mid=mid, title=title, app_id=app_id)
     db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=app_id))
+    _prove_managed_folder(db, mid, mod)
     return mod
 
 
@@ -100,7 +122,7 @@ def _ctx(
     cfg = db.get_game_deploy_config(app_id)
     assert cfg is not None
     return DeployContext(
-        mod_id=mid,
+        internal_id=mid,
         source=mod,
         app_id=app_id,
         config=cfg,
@@ -110,7 +132,7 @@ def _ctx(
 
 
 # ---------------------------------------------------------------------------
-# Case1 — malicious manifest target traversal
+# Case1 �?malicious manifest target traversal
 # ---------------------------------------------------------------------------
 
 
@@ -149,11 +171,11 @@ def test_case1_malicious_manifest_target_traversal(tmp_path: Path, db: DatabaseM
     assert outside.read_text(encoding="utf-8") == "KEEP"
     assert "安全校验" in str(out.get("error") or "") or "mismatch" in str(
         out.get("error") or ""
-    ).lower() or "清单" in str(out.get("error") or "")
+    ).lower() or "清坕" in str(out.get("error") or "")
 
 
 # ---------------------------------------------------------------------------
-# Case2 — illegal backup path restore
+# Case2 �?illegal backup path restore
 # ---------------------------------------------------------------------------
 
 
@@ -177,7 +199,7 @@ def test_case2_illegal_backup_path(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Case3 — Mod A must not use Mod B manifest
+# Case3 �?Mod A must not use Mod B manifest
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +236,7 @@ def test_case3_mod_a_cannot_read_mod_b_manifest(tmp_path: Path, db: DatabaseMana
 
 
 # ---------------------------------------------------------------------------
-# Case4 — remove_empty_parents never deletes protected roots
+# Case4 �?remove_empty_parents never deletes protected roots
 # ---------------------------------------------------------------------------
 
 
@@ -247,7 +269,7 @@ def test_case4_remove_empty_parent_protection(tmp_path: Path, db: DatabaseManage
 
 
 # ---------------------------------------------------------------------------
-# Case5 — source outside workspace rejected
+# Case5 �?source outside workspace rejected
 # ---------------------------------------------------------------------------
 
 
@@ -290,7 +312,7 @@ def test_case5_source_outside_workspace(tmp_path: Path, db: DatabaseManager) -> 
 
 
 # ---------------------------------------------------------------------------
-# Case6 — shared / referenced backup prune protection
+# Case6 �?shared / referenced backup prune protection
 # ---------------------------------------------------------------------------
 
 
@@ -345,7 +367,7 @@ def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseMa
 
 
 # ---------------------------------------------------------------------------
-# Case7 — illegal manifest refuses undeploy (no deletes)
+# Case7 �?illegal manifest refuses undeploy (no deletes)
 # ---------------------------------------------------------------------------
 
 

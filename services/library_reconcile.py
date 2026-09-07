@@ -1,8 +1,34 @@
-"""Library reconciliation — disk + SQLite + backup into one consistent view.
+"""Library reconciliation — filesystem ↔ database consistency only.
 
-Identity: bind existing Workspace ID, or create from official platform identity
-(Steam Workshop ID / Nexus Mod ID → external_id → workspace_id).
-Never mint Workspace ID from Internal ID. Unrecognized folders stay unresolved.
+ARCHITECTURE RULE (lifecycle ownership)
+---------------------------------------
+Reconcile may:
+
+1. Discover filesystem / backup state
+2. Bind and update **existing** Internal Entities (path, folder_present, …)
+3. Emit :class:`services.orphan_import.OrphanCandidate` for unknown folders
+
+Reconcile must **never**:
+
+- call ``create_mod_identity`` / allocate Internal Entities
+- treat consistency scanning as user-metadata change (no backup enqueue
+  when an existing entity is unchanged)
+
+Correct create lifecycle for unknown directories:
+
+    Reconcile → OrphanCandidate → Import/Sync (``import_orphan_candidates``)
+        → Identity Service → Internal Entity
+
+ARCHITECTURE RULE (content missing)
+-----------------------------------
+Content Missing is a **system derived state**. Reconcile must **not** produce
+``content_status=content_missing``. Missing evaluation belongs to
+``services.content_status_eval`` (via Refresh).
+
+ARCHITECTURE RULE (startup)
+---------------------------
+Reconcile must **not** make Loading Mods wait. Bind known entities via
+indexed resolve; leave unresolved folders as OrphanCandidate / notes.
 """
 
 from __future__ import annotations
@@ -31,36 +57,28 @@ from services.file_ops import (
     read_info_metadata_dict,
 )
 from services.library_status import (
-    CONTENT_IDENTITY_CONFLICT,
-    LIBRARY_STATUS_BACKUP_INVALID,
-    LIBRARY_STATUS_CONFLICT,
     LIBRARY_STATUS_IMPORTED,
     LIBRARY_STATUS_MISSING,
     LIBRARY_STATUS_NORMAL,
-    SOURCE_EXTERNAL,
-    compute_content_status,
-    content_status_to_library_status,
     infer_initial_source_type,
-    normalize_library_source,
     row_source_type,
 )
 from services.metadata_backup import BACKUP_DIR_NAME, mark_missing
-from services.metadata_backup_sync import sync_after_metadata_change
+from services.metadata_backup_sync import mark_backup_dirty
 from services.mod_identity import (
     ensure_mod_identity,
+    extract_workspace_id,
     read_internal_id,
-    resolve_existing_mod_id,
 )
+from services.orphan_import import OrphanCandidate
 
 logger = logging.getLogger(__name__)
 
-# Re-export legacy constants for older tests / callers
 __all__ = [
     "LIBRARY_STATUS_NORMAL",
     "LIBRARY_STATUS_MISSING",
     "LIBRARY_STATUS_IMPORTED",
-    "LIBRARY_STATUS_CONFLICT",
-    "LIBRARY_STATUS_BACKUP_INVALID",
+    "OrphanCandidate",
     "ReconcileResult",
     "reconcile_library",
     "start_reconcile_library_async",
@@ -70,6 +88,7 @@ __all__ = [
     "library_load_must_wait",
     "is_reconcile_running",
     "add_reconcile_idle_listener",
+    "take_projection_touch_ids",
     "request_reconcile_shutdown",
     "join_reconcile_thread",
 ]
@@ -84,6 +103,37 @@ _startup_hold = False
 _idle_listeners: list = []
 _shutdown_requested = False
 _reconcile_thread: threading.Thread | None = None
+_projection_touch_ids: list[str] = []
+
+
+def take_projection_touch_ids() -> list[str]:
+    """Consume internal_ids whose Projection path bind changed during reconcile."""
+    global _projection_touch_ids
+    with _reconcile_lock:
+        out = list(_projection_touch_ids)
+        _projection_touch_ids = []
+        return out
+
+
+def _store_projection_touch_ids(ids: list[str]) -> None:
+    global _projection_touch_ids
+    cleaned = [str(x).strip() for x in ids if str(x).strip()]
+    with _reconcile_lock:
+        _projection_touch_ids = list(dict.fromkeys(cleaned))
+
+
+def _refresh_projections_for_rebinds(ids: list[str]) -> None:
+    """Warm-cache only — UI listeners fire on main thread via idle."""
+    try:
+        from services.mod_library_cache import get_library_cache
+    except Exception:  # noqa: BLE001
+        return
+    cache = get_library_cache()
+    for mid in ids:
+        try:
+            cache.refresh_projection(mid)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @dataclass
@@ -96,6 +146,10 @@ class ReconcileResult:
     conflicts: int = 0
     restored: int = 0
     notes: list[str] = field(default_factory=list)
+    # Unknown directories / backup dirs awaiting Import/Sync Identity — never created here.
+    orphans: list[OrphanCandidate] = field(default_factory=list)
+    # internal_id values whose last_known_path was rebound this run.
+    rebound_ids: list[str] = field(default_factory=list)
 
 
 def _folder_has_metadata(folder: Path) -> bool:
@@ -114,29 +168,52 @@ def _folder_has_metadata(folder: Path) -> bool:
 def _folder_missing_content(
     folder: Path,
     *,
-    mod_id: str | None = None,
+    internal_id: str | None = None,
     db=None,
 ) -> bool:
+    """Payload-absence fact for callers that need a boolean.
+
+    ARCHITECTURE RULE: Do **not** use this inside ``reconcile_library`` to
+    persist ``content_status=content_missing``. Reconcile must not stamp
+    missing; Refresh uses ``content_status_eval`` instead.
+    """
     from services.local_file_index import has_local_mod_payload
 
-    return not has_local_mod_payload(folder, mod_id=mod_id, db=db)
+    return not has_local_mod_payload(folder, mod_id=internal_id, db=db)
 
 
 def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult:
     """
-    Unify disk / SQLite / backup state.
+    Unify disk / SQLite path facts for **existing** entities.
 
-    1. Scan ``mod/<game>/<mod>`` with ``.info`` → ensure identity → sync backup
-    2. Mark backup-only mods as ``folder_present=0``
-    3. Import brand-new external folders into SQLite stubs
+    1. Scan ``mod/<game>/<mod>`` → bind via ``ensure_mod_identity``
+    2. Update path / folder_present on known entities
+    3. Emit :class:`OrphanCandidate` for unknown directories (no Identity create)
+    4. Mark DB rows whose folders are gone as ``folder_present=0``
 
-    Sticky ``source_type`` is preserved across refreshes; ``content_status``
-    is recomputed every pass.
+    ARCHITECTURE RULE: Reconcile has **no** Internal Entity create right.
+    Unknown directories are OrphanCandidates for Import/Sync Identity only.
+
+    ARCHITECTURE RULE: present-folder content axis is owned by
+    ``services.content_status_eval`` (authoritative payload check). Reconcile
+    may *invoke* that API; it must not stamp ``content_missing`` from shallow
+    probes or literals. Absent folders re-eval to ``content_missing``.
+    Multi-folder identity may mark ``identity_status`` (not Mod status).
+
+    ARCHITECTURE RULE: consistency scan ≠ user metadata change. Do not
+    ``mark_backup_dirty`` when an existing entity is unchanged.
     """
     root = Path(library_root) if library_root else Path(default_mod_library())
     result = ReconcileResult()
     if not root.is_dir():
         root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        from services.managed_path_cache import invalidate_managed_path_cache
+
+        invalidate_managed_path_cache(library_root=root)
+    except Exception:  # noqa: BLE001
+        pass
 
     from core.db_manager import get_db
     from core.paths import data_dir
@@ -146,7 +223,24 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
         with lifecycle_scope(LIFECYCLE_RECONCILE):
             return reconcile_library(library_root)
 
+    try:
+        from services.mod_fs_observer import begin_projection_defer
+
+        begin_projection_defer()
+    except Exception:  # noqa: BLE001
+        pass
+
     db = get_db()
+    try:
+        from services.status_recovery import (
+            run_status_model_cleanup_v2,
+            run_status_recovery,
+        )
+
+        run_status_recovery(db, root)
+        run_status_model_cleanup_v2(db, root)
+    except Exception:  # noqa: BLE001
+        logger.debug("status_recovery skipped", exc_info=True)
     manager = ModFileManager(root)
     seen_ids: set[str] = set()
     id_to_paths: dict[str, list[Path]] = {}
@@ -185,7 +279,7 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
     managed_folders = manager.list_managed_mods()
     add_list_discover_ms((_time.perf_counter() - t_discover) * 1000.0)
 
-    # --- Step 1 + 3: disk mods ---
+    # --- Step 1: disk mods (bind existing only) ---
     with ModTimingGuard(reason="reconcile") as _mod_timer:
         for folder in managed_folders:
             result.scanned += 1
@@ -193,156 +287,47 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
             t_scan = _time.perf_counter()
             raw = dict(read_info_metadata_dict(folder) or {})
             add_scan_ms((_time.perf_counter() - t_scan) * 1000.0)
+            if not raw:
+                # No .info → not a Mod. Only allowed action: restore .info when
+                # DB already owns this path and backup identity matches.
+                try:
+                    owned = db.find_mod_by_last_known_path(str(folder.resolve()))
+                except Exception:  # noqa: BLE001
+                    owned = None
+                if owned and str(owned).isdigit():
+                    from services.metadata_backup import restore_info_sidecar_from_backup
+
+                    if restore_info_sidecar_from_backup(owned, folder, db=db):
+                        raw = dict(read_info_metadata_dict(folder) or {})
+                        result.notes.append(f"INFO_RESTORED_FROM_BACKUP: {folder}")
+                    else:
+                        result.notes.append(f"IGNORE_NO_INFO: {folder}")
+                        continue
+                else:
+                    result.notes.append(f"IGNORE_NO_INFO: {folder}")
+                    continue
             raw["_managed_path"] = str(folder.resolve())
             raw["_folder_name"] = folder.name
             t_ident = _time.perf_counter()
-            had_row = bool(resolve_existing_mod_id(raw, db=db))
-            mod_id, payload, changed = ensure_mod_identity(folder, raw, db=db)
+            # Bind only — never allocate / mint / create here.
+            internal_id, payload, changed = ensure_mod_identity(folder, raw, db=db)
+            had_row = bool(internal_id.isdigit())
             add_identity_ms((_time.perf_counter() - t_ident) * 1000.0)
-            note_mod_id(mod_id)
+            note_mod_id(internal_id)
             early_drift = None
             prev_before_drift = ""
-            if mod_id.isdigit():
+            if internal_id.isdigit():
                 prev_before_drift = str(
-                    (db.get_mod_backup_row(mod_id) or {}).get("last_known_path") or ""
+                    (db.get_mod_backup_row(internal_id) or {}).get("last_known_path") or ""
                 ).strip()
                 from services.path_lifecycle import detect_path_drift as _drift_before_create
 
-                early_drift = _drift_before_create(mod_id, folder, db=db)
-            if not mod_id.isdigit():
-                from services.identity_service import (
-                    create_mod_identity,
-                    has_official_platform_identity,
-                    is_empty_mod_placeholder,
-                    sidecar_published_file_id,
-                )
-
-                plat = normalize_platform_if_known(
-                    str(payload.get("source_type") or payload.get("platform") or "")
-                )
-                url = str(payload.get("url") or payload.get("source_url") or "").strip()
-                ext = str(payload.get("external_id") or "").strip()
-                ws_hint = str(payload.get("workspace_id") or "").strip()
-                folder_title = str(payload.get("title") or folder.name)
-                placeholder = is_empty_mod_placeholder(folder.name) or is_empty_mod_placeholder(
-                    folder_title
-                )
-                official = has_official_platform_identity(
-                    platform=plat,
-                    external_id=ext,
-                    source_url=url,
-                    workshop_id=ws_hint if plat == PLATFORM_STEAM else "",
-                )
-                if placeholder and not official:
-                    result.notes.append(f"IDENTITY_UNRESOLVED_PLACEHOLDER: {folder}")
-                    if changed:
-                        try:
-                            persist_unified_metadata_dict(
-                                folder, payload, sync_backup=False, sync_reason="unresolved"
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "persist unresolved placeholder failed for %s: %s", folder, exc
-                            )
-                    continue
-                try:
-                    app_id = int(payload.get("app_id") or 0)
-                except (TypeError, ValueError):
-                    app_id = 0
-                game_name = str(payload.get("game_name") or folder.parent.name)
-                if app_id <= 0 and game_name:
-                    try:
-                        for game in db.list_games():
-                            names = {
-                                str(game.name or "").strip(),
-                                str(getattr(game, "folder_name", "") or "").strip(),
-                            }
-                            if game_name in names:
-                                app_id = int(game.app_id or 0)
-                                break
-                    except Exception:  # noqa: BLE001
-                        pass
-                if app_id > 0 and game_name:
-                    try:
-                        from core.game_info import GameInfo
-
-                        db.upsert_game(
-                            GameInfo(app_id=app_id, name=game_name, folder_name=game_name)
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                created_id = ""
-                rebound = False
-                if ws_hint and not is_internal_mod_id(ws_hint):
-                    occupied = db.find_mod_by_workspace_id(
-                        ws_hint, platform=plat or None, app_id=app_id
-                    )
-                    if occupied:
-                        created_id = occupied
-                        rebound = True
-                try:
-                    if created_id.isdigit():
-                        pass
-                    elif plat == PLATFORM_STEAM:
-                        from core.mod_platform import steam_workshop_url as _swu
-                        from urllib.parse import parse_qs, urlparse
-
-                        wid = ext if ext.isdigit() and not is_internal_mod_id(ext) else ""
-                        if not wid and ws_hint.isdigit() and not is_internal_mod_id(ws_hint):
-                            wid = ws_hint
-                        if not wid and "id=" in url:
-                            parsed_id = parse_qs(urlparse(url).query).get("id", [""])[0]
-                            if parsed_id.isdigit() and not is_internal_mod_id(parsed_id):
-                                wid = parsed_id
-                        if wid.isdigit() and not is_internal_mod_id(wid) and official:
-                            created = create_mod_identity(
-                                db,
-                                platform=PLATFORM_STEAM,
-                                workshop_id=wid,
-                                external_id=wid,
-                                source_url=url or _swu(wid),
-                                title=str(payload.get("title") or folder.name),
-                                app_id=app_id,
-                                game_name=game_name,
-                                operation="reconcile",
-                            )
-                            created_id = created.mod_id
-                    elif plat and official and (url or ext):
-                        created = create_mod_identity(
-                            db,
-                            platform=plat,
-                            external_id=ext,
-                            source_url=url,
-                            title=str(payload.get("title") or folder.name),
-                            app_id=app_id,
-                            game_name=game_name,
-                            operation="reconcile",
-                        )
-                        created_id = created.mod_id
-                except Exception as exc:  # noqa: BLE001
-                    logger.info("reconcile identity create skipped for %s: %s", folder, exc)
-                if created_id.isdigit():
-                    mod_id = created_id
-                    payload["published_file_id"] = sidecar_published_file_id(
-                        mod_id=mod_id,
-                        platform=plat,
-                        external_id=ext or (created_id if plat == PLATFORM_STEAM else ""),
-                    )
-                    payload["identity_status"] = "complete"
-                    changed = True
-                    had_row = rebound
-                else:
-                    result.notes.append(f"IDENTITY_UNRESOLVED: {folder}")
-                    if changed:
-                        try:
-                            persist_unified_metadata_dict(
-                                folder, payload, sync_backup=False, sync_reason="unresolved"
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "persist unresolved identity failed for %s: %s", folder, exc
-                            )
-                    continue
+                early_drift = _drift_before_create(internal_id, folder, db=db)
+            if not internal_id.isdigit():
+                # Forged / unmatched .info — ignore. Never create. Never invent
+                # workshop identity from folder names.
+                result.notes.append(f"IGNORE_UNBOUND_INFO: {folder}")
+                continue
 
             if changed:
                 try:
@@ -352,24 +337,26 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("persist identity failed for %s: %s", folder, exc)
 
-            id_to_paths.setdefault(mod_id, []).append(folder)
-            seen_ids.add(mod_id)
+            id_to_paths.setdefault(internal_id, []).append(folder)
+            seen_ids.add(internal_id)
 
-            prev = db.get_mod_backup_row(mod_id)
+            prev = db.get_mod_backup_row(internal_id)
             prev_path = prev_before_drift or str((prev or {}).get("last_known_path") or "").strip()
             renamed = early_drift is not None and early_drift.success
             if not renamed:
                 from services.path_lifecycle import detect_path_drift
 
-                drift = detect_path_drift(mod_id, folder, db=db)
+                drift = detect_path_drift(internal_id, folder, db=db)
                 renamed = drift is not None and drift.success
             if renamed:
                 result.renamed += 1
+                result.rebound_ids.append(internal_id)
             elif prev_path and Path(prev_path) != folder:
                 if prev_path and Path(prev_path).is_dir() and Path(prev_path) != folder:
                     pass
                 else:
                     result.renamed += 1
+                    result.rebound_ids.append(internal_id)
 
             title = str(payload.get("title") or payload.get("display_name") or folder.name)
             payload_source = str(
@@ -379,45 +366,35 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                 normalize_platform(payload_source) if payload_source else ""
             )
             source_type = infer_initial_source_type(
-                mod_id=mod_id,
+                mod_id=internal_id,
                 had_row=had_row,
                 existing_source=str((prev or {}).get("source_type") or ""),
                 existing_platform=str((prev or {}).get("platform") or ""),
                 payload_source=payload_source,
             )
-            if not had_row:
-                result.imported += 1
-
-            content_status = compute_content_status(
-                folder_present=True,
-                missing_content=_folder_missing_content(folder),
-                metadata_missing=not _folder_has_metadata(folder),
-                backup_status=str((prev or {}).get("backup_status") or ""),
-            )
-            library_status = content_status_to_library_status(content_status)
 
             from services.identity_service import persist_identity, persist_workspace_id
             from services.mod_identity import source_url_embeds_internal
             from services.mod_identity_authority import sanitize_platform_external_id
 
             raw_url = str(payload.get("url") or payload.get("source_url") or "").strip()
-            if source_url_embeds_internal(raw_url, internal_pk=mod_id):
+            if source_url_embeds_internal(raw_url, internal_pk=internal_id):
                 raw_url = ""
             ws = persist_workspace_id(
                 platform=store_platform,
-                mod_id=mod_id,
+                mod_id=internal_id,
                 workspace_id=str(payload.get("workspace_id") or ""),
                 source_url=raw_url,
                 external_id=str(payload.get("external_id") or ""),
             )
             ext = sanitize_platform_external_id(
-                store_platform, str(payload.get("external_id") or ""), mod_id=mod_id
+                store_platform, str(payload.get("external_id") or ""), mod_id=internal_id
             )
+            # Path / identity on present folders.
+            # Content Missing: only via content_status_eval (authoritative payload).
             persist_kw: dict = {
                 "internal_id": read_internal_id(payload),
                 "source_type": source_type,
-                "content_status": content_status,
-                "library_status": library_status,
                 "last_known_path": str(folder.resolve()),
                 "folder_present": True,
                 "title": title,
@@ -433,18 +410,40 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
             try:
                 persist_identity(
                     db,
-                    mod_id,
+                    internal_id,
                     source="reconcile",
                     reason="bind",
                     **persist_kw,
                 )
             except Exception:  # noqa: BLE001
-                logger.debug("update identity fields failed for %s", mod_id, exc_info=True)
+                logger.debug("update identity fields failed for %s", mid, exc_info=True)
 
-            if sync_after_metadata_change(mod_id, folder, "restore" if had_row else "import"):
-                result.synced += 1
-                if had_row and renamed:
-                    result.restored += 1
+            # Content Validator (authority): derive content_status from live payload.
+            # Do not use shallow probes or literal content_missing stamps.
+            try:
+                from services.content_status_eval import persist_evaluated_content_status
+
+                persist_evaluated_content_status(
+                    internal_id,
+                    folder,
+                    db=db,
+                    folder_present=True,
+                    backup_status=str((prev or {}).get("backup_status") or ""),
+                    metadata_missing=not _folder_has_metadata(folder),
+                    sync_sticky_marker=True,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "content status validate failed for %s", internal_id, exc_info=True
+                )
+
+            # ARCHITECTURE RULE: only real sidecar metadata change dirties backup.
+            # Steady-state bind / path reconcile must not enqueue BackupWorker.
+            if changed:
+                if mark_backup_dirty(internal_id, folder, "restore"):
+                    result.synced += 1
+                    if had_row and renamed:
+                        result.restored += 1
 
     # Identity conflicts: same mod_id → multiple live folders
     for mid, paths in id_to_paths.items():
@@ -452,14 +451,53 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
         if len(live) > 1:
             result.conflicts += 1
             try:
+                from services.status_authority import IDENTITY_STATUS_CONFLICT
+
                 db.update_mod_identity_fields(
                     mid,
-                    content_status=CONTENT_IDENTITY_CONFLICT,
-                    library_status=LIBRARY_STATUS_CONFLICT,
+                    identity_status=IDENTITY_STATUS_CONFLICT,
                     folder_present=True,
                 )
             except Exception:  # noqa: BLE001
                 pass
+        else:
+            try:
+                from services.status_authority import IDENTITY_STATUS_OK
+
+                row = db.get_mod_backup_row(mid) or {}
+                cur = str(row.get("identity_status") or "").strip()
+                if cur == "identity_conflict":
+                    db.update_mod_identity_fields(
+                        mid, identity_status=IDENTITY_STATUS_OK
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            # Sole remaining legal .info path must become the entity's storage bind.
+            # Entity / internal_id / workspace_id stay unchanged.
+            if len(live) == 1:
+                sole = live[0]
+                try:
+                    from services.identity_service import persist_identity
+
+                    prev_row = db.get_mod_backup_row(mid) or {}
+                    prev_lkp = str(prev_row.get("last_known_path") or "").strip()
+                    sole_resolved = str(sole.resolve())
+                    if prev_lkp != sole_resolved or int(prev_row.get("folder_present") or 0) != 1:
+                        persist_identity(
+                            db,
+                            mid,
+                            source="reconcile",
+                            reason="rebind_sole_info_path",
+                            last_known_path=sole_resolved,
+                            folder_present=True,
+                        )
+                        result.renamed += 1
+                        result.rebound_ids.append(mid)
+                        result.notes.append(f"PATH_REBOUND: {mid} -> {sole_resolved}")
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "sole-path rebind failed for %s", mid, exc_info=True
+                    )
 
     # --- Step 2: backup / DB rows without disk ---
     try:
@@ -470,25 +508,100 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
             lkp = str(row.get("last_known_path") or "").strip()
             path = Path(lkp) if lkp else None
             if path is not None and path.is_dir():
-                if sync_after_metadata_change(mid, path, "restore"):
-                    result.synced += 1
-                    result.restored += 1
+                # Path still present but was not in list_managed_mods — bind path only.
+                # No backup enqueue: consistency scan ≠ metadata change.
+                try:
+                    from services.identity_service import persist_identity
+
+                    persist_identity(
+                        db,
+                        mid,
+                        source="reconcile",
+                        reason="bind",
+                        last_known_path=str(path.resolve()),
+                        folder_present=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 seen_ids.add(mid)
                 continue
+
+            # Dead last_known_path: rebind when another folder proves the same
+            # .info.internal_id (never workspace / folder-name invent).
+            rebound = False
+            try:
+                from services.path_lifecycle import discover_folder_by_internal_id
+                from services.identity_service import persist_identity
+
+                iid = str(row.get("internal_id") or "").strip()
+                if not iid:
+                    iid = str(
+                        (db.get_mod_backup_row(mid) or {}).get("internal_id") or ""
+                    ).strip() or mid
+                alt = discover_folder_by_internal_id(
+                    iid,
+                    library_root=root,
+                    expected_mod_id=mid,
+                    db=db,
+                )
+                if alt is not None and alt.is_dir():
+                    persist_identity(
+                        db,
+                        mid,
+                        source="reconcile",
+                        reason="rebind_info_internal_id",
+                        last_known_path=str(alt.resolve()),
+                        folder_present=True,
+                    )
+                    try:
+                        from services.content_status_eval import (
+                            persist_evaluated_content_status,
+                        )
+
+                        persist_evaluated_content_status(
+                            mid,
+                            alt,
+                            db=db,
+                            folder_present=True,
+                            backup_status=str(row.get("backup_status") or ""),
+                            metadata_missing=not _folder_has_metadata(alt),
+                            sync_sticky_marker=True,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    seen_ids.add(mid)
+                    result.renamed += 1
+                    result.rebound_ids.append(mid)
+                    result.notes.append(f"PATH_REBOUND: {mid} -> {alt}")
+                    rebound = True
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "internal_id path rebind failed for %s", mid, exc_info=True
+                )
+            if rebound:
+                continue
+
             mark_missing(mid)
             try:
+                from services.content_status_eval import persist_evaluated_content_status
+
                 bstatus = str(row.get("backup_status") or "").strip()
-                content_status = compute_content_status(
+                existing_source = row_source_type(row)
+                if existing_source:
+                    db.update_mod_identity_fields(
+                        mid,
+                        source_type=existing_source,
+                        folder_present=False,
+                    )
+                else:
+                    db.update_mod_identity_fields(mid, folder_present=False)
+                persist_evaluated_content_status(
+                    mid,
+                    None,
+                    db=db,
                     folder_present=False,
                     backup_status=bstatus,
-                )
-                existing_source = row_source_type(row)
-                db.update_mod_identity_fields(
-                    mid,
-                    source_type=existing_source if existing_source else None,
-                    content_status=content_status,
-                    library_status=content_status_to_library_status(content_status),
-                    folder_present=False,
+                    sync_sticky_marker=False,
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -496,7 +609,7 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
     except Exception as exc:  # noqa: BLE001
         logger.warning("reconcile missing-pass failed: %s", exc)
 
-    # Orphan backup dirs on disk not yet in SQLite.
+    # Orphan backup dirs on disk not yet in SQLite → OrphanCandidate (no create).
     # Backup folder name is Internal/Steam PK storage — never Steam CREATE proof.
     try:
         from services.metadata_backup import load_backup
@@ -536,6 +649,37 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                     if db.get_mod(mid) is None and not lkp:
                         result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
                         continue
+                    if db.get_mod(mid) is not None:
+                        # Existing entity — path/presence only; no backup enqueue.
+                        present = bool(lkp and Path(lkp).is_dir())
+                        from services.content_status_eval import (
+                            persist_evaluated_content_status,
+                        )
+                        from services.identity_service import persist_identity
+
+                        persist_identity(
+                            db,
+                            mid,
+                            source="reconcile",
+                            reason="backup_orphan",
+                            internal_id=read_internal_id(meta) or None,
+                            last_known_path=lkp,
+                            folder_present=present,
+                            sticky_source=True,
+                        )
+                        persist_evaluated_content_status(
+                            mid,
+                            Path(lkp) if present else None,
+                            db=db,
+                            folder_present=present,
+                            sync_sticky_marker=False,
+                        )
+                        if not present:
+                            result.missing += 1
+                        seen_ids.add(mid)
+                        continue
+
+                    # No mods row — emit OrphanCandidate for Import/Sync.
                     title = str(
                         meta.get("title")
                         or meta.get("display_name")
@@ -547,22 +691,11 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                     store_platform = normalize_platform_if_known(payload_source) or (
                         normalize_platform(payload_source) if payload_source else ""
                     )
-                    source_type = infer_initial_source_type(
-                        mod_id=mid,
-                        had_row=False,
-                        payload_source=payload_source,
-                    )
-                    if source_type == SOURCE_EXTERNAL and store_platform:
-                        source_type = normalize_library_source(store_platform)
-                    from services.identity_service import (
-                        create_mod_identity,
-                        has_official_platform_identity,
-                        persist_identity,
-                    )
-
                     url = str(meta.get("url") or meta.get("source_url") or "")
                     ext = str(meta.get("external_id") or "")
                     ws_meta = str(meta.get("workspace_id") or "").strip()
+                    from services.identity_service import has_official_platform_identity
+
                     steam_wid = ""
                     if store_platform == PLATFORM_STEAM:
                         if ext.isdigit() and not is_internal_mod_id(ext):
@@ -575,72 +708,28 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                         source_url=url,
                         workshop_id=steam_wid,
                     )
-                    if db.get_mod(mid) is None:
-                        if not official or not store_platform:
-                            result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
-                            continue
-                        try:
-                            if store_platform == PLATFORM_STEAM:
-                                if not steam_wid:
-                                    result.notes.append(
-                                        f"IDENTITY_UNRESOLVED backup: {mid}"
-                                    )
-                                    continue
-                                created = create_mod_identity(
-                                    db,
-                                    platform=PLATFORM_STEAM,
-                                    workshop_id=steam_wid,
-                                    external_id=steam_wid,
-                                    source_url=url,
-                                    title=title,
-                                    app_id=int(meta.get("app_id") or 0),
-                                    game_name=str(meta.get("game_name") or ""),
-                                    operation="reconcile",
-                                )
-                            else:
-                                created = create_mod_identity(
-                                    db,
-                                    platform=store_platform,
-                                    external_id=ext,
-                                    source_url=url,
-                                    title=title,
-                                    app_id=int(meta.get("app_id") or 0),
-                                    game_name=str(meta.get("game_name") or ""),
-                                    operation="reconcile",
-                                )
-                            mid = created.mod_id
-                        except Exception as exc:  # noqa: BLE001
-                            logger.info(
-                                "orphan backup identity create skipped for %s: %s",
-                                mid,
-                                exc,
-                            )
-                            result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
-                            continue
-                    present = bool(lkp and Path(lkp).is_dir())
-                    content_status = compute_content_status(folder_present=present)
-                    persist_identity(
-                        db,
-                        mid,
-                        source="reconcile",
-                        reason="backup_orphan",
-                        internal_id=read_internal_id(meta) or None,
-                        source_type=source_type,
-                        content_status=content_status,
-                        library_status=content_status_to_library_status(content_status),
-                        last_known_path=lkp,
-                        folder_present=present,
-                        sticky_source=True,
+                    if not official or not store_platform:
+                        result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
+                        continue
+                    orphan_path = lkp if lkp else str(child)
+                    result.orphans.append(
+                        OrphanCandidate(
+                            path=orphan_path,
+                            platform=store_platform,
+                            external_id=ext or steam_wid,
+                            workspace_id=ws_meta or steam_wid or ext,
+                            source_url=url,
+                            title=title,
+                            app_id=int(meta.get("app_id") or 0),
+                            game_name=str(meta.get("game_name") or ""),
+                            origin="backup",
+                            payload=dict(meta),
+                        )
                     )
-                    if present:
-                        sync_after_metadata_change(mid, lkp, "restore")
-                        result.synced += 1
-                    else:
-                        result.missing += 1
-                    seen_ids.add(mid)
+                    result.notes.append(f"ORPHAN_CANDIDATE backup: {mid}")
                 except Exception:  # noqa: BLE001
                     logger.debug(
-                        "orphan backup import failed for %s", mid, exc_info=True
+                        "orphan backup scan failed for %s", mid, exc_info=True
                     )
     except Exception as exc:  # noqa: BLE001
         logger.warning("orphan backup scan failed: %s", exc)
@@ -658,17 +747,44 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
         logger.warning("deploy transaction recovery failed: %s", exc)
 
     logger.info(
-        "reconcile_library done scanned=%s synced=%s imported=%s missing=%s "
+        "reconcile_library done scanned=%s synced=%s orphans=%s missing=%s "
         "renamed=%s conflicts=%s restored=%s root=%s",
         result.scanned,
         result.synced,
-        result.imported,
+        len(result.orphans),
         result.missing,
         result.renamed,
         result.conflicts,
         result.restored,
         root,
     )
+    result.rebound_ids = list(
+        dict.fromkeys(str(x).strip() for x in result.rebound_ids if str(x).strip())
+    )
+    try:
+        from services.mod_fs_observer import (
+            drain_projection_touch_ids,
+            end_projection_defer,
+            observe_mods_fs_batch,
+        )
+
+        end_projection_defer()
+        content_touch = drain_projection_touch_ids()
+        if content_touch:
+            result.rebound_ids.extend(content_touch)
+            result.rebound_ids = list(dict.fromkeys(result.rebound_ids))
+        # Startup / reconcile follow-up: cheap batch L0 only (never full L2).
+        try:
+            observe_mods_fs_batch(level=0, db=db, notify_projection=False)
+            result.notes.append("fs_observe_l0_batch")
+        except Exception:  # noqa: BLE001
+            logger.debug("post-reconcile L0 batch failed", exc_info=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("projection defer end / L0 batch failed", exc_info=True)
+
+    if result.rebound_ids:
+        _refresh_projections_for_rebinds(result.rebound_ids)
+        _store_projection_touch_ids(result.rebound_ids)
     elapsed_ms = (_time.perf_counter() - backup_session.t0) * 1000.0
     backup_session.mods = result.scanned
     backup_session.add("sync", elapsed_ms, mods=result.synced)
@@ -831,16 +947,17 @@ def start_reconcile_library_async(library_root: str | Path | None = None) -> boo
 
 def resolve_library_games(library_root: str | Path) -> list[dict[str, object]]:
     """
-    Unified game list for the Library sidebar.
+    Unified game list for the Library sidebar (Database Read Projection).
 
-    Delegates to :func:`services.game_library.resolve_games` (filesystem >
-    backup history > games table). Snapshot cards supply accurate counts
-    and ``content_status`` hints for aggregation (no extra disk scans).
+    ARCHITECTURE RULE: must not call ``resolve_games`` / filesystem
+    ``list_games``. Built from ``games`` + ``mods`` aggregates via
+    :func:`services.game_sidebar.build_game_sidebar_view_models`.
     """
-    from services.game_library import resolve_games_as_dicts
+    from services.game_sidebar import build_game_sidebar_view_models
     from services.game_status import ModStatusHint
     from services.mod_library_cache import build_library_snapshot
 
+    # Snapshot supplies mod counts / content hints from DB Layer-1 rows only.
     snap = build_library_snapshot(library_root)
     counts: dict[str, int] = {}
     hints: list[ModStatusHint] = []
@@ -857,10 +974,12 @@ def resolve_library_games(library_root: str | Path) -> list[dict[str, object]]:
             ModStatusHint(
                 game_folder=key,
                 content_status=str(card.content_status or "") or "healthy",
+                identity_status=str(getattr(card, "identity_status", "") or "ok"),
                 category=cat,
                 folder_absent=bool(card.folder_absent),
             )
         )
-    return resolve_games_as_dicts(
-        library_root, mod_counts=counts, mod_hints=hints
-    )
+    return [
+        e.to_dict()
+        for e in build_game_sidebar_view_models(mod_counts=counts, mod_hints=hints)
+    ]

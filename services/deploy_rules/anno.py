@@ -1,20 +1,28 @@
-"""Anno 1800 deploy: loose folders → ``mods/<name>/``; archives → extract into ``mods/``.
+"""Anno 1800 path-mapping adapter: folders → mods/<name>/; archives → mods/.
 
-Blueprint (stamps) Mods merge into ``Documents/Anno 1800/stamps``.
+Blueprint (stamps) Mods map into ``Documents/Anno 1800/stamps``.
+
+Phase 3: ``plan()`` only builds FilePlan mappings (archive members via listing,
+never ArchiveExtractor). ``deploy()`` is inert — Core Apply owns I/O.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 
 from core.db_manager import GameDeployConfig
-from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult
+from services.deploy_archive_members import (
+    archive_contains_prefix,
+    iter_archive_members,
+)
+from services.deploy_rules.base import (
+    DeployContext,
+    DeployStrategy,
+    StrategyResult,
+    inert_strategy_deploy,
+)
 from services.deploy_rules.generic import FolderCopyStrategy
 from services.deploy_rules.manifest import (
     DeployManifest,
@@ -60,10 +68,6 @@ def resolve_anno_stamps_dir() -> Path:
     return anno_docs_dir / STAMPS_DIR_NAME
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
 def _is_blueprint_category(ctx: DeployContext) -> bool:
     meta = read_info_metadata_dict(ctx.library_folder()) or {}
     cat = str(meta.get("category") or "").strip().lower()
@@ -98,128 +102,25 @@ def _iter_files_under(directory: Path) -> list[Path]:
     return sorted(safe_iter_files(directory))
 
 
-def _manifest_stamp_source(src: Path, source_label: str) -> str:
-    """
-    Manifest ``source`` for stamps entries.
-
-    Archive extracts land in import_cache staging (outside the mod workspace).
-    Attribute those files to the archive / library label so security checks and
-    ownership stay workspace-bound — same pattern as Anno ``type=archive``.
-    """
-    label = str(source_label or "").strip()
-    if not label:
-        return str(src.resolve())
-    try:
-        label_path = Path(label).expanduser().resolve()
-    except OSError:
-        return label
-    if label_path.is_file():
-        return str(label_path)
-    try:
-        src.resolve().relative_to(label_path)
-        return str(src.resolve())
-    except (ValueError, OSError):
-        return str(label_path)
-
-
-def _copy_stamps_tree(
-    stamps_src: Path,
-    stamps_dst: Path,
-    *,
-    source_label: str,
-) -> list[ManifestFileEntry]:
-    """Merge-copy *stamps_src* contents into *stamps_dst* (overwrite same names)."""
-    os.makedirs(stamps_dst, exist_ok=True)
-    entries: list[ManifestFileEntry] = []
-    for src in _iter_files_under(stamps_src):
-        rel = src.relative_to(stamps_src)
-        dst = (stamps_dst / rel).resolve()
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        entries.append(
-            ManifestFileEntry(
-                source=_manifest_stamp_source(src, source_label),
-                target=str(dst),
-                type=ENTRY_TYPE_STAMPS,
-            )
-        )
-    return entries
-
-
 def _plan_stamps_entries(
     stamps_src: Path,
     stamps_dst: Path,
     *,
     source_label: str,
 ) -> list[ManifestFileEntry]:
-    return [
-        ManifestFileEntry(
-            source=_manifest_stamp_source(src, source_label),
-            target=str((stamps_dst / src.relative_to(stamps_src)).resolve()),
-            type=ENTRY_TYPE_STAMPS,
-        )
-        for src in _iter_files_under(stamps_src)
-    ]
-
-
-def _deploy_stamps_from_directory(
-    ctx: DeployContext,
-    content_root: Path,
-    *,
-    source_label: str | None = None,
-) -> StrategyResult:
-    stamps_src = _find_stamps_dir(content_root)
-    if stamps_src is None:
-        return StrategyResult(
-            success=False,
-            error="蓝图 Mod 中未找到 stamps 目录",
-            deploy_type=_ANNO_DEPLOY_TYPE,
-        )
-    stamps_dst = resolve_anno_stamps_dir()
-    label = source_label or str(content_root)
-    try:
-        entries = _copy_stamps_tree(stamps_src, stamps_dst, source_label=label)
-    except OSError as exc:
-        err = str(exc).lower()
-        if "permission" in err or "denied" in err:
-            return StrategyResult(
-                success=False,
-                error=f"Permission denied：{exc}",
-                deploy_type=_ANNO_DEPLOY_TYPE,
+    entries: list[ManifestFileEntry] = []
+    for src in _iter_files_under(stamps_src):
+        rel = src.relative_to(stamps_src).as_posix()
+        entries.append(
+            ManifestFileEntry(
+                source=str(src.resolve()),
+                target=str((stamps_dst / rel).resolve()),
+                type=ENTRY_TYPE_STAMPS,
+                source_relative=rel,
+                relative=rel,
             )
-        return StrategyResult(
-            success=False,
-            error=f"蓝图拷贝失败：{exc}",
-            deploy_type=_ANNO_DEPLOY_TYPE,
         )
-    if not entries:
-        return StrategyResult(
-            success=False,
-            error="stamps 目录中没有可部署的文件",
-            deploy_type=_ANNO_DEPLOY_TYPE,
-        )
-    when = _utc_now()
-    manifest = DeployManifest(
-        mod_id=ctx.mod_id,
-        deploy_time=when,
-        deploy_type=_ANNO_DEPLOY_TYPE,
-        files=entries,
-    )
-    logger.info(
-        "[DEPLOY] anno stamps mod_id=%s files=%s target=%s",
-        ctx.mod_id,
-        len(entries),
-        stamps_dst,
-    )
-    return StrategyResult(
-        success=True,
-        target=str(stamps_dst.resolve()),
-        copied_files=len(entries),
-        deploy_type=_ANNO_DEPLOY_TYPE,
-        deploy_time=when,
-        files=entries,
-        manifest=manifest,
-    )
+    return entries
 
 
 def _plan_stamps_from_directory(
@@ -252,64 +153,48 @@ def _plan_stamps_from_directory(
     )
 
 
-def _extract_archives_to_stage(archives: list[Path]) -> Path:
-    from services.archive_extractor import ArchiveExtractor
-    from services.importers.archive import import_cache_root
-
-    stage = import_cache_root() / f"anno_stamps_{uuid.uuid4().hex}"
-    stage.mkdir(parents=True, exist_ok=False)
-    for archive in archives:
-        result = ArchiveExtractor.extract(archive, stage)
-        if not result.success:
-            raise RuntimeError(result.error or "压缩包解压失败")
-    return stage
-
-
-def _deploy_stamps_from_archives(
-    ctx: DeployContext,
-    archives: list[Path],
-) -> StrategyResult:
-    from services.importers.archive import cleanup_import_cache
-
-    stage: Path | None = None
-    try:
-        stage = _extract_archives_to_stage(archives)
-        label = str(archives[0]) if len(archives) == 1 else str(ctx.library_folder())
-        return _deploy_stamps_from_directory(ctx, stage, source_label=label)
-    except OSError as exc:
-        err = str(exc).lower()
-        if "permission" in err or "denied" in err:
-            msg = f"Permission denied：{exc}"
-        else:
-            msg = f"解压失败：{exc}"
-        return StrategyResult(
-            success=False, error=msg, deploy_type=_ANNO_DEPLOY_TYPE
-        )
-    finally:
-        if stage is not None:
-            cleanup_import_cache(stage)
-
-
 def _plan_stamps_from_archives(archives: list[Path]) -> StrategyResult:
-    from services.importers.archive import cleanup_import_cache
-
-    stage: Path | None = None
+    """Map archive members under ``stamps/`` → Documents stamps root (no extract)."""
+    stamps_dst = resolve_anno_stamps_dir()
+    entries: list[ManifestFileEntry] = []
     try:
-        stage = _extract_archives_to_stage(archives)
-        label = str(archives[0])
-        return _plan_stamps_from_directory(stage, source_label=label)
-    except OSError as exc:
-        err = str(exc).lower()
-        if "permission" in err or "denied" in err:
-            msg = f"Permission denied：{exc}"
-        else:
-            msg = f"解压失败：{exc}"
+        for archive in archives:
+            for member in iter_archive_members(archive):
+                parts = member.replace("\\", "/").split("/")
+                if STAMPS_DIR_NAME not in parts:
+                    continue
+                idx = parts.index(STAMPS_DIR_NAME)
+                under = "/".join(parts[idx + 1 :])
+                if not under:
+                    continue
+                entries.append(
+                    ManifestFileEntry(
+                        source=str(archive.resolve()),
+                        target=str((stamps_dst / under).resolve()),
+                        type=ENTRY_TYPE_STAMPS,
+                        source_relative=member,
+                        relative=under,
+                    )
+                )
+    except (OSError, RuntimeError, FileNotFoundError) as exc:
         return StrategyResult(
-            success=False, error=msg, deploy_type=_ANNO_DEPLOY_TYPE
+            success=False,
+            error=f"无法枚举压缩包成员：{exc}",
+            deploy_type=_ANNO_DEPLOY_TYPE,
         )
-    finally:
-        if stage is not None:
-            cleanup_import_cache(stage)
+    if not entries:
+        return StrategyResult(
+            success=False,
+            error="stamps 目录中没有可部署的文件",
+            deploy_type=_ANNO_DEPLOY_TYPE,
+        )
+    return StrategyResult(
+        success=True,
+        target=str(stamps_dst.resolve()),
+        copied_files=len(entries),
+        deploy_type=_ANNO_DEPLOY_TYPE,
+        files=entries,
+    )
 
 
 def _looks_like_stamps_mod(ctx: DeployContext, archives: list[Path]) -> bool:
@@ -320,47 +205,27 @@ def _looks_like_stamps_mod(ctx: DeployContext, archives: list[Path]) -> bool:
     if _find_stamps_dir(content) is not None:
         return True
     library = ctx.library_folder()
-    if library.resolve() != content.resolve() and _find_stamps_dir(library) is not None:
-        return True
+    try:
+        if library.resolve() != content.resolve() and _find_stamps_dir(library) is not None:
+            return True
+    except OSError:
+        pass
     return False
 
 
-def _snapshot_files(root: Path) -> set[Path]:
-    from services.deploy_fs import safe_iter_files
-
-    if not root.is_dir():
-        return set()
-    return {p.resolve() for p in safe_iter_files(root)}
-
-
-def _manifest_entries_for_paths(
-    mods_root: Path,
-    deployed: list[Path],
-    *,
-    source: str,
-) -> list[ManifestFileEntry]:
-    """
-    Record files created by archive extract into ``mods/``.
-
-    IMPORTANT:
-    ``source`` is the archive path for manifest security; ``type=archive`` tells
-    post-deploy verification not to compare archive size with extracted targets.
-    """
-    root = mods_root.resolve()
-    entries: list[ManifestFileEntry] = []
-    for path in deployed:
+def _archives_have_stamps(archives: list[Path]) -> bool:
+    for archive in archives:
         try:
-            path.resolve().relative_to(root)
-        except ValueError:
+            if archive_contains_prefix(archive, STAMPS_DIR_NAME):
+                return True
+            # nested: any/.../stamps/...
+            for member in iter_archive_members(archive):
+                parts = member.replace("\\", "/").split("/")
+                if STAMPS_DIR_NAME in parts:
+                    return True
+        except (OSError, RuntimeError, FileNotFoundError):
             continue
-        entries.append(
-            ManifestFileEntry(
-                source=source,
-                target=str(path.resolve()),
-                type="archive",
-            )
-        )
-    return entries
+    return False
 
 
 def _plan_anno_archive_deploy(
@@ -368,149 +233,48 @@ def _plan_anno_archive_deploy(
     mods_root: Path,
     archives: list[Path],
 ) -> StrategyResult:
-    """Dry-run: extract archives to a temp dir (preserve zip roots) → map under mods/."""
-    from services.importers.archive import (
-        cleanup_import_cache,
-        import_cache_root,
-    )
-
-    stage = import_cache_root() / f"anno_plan_{uuid.uuid4().hex}"
-    stage.mkdir(parents=True, exist_ok=False)
-    try:
-        from services.archive_extractor import ArchiveExtractor
-
-        for archive in archives:
-            result = ArchiveExtractor.extract(archive, stage)
-            if not result.success:
-                return StrategyResult(
-                    success=False,
-                    error=result.error or "压缩包解压失败",
-                    deploy_type=_ANNO_DEPLOY_TYPE,
-                )
-        from services.deploy_fs import safe_iter_files
-
-        files = sorted(safe_iter_files(stage))
-        if not files:
-            return StrategyResult(
-                success=False,
-                error="压缩包解压后没有可部署的文件",
-                deploy_type=_ANNO_DEPLOY_TYPE,
-            )
-        entries: list[ManifestFileEntry] = []
-        for path in files:
-            rel = path.relative_to(stage)
-            entries.append(
-                ManifestFileEntry(
-                    source=str(archives[0]),
-                    target=str((mods_root / rel).resolve()),
-                    type="archive",
-                )
-            )
-        return StrategyResult(
-            success=True,
-            target=str(mods_root.resolve()),
-            copied_files=len(entries),
-            deploy_type=_ANNO_DEPLOY_TYPE,
-            files=entries,
-        )
-    except OSError as exc:
-        err = str(exc).lower()
-        if "permission" in err or "denied" in err:
-            msg = f"Permission denied：{exc}"
-        else:
-            msg = f"解压失败：{exc}"
-        return StrategyResult(
-            success=False, error=msg, deploy_type=_ANNO_DEPLOY_TYPE
-        )
-    finally:
-        cleanup_import_cache(stage)
-
-
-def _deploy_anno_archives_to_mods_root(
-    ctx: DeployContext,
-    mods_root: Path,
-    archives: list[Path],
-) -> StrategyResult:
-    """
-    Extract archives directly into ``mods/`` — no managed-folder wrapper, no root strip.
-    """
-    from services.archive_extractor import ArchiveExtractor
-
-    target_dir = mods_root.resolve()
-    try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        err = str(exc).lower()
-        if "permission" in err or "denied" in err or "拒绝" in str(exc):
-            msg = f"Permission denied：无法创建 mods 目录（{exc}）"
-        else:
-            msg = f"无法创建 mods 目录：{target_dir}（{exc}）"
-        return StrategyResult(
-            success=False, error=msg, deploy_type=_ANNO_DEPLOY_TYPE
-        )
-
-    before = _snapshot_files(target_dir)
-    source_label = str(archives[0]) if len(archives) == 1 else str(ctx.library_folder())
+    """Map archive members → ``mods/<member>`` without extracting."""
+    entries: list[ManifestFileEntry] = []
     try:
         for archive in archives:
-            result = ArchiveExtractor.extract(archive, target_dir)
-            if not result.success:
-                return StrategyResult(
-                    success=False,
-                    error=result.error or "解压失败",
-                    deploy_type=_ANNO_DEPLOY_TYPE,
+            for member in iter_archive_members(archive):
+                entries.append(
+                    ManifestFileEntry(
+                        source=str(archive.resolve()),
+                        target=str((mods_root / member).resolve()),
+                        type="archive",
+                        source_relative=member,
+                        relative=member,
+                    )
                 )
-    except OSError as exc:
-        err = str(exc).lower()
-        if "permission" in err or "denied" in err:
-            return StrategyResult(
-                success=False,
-                error=f"Permission denied：{exc}",
-                deploy_type=_ANNO_DEPLOY_TYPE,
-            )
+    except (OSError, RuntimeError, FileNotFoundError) as exc:
         return StrategyResult(
             success=False,
-            error=f"解压失败：{exc}",
+            error=f"无法枚举压缩包成员：{exc}",
             deploy_type=_ANNO_DEPLOY_TYPE,
         )
-
-    deployed = sorted(_snapshot_files(target_dir) - before)
-    entries = _manifest_entries_for_paths(
-        target_dir, deployed, source=source_label
-    )
     if not entries:
         return StrategyResult(
             success=False,
-            error="压缩包解压后没有可部署的文件",
+            error="压缩包中没有可部署的文件",
             deploy_type=_ANNO_DEPLOY_TYPE,
         )
-
-    when = _utc_now()
-    manifest = DeployManifest(
-        mod_id=ctx.mod_id,
-        deploy_time=when,
-        deploy_type=_ANNO_DEPLOY_TYPE,
-        files=entries,
-    )
     return StrategyResult(
         success=True,
-        target=str(target_dir),
+        target=str(mods_root.resolve()),
         copied_files=len(entries),
         deploy_type=_ANNO_DEPLOY_TYPE,
-        deploy_time=when,
         files=entries,
-        manifest=manifest,
     )
 
 
 class Anno1800Strategy(DeployStrategy):
     """
-    Anno 1800 / 纪元1800:
+    Anno 1800 path-mapping adapter.
 
-    - Blueprint / stamps Mods: merge into ``Documents/Anno 1800/stamps``.
-    - Archive mods (mod.io zip): extract into ``<install>/mods/`` preserving
-      in-archive folder names — never ``mods/<library_folder>/``.
-    - Loose directory mods: ``mods/<managed_folder_name>/`` via folder_copy.
+    - Blueprint / stamps: map into ``Documents/Anno 1800/stamps``.
+    - Archive mods: map zip members into ``<install>/mods/``.
+    - Loose directory mods: ``mods/<managed_folder_name>/`` via folder plan.
     """
 
     deploy_type = "anno_1800"
@@ -526,18 +290,6 @@ class Anno1800Strategy(DeployStrategy):
                 error="请先配置游戏安装目录（将部署到 mods/）",
                 deploy_type=self.deploy_type,
             )
-        try:
-            mods_root.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            err = str(exc).lower()
-            if "permission" in err or "denied" in err or "拒绝" in str(exc):
-                msg = f"Permission denied：无法创建 mods 目录（{exc}）"
-            else:
-                msg = f"无法创建 mods 目录：{mods_root}（{exc}）"
-            return StrategyResult(
-                success=False, error=msg, deploy_type=self.deploy_type
-            )
-
         cfg = replace(ctx.config, mod_path=str(mods_root))
         return replace(ctx, config=cfg, deploy_type=FolderCopyStrategy.deploy_type)
 
@@ -550,15 +302,17 @@ class Anno1800Strategy(DeployStrategy):
                 deploy_time=man.deploy_time,
                 deploy_type=self.deploy_type,
                 files=list(man.files),
+                content_fingerprint=man.content_fingerprint,
+                source_path=man.source_path,
+                internal_id=man.internal_id or man.mod_id,
+                schema_version=man.schema_version,
             )
         return result
 
     def _archive_paths(self, ctx: DeployContext) -> list[Path]:
         from services.deploy import collect_deploy_archives
 
-        return collect_deploy_archives(
-            ctx.mod_id, ctx.library_folder()
-        )
+        return collect_deploy_archives(ctx.internal_id, ctx.library_folder())
 
     def _try_stamps_plan(
         self, ctx: DeployContext, archives: list[Path]
@@ -578,72 +332,8 @@ class Anno1800Strategy(DeployStrategy):
             )
         if known and archives:
             return self._retag(_plan_stamps_from_archives(archives))
-        if archives:
-            # Peek inside archives for a stamps/ tree (no category required).
-            from services.importers.archive import cleanup_import_cache
-
-            stage: Path | None = None
-            try:
-                stage = _extract_archives_to_stage(archives)
-                if _find_stamps_dir(stage) is not None:
-                    return self._retag(
-                        _plan_stamps_from_directory(
-                            stage, source_label=str(archives[0])
-                        )
-                    )
-            except OSError:
-                return None
-            finally:
-                if stage is not None:
-                    cleanup_import_cache(stage)
-        return None
-
-    def _try_stamps_deploy(
-        self, ctx: DeployContext, archives: list[Path]
-    ) -> StrategyResult | None:
-        """Return stamps deploy result when this Mod is a blueprint; else None."""
-        loose_root = ctx.content_root()
-        if _find_stamps_dir(loose_root) is None:
-            lib = ctx.library_folder()
-            if _find_stamps_dir(lib) is not None:
-                loose_root = lib
-        known = _looks_like_stamps_mod(ctx, archives)
-        if known and _find_stamps_dir(loose_root) is not None:
-            return self._retag(
-                _deploy_stamps_from_directory(
-                    ctx, loose_root, source_label=str(ctx.library_folder())
-                )
-            )
-        if known and archives:
-            return self._retag(_deploy_stamps_from_archives(ctx, archives))
-        if archives:
-            from services.importers.archive import cleanup_import_cache
-
-            stage: Path | None = None
-            try:
-                stage = _extract_archives_to_stage(archives)
-                if _find_stamps_dir(stage) is not None:
-                    label = (
-                        str(archives[0])
-                        if len(archives) == 1
-                        else str(ctx.library_folder())
-                    )
-                    result = _deploy_stamps_from_directory(
-                        ctx, stage, source_label=label
-                    )
-                    return self._retag(result)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    msg = f"Permission denied：{exc}"
-                else:
-                    msg = f"解压失败：{exc}"
-                return StrategyResult(
-                    success=False, error=msg, deploy_type=self.deploy_type
-                )
-            finally:
-                if stage is not None:
-                    cleanup_import_cache(stage)
+        if archives and _archives_have_stamps(archives):
+            return self._retag(_plan_stamps_from_archives(archives))
         return None
 
     def plan(self, ctx: DeployContext) -> StrategyResult:
@@ -665,22 +355,8 @@ class Anno1800Strategy(DeployStrategy):
         return self._retag(self._folder.plan(patched))
 
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        archives = self._archive_paths(ctx)
-        stamps = self._try_stamps_deploy(ctx, archives)
-        if stamps is not None:
-            return stamps
-
-        patched = self._patched_context(ctx)
-        if isinstance(patched, StrategyResult):
-            return patched
-        archives = self._archive_paths(patched)
-        if archives:
-            mods_root = resolve_anno_mods_root(patched.config)
-            assert mods_root is not None
-            return self._retag(
-                _deploy_anno_archives_to_mods_root(patched, mods_root, archives)
-            )
-        return self._retag(self._folder.deploy(patched))
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

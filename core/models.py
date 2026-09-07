@@ -11,6 +11,12 @@ _UNKNOWN_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Clean library-folder fallback (never use ``Unknown Mod …`` on disk).
+_LIBRARY_MOD_FALLBACK_RE = re.compile(
+    r"^Mod[_\s\-]?(\d+)\s*$",
+    re.IGNORECASE,
+)
+
 
 def is_unknown_mod_title(title: str | None, *, published_file_id: str = "") -> bool:
     """True when *title* is empty, numeric, or an ``Unknown_Mod_*`` / ``Unknown Mod`` placeholder."""
@@ -27,6 +33,42 @@ def is_unknown_mod_title(title: str | None, *, published_file_id: str = "") -> b
         f"Unknown_Mod_{mid}",
         f"Unknown Mod {mid}",
         f"Unknown Mod_{mid}",
+    }:
+        return True
+    return False
+
+
+def library_mod_folder_fallback(published_file_id: str | int | None) -> str:
+    """
+    Stable, clean library folder name when no real title is available.
+
+    UI may still show ``Unknown Mod …``; filesystem folders must not.
+    """
+    mid = str(published_file_id or "").strip()
+    return f"Mod_{mid}" if mid else "Mod"
+
+
+def is_placeholder_library_folder_name(
+    name: str | None, *, published_file_id: str = ""
+) -> bool:
+    """
+    True when a managed folder leaf is a temporary/placeholder name.
+
+    Includes ``Unknown Mod*`` / ``Unknown_Mod_*`` and clean ``Mod_<id>`` fallbacks
+    so refresh can rename them once a real title exists.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return True
+    if is_unknown_mod_title(text, published_file_id=published_file_id):
+        return True
+    mid = str(published_file_id or "").strip()
+    if _LIBRARY_MOD_FALLBACK_RE.match(text):
+        return True
+    if mid and text in {
+        f"Mod_{mid}",
+        f"Mod-{mid}",
+        f"Mod {mid}",
     }:
         return True
     return False

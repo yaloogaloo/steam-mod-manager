@@ -105,16 +105,24 @@ class SteamImporter(ModImporter):
                 platform=self.platform,
             )
 
-        name = (title or "").strip() or f"Unknown_Mod_{mid}"
+        name = (title or "").strip()
+        from core.models import is_unknown_mod_title, library_mod_folder_fallback
         from services.identity_service import create_mod_identity
 
+        # Folder materialization uses ``Mod_<id>`` when title is missing;
+        # DB/UI may still resolve display via effective_title placeholders.
+        folder_title = (
+            name
+            if name and not is_unknown_mod_title(name, published_file_id=mid)
+            else library_mod_folder_fallback(mid)
+        )
         created = create_mod_identity(
             db,
             platform=PLATFORM_STEAM,
             workshop_id=mid,
             external_id=mid,
             source_url=url,
-            title=name,
+            title=folder_title,
             app_id=int(resolved_app_id or 0),
             game_name=resolved_game,
         )
@@ -143,7 +151,7 @@ class SteamImporter(ModImporter):
             dest = materialize_imported_mod(
                 library_root=library_root,
                 mod_id=mid,
-                title=name,
+                title=folder_title,
                 game_name=resolved_game,
                 source_folder=folder if folder and folder.is_dir() else None,
                 cover_source=_kwargs.get("cover_source") or _kwargs.get("cover_path"),

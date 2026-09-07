@@ -156,66 +156,98 @@ class ModMetadataResolver:
             return self.resolve_missing_folder(mod_id, root)
 
         info = read_info_metadata_dict(root) or {}
-        mid = _first_text(
-            mod_id,
-            info.get("published_file_id"),
-            root.name if root.name.isdigit() else "",
-        )
+        mid = _first_text(mod_id)
+        if not str(mid).isdigit():
+            # Detail / resolver require caller-supplied internal_id — no path invent.
+            return None
+        # Bound folder must prove the same entity when .info is present.
+        proof = _first_text(info.get("internal_id"))
+        if proof:
+            from services.mod_identity import ensure_mod_identity
+
+            bound, _payload, _changed = ensure_mod_identity(
+                root, dict(info), db=None
+            )
+            if str(bound).isdigit() and str(bound) != str(mid):
+                return None
 
         backup = load_backup(mid) if str(mid).isdigit() else None
         sqlite = self._sqlite_row(mid)
         display = self._sqlite_display(mid)
+        entity_app = int((sqlite or {}).get("app_id") or 0)
+        if entity_app <= 0:
+            entity_app = int(getattr(display, "app_id", 0) or 0)
+
+        from services.metadata_owner_guard import metadata_payload_is_foreign
+
+        info_foreign = metadata_payload_is_foreign(info, entity_app_id=entity_app)
+        backup_foreign = bool(
+            backup is not None
+            and metadata_payload_is_foreign(backup.metadata, entity_app_id=entity_app)
+        )
+        info_owned = info if not info_foreign else {}
+        backup_meta = (
+            (backup.metadata if backup is not None else {})
+            if not backup_foreign
+            else {}
+        )
 
         display_name = _first_text(
-            info.get("display_name"),
+            info_owned.get("display_name"),
             getattr(display, "user_display_name", "") if display else "",
-            info.get("title"),
-            (backup.metadata.get("display_name") if backup else ""),
-            (backup.metadata.get("title") if backup else ""),
+            getattr(display, "display_name", "") if display else "",
+            info_owned.get("title"),
+            backup_meta.get("display_name"),
+            backup_meta.get("title"),
+            getattr(display, "steam_name", "") if display else "",
         )
         description = _first_text(
-            info.get("description"),
-            info.get("custom_description"),
-            (backup.metadata.get("description") if backup else ""),
+            info_owned.get("description"),
+            info_owned.get("custom_description"),
+            backup_meta.get("description"),
+            getattr(display, "custom_description", "") if display else "",
+            getattr(display, "steam_description", "") if display else "",
         )
-        platform = parse_metadata_platform(info) or _first_text(
-            (backup.metadata.get("source_type") if backup else ""),
-            (backup.metadata.get("platform") if backup else ""),
+        platform = parse_metadata_platform(info_owned) or _first_text(
+            backup_meta.get("source_type"),
+            backup_meta.get("platform"),
             getattr(display, "platform", "") if display else "",
             PLATFORM_STEAM,
         )
         source_url = _first_text(
-            info.get("url"),
-            info.get("source_url"),
-            info.get("website"),
-            (backup.metadata.get("url") if backup else ""),
-            (backup.metadata.get("source_url") if backup else ""),
+            info_owned.get("url"),
+            info_owned.get("source_url"),
+            info_owned.get("website"),
+            backup_meta.get("url"),
+            backup_meta.get("source_url"),
             getattr(display, "source_url", "") if display else "",
         )
         workspace_id = _first_text(
-            info.get("workspace_id"),
-            (backup.metadata.get("workspace_id") if backup else ""),
+            info_owned.get("workspace_id"),
+            backup_meta.get("workspace_id"),
             getattr(display, "workspace_id", "") if display else "",
         )
-        cover = self._cover_existing(root, info, backup, sqlite)
-        offline = self._offline_existing(root, backup)
-        deps = _dependencies_from_mapping(info)
-        if not deps and backup is not None:
-            deps = _dependencies_from_mapping(backup.metadata)
+        cover_backup = None if backup_foreign else backup
+        cover = self._cover_existing(root, info_owned, cover_backup, sqlite)
+        offline_backup = None if backup_foreign else backup
+        offline = self._offline_existing(root, offline_backup)
+        deps = _dependencies_from_mapping(info_owned)
+        if not deps and backup_meta:
+            deps = _dependencies_from_mapping(backup_meta)
         tags, category = self._tags_from_sqlite(mid)
         author = _first_text(
-            info.get("author"),
-            (backup.metadata.get("author") if backup else ""),
+            info_owned.get("author"),
+            backup_meta.get("author"),
         )
         game_name = _first_text(
-            info.get("game_name"),
-            (backup.metadata.get("game_name") if backup else ""),
+            info_owned.get("game_name"),
+            backup_meta.get("game_name"),
             root.parent.name,
         )
-        app_id = int(
-            info.get("app_id")
-            or (backup.metadata.get("app_id") if backup else 0)
-            or (sqlite.get("app_id") if sqlite else 0)
+        # Entity app_id is authoritative — never adopt foreign payload app_id.
+        app_id = entity_app or int(
+            info_owned.get("app_id")
+            or backup_meta.get("app_id")
             or 0
         )
         return ResolvedModMetadata(
@@ -233,7 +265,7 @@ class ModMetadataResolver:
             managed_path=str(root),
             author=author,
             category=category,
-            title=_first_text(info.get("title"), display_name),
+            title=_first_text(info_owned.get("title"), display_name),
             game_name=game_name,
             app_id=app_id,
             favorite=bool(getattr(display, "favorite", False)) if display else False,
@@ -247,17 +279,27 @@ class ModMetadataResolver:
     ) -> ResolvedModMetadata | None:
         """Directory missing: backup files > SQLite cache. Never read dead ``.info``."""
         mid = _first_text(mod_id)
-        sqlite = self._sqlite_row(mid) if mid.isdigit() else None
-        if not mid.isdigit() and managed_path is not None:
-            sqlite = self._sqlite_row_by_path(managed_path) or sqlite
-            if sqlite is not None:
-                mid = str(sqlite.get("mod_id") or mid)
+        if not mid.isdigit():
+            return None
+        sqlite = self._sqlite_row(mid)
         backup = load_backup(mid) if mid.isdigit() else None
-        if backup is None and sqlite is None and not mid:
+        if backup is None and sqlite is None:
             return None
 
         bmeta: dict[str, Any] = dict(backup.metadata) if backup else {}
         display = self._sqlite_display(mid)
+        entity_app = int((sqlite or {}).get("app_id") or 0)
+        if entity_app <= 0:
+            entity_app = int(getattr(display, "app_id", 0) or 0)
+
+        from services.metadata_owner_guard import metadata_payload_is_foreign
+
+        if backup is not None and metadata_payload_is_foreign(
+            bmeta, entity_app_id=entity_app
+        ):
+            bmeta = {}
+            backup = None
+
         path = ""
         if managed_path is not None:
             path = str(managed_path)
@@ -303,11 +345,7 @@ class ModMetadataResolver:
             bmeta.get("game_name"),
             Path(path).parent.name if path else "",
         )
-        app_id = int(
-            bmeta.get("app_id")
-            or (sqlite.get("app_id") if sqlite else 0)
-            or 0
-        )
+        app_id = entity_app or int(bmeta.get("app_id") or 0)
         return ResolvedModMetadata(
             published_file_id=str(mid),
             display_name=display_name,
@@ -335,6 +373,21 @@ class ModMetadataResolver:
         mod_id: int | str | None = None,
         managed_path: str | Path | None = None,
     ) -> Path | None:
+        """Resource locator: prefer on-disk ``.info/cover.*``; never invent entity."""
+        if managed_path is not None:
+            root = Path(managed_path)
+            if root.is_dir():
+                found = _find_info_cover(root / INFO_DIR_NAME)
+                if found is not None:
+                    return found
+                info = read_info_metadata_dict(root) or {}
+                ref = _first_text(info.get("cover_path"))
+                if ref:
+                    nested = root / ref
+                    if nested.is_file():
+                        return nested.resolve()
+                    if Path(ref).is_file():
+                        return Path(ref).resolve()
         resolved = self.resolve(mod_id, managed_path)
         if resolved is None or not resolved.cover_path:
             return None
@@ -417,26 +470,25 @@ class ModMetadataResolver:
         mod_id: int | str | None,
         managed_path: str | Path | None,
     ) -> tuple[str, Path | None]:
+        """Require caller internal_id. Never invent identity from path/folder/published."""
         path = Path(managed_path) if managed_path is not None else None
         mid = _first_text(mod_id)
-        if not mid.isdigit() and path is not None and path.is_dir():
-            from services.mod_identity import resolve_existing_mod_id
+        if not mid.isdigit():
+            return "", path
+        if not _folder_exists(path):
+            try:
+                from services.path_lifecycle import resolve_managed_folder
 
-            info = dict(read_info_metadata_dict(path) or {})
-            info["_managed_path"] = str(path.resolve())
-            info["_folder_name"] = path.name
-            mid = resolve_existing_mod_id(info)
-        if not mid.isdigit() and path is not None and not path.is_dir():
-            row = self._sqlite_row_by_path(path)
-            if row is not None:
-                mid = str(row.get("mod_id") or "")
-        if not _folder_exists(path) and mid.isdigit():
-            sqlite = self._sqlite_row(mid)
-            lkp = str((sqlite or {}).get("last_known_path") or "").strip()
-            if lkp and Path(lkp).is_dir():
-                path = Path(lkp)
-            elif path is None and lkp:
-                path = Path(lkp)
+                healed = resolve_managed_folder(mid, hint_path=path, db=None)
+                if healed.path is not None and healed.path.is_dir():
+                    path = healed.path
+            except Exception:  # noqa: BLE001
+                sqlite = self._sqlite_row(mid)
+                lkp = str((sqlite or {}).get("last_known_path") or "").strip()
+                if lkp and Path(lkp).is_dir():
+                    path = Path(lkp)
+                elif path is None and lkp:
+                    path = Path(lkp)
         return mid, path
 
     def _sqlite_row(self, mod_id: str) -> dict[str, Any] | None:

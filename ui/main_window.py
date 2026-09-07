@@ -192,12 +192,9 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
             log_io_event("gui", "restore_page", page=page)
         except Exception:  # noqa: BLE001
             pass
-        try:
-            from services.library_reconcile import hold_library_load_until_reconcile_idle
-
-            hold_library_load_until_reconcile_idle()
-        except Exception:  # noqa: BLE001
-            pass
+        # ARCHITECTURE RULE: Loading Mods must not wait for reconcile identity.
+        # Startup reads existing entities via LibraryLoadWorker; reconcile runs
+        # async in the background and must not gate the snapshot load.
         self.nav_list.setCurrentRow(page)
         if page == PAGE_LIBRARY:
             self.library_view.refresh(force=False)

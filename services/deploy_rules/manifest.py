@@ -72,6 +72,10 @@ class ManifestFileEntry:
     backup: ManifestBackupInfo | None = None
     # Optional audit field (backward compatible — omitted when empty)
     source_hash: str = ""
+    # Canonical target: root_kind + relative. Absolute target is a projection.
+    root_kind: str = ""
+    relative: str = ""
+    source_relative: str = ""
 
 
 @dataclass
@@ -84,6 +88,8 @@ class DeployManifest:
     content_fingerprint: str = ""
     source_path: str = ""
     internal_id: str = ""
+    # 0/1 = legacy absolute-only; 2 = root_kind + relative
+    schema_version: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         files_out: list[dict[str, Any]] = []
@@ -93,6 +99,12 @@ class DeployManifest:
                 item["type"] = f.type
             if f.source_hash:
                 item["source_hash"] = f.source_hash
+            if f.root_kind:
+                item["root_kind"] = f.root_kind
+            if f.relative:
+                item["relative"] = f.relative
+            if f.source_relative:
+                item["source_relative"] = f.source_relative
             # Explicit null when no pre-existing file (new schema); omit for empty legacy
             if f.backup is not None:
                 item["backup"] = f.backup.to_dict()
@@ -105,6 +117,8 @@ class DeployManifest:
             "deploy_type": self.deploy_type,
             "files": files_out,
         }
+        if self.schema_version:
+            out["schema_version"] = int(self.schema_version)
         if self.content_fingerprint:
             out["content_fingerprint"] = self.content_fingerprint
         if self.source_path:
@@ -132,8 +146,15 @@ class DeployManifest:
                         type=entry_type,
                         backup=backup,
                         source_hash=str(item.get("source_hash") or ""),
+                        root_kind=str(item.get("root_kind") or ""),
+                        relative=str(item.get("relative") or ""),
+                        source_relative=str(item.get("source_relative") or ""),
                     )
                 )
+        try:
+            schema_version = int(data.get("schema_version") or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
         return cls(
             mod_id=str(data.get("mod_id") or ""),
             deploy_time=str(data.get("deploy_time") or ""),
@@ -142,6 +163,7 @@ class DeployManifest:
             content_fingerprint=str(data.get("content_fingerprint") or ""),
             source_path=str(data.get("source_path") or ""),
             internal_id=str(data.get("internal_id") or ""),
+            schema_version=schema_version,
         )
 
 
@@ -160,13 +182,15 @@ def manifest_path_for(managed_path: Path) -> Path:
 def load_manifest(
     managed_path: Path,
     *,
+    expected_internal_id: str | None = None,
     expected_mod_id: str | None = None,
 ) -> DeployManifest | None:
     """
     Load ``deploy_manifest.json`` for a managed Mod folder.
 
-    When *expected_mod_id* is set, refuse manifests that claim a different
-    ``mod_id`` (returns ``None`` after logging — caller must not undeploy).
+    When *expected_internal_id* (or legacy *expected_mod_id*) is set, refuse
+    manifests that claim a different ``mod_id`` (returns ``None`` after
+    logging — caller must not undeploy).
     """
     path = manifest_path_for(managed_path)
     if not path.is_file():
@@ -179,8 +203,13 @@ def load_manifest(
     if not isinstance(data, dict):
         return None
     manifest = DeployManifest.from_dict(data)
-    if expected_mod_id is not None:
-        mid = str(expected_mod_id or "").strip()
+    expected = (
+        expected_internal_id
+        if expected_internal_id is not None
+        else expected_mod_id
+    )
+    if expected is not None:
+        mid = str(expected or "").strip()
         claimed = str(manifest.mod_id or "").strip()
         if mid and claimed and claimed != mid:
             logger.error(

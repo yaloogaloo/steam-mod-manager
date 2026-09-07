@@ -64,7 +64,7 @@ def test_status_banner_hidden_by_default(
     db.upsert_mod(ModMetadata(published_file_id="95001", title="OkMod"))
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="95001")
     qapp.processEvents()
     assert panel._status_banner.isHidden()
 
@@ -76,7 +76,7 @@ def test_status_banner_shows_concrete_deploy_failure(
     db.upsert_mod(ModMetadata(published_file_id="95002", title="FailMod"))
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="95002")
     qapp.processEvents()
 
     panel.apply_deploy_result(
@@ -173,7 +173,7 @@ def test_failed_db_status_rehydrates_banner(
     )
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="95003")
     qapp.processEvents()
     assert not panel._status_banner.isHidden()
     body = panel._status_banner_body.text()

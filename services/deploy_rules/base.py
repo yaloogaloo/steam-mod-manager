@@ -1,4 +1,25 @@
-"""Deploy strategy base types."""
+"""Deploy strategy base types.
+
+ARCHITECTURE CONTRACT (permanent)
+
+Strategy = PATH-MAPPING ADAPTER, not a deployment engine.
+
+Allowed:
+- decide source → target path mapping for a game
+- contribute entries that become DeployFilePlan.files
+- undeploy by deleting paths listed in the Deploy Manifest only
+
+Forbidden:
+- copy / move / extract as a Strategy-owned deploy pipeline
+- call ArchiveExtractor (or any extract primitive) directly
+- after-before / snapshot-diff / post-copy filesystem scans to infer deployed files
+- decide Core deploy success, run Backup/Verify, or author Manifest independently
+- call self.plan() from deploy(); deploy() must stay inert
+
+Authoritative file list: DeployFilePlan.files.
+Execution owner: ModDeployer Core (Resolve → FilePlan → Backup → Apply → Verify → Manifest).
+New games: add mapping rules here; never invent a second deploy pipeline.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +57,7 @@ def is_rel_path_allowed(
 class DeployContext:
     """Inputs shared by all deploy strategies."""
 
-    mod_id: str
+    internal_id: str
     source: Path
     app_id: int
     config: GameDeployConfig
@@ -62,7 +83,12 @@ class DeployContext:
 
 @dataclass
 class StrategyResult:
-    """Outcome of deploy / undeploy (before DB update)."""
+    """
+    Path-mapping outcome from ``plan()`` (or undeploy outcome).
+
+    For Core Deploy, ``files`` feed DeployFilePlan. Success of Core Deploy is
+    decided by Verify — not by StrategyResult.success from ``deploy()``.
+    """
 
     success: bool
     error: str = ""
@@ -91,22 +117,49 @@ class StrategyResult:
         return out
 
 
+def inert_strategy_deploy(deploy_type: str) -> StrategyResult:
+    """
+    Compatibility shell only: Strategy.deploy must not mutate the filesystem.
+
+    Callers that need a real deploy use ``ModDeployer.deploy_mod`` (or
+    ``plan`` + ``apply_file_plan`` in tests).
+    """
+    return StrategyResult(
+        success=False,
+        error=(
+            f"{deploy_type or 'strategy'}.deploy is inert; "
+            "deployment is owned by ModDeployer FilePlan Apply"
+        ),
+        deploy_type=deploy_type,
+    )
+
+
 class DeployStrategy(ABC):
-    """Pluggable deploy / undeploy rule for one ``game.deploy_type``."""
+    """
+    ARCHITECTURE CONTRACT — path-mapping adapter for one ``game.deploy_type``.
+
+    ``plan(ctx)`` builds source→target mappings (no I/O mutation).
+    ``deploy(ctx)`` is inert; Core Apply owns copy/extract.
+    ``undeploy`` deletes only Manifest-listed targets.
+    """
 
     deploy_type: str = ""
 
     def plan(self, ctx: DeployContext) -> StrategyResult:
-        """Compute intended file mappings without copying (for conflict checks)."""
+        """
+        Build intended source→target mappings only (no copy/extract).
+
+        Output ``files`` become DeployFilePlan — the sole deploy file list.
+        """
         return StrategyResult(
             success=False,
             error=f"策略未实现 plan()：{self.deploy_type}",
             deploy_type=self.deploy_type,
         )
 
-    @abstractmethod
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        """Copy files and return a result with file list for the manifest."""
+        """Inert compatibility shell — must not plan, copy, extract, or account."""
+        return inert_strategy_deploy(self.deploy_type)
 
     @abstractmethod
     def undeploy(

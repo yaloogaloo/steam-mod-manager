@@ -252,6 +252,7 @@ def test_ui_filter_mutex_and_clear_overlays(qapp, tmp_path: Path) -> None:
     view._set_library_status_filter(
         FILTER_DEPLOYMENT_RECORD, record_id=99, record_name="宝可梦一周目"
     )
+    view._card_entries = [(_index("2", deployed=False), card)]
     view._cached_record_mod_ids = frozenset({"2"})
     view._last_filter_sig = None
     view._sync_record_overlays()

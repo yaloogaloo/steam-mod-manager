@@ -1,9 +1,19 @@
-"""Deploy-time source / result verification (runtime only; not manifest format)."""
+"""Deploy-time source / result verification (runtime only; not manifest format).
+
+DEPLOYMENT SUCCESS AUTHORITY (permanent)
+
+``verify_file_plan`` consumes DeployFilePlan and decides whether required
+planned targets exist. Apply executes; Verify owns Core deploy success.
+
+Do NOT infer success from newly created files, snapshot diffs, target-tree
+scans, or Strategy-reported deployed lists. Pre-existing targets still count.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -211,3 +221,69 @@ def verify_deploy_result(
             missing_targets=hash_mismatches,
         )
     return len(entries)
+
+
+@dataclass
+class FilePlanVerifyResult:
+    success: bool
+    verified: int = 0
+    failed: int = 0
+    error: str = ""
+    missing_targets: list[str] = field(default_factory=list)
+
+
+def verify_file_plan(plan: Any) -> FilePlanVerifyResult:
+    """
+    DEPLOYMENT SUCCESS AUTHORITY — verify required FilePlan targets exist.
+
+    Consumes FilePlan only. Existing identical targets count as success.
+    Never rescans a directory to invent files or uses after−before accounting.
+    """
+    entries = list(getattr(plan, "files", None) or [])
+    if not entries:
+        diag = getattr(plan, "diagnostics", None)
+        if diag is not None:
+            diag.stage = "verify"
+            diag.verified_files = 0
+            diag.failed_files = 0
+        return FilePlanVerifyResult(
+            success=False,
+            error="FilePlan 为空：无法校验",
+            missing_targets=[],
+        )
+
+    missing: list[str] = []
+    verified = 0
+    for entry in entries:
+        if not bool(getattr(entry, "required", True)):
+            continue
+        raw = str(getattr(entry, "target_absolute", "") or "").strip()
+        if not raw:
+            missing.append("(empty target_absolute)")
+            continue
+        target = Path(raw)
+        if target.is_file():
+            verified += 1
+            continue
+        if target.is_dir():
+            # Rare directory targets — treat as present.
+            verified += 1
+            continue
+        missing.append(raw)
+
+    diag = getattr(plan, "diagnostics", None)
+    if diag is not None:
+        diag.stage = "verify"
+        diag.verified_files = verified
+        diag.failed_files = len(missing)
+        diag.failed_details = list(missing)
+
+    if missing:
+        return FilePlanVerifyResult(
+            success=False,
+            verified=verified,
+            failed=len(missing),
+            error=f"校验失败：缺少 {len(missing)} 个目标文件",
+            missing_targets=missing,
+        )
+    return FilePlanVerifyResult(success=True, verified=verified)

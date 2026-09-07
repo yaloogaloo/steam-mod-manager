@@ -628,12 +628,12 @@ def write_archive_status(
     return path
 
 
-def _tls_mod_id() -> str:
-    return str(getattr(_archive_tls, "mod_id", "") or "")
+def _tls_published_file_id() -> str:
+    return str(getattr(_archive_tls, "published_file_id", "") or "")
 
 
-def _set_tls_mod_id(mod_id: str) -> None:
-    _archive_tls.mod_id = str(mod_id)
+def _set_tls_published_file_id(published_file_id: str) -> None:
+    _archive_tls.published_file_id = str(published_file_id)
 
 
 def _parse_workshop_html(html_text: str) -> BeautifulSoup:
@@ -858,6 +858,66 @@ def archive_proxies_dict(proxy_url: str | None = None) -> dict[str, str] | None:
     return {"http": url, "https": url}
 
 
+def _redact_proxy_url(url: str) -> str:
+    """Mask userinfo / token query values for logs and error messages."""
+    text = str(url or "").strip()
+    if not text:
+        return "(none)"
+    parsed = urlparse(text)
+    if parsed.username or parsed.password:
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        netloc = f"***:***@{host}{port}"
+        return urlunparse(
+            (parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, "")
+        )
+    query = parsed.query or ""
+    if query and any(
+        key in query.lower()
+        for key in ("token=", "secret=", "key=", "auth=", "password=")
+    ):
+        return urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, "", "REDACTED", "")
+        )
+    return text
+
+
+def _proxy_transport_error(
+    exc: BaseException,
+    *,
+    url: str,
+    proxy_label: str,
+) -> BaseException:
+    """
+    Enrich a proxy transport failure without dropping the original curl error.
+
+    ``direct_fallback=not_executed`` records that HTML did not fall back to
+    direct when a resolved proxy was in use.
+    """
+    redacted = _redact_proxy_url(proxy_label)
+    msg = (
+        "Steam Workshop request through configured proxy failed "
+        f"(direct_fallback=not_executed; proxy={redacted}; url={url}): {exc}"
+    )
+    try:
+        enriched: BaseException = type(exc)(msg)
+    except Exception:  # noqa: BLE001
+        enriched = RequestException(msg)
+    code = getattr(exc, "code", None)
+    if code is not None:
+        try:
+            setattr(enriched, "code", code)
+        except Exception:  # noqa: BLE001
+            pass
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            setattr(enriched, "response", response)
+        except Exception:  # noqa: BLE001
+            pass
+    return enriched
+
+
 def _attempt_state_path(info_dir: Path) -> Path:
     return Path(info_dir) / _ARCHIVE_ATTEMPT_NAME
 
@@ -1003,7 +1063,7 @@ class OfflinePageArchiver:
             self._session = curl_requests.Session()
             self._owns_session = True
         self._session_lock = threading.Lock()
-        self._active_mod_id: str = ""
+        self._active_published_file_id: str = ""
         self._request_count: int = 0
 
     def _bind_session_proxy(self) -> None:
@@ -1097,7 +1157,7 @@ class OfflinePageArchiver:
             stream=stream, allow_redirects=allow_redirects
         )
 
-        mod_id = _tls_mod_id() or self._active_mod_id or "-"
+        published_file_id = _tls_published_file_id() or self._active_published_file_id or "-"
         url_id = _workshop_id_from_url(url) or "-"
         proxy_label = None
         if self._proxies:
@@ -1134,10 +1194,10 @@ class OfflinePageArchiver:
             last_ts = STEAM_ARCHIVE_LIMITER.last_request_timestamp
 
             logger.info(
-                "[STEAM ARCHIVE] mod_id=%s url_id=%s session_id存在=%s "
+                "[STEAM ARCHIVE] published_file_id=%s url_id=%s session_id存在=%s "
                 "cookie数量=%s last_request_timestamp=%s wait_seconds=%.3f "
                 "last_status=%s request_count=%s elapsed=%.3f url=%s",
-                mod_id,
+                published_file_id,
                 url_id,
                 has_sessionid,
                 cookie_count,
@@ -1241,14 +1301,21 @@ class OfflinePageArchiver:
             raise
 
     def _perform_get(self, url: str, kwargs: dict[str, Any]) -> Any:
-        """One HTML Session GET with optional proxy → direct fallback."""
+        """
+        One HTML Session GET.
+
+        When a resolved proxy is configured, transport failures are raised
+        (enriched) — no unconditional fallback to direct. Direct is used only
+        when no proxy is configured for this archiver instance.
+        """
         if self._proxies:
             proxy_label = (
                 self._proxies.get("https")
                 or self._proxies.get("http")
                 or "<set>"
             )
-            logger.info("[ARCHIVE] proxy=%s", proxy_label)
+            redacted = _redact_proxy_url(str(proxy_label))
+            logger.info("[ARCHIVE] proxy=%s", redacted)
             try:
                 response = self._session_get(
                     url, **kwargs, proxies=self._proxies
@@ -1258,9 +1325,15 @@ class OfflinePageArchiver:
             except _PROXY_TRANSPORT_ERRORS as exc:
                 logger.info("[ARCHIVE] proxy failed")
                 logger.info(
-                    "[ARCHIVE] proxy failed, fallback direct (%s)",
+                    "[ARCHIVE] proxy failed; direct_fallback=not_executed "
+                    "proxy=%s url=%s err=%s",
+                    redacted,
+                    url,
                     exc,
                 )
+                raise _proxy_transport_error(
+                    exc, url=url, proxy_label=str(proxy_label)
+                ) from exc
 
         response = self._session_get(url, **kwargs)
         logger.info("[ARCHIVE] direct success")
@@ -1410,13 +1483,13 @@ class OfflinePageArchiver:
         ``rate_limited``.
         """
         _ARCHIVE_SEMAPHORE.acquire()
-        prev_mod = _tls_mod_id()
+        prev_mod = _tls_published_file_id()
         try:
             from services.identity_service import lifecycle_scope
 
-            mod_id = str(published_file_id)
-            self._active_mod_id = mod_id
-            _set_tls_mod_id(mod_id)
+            published_file_id = str(published_file_id)
+            self._active_published_file_id = published_file_id
+            _set_tls_published_file_id(published_file_id)
             self._request_count = 0
             self._bind_session_proxy()
             with lifecycle_scope("archive"):
@@ -1445,7 +1518,7 @@ class OfflinePageArchiver:
                         pass
                 return result
         finally:
-            _set_tls_mod_id(prev_mod)
+            _set_tls_published_file_id(prev_mod)
             _ARCHIVE_SEMAPHORE.release()
 
     def _archive_body(
@@ -1482,15 +1555,15 @@ class OfflinePageArchiver:
         page_url = WORKSHOP_PAGE_URL.format(id=published_file_id)
         # Guard against parameter / URL drift in logs and fetches.
         url_id = _workshop_id_from_url(page_url)
-        mod_id = str(published_file_id)
-        if url_id and url_id != mod_id:
+        published_file_id = str(published_file_id)
+        if url_id and url_id != published_file_id:
             logger.error(
-                "[STEAM ARCHIVE] mod_id/url_id mismatch mod_id=%s url_id=%s url=%s",
-                mod_id,
+                "[STEAM ARCHIVE] mod_id/url_id mismatch published_file_id=%s url_id=%s url=%s",
+                published_file_id,
                 url_id,
                 page_url,
             )
-            page_url = WORKSHOP_PAGE_URL.format(id=mod_id)
+            page_url = WORKSHOP_PAGE_URL.format(id=published_file_id)
 
         from services.archive_observability import (
             classify_archive_error,
@@ -1512,7 +1585,7 @@ class OfflinePageArchiver:
         if proxy_label:
             proxy_fields["proxy"] = proxy_label
         log_archive_start(
-            mod_id=mod_id,
+            published_file_id=published_file_id,
             url=page_url,
             source="steam_workshop",
             timeout=getattr(self, "timeout", DEFAULT_TIMEOUT),
@@ -1527,15 +1600,15 @@ class OfflinePageArchiver:
         try:
             t_html0 = time.monotonic()
             logger.info(
-                "[STEAM ARCHIVE] HTTP request started mod_id=%s url=%s",
-                mod_id,
+                "[STEAM ARCHIVE] HTTP request started published_file_id=%s url=%s",
+                published_file_id,
                 page_url,
             )
             html_text = self._fetch_main_html(page_url)
             http_performed = True
             logger.info(
-                "[STEAM ARCHIVE] HTTP response received mod_id=%s bytes=%s",
-                mod_id,
+                "[STEAM ARCHIVE] HTTP response received published_file_id=%s bytes=%s",
+                published_file_id,
                 len(html_text or ""),
             )
             kind = classify_steam_workshop_html(html_text)
@@ -1554,15 +1627,15 @@ class OfflinePageArchiver:
             assets_elapsed = time.monotonic() - t_assets0
             self._inject_offline_banner(soup, published_file_id, page_url)
             logger.info(
-                "[STEAM ARCHIVE] write started mod_id=%s path=%s",
-                mod_id,
+                "[STEAM ARCHIVE] write started published_file_id=%s path=%s",
+                published_file_id,
                 index_path,
             )
             self._write_atomic(index_path, str(soup))
             write_performed = True
             logger.info(
-                "[STEAM ARCHIVE] write completed mod_id=%s path=%s",
-                mod_id,
+                "[STEAM ARCHIVE] write completed published_file_id=%s path=%s",
+                published_file_id,
                 index_path,
             )
             # Clear prior rate-limit marker on success.
@@ -1792,7 +1865,7 @@ class OfflinePageArchiver:
         index_path = info_dir / DEFAULT_INDEX_NAME
         force = bool(force_refresh)
         logger.info(
-            "[STEAM ARCHIVE] ensure_offline_page force_refresh=%s mod_id=%s",
+            "[STEAM ARCHIVE] ensure_offline_page force_refresh=%s published_file_id=%s",
             force,
             published_file_id,
         )
@@ -1805,7 +1878,7 @@ class OfflinePageArchiver:
                         except Exception:  # noqa: BLE001
                             pass
                     logger.info(
-                        "[STEAM ARCHIVE] cache hit skip mod_id=%s path=%s",
+                        "[STEAM ARCHIVE] cache hit skip published_file_id=%s path=%s",
                         published_file_id,
                         index_path,
                     )

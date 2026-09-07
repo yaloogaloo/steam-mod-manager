@@ -1,29 +1,28 @@
-"""Batch Mod Library card data — one filesystem scan + one SQLite round-trip."""
+"""Batch Mod Library list index — Database-first Layer-1 rows.
+
+ARCHITECTURE RULE
+-----------------
+Library list / game-switch must **not** call ``list_visible_mods``, walk the
+filesystem, or ``load_backup``. Snapshot rows are ``ModListItem`` / light
+``ModCardData`` (no description body).
+
+``conflict`` / ``conflict_status`` are user annotation mirrors from SQLite.
+``content_status`` comes from DB columns maintained by Refresh / content eval —
+list load does not re-scan payloads.
+"""
 
 from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from core.db_manager import DEPLOY_STATUS_DEPLOYED, get_db
-from core.mod_platform import PLATFORM_STEAM, normalize_offline_status, normalize_platform
+from core.db_manager import get_db
+from core.mod_platform import PLATFORM_STEAM, normalize_platform
 from core.models import ModMetadata
-from services.file_ops import (
-    INFO_DIR_NAME,
-    LEGACY_INFO_DIR_NAME,
-    MISSING_CONTENT_METADATA_KEY,
-    ModFileManager,
-)
-from services.library_status import (
-    GAME_STATUS_HEALTHY,
-    compute_content_status,
-    content_status_to_library_status,
-    row_content_status,
-    row_source_type,
-)
+from services.mod_list_item import ModListItem
 
 logger = logging.getLogger(__name__)
 
@@ -38,24 +37,6 @@ def _cache_root_key(path: str | Path) -> str:
         return str(Path(path))
 
 
-def _missing_content_fast(folder: Path, data: dict[str, Any] | None) -> bool:
-    if not folder.is_dir():
-        return True
-    if data and data.get(MISSING_CONTENT_METADATA_KEY) is True:
-        return True
-    try:
-        for child in folder.iterdir():
-            if child.name in {INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, ".cache"}:
-                continue
-            if child.is_file():
-                return False
-            if child.is_dir():
-                return False
-    except OSError:
-        return True
-    return True
-
-
 def _folder_mtime(folder: Path) -> float:
     try:
         return float(folder.stat().st_mtime)
@@ -65,7 +46,7 @@ def _folder_mtime(folder: Path) -> float:
 
 @dataclass
 class ModCardData:
-    """Immutable-enough payload for one library card (no SQLite on the widget)."""
+    """UI bind adapter for Layer-1 list rows (description always empty on list path)."""
 
     id: str
     title: str
@@ -101,11 +82,17 @@ class ModCardData:
     library_status: str = ""
     source_type: str = ""
     content_status: str = ""
+    identity_status: str = "ok"
     relation_deps: int = 0
     relation_conflicts: int = 0
 
     @property
+    def internal_id(self) -> str:
+        return self.id
+
+    @property
     def mod_id(self) -> str:
+        """Legacy UI alias for entity id (same as ``id`` / ``internal_id``)."""
         return self.id
 
 
@@ -116,9 +103,7 @@ class GameSidebarEntry:
     app_id: int
     count: int
     categories: list[str] = field(default_factory=list)
-    game_status: str = GAME_STATUS_HEALTHY
-    status_summary: object | None = None
-    category_summaries: dict = field(default_factory=dict)
+    game_status: str = "healthy"
     status_summary: object | None = None
     category_summaries: dict = field(default_factory=dict)
 
@@ -129,13 +114,19 @@ class LibrarySnapshot:
     games: list[GameSidebarEntry]
     total_count: int
     library_root: str = ""
+    list_items: list[ModListItem] = field(default_factory=list)
 
 
 def card_data_to_metadata(data: ModCardData) -> ModMetadata:
+    """Adapt Projection → legacy ModMetadata for Detail/Card paint.
+
+    ``published_file_id`` carries internal_id for historical callers that still
+    read that field as the entity key. It is not a Workshop identity lookup.
+    """
     return ModMetadata(
         published_file_id=str(data.id or ""),
         title=str(data.metadata_title or data.title or ""),
-        description=str(data.description or ""),
+        description="",  # Layer-1: never ship description on list bind
         managed_path=str(data.managed_path or ""),
         local_path=str(data.managed_path or ""),
         cover_path=str(data.cover or "") or None,
@@ -147,8 +138,144 @@ def card_data_to_metadata(data: ModCardData) -> ModMetadata:
     )
 
 
+def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
+    return ModListItem(
+        internal_id=str(row.get("internal_id") or ""),
+        workspace_id=str(row.get("workspace_id") or ""),
+        game_id=int(row.get("game_id") or 0),
+        game_folder=str(row.get("game_folder") or ""),
+        name=str(row.get("name") or ""),
+        favorite=bool(row.get("favorite")),
+        cover_path=str(row.get("cover_path") or ""),
+        status_badge=str(row.get("status_badge") or ""),
+        managed_path=str(row.get("managed_path") or ""),
+        platform=str(row.get("platform") or ""),
+        deployed=bool(row.get("deployed")),
+        folder_absent=bool(row.get("folder_absent")),
+        content_status=str(row.get("content_status") or ""),
+        identity_status=str(row.get("identity_status") or "ok"),
+        conflict=bool(row.get("conflict")),
+        conflict_status=str(row.get("conflict_status") or "none"),
+        invalid=bool(row.get("invalid")),
+        enabled=bool(row.get("enabled", True)),
+        has_offline=bool(row.get("has_offline")),
+        mtime=float(row.get("mtime") or 0.0),
+        category_tags=str(row.get("category_tags") or ""),
+        external_id=str(row.get("external_id") or ""),
+        source_url=str(row.get("source_url") or ""),
+        source_type=str(row.get("source_type") or ""),
+        deploy_status=str(row.get("deploy_status") or "not_deployed"),
+        offline_status=str(row.get("offline_status") or "none"),
+        library_status=str(row.get("library_status") or ""),
+        steam_name=str(row.get("steam_name") or ""),
+        relation_deps=int(row.get("relation_deps") or 0),
+        relation_conflicts=int(row.get("relation_conflicts") or 0),
+        notes_preview=str(row.get("notes_preview") or ""),
+    )
+
+
+def list_item_to_card_data(item: ModListItem) -> ModCardData:
+    """Adapt Layer-1 item → UI card DTO (description always empty)."""
+    content = str(item.content_status or "")
+    missing = content == "content_missing"
+    return ModCardData(
+        id=item.internal_id,
+        title=item.name,
+        platform=item.platform or PLATFORM_STEAM,
+        cover=item.cover_path,
+        description="",
+        tags=item.category_tags,
+        size=0,
+        updated_time=float(item.mtime or 0.0),
+        managed_path=item.managed_path,
+        game_folder=item.game_folder,
+        steam_name=item.steam_name or item.name,
+        json_display_name=item.name,
+        metadata_title=item.steam_name or item.name,
+        notes=item.notes_preview,
+        game_name=item.game_folder,
+        favorite=item.favorite,
+        deployed=item.deployed,
+        deploy_status=item.deploy_status,
+        has_offline=item.has_offline,
+        offline_status=item.offline_status,
+        invalid=item.invalid,
+        conflict=item.conflict,
+        conflict_status=str(item.conflict_status or "none"),
+        enabled=item.enabled,
+        source_url=item.source_url,
+        external_id=item.external_id,
+        workspace_id=item.workspace_id,
+        category_tags=item.category_tags,
+        tag_values="",
+        folder_absent=item.folder_absent,
+        missing_content=missing,
+        library_status=item.library_status or content,
+        source_type=item.source_type or item.platform,
+        content_status=content,
+        identity_status=str(getattr(item, "identity_status", "") or "ok"),
+        relation_deps=item.relation_deps,
+        relation_conflicts=item.relation_conflicts,
+    )
+
+
+def apply_content_status_to_card_data(
+    data: ModCardData,
+    *,
+    content_status: str,
+    folder_absent: bool | None = None,
+    library_status: str | None = None,
+) -> ModCardData:
+    """Return a copy of *data* with authoritative content_status fields updated."""
+    from services.library_status import CONTENT_CONTENT_MISSING
+    from services.status_authority import normalize_content_axis
+
+    cs = normalize_content_axis(content_status)
+    absent = bool(data.folder_absent if folder_absent is None else folder_absent)
+    if absent and not str(content_status or "").strip():
+        cs = CONTENT_CONTENT_MISSING
+    return replace(
+        data,
+        content_status=cs,
+        library_status=str(library_status or data.library_status or cs),
+        folder_absent=absent,
+        missing_content=(cs == CONTENT_CONTENT_MISSING),
+    )
+
+
+def fetch_mod_list_item(internal_id: str | int) -> ModListItem | None:
+    """Load one Layer-1 row from SQLite (full projection source of truth)."""
+    mid = str(internal_id or "").strip()
+    if not mid.isdigit():
+        return None
+    try:
+        rows = get_db().list_mod_list_items(mod_id=mid)
+    except Exception:  # noqa: BLE001
+        logger.debug("fetch_mod_list_item failed internal_id=%s", mid, exc_info=True)
+        return None
+    if not rows:
+        return None
+    item = mod_list_item_from_row(rows[0])
+    try:
+        fields = get_db().get_mods_search_fields([mid]).get(mid)
+        if fields is not None and str(fields.category_tags or "").strip():
+            item = replace(item, category_tags=str(fields.category_tags or ""))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        rel = get_db().get_relationship_counts([mid]).get(mid, (0, 0))
+        item = replace(
+            item,
+            relation_deps=int(rel[0] or 0),
+            relation_conflicts=int(rel[1] or 0),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return item
+
+
 class ModLibraryCache:
-    """Process-wide card snapshot. ``load_all_mod_cards`` rebuilds from disk+DB."""
+    """Process-wide card snapshot. ``load_snapshot`` rebuilds from SQLite Layer-1."""
 
     def __init__(self) -> None:
         self._by_id: dict[str, ModCardData] = {}
@@ -197,17 +324,17 @@ class ModLibraryCache:
         self._by_id = {c.id: c for c in self._all if c.id}
         return snapshot
 
-    def get_card_data(self, mod_id: str) -> ModCardData | None:
-        return self._by_id.get(str(mod_id or "").strip())
+    def get_card_data(self, internal_id: str) -> ModCardData | None:
+        return self._by_id.get(str(internal_id or "").strip())
 
-    def invalidate(self, mod_id: str | None = None) -> None:
-        if mod_id is None:
+    def invalidate(self, internal_id: str | None = None) -> None:
+        if internal_id is None:
             self._by_id.clear()
             self._all.clear()
             self._snapshot = None
             self._root = ""
             return
-        mid = str(mod_id).strip()
+        mid = str(internal_id).strip()
         self._by_id.pop(mid, None)
         self._all = [c for c in self._all if c.id != mid]
         if self._snapshot is not None:
@@ -217,6 +344,11 @@ class ModLibraryCache:
                 games=self._snapshot.games,
                 total_count=len(cards),
                 library_root=self._snapshot.library_root,
+                list_items=[
+                    i
+                    for i in (self._snapshot.list_items or [])
+                    if str(getattr(i, "internal_id", "") or "") != mid
+                ],
             )
 
     def put_card_data(self, data: ModCardData) -> None:
@@ -225,6 +357,68 @@ class ModLibraryCache:
         self._by_id[data.id] = data
         self._all = [c for c in self._all if c.id != data.id]
         self._all.append(data)
+
+    def refresh_projection(self, internal_id: str | int) -> ModCardData | None:
+        """
+        Re-read one Mod's full Layer-1 row from SQLite and replace warm projection.
+
+        ARCHITECTURE RULE: single-row replace only — never rebuild the Library
+        snapshot, scan the filesystem, or run reconcile.
+        """
+        mid = str(internal_id or "").strip()
+        if not mid:
+            return None
+        item = fetch_mod_list_item(mid)
+        if item is None:
+            return None
+        updated = list_item_to_card_data(item)
+        self.put_card_data(updated)
+        if self._snapshot is not None:
+            found = False
+            cards: list[ModCardData] = []
+            for card in self._snapshot.cards:
+                if str(card.id) == mid:
+                    cards.append(updated)
+                    found = True
+                else:
+                    cards.append(card)
+            if not found:
+                cards.append(updated)
+            items: list[ModListItem] = []
+            item_found = False
+            for existing in list(self._snapshot.list_items or []):
+                if str(existing.internal_id) == mid:
+                    items.append(item)
+                    item_found = True
+                else:
+                    items.append(existing)
+            if not item_found:
+                items.append(item)
+            self._snapshot = LibrarySnapshot(
+                cards=cards,
+                games=self._snapshot.games,
+                total_count=len(cards),
+                library_root=self._snapshot.library_root,
+                list_items=items,
+            )
+            self._all = list(cards)
+        return updated
+
+    def patch_content_status(
+        self,
+        internal_id: str,
+        *,
+        content_status: str = "",
+        folder_absent: bool | None = None,
+        library_status: str | None = None,
+    ) -> ModCardData | None:
+        """
+        After content_status is persisted to DB, refresh that Mod's projection.
+
+        Keyword args are ignored — warm cache always re-reads SQLite.
+        """
+        del content_status, folder_absent, library_status
+        return self.refresh_projection(internal_id)
 
 
 def get_library_cache() -> ModLibraryCache:
@@ -243,203 +437,115 @@ def reset_library_cache() -> None:
 
 def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
     """
-    Scan the library once via Metadata Resolver, batch-read SQLite user state.
+    Build Library list index from SQLite (DB-first).
 
-    Safe to call from a worker thread (no QWidget).
+    ARCHITECTURE RULE: must not call ``list_visible_mods``, walk managed
+    folders, ``load_backup``, ``resolve_games``, or filesystem ``list_games``.
+    Game sidebar comes from ``games`` + ``mods`` aggregates only.
+    Safe on a worker thread (no QWidget).
     """
-    from services.mod_metadata_resolver import list_visible_mods
+    import time
+
+    from services.library_perf_metrics import get_library_perf_metrics
 
     root = Path(library_root)
     root.mkdir(parents=True, exist_ok=True)
-    manager = ModFileManager(root)
-    resolved_list = list_visible_mods(root, None)
+    t_all = time.perf_counter()
+    query_ms = 0.0
+    vm_ms = 0.0
+
+    list_items: list[ModListItem] = []
+    cards: list[ModCardData] = []
+    try:
+        db = get_db()
+        t_q = time.perf_counter()
+        rows = db.list_mod_list_items()
+        mod_ids = [
+            str(r.get("internal_id") or "")
+            for r in rows
+            if str(r.get("internal_id") or "").isdigit()
+        ]
+        cat_map: dict[str, str] = {}
+        rel_counts: dict[str, tuple[int, int]] = {}
+        if mod_ids:
+            try:
+                fields_map = db.get_mods_search_fields(mod_ids)
+                for mid, fields in fields_map.items():
+                    cat_map[mid] = str(getattr(fields, "category_tags", "") or "")
+            except Exception:  # noqa: BLE001
+                logger.debug("category batch failed", exc_info=True)
+            try:
+                rel_counts = db.get_relationship_counts(mod_ids)
+            except Exception:  # noqa: BLE001
+                logger.debug("relationship batch failed", exc_info=True)
+        query_ms = (time.perf_counter() - t_q) * 1000.0
+        t_vm = time.perf_counter()
+        try:
+            from services.managed_path_cache import put_managed_path
+
+            warm_paths = True
+        except Exception:  # noqa: BLE001
+            warm_paths = False
+            put_managed_path = None  # type: ignore[assignment]
+        for row in rows:
+            mid = str(row.get("internal_id") or "")
+            row_out = dict(row)
+            if mid in cat_map and cat_map[mid]:
+                row_out["category_tags"] = cat_map[mid]
+            if mid in rel_counts:
+                deps, confs = rel_counts[mid]
+                row_out["relation_deps"] = int(deps)
+                row_out["relation_conflicts"] = int(confs)
+            item = mod_list_item_from_row(row_out)
+            list_items.append(item)
+            cards.append(list_item_to_card_data(item))
+            if warm_paths and mid.isdigit() and str(item.managed_path or "").strip():
+                try:
+                    put_managed_path(mid, item.managed_path, library_root=root)
+                except Exception:  # noqa: BLE001
+                    pass
+        vm_ms = (time.perf_counter() - t_vm) * 1000.0
+    except Exception:  # noqa: BLE001
+        logger.exception("DB-first library snapshot failed")
+        list_items = []
+        cards = []
+
     try:
         from services.startup_io_trace import log_io_event
 
-        log_io_event(
-            "library_load",
-            "snapshot",
-            mods_seen=len(resolved_list),
-        )
+        log_io_event("library_load", "snapshot", mods_seen=len(cards))
     except Exception:  # noqa: BLE001
         pass
 
-    mod_ids: list[str] = []
-    for item in resolved_list:
-        mid = str(item.published_file_id or "").strip()
-        if mid.isdigit():
-            mod_ids.append(mid)
-
-    fields_map: dict[str, Any] = {}
-    tag_flags_map: dict[str, Any] = {}
-    rel_counts: dict[str, tuple[int, int]] = {}
-    backup_rows: dict[str, Any] = {}
-    db = None
+    games = _build_game_entries(cards)
+    total_ms = (time.perf_counter() - t_all) * 1000.0
     try:
-        db = get_db()
-        if mod_ids:
-            fields_map = db.get_mods_search_fields(mod_ids)
-            tag_flags_map = db.get_mods_tag_flags(mod_ids)
-            rel_counts = db.get_relationship_counts(mod_ids)
-            backup_rows = db.get_mods_backup_rows(mod_ids)
+        get_library_perf_metrics().record_index_load(
+            database_query_ms=query_ms,
+            viewmodel_create_ms=vm_ms,
+            total_ms=total_ms,
+        )
     except Exception:  # noqa: BLE001
-        logger.debug("batch library DB read failed", exc_info=True)
-
-    cards: list[ModCardData] = []
-    for resolved in resolved_list:
-        folder = Path(resolved.managed_path or "")
-        mid = str(resolved.published_file_id or "").strip()
-        fields = fields_map.get(mid) if mid else None
-        flags = tag_flags_map.get(mid) if mid else None
-        deps, confs = rel_counts.get(mid, (0, 0)) if mid else (0, 0)
-        game_folder = str(resolved.game_name or "").strip()
-        try:
-            from_path = manager.game_name_for_path(folder)
-            if from_path:
-                game_folder = from_path
-        except Exception:  # noqa: BLE001
-            if not game_folder and folder.parent:
-                game_folder = folder.parent.name
-
-        notes = ""
-        favorite = False
-        deployed = False
-        deploy_status = "not_deployed"
-        game_db = ""
-        steam = str(resolved.title or "").strip()
-        # UI store platform — always prefer SQLite mods.platform over resolver/sticky
-        platform = ""
-        source_url = str(resolved.source_url or "").strip()
-        external_id = ""
-        workspace_id = ""
-        is_invalid = False
-        conflict_status = "none"
-        enabled = True
-        category_tags = ""
-        if fields is not None:
-            notes = str(fields.user_notes or "")
-            favorite = bool(fields.favorite)
-            deploy_status = str(fields.deploy_status or "not_deployed")
-            deployed = deploy_status == DEPLOY_STATUS_DEPLOYED
-            game_db = str(fields.game_name or "").strip()
-            if not steam:
-                steam = str(fields.steam_name or "").strip()
-            platform = str(fields.platform or "").strip()
-            external_id = str(fields.external_id or "").strip()
-            is_invalid = bool(fields.is_invalid)
-            conflict_status = str(fields.conflict_status or "none")
-            enabled = bool(fields.enabled)
-            category_tags = str(fields.category_tags or "")
-            if not source_url:
-                source_url = str(fields.source_url or "").strip()
-            workspace_id = str(getattr(fields, "workspace_id", "") or "").strip()
-
-        from services.platform_identity import resolve_display_platform
-
-        platform = resolve_display_platform(
-            db_platform=platform,
-            metadata_platform=str(resolved.platform or ""),
-        )
-        title = str(resolved.display_name or resolved.title or folder.name or "—").strip()
-        json_display = str(resolved.display_name or "").strip()
-        meta_title = str(resolved.title or "").strip()
-        invalid = is_invalid or bool(getattr(flags, "invalid", False)) if flags else is_invalid
-        conflict = (conflict_status == "conflict") or (
-            bool(getattr(flags, "conflict", False)) if flags else False
-        )
-        tag_values = ""
-        if flags is not None:
-            values = getattr(flags, "tag_values", ()) or ()
-            reason = getattr(flags, "invalid_reason", "") or ""
-            tag_values = " ".join(p for p in (*values, reason) if str(p).strip())
-
-        folder_absent = not bool(resolved.folder_present)
-        cover = str(resolved.cover_path or "").strip()
-        desc = str(resolved.description or "").strip()
-        off_ref = str(resolved.offline_path or "").strip()
-        has_offline = False
-        if off_ref:
-            try:
-                has_offline = Path(off_ref).is_file()
-            except OSError:
-                has_offline = False
-        missing = True if folder_absent else _missing_content_fast(folder, None)
-        offline_status = "none"
-        if fields is not None:
-            offline_status = normalize_offline_status(
-                str(getattr(fields, "offline_status", "") or "none")
-            )
-        brow = backup_rows.get(mid) if mid else None
-        # Sticky provenance only — must never overwrite ModCardData.platform
-        sticky = row_source_type(brow) if brow else ""
-        source_type = sticky if sticky and sticky != "unknown" else ""
-        backup_status = str((brow or {}).get("backup_status") or "")
-        db_content = row_content_status(brow) if brow else ""
-        identity_conflict = conflict or db_content == "identity_conflict"
-        content_status = compute_content_status(
-            folder_present=not folder_absent,
-            identity_conflict=identity_conflict,
-            backup_status=backup_status
-            or ("invalid" if db_content == "backup_invalid" else ""),
-            missing_content=bool(missing) and not folder_absent,
-        )
-        library_status = content_status_to_library_status(content_status)
-
-        cards.append(
-            ModCardData(
-                id=mid,
-                title=title,
-                platform=platform,
-                cover=cover,
-                description=desc,
-                tags=" ".join(p for p in (category_tags, tag_values) if p),
-                size=0,
-                updated_time=_folder_mtime(folder) if not folder_absent else 0.0,
-                managed_path=str(folder),
-                game_folder=game_folder,
-                steam_name=steam,
-                json_display_name=json_display,
-                metadata_title=meta_title,
-                notes=notes,
-                game_name=" ".join(p for p in (game_db, game_folder) if p),
-                favorite=favorite,
-                deployed=deployed,
-                deploy_status=deploy_status,
-                has_offline=has_offline,
-                offline_status=offline_status,
-                invalid=invalid,
-                conflict=conflict,
-                conflict_status=conflict_status,
-                enabled=enabled,
-                source_url=source_url,
-                external_id=external_id,
-                workspace_id=workspace_id,
-                category_tags=category_tags,
-                tag_values=tag_values,
-                folder_absent=folder_absent,
-                missing_content=missing,
-                library_status=library_status,
-                source_type=source_type,
-                content_status=content_status,
-                relation_deps=int(deps),
-                relation_conflicts=int(confs),
-            )
-        )
-
-    games = _build_game_entries(root, cards)
+        pass
     return LibrarySnapshot(
         cards=cards,
         games=games,
         total_count=len(cards),
         library_root=str(root),
+        list_items=list_items,
     )
 
 
 def _build_game_entries(
-    library_root: Path,
     cards: list[ModCardData],
 ) -> list[GameSidebarEntry]:
-    from services.game_library import resolve_games
+    """
+    Library sidebar from Database projection only.
+
+    ARCHITECTURE RULE: must not call ``resolve_games`` / ``list_games`` /
+    filesystem ``iterdir``. Filesystem discovery belongs to Sync/Reconcile.
+    """
+    from services.game_sidebar import build_game_sidebar_view_models
     from services.game_status import ModStatusHint
 
     counts: dict[str, int] = {}
@@ -457,12 +563,15 @@ def _build_game_entries(
             ModStatusHint(
                 game_folder=key,
                 content_status=str(card.content_status or "") or "healthy",
+                identity_status=str(getattr(card, "identity_status", "") or "ok"),
                 category=cat,
                 folder_absent=bool(card.folder_absent),
+                conflict_status=str(getattr(card, "conflict_status", "") or "none"),
+                invalid=bool(getattr(card, "invalid", False)),
             )
         )
 
-    resolved = resolve_games(library_root, mod_counts=counts, mod_hints=hints)
+    resolved = build_game_sidebar_view_models(mod_counts=counts, mod_hints=hints)
     return [
         GameSidebarEntry(
             folder=g.folder,
@@ -470,9 +579,9 @@ def _build_game_entries(
             app_id=int(g.app_id),
             count=int(g.count),
             categories=list(g.categories),
-            game_status=str(g.game_status or GAME_STATUS_HEALTHY),
-            status_summary=g.status_summary,
-            category_summaries=dict(g.category_summaries or {}),
+            game_status=str(getattr(g, "game_status", "") or "healthy"),
+            status_summary=getattr(g, "status_summary", None),
+            category_summaries=dict(getattr(g, "category_summaries", {}) or {}),
         )
         for g in resolved
     ]

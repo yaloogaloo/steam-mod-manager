@@ -1,4 +1,8 @@
-"""Read-only Library diagnostics payload (Phase 7)."""
+"""Read-only Library diagnostics payload (Phase 7).
+
+Uses folder_present / backup_status / identity_status facts — never treats
+deleted Mod-status tokens (folder_missing, backup_invalid, …) as content_status.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +12,12 @@ from typing import Any
 from core.paths import data_dir, default_mod_library
 from services.library_maintenance import scan_library_issues
 from services.library_status import (
-    CONTENT_BACKUP_INVALID,
-    CONTENT_FOLDER_MISSING,
-    CONTENT_IDENTITY_CONFLICT,
-    CONTENT_METADATA_MISSING,
+    CONTENT_CONTENT_MISSING,
     row_content_status,
+    row_identity_status,
 )
 from services.metadata_backup import BACKUP_DIR_NAME
+from services.status_authority import IDENTITY_STATUS_CONFLICT, normalize_identity_status
 
 
 def build_library_diagnostics(
@@ -34,13 +37,14 @@ def build_library_diagnostics(
     invalid_backup: list[str] = []
     identity_conflict: list[str] = []
     folder_missing_mods: list[str] = []
+    content_missing_mods: list[str] = []
 
     try:
         with db._lock:
             rows = db._conn.execute(
                 """
                 SELECT mod_id, content_status, library_status, backup_status,
-                       folder_present, last_known_path
+                       folder_present, last_known_path, identity_status
                 FROM mods
                 """
             ).fetchall()
@@ -52,14 +56,14 @@ def build_library_diagnostics(
         brow = {str(k): row[k] for k in row.keys()}
         cs = row_content_status(brow)
         bstatus = str(brow.get("backup_status") or "").strip()
-        if cs == CONTENT_METADATA_MISSING:
-            missing_metadata.append(mid)
-        if cs == CONTENT_BACKUP_INVALID or bstatus == "invalid":
+        if bstatus == "invalid":
             invalid_backup.append(mid)
-        if cs == CONTENT_IDENTITY_CONFLICT:
+        if normalize_identity_status(row_identity_status(brow)) == IDENTITY_STATUS_CONFLICT:
             identity_conflict.append(mid)
-        if cs == CONTENT_FOLDER_MISSING or int(brow.get("folder_present") or 1) == 0:
+        if int(brow.get("folder_present") or 1) == 0:
             folder_missing_mods.append(mid)
+        if cs == CONTENT_CONTENT_MISSING:
+            content_missing_mods.append(mid)
 
     backup_base = data / BACKUP_DIR_NAME
     _sort = lambda xs: sorted(set(xs), key=lambda x: int(x) if str(x).isdigit() else x)
@@ -74,6 +78,7 @@ def build_library_diagnostics(
         },
         "mods": {
             "folder_missing": _sort(folder_missing_mods),
+            "content_missing": _sort(content_missing_mods),
             "missing_metadata": _sort(missing_metadata),
             "invalid_backup": _sort(invalid_backup),
             "identity_conflict": _sort(identity_conflict),

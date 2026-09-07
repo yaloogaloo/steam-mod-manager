@@ -67,6 +67,10 @@ def classify_archive_error(exc: BaseException | str, *, proxy: str = "") -> str:
         or "operation timed out" in lowered
     ):
         return NETWORK_FAILURE
+    # curl / connection transport errors stay NETWORK even when the message
+    # mentions a configured proxy (proxy→direct fallback may be skipped).
+    if "connection" in lowered or "network" in lowered or "curl: (" in lowered:
+        return NETWORK_FAILURE
     if "proxy" in lowered and ("fail" in lowered or "refused" in lowered or "unable" in lowered):
         return CONFIG_FAILURE if proxy else ENVIRONMENT_FAILURE
     if any(
@@ -82,8 +86,6 @@ def classify_archive_error(exc: BaseException | str, *, proxy: str = "") -> str:
         return STEAM_FAILURE
     if "config" in lowered or "qsettings" in lowered:
         return CONFIG_FAILURE
-    if "connection" in lowered or "network" in lowered or "curl: (" in lowered:
-        return NETWORK_FAILURE
     return APPLICATION_FAILURE
 
 
@@ -100,7 +102,7 @@ def curl_code_from_error(exc: BaseException | str) -> str:
 
 def log_archive_start(
     *,
-    mod_id: str,
+    published_file_id: str,
     url: str,
     source: str = "steam_workshop",
     proxy: str = "",
@@ -112,10 +114,10 @@ def log_archive_start(
     impersonate: str = "",
 ) -> None:
     logger.info(
-        "[ARCHIVE_START] mod_id=%s url=%s source=%s proxy=%s "
+        "[ARCHIVE_START] published_file_id=%s url=%s source=%s proxy=%s "
         "proxy_source=%s proxy_scheme=%s proxy_host=%s proxy_port=%s "
         "timeout=%s impersonate=%s",
-        mod_id,
+        published_file_id,
         url,
         source,
         proxy or "(direct)",

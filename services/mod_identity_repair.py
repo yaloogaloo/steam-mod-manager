@@ -436,7 +436,6 @@ def apply_repair_plan(
                 url = str(action.details.get("source_url") or "")
                 before = db.get_mod_display_info(mid)
                 old_ext = str(before.external_id or "") if before else ""
-                from core.db_manager import _utc_now
 
                 if new_ext:
                     # Skip recovery write when another row already owns this identity.
@@ -454,11 +453,10 @@ def apply_repair_plan(
                         UPDATE mods SET
                             external_id = ?,
                             platform = CASE WHEN TRIM(?) != '' THEN ? ELSE platform END,
-                            source_url = CASE WHEN TRIM(?) != '' THEN ? ELSE source_url END,
-                            updated_at = ?
+                            source_url = CASE WHEN TRIM(?) != '' THEN ? ELSE source_url END
                         WHERE mod_id = ?
                         """,
-                        (new_ext, plat, plat, url, url, _utc_now(), int(mid)),
+                        (new_ext, plat, plat, url, url, int(mid)),
                     )
                     db._conn.commit()
                 log_identity_mutation(
@@ -473,7 +471,6 @@ def apply_repair_plan(
             elif action.action == "fix_steam_on_internal_id":
                 mid = action.canonical_mod_id
                 new_plat = str(action.details.get("new_platform") or "other")
-                from core.db_manager import _utc_now
                 from core.mod_platform import generate_unique_workspace_id
 
                 before = db.get_mod_display_info(mid)
@@ -487,11 +484,10 @@ def apply_repair_plan(
                         """
                         UPDATE mods SET
                             platform = ?,
-                            workspace_id = ?,
-                            updated_at = ?
+                            workspace_id = ?
                         WHERE mod_id = ?
                         """,
-                        (new_plat, new_ws, _utc_now(), int(mid)),
+                        (new_plat, new_ws, int(mid)),
                     )
                     db._conn.commit()
                 log_identity_mutation(

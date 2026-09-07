@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from core.db_manager import get_db
-from core.mod_platform import PLATFORM_STEAM, normalize_platform
+from core.mod_platform import PLATFORM_STEAM, is_internal_mod_id, normalize_platform
 from core.models import ModMetadata
 from core.paths import default_mod_library
 from services.archive import (
@@ -32,6 +33,124 @@ from services.offline.base import (
     OfflineUpdateResult,
     PROVIDER_STEAM_ARCHIVE,
 )
+
+_WORKSHOP_ID_IN_URL = re.compile(r"[?&]id=(\d+)", re.IGNORECASE)
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _digit_token(value: Any) -> str:
+    text = _text(value)
+    return text if text.isdigit() else ""
+
+
+def resolve_steam_workshop_id_for_archive(
+    entity_mod_id: str | int,
+    *,
+    metadata: Any | None = None,
+    db: Any | None = None,
+    managed_path: str | Path | None = None,
+) -> str:
+    """
+    Resolve the Steam Workshop file id used for archive HTTP.
+
+    Entity ``mods.mod_id`` / ``ModMetadata.published_file_id`` may equal the
+    Internal PK after Identity rebuild and must **not** be used as Workshop id
+    when ``workspace_id`` / legal ``external_id`` / source URL provide the
+    platform registration number.
+    """
+    mid = _text(entity_mod_id)
+    database = db if db is not None else get_db()
+    row: dict[str, Any] = {}
+    try:
+        if mid.isdigit():
+            row = dict(database.get_mod_backup_row(mid) or {})
+    except Exception:  # noqa: BLE001
+        row = {}
+
+    info = None
+    try:
+        if mid.isdigit():
+            info = database.get_mod_display_info(mid)
+    except Exception:  # noqa: BLE001
+        info = None
+
+    candidates: list[str] = []
+
+    def _push(raw: Any) -> None:
+        token = _digit_token(raw)
+        if not token:
+            return
+        # Never treat 9000… Internal PK range as a Workshop id.
+        if is_internal_mod_id(token):
+            return
+        if token not in candidates:
+            candidates.append(token)
+
+    # 1) Registration / display number (authoritative after rebuild).
+    _push(row.get("workspace_id"))
+    _push(getattr(info, "workspace_id", ""))
+    if isinstance(metadata, dict):
+        _push(metadata.get("workspace_id"))
+    else:
+        _push(getattr(metadata, "workspace_id", ""))
+
+    # 2) Legal external_id (must not be the Internal PK mirror).
+    ext = _digit_token(row.get("external_id"))
+    if ext and ext != mid:
+        _push(ext)
+    if info is not None:
+        ext2 = _digit_token(getattr(info, "external_id", ""))
+        if ext2 and ext2 != mid:
+            _push(ext2)
+
+    # 3) source_url / portable url ?id=
+    meta_url = ""
+    if isinstance(metadata, ModMetadata):
+        meta_url = _text(metadata.url)
+    elif isinstance(metadata, dict):
+        meta_url = _text(metadata.get("source_url") or metadata.get("url"))
+    else:
+        meta_url = _text(getattr(metadata, "url", "") or getattr(metadata, "source_url", ""))
+    for url in (
+        row.get("source_url"),
+        getattr(info, "source_url", "") if info is not None else "",
+        meta_url,
+    ):
+        m = _WORKSHOP_ID_IN_URL.search(_text(url))
+        if m:
+            _push(m.group(1))
+    # 4) Sidecar published_file_id / workspace when metadata object lacks them.
+    if managed_path is not None:
+        try:
+            from services.file_ops import read_info_metadata_dict
+
+            data = read_info_metadata_dict(managed_path) or {}
+            _push(data.get("workspace_id"))
+            pub = _digit_token(data.get("published_file_id"))
+            if pub and pub != mid:
+                _push(pub)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 5) metadata.published_file_id only when it is not the Internal PK stand-in.
+    pub_meta = ""
+    if isinstance(metadata, ModMetadata):
+        pub_meta = _digit_token(metadata.published_file_id)
+    elif isinstance(metadata, dict):
+        pub_meta = _digit_token(metadata.get("published_file_id"))
+    if pub_meta and pub_meta != mid:
+        _push(pub_meta)
+
+    if candidates:
+        return candidates[0]
+
+    # Last resort: historical Steam PK == Workshop id (pre-rebuild scheme).
+    if mid.isdigit() and not is_internal_mod_id(mid):
+        return mid
+    return ""
 
 
 def _coerce_ensure(value: Any) -> ArchiveEnsureResult:
@@ -103,9 +222,34 @@ class SteamOfflineProvider(OfflineProvider):
                 app_id=int(info.app_id) if info else 0,
             )
 
-        workshop_id = mid
-        if isinstance(meta, ModMetadata) and meta.published_file_id:
-            workshop_id = str(meta.published_file_id).strip() or mid
+        # Workshop id ≠ entity Internal PK. Existing archives must refresh with
+        # the same resolution as first-time saves (force_refresh path included).
+        workshop_id = resolve_steam_workshop_id_for_archive(
+            mid,
+            metadata=meta,
+            db=get_db(),
+            managed_path=path,
+        )
+        if not workshop_id:
+            status = OFFLINE_STATUS_FAILED
+            error = "无法解析 Steam Workshop ID（workspace_id / source_url 缺失）"
+            get_db().update_mod_offline_status(
+                mid,
+                status=status,
+                provider=self.get_provider_name(),
+            )
+            index = info_dir / "index.html"
+            return OfflineUpdateResult(
+                mod_id=mid,
+                index_path=Path(index),
+                status=status,
+                provider=self.get_provider_name(),
+                error=error,
+                outcome=OFFLINE_OUTCOME_FAILED,
+                force_refresh=force,
+                http_performed=False,
+                write_performed=False,
+            )
 
         error = ""
         try:

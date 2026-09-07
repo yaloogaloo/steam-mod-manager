@@ -107,6 +107,14 @@ class SyncResult:
     baselined: list[ModMetadata] = field(default_factory=list)
     failed: list[tuple[ModMetadata | None, str]] = field(default_factory=list)
     rate_limited: list[tuple[ModMetadata | None, str]] = field(default_factory=list)
+    # Lifecycle counters — sync success requires files AND entities.
+    source_count: int = 0
+    materialized_count: int = 0
+    identity_success_count: int = 0
+    entity_created_count: int = 0
+    entity_bound_count: int = 0
+    library_count: int = 0
+    registration_failed: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def total_processed(self) -> int:
@@ -152,6 +160,14 @@ class ModSyncService:
       3. Batch-fetch metadata only for mods that still need work
       4. Resolve unique game names (parallel, cache-first)
       5. Concurrent copy (small IO pool) + cover/archive (larger net pool)
+      6. Entity registration — every materialized workshop folder must bind
+         or create a Steam Mod entity (files alone are not a successful sync)
+
+    ARCHITECTURE RULE
+    -----------------
+    Sync success means filesystem materialization **and** Mod entity
+    registration. Do not rely on later reconcile / UI scans to invent
+    missing entities. Do not skip registration for ``skip_existing`` folders.
     """
 
     def __init__(
@@ -381,7 +397,27 @@ class ModSyncService:
 
         if not to_fetch:
             total = len(to_skip)
-            progress("done", total, max(total, 1), "Sync complete (nothing new)")
+            progress(
+                "sync",
+                total,
+                max(total, 1),
+                "Files up to date — registering Mod entities…",
+            )
+            self._register_synced_entities(
+                scanned,
+                existing_index,
+                result,
+                progress,
+            )
+            progress(
+                "done",
+                result.library_count,
+                max(result.source_count, 1),
+                "Sync complete "
+                f"(source={result.source_count} "
+                f"materialized={result.materialized_count} "
+                f"entities={result.library_count})",
+            )
             return result
 
         # --- Phase 2: batch metadata ONLY for mods that need work ---
@@ -395,9 +431,13 @@ class ModSyncService:
         for meta in metas:
             meta.source_path = str(path_map.get(meta.published_file_id, ""))
             self.files.enrich_title_from_db(meta)
-            # Guarantee a non-numeric title before path allocation
+            # Guarantee a non-numeric title before path allocation.
+            # Use clean ``Mod_<id>`` for folders — never ``Unknown_Mod_*`` on disk.
             if not (meta.title or "").strip() or meta.title.strip().isdigit():
-                meta.title = f"Unknown_Mod_{meta.published_file_id}"
+                from core.models import library_mod_folder_fallback
+
+                meta.title = library_mod_folder_fallback(meta.published_file_id)
+            self._stamp_steam_identity_fields(meta)
 
         def game_progress(done: int, total: int) -> None:
             progress(
@@ -538,23 +578,371 @@ class ModSyncService:
                         archives_done += 1
                     report(f"网络增强失败: {meta.display_name}", increment=1)
 
+        # --- Phase 4: entity registration (all materialized workshop folders) ---
+        self._register_synced_entities(
+            scanned,
+            existing_index,
+            result,
+            progress,
+        )
         grand_total = len(result.success) + len(result.skipped) + len(result.failed)
-        progress("done", grand_total, max(grand_total, 1), "Sync complete")
+        progress(
+            "done",
+            max(grand_total, result.library_count),
+            max(result.source_count, grand_total, 1),
+            "Sync complete "
+            f"(source={result.source_count} "
+            f"materialized={result.materialized_count} "
+            f"identity_ok={result.identity_success_count} "
+            f"created={result.entity_created_count} "
+            f"library={result.library_count})",
+        )
         return result
 
     # ------------------------------------------------------------------
     # Early-exit helpers
     # ------------------------------------------------------------------
 
+    def _register_synced_entities(
+        self,
+        scanned: list,
+        existing_index: dict[str, Path],
+        result: SyncResult,
+        progress: ProgressCallback,
+    ) -> None:
+        """
+        Bind/create a Steam Mod entity for every materialized workshop folder.
+
+        ARCHITECTURE RULE: This is part of Sync, not a post-hoc UI/reconcile
+        repair. ``skip_existing`` must not leave files without entities.
+        """
+        from core.db_manager import get_db
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+        from services.identity_service import LIFECYCLE_SYNC, lifecycle_scope
+        from services.mod_identity import resolve_existing_mod_id
+
+        result.source_count = len(scanned)
+        if not scanned:
+            result.materialized_count = 0
+            result.library_count = 0
+            return
+
+        # Refresh index so newly copied title folders are visible.
+        existing_index.update(self._build_existing_index())
+        db = get_db()
+        total = len(scanned)
+        progress(
+            "sync",
+            0,
+            max(total, 1),
+            f"Registering Mod entities 0/{total}…",
+        )
+
+        with lifecycle_scope(LIFECYCLE_SYNC):
+            for index, item in enumerate(scanned, start=1):
+                wid = str(item.published_file_id or "").strip()
+                managed = existing_index.get(wid)
+                if managed is None or not Path(managed).is_dir():
+                    logger.error(
+                        "[SYNC_LIFECYCLE] count drop: managed folder missing "
+                        "workspace_id=%s (cannot register entity)",
+                        wid,
+                    )
+                    result.registration_failed.append(
+                        (wid, "managed folder missing after sync")
+                    )
+                    progress(
+                        "sync",
+                        index,
+                        total,
+                        f"Registering Mod entities {index}/{total} (missing folder)",
+                    )
+                    continue
+
+                result.materialized_count += 1
+                try:
+                    mid, created = self._ensure_steam_entity_for_folder(
+                        db,
+                        workshop_id=wid,
+                        managed=Path(managed),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "[SYNC_LIFECYCLE] identity registration failed "
+                        "workspace_id=%s folder=%s",
+                        wid,
+                        managed,
+                    )
+                    result.registration_failed.append((wid, str(exc)))
+                    stub = ModMetadata(
+                        published_file_id=wid, managed_path=str(managed)
+                    )
+                    result.failed.append((stub, f"entity registration: {exc}"))
+                    progress(
+                        "sync",
+                        index,
+                        total,
+                        f"Registering Mod entities {index}/{total} (failed)",
+                    )
+                    continue
+
+                if mid:
+                    result.identity_success_count += 1
+                    if created:
+                        result.entity_created_count += 1
+                    else:
+                        result.entity_bound_count += 1
+                else:
+                    logger.error(
+                        "[SYNC_LIFECYCLE] count drop: empty Internal ID after "
+                        "identity bind workspace_id=%s folder=%s",
+                        wid,
+                        managed,
+                    )
+                    result.registration_failed.append(
+                        (wid, "identity returned empty Internal ID")
+                    )
+                progress(
+                    "sync",
+                    index,
+                    total,
+                    f"Registering Mod entities {index}/{total}",
+                )
+
+        library_ok = 0
+        for item in scanned:
+            wid = str(item.published_file_id or "").strip()
+            managed = existing_index.get(wid)
+            if managed is None or not Path(managed).is_dir():
+                continue
+            from services.mod_identity import extract_workspace_id
+
+            ws = extract_workspace_id(
+                folder_name=Path(managed).name,
+                legacy_token=wid,
+                source_url=steam_workshop_url(wid),
+            )
+            payload = {
+                "workspace_id": ws or wid,
+                "external_id": ws or wid,
+                "source_type": PLATFORM_STEAM,
+                "platform": PLATFORM_STEAM,
+                "url": steam_workshop_url(wid),
+                "_managed_path": str(Path(managed).resolve()),
+                "_folder_name": Path(managed).name,
+                "published_file_id": wid,
+            }
+            if resolve_existing_mod_id(payload, db=db):
+                library_ok += 1
+            else:
+                logger.error(
+                    "[SYNC_LIFECYCLE] library visibility miss workspace_id=%s folder=%s",
+                    ws or wid,
+                    managed,
+                )
+                result.registration_failed.append(
+                    (ws or wid, "library visibility miss after identity persist")
+                )
+        result.library_count = library_ok
+        logger.info(
+            "[SYNC_LIFECYCLE] source_count=%s materialized_count=%s "
+            "identity_success_count=%s entity_created_count=%s "
+            "entity_bound_count=%s library_count=%s reg_failed=%s",
+            result.source_count,
+            result.materialized_count,
+            result.identity_success_count,
+            result.entity_created_count,
+            result.entity_bound_count,
+            result.library_count,
+            len(result.registration_failed),
+        )
+        if result.library_count < result.source_count:
+            logger.error(
+                "[SYNC_LIFECYCLE] COUNT DROP source_count=%s "
+                "materialized_count=%s identity_success_count=%s "
+                "library_count=%s delta=%s failures=%s",
+                result.source_count,
+                result.materialized_count,
+                result.identity_success_count,
+                result.library_count,
+                result.source_count - result.library_count,
+                result.registration_failed[:20],
+            )
+        if result.registration_failed:
+            logger.warning(
+                "[SYNC_LIFECYCLE] registration failures sample=%s",
+                result.registration_failed[:12],
+            )
+
+    def _ensure_steam_entity_for_folder(
+        self,
+        db,
+        *,
+        workshop_id: str,
+        managed: Path,
+    ) -> tuple[str, bool]:
+        """
+        Workspace ID → Identity Service → Internal Mod entity.
+
+        *workshop_id* is the Steam Workshop / Workspace ID from the source
+        scan (external identity). Internal ID is allocated/bound only via
+        Identity Service — never by copying Workspace ID in Sync itself.
+        """
+        from core.game_info import GameInfo
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+        from services.identity_service import (
+            LIFECYCLE_SYNC,
+            create_mod_identity,
+            persist_identity,
+        )
+        from services.mod_identity import extract_workspace_id, read_internal_id
+
+        # Prefer Workshop ID from Steam content scan — never invent from
+        # managed library folder names.
+        loaded = self.files.load_metadata(managed)
+        meta = loaded or ModMetadata(published_file_id=str(workshop_id or "").strip())
+        workspace_id = extract_workspace_id(
+            workspace_id=str(getattr(meta, "workspace_id", "") or ""),
+            external_id="",
+            title=str(meta.title or ""),
+            source_url=str(meta.url or ""),
+            legacy_token=str(workshop_id or meta.published_file_id or "").strip(),
+        )
+        if not workspace_id:
+            raise ValueError(
+                f"cannot resolve Workshop ID for Steam sync folder {managed}"
+            )
+
+        meta.published_file_id = workspace_id
+        meta.managed_path = str(managed)
+        self._stamp_steam_identity_fields(meta)
+        if not (meta.title or "").strip() or str(meta.title).strip().isdigit():
+            from core.models import library_mod_folder_fallback
+
+            meta.title = library_mod_folder_fallback(workspace_id)
+        # Sidecar first without backup DB write — entity may not exist yet.
+        self.files.save_metadata(meta, managed, sync_backup=False, sync_reason="sync")
+        self._persist_steam_sidecar_identity(managed, meta)
+
+        app_id = int(meta.app_id or 0)
+        game_name = str(meta.game_name or managed.parent.name or "").strip()
+        if app_id > 0 and game_name:
+            try:
+                db.upsert_game(
+                    GameInfo(app_id=app_id, name=game_name, folder_name=game_name)
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("sync upsert_game failed app_id=%s", app_id, exc_info=True)
+
+        # Registration rematch only: (platform, app_id, workspace_id).
+        # Entity bind (.info) uses internal_id when already present.
+        existing = ""
+        sidecar_iid = ""
+        try:
+            from services.file_ops import read_info_metadata_dict
+
+            sidecar_iid = read_internal_id(read_info_metadata_dict(managed) or {})
+        except Exception:  # noqa: BLE001
+            sidecar_iid = ""
+        if sidecar_iid:
+            try:
+                found = db.find_mod_by_internal_id(sidecar_iid)
+                if found is not None:
+                    existing = str(found)
+            except Exception:  # noqa: BLE001
+                existing = ""
+        if not existing and app_id > 0:
+            hit = db.find_mod_for_registration(PLATFORM_STEAM, app_id, workspace_id)
+            if hit is not None:
+                existing = str(hit.mod_id)
+        created = False
+        if existing and str(existing).isdigit():
+            mid = str(existing)
+        else:
+            from core.models import library_mod_folder_fallback
+
+            out = create_mod_identity(
+                db,
+                platform=PLATFORM_STEAM,
+                workshop_id=workspace_id,
+                external_id=workspace_id,
+                source_url=str(meta.url or steam_workshop_url(workspace_id)),
+                title=str(meta.title or library_mod_folder_fallback(workspace_id)),
+                app_id=app_id,
+                game_name=game_name,
+                operation=LIFECYCLE_SYNC,
+            )
+            mid = str(out.mod_id)
+            created = True
+
+        persist_identity(
+            db,
+            mid,
+            source="sync",
+            reason="materialize_bind",
+            platform=PLATFORM_STEAM,
+            external_id=workspace_id,
+            workspace_id=workspace_id,
+            source_url=str(meta.url or steam_workshop_url(workspace_id)),
+            source_type="steam",
+            last_known_path=str(managed.resolve()),
+            folder_present=True,
+            app_id=app_id or None,
+            title=str(meta.title or "") or None,
+            sticky_source=True,
+        )
+        try:
+            from services.content_status_eval import persist_evaluated_content_status
+
+            persist_evaluated_content_status(
+                mid,
+                managed,
+                db=db,
+                folder_present=True,
+                sync_sticky_marker=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "sync content status validate failed mid=%s", mid, exc_info=True
+            )
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            sync_after_metadata_change(mid, managed, "sync")
+        except Exception:  # noqa: BLE001
+            logger.debug("sync backup after entity register failed", exc_info=True)
+        try:
+            from services.info_sidecar import ensure_registration_info_proof
+
+            ensure_registration_info_proof(managed, mid, db=db)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "sync registration .info proof failed mid=%s: %s", mid, exc
+            )
+            raise
+        return mid, created
+
     def _build_existing_index(self) -> dict[str, Path]:
-        """Map published_file_id → managed folder (one library walk)."""
+        """Map Steam Workshop ID → managed folder (sidecar only; never folder name)."""
+        from services.mod_identity import extract_workspace_id
+
         index: dict[str, Path] = {}
         for folder in self.files.list_managed_mods():
             meta = self.files.load_metadata(folder)
-            if meta and meta.published_file_id:
-                index[meta.published_file_id] = folder
-            elif folder.name.isdigit():
-                index[folder.name] = folder
+            if meta is None:
+                continue
+            pub = str(meta.published_file_id or "").strip()
+            if pub.isdigit():
+                index[pub] = folder
+                continue
+            ws = extract_workspace_id(
+                workspace_id=str(getattr(meta, "workspace_id", "") or ""),
+                title=str(meta.title or ""),
+                source_url=str(meta.url or ""),
+                legacy_token=pub,
+            )
+            if ws:
+                index[ws] = folder
         return index
 
     @staticmethod
@@ -792,8 +1180,47 @@ class ModSyncService:
     ) -> None:
         # time_updated (and other metadata) is committed only after copy + enrich
         # succeed; a failed sync must leave the prior baseline for retry detection.
+        self._stamp_steam_identity_fields(meta)
         self._network_enrich(meta, managed, opts, on_status=on_status)
         self.files.save_metadata(meta, managed)
+
+    @staticmethod
+    def _stamp_steam_identity_fields(meta: ModMetadata) -> None:
+        """Ensure sidecar carries official Steam identity facts for entity bind."""
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+
+        wid = str(meta.published_file_id or "").strip()
+        if not wid.isdigit():
+            return
+        if not str(meta.source_type or "").strip():
+            meta.source_type = PLATFORM_STEAM
+        if not str(meta.url or "").strip():
+            meta.url = steam_workshop_url(wid)
+
+    def _persist_steam_sidecar_identity(self, managed: Path, meta: ModMetadata) -> None:
+        """Write Steam external_id / workspace_id into ``.info`` (ModMetadata lacks them)."""
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+        from services.file_ops import persist_unified_metadata_dict, read_info_metadata_dict
+
+        wid = str(meta.published_file_id or "").strip()
+        if not wid.isdigit():
+            return
+        data = dict(read_info_metadata_dict(managed) or {})
+        data["published_file_id"] = wid
+        data["source_type"] = PLATFORM_STEAM
+        data["platform"] = PLATFORM_STEAM
+        data["external_id"] = wid
+        data["workspace_id"] = wid
+        data["url"] = str(meta.url or steam_workshop_url(wid))
+        if meta.title:
+            data["title"] = meta.title
+        if meta.app_id:
+            data["app_id"] = int(meta.app_id)
+        if meta.game_name:
+            data["game_name"] = meta.game_name
+        persist_unified_metadata_dict(
+            managed, data, sync_backup=False, sync_reason="sync"
+        )
 
     def _network_enrich(
         self,
@@ -1017,13 +1444,7 @@ class ModSyncService:
             for folder in self.files.list_managed_mods():
                 meta = self.files.load_metadata(folder)
                 if meta is None:
-                    meta = ModMetadata(
-                        published_file_id=(
-                            folder.name if folder.name.isdigit() else ""
-                        ),
-                        title=folder.name,
-                        managed_path=str(folder),
-                    )
+                    continue
                 pub = str(meta.published_file_id or "")
                 if id_filter is not None and pub not in id_filter:
                     continue

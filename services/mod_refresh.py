@@ -13,12 +13,8 @@ from core.mod_platform import (
     normalize_platform,
     silent_correct_nexus_workspace_id,
 )
-from services.library_reconcile import _folder_has_metadata, _folder_missing_content
-from services.library_status import (
-    compute_content_status,
-    content_status_to_library_status,
-    row_content_status,
-)
+from services.library_reconcile import _folder_has_metadata
+from services.library_status import CONTENT_CONTENT_MISSING
 from services.metadata_ownership import (
     FIELD_COVER,
     FIELD_DESCRIPTION,
@@ -105,14 +101,15 @@ def reconcile_local_state(
 ) -> LocalReconcileResult:
     """
     Recompute folder/content/backup-related state from disk — no network I/O.
+
+    ARCHITECTURE RULE: Content Missing is persisted only via
+    ``services.content_status_eval.persist_evaluated_content_status``.
+    Do not reintroduce direct ``content_status=content_missing`` writes here
+    outside that evaluator.
     """
     from core.db_manager import get_db
-    from services.file_ops import (
-        apply_missing_content_marker,
-        clear_missing_content_if_present,
-    )
+    from services.content_status_eval import persist_evaluated_content_status
     from services.metadata_backup import mark_missing
-    from services.metadata_backup_sync import sync_after_metadata_change
 
     database = db if db is not None else get_db()
     mid = str(mod_id or "").strip()
@@ -136,16 +133,20 @@ def reconcile_local_state(
         mark_missing(mid)
         row = database.get_mod_backup_row(mid) or {}
         bstatus = str(row.get("backup_status") or "").strip()
-        cs = compute_content_status(folder_present=False, backup_status=bstatus)
+        cs = persist_evaluated_content_status(
+            mid,
+            None,
+            db=database,
+            folder_present=False,
+            backup_status=bstatus,
+            sync_sticky_marker=False,
+        )
         try:
-            database.update_mod_identity_fields(
-                mid,
-                content_status=cs,
-                library_status=content_status_to_library_status(cs),
-                folder_present=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("update folder_missing failed for %s: %s", mid, exc)
+            from services.mod_fs_observer import touch_observation_stamp
+
+            touch_observation_stamp(mid, db=database, managed_path=None)
+        except Exception:  # noqa: BLE001
+            logger.debug("fs observation stamp after missing failed for %s", mid)
         logger.info(
             "[refresh] mod_id=%s folder missing content_status=%s",
             mid,
@@ -162,13 +163,10 @@ def reconcile_local_state(
     meta_missing = not _folder_has_metadata(folder)
     row = database.get_mod_backup_row(mid) or {}
     backup_status = str(row.get("backup_status") or "").strip()
-    missing = _folder_missing_content(folder, mod_id=mid, db=database)
 
-    try:
-        if sync_after_metadata_change(mid, folder, "refresh"):
-            notes.append("backup_synced")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("backup sync during refresh failed for %s: %s", mid, exc)
+    # ARCHITECTURE RULE: local reconcile is path/content fact evaluation.
+    # It must not unconditionally mark_backup_dirty — only real metadata
+    # writes (provider refresh / user edit / import) may dirty backup.
 
     # Local archive / sidecar rescan (no remote providers)
     try:
@@ -185,43 +183,43 @@ def reconcile_local_state(
         logger.debug("local rescan failed for %s: %s", mid, exc)
 
     try:
-        from services.local_file_index import (
-            has_local_mod_payload,
-            reconcile_local_files,
-        )
+        from services.local_file_index import reconcile_local_files
 
         recon = reconcile_local_files(mid, managed_path=folder, db=database)
         if recon.updated:
             notes.append("archive_source_reconciled")
+            try:
+                from services.mod_fs_observer import note_mod_files_projection_touch
+
+                note_mod_files_projection_touch(mid)
+            except Exception:  # noqa: BLE001
+                pass
         if recon.replacement_candidates:
             notes.append(
                 f"archive_replacement_candidates={len(recon.replacement_candidates)}"
             )
-        missing = not has_local_mod_payload(folder, mod_id=mid, db=database)
-        if clear_missing_content_if_present(folder):
-            notes.append("cleared_stale_missing_flag")
-        elif apply_missing_content_marker(folder, sync_backup=False):
-            notes.append("marked_missing_content")
     except Exception as exc:  # noqa: BLE001 — local file errors must not block refresh
         logger.debug("local file reconcile failed for %s: %s", mid, exc)
         notes.append("local_file_reconcile_failed")
 
-    cs = compute_content_status(
+    # Sole legal writer of content_missing / healthy for present folders.
+    cs = persist_evaluated_content_status(
+        mid,
+        folder,
+        db=database,
         folder_present=True,
-        missing_content=missing,
-        metadata_missing=meta_missing,
         backup_status=backup_status,
+        metadata_missing=meta_missing,
+        sync_sticky_marker=True,
     )
+    missing = cs == CONTENT_CONTENT_MISSING
+
     try:
-        database.update_mod_identity_fields(
-            mid,
-            content_status=cs,
-            library_status=content_status_to_library_status(cs),
-            folder_present=True,
-            last_known_path=str(folder.resolve()),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("update local content_status failed for %s: %s", mid, exc)
+        from services.mod_fs_observer import touch_observation_stamp
+
+        touch_observation_stamp(mid, db=database, managed_path=folder)
+    except Exception:  # noqa: BLE001
+        logger.debug("fs observation stamp after reconcile failed for %s", mid)
 
     logger.info(
         "[refresh] mod_id=%s local reconcile done content_status=%s folder_present=1",
@@ -384,6 +382,12 @@ def refresh_mod(
             )
 
         database.set_official_metadata_synced(mid, False)
+        logger.error(
+            "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 title=— "
+            "stage=official_sync reason=%s exception=—",
+            mid,
+            provider_result.error or "official metadata sync failed",
+        )
         logger.warning(
             "[refresh] mod_id=%s official metadata sync failed; remains unsynced error=%s",
             mid,

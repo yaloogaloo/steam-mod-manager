@@ -77,9 +77,15 @@ class GithubImporter(ModImporter):
                 return ImportResult(
                     success=False, error="缺少 GitHub URL", platform=self.platform
                 )
-            local_key = suffix or folder.name
-            external_id = f"local/{local_key}"
-            name = (title or "").strip() or local_key
+            from services.importers.nexus import local_nexus_external_id
+            import uuid
+
+            if suffix:
+                external_id = local_nexus_external_id(suffix)
+                name = (title or "").strip() or suffix
+            else:
+                external_id = local_nexus_external_id(uuid.uuid4().hex)
+                name = (title or "").strip() or folder.name
             canonical = ""
         else:
             repo = self.parse_repo(url)

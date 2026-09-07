@@ -401,6 +401,11 @@ def test_resolve_steam_workshop_external_id_not_internal(
 ) -> None:
     from services.metadata_refresh import resolve_steam_workshop_external_id
 
+    # Without a mods row, Workshop digits must not be invented from the argument.
+    assert resolve_steam_workshop_external_id(db, STEAM_ID) == ""
+    assert resolve_steam_workshop_external_id(db, GHOST_ID) == ""
+
+    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="Legacy Steam"))
     assert resolve_steam_workshop_external_id(db, STEAM_ID) == STEAM_ID
     assert resolve_steam_workshop_external_id(db, GHOST_ID) == ""
 

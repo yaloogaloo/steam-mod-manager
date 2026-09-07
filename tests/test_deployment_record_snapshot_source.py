@@ -144,7 +144,7 @@ def test_save_record_includes_app_id_zero_under_game_folder(
 def test_create_or_update_accepts_explicit_library_mod_ids(
     db: DatabaseManager,
 ) -> None:
-    """UI may pass deployed ids from ``_card_entries`` directly."""
+    """UI may pass deployed ids from the Library entity layer (``_game_row_entries``)."""
     db.upsert_game(GameInfo(app_id=ANNO, name=GAME_FOLDER, folder_name=GAME_FOLDER))
     _mod(db, 2001, app_id=ANNO, deployed=True)
     _mod(db, 2002, app_id=0, deployed=True)

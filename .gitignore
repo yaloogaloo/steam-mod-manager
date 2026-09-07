@@ -7,6 +7,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.cache/
 
 # App runtime
 *.log
@@ -29,6 +33,30 @@ data/browser_profile/
 data/identity_repair_production_backup/
 data/identity_repair_quarantine/
 data/
+
+# Accidental repo-root sidecar / scratch DB
+.info/
+.tmp_ident.db
+.tmp_*
+_tmp_*
+*.db-wal
+*.db-shm
+
+# Identity / deploy audit outputs (regenerable; never commit)
+tools/_audit_out/
+tools/identity_recovery_rollback/
+tools/_tmp_*
+tools/_tmp_dup_*
+
+# One-off live snapshots under docs (keep formal .md)
+docs/_p0_*_live_snapshot.json
+docs/_phase_*_live_snapshot.json
+docs/p0_data_hygiene_inventory.json
+
+# Qt / PySide caches
+*.qmlc
+*.jsc
+*_rc.py.bak
 
 # OS / IDE
 .DS_Store

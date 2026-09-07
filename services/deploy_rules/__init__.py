@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from core.mod_platform import CIVILIZATION_VI_APP_IDS
 from services.deploy_rules.anno import ANNO_1800_APP_ID, Anno1800Strategy
 from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult
 from services.deploy_rules.custom import DEPLOY_TYPE_CUSTOM_PATH, CustomPathStrategy
@@ -35,6 +36,9 @@ from services.deploy_rules.duckov import (
     find_duckov_mod_root,
 )
 
+# Steam AppID — Civilization VI always uses generic folder_copy.
+CIVILIZATION_VI_APP_ID = next(iter(CIVILIZATION_VI_APP_IDS))
+
 DEPLOY_TYPE_FOLDER_COPY = FolderCopyStrategy.deploy_type
 DEPLOY_TYPE_PALWORLD_PAK = PalworldStrategy.deploy_type
 DEPLOY_TYPE_ANNO_1800 = Anno1800Strategy.deploy_type
@@ -67,6 +71,7 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
     Anno 1800 (916440) always deploys into ``<install>/mods/``.
     Slay the Spire (646570) always uses jar → mods/ (+ ModTheSpire root).
     Stardew Valley (413150) always uses SMAPI ``manifest.json`` → Mods/.
+    Civilization VI (289070) always uses generic ``folder_copy``.
     Other games keep configured type.
     """
     try:
@@ -83,6 +88,8 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
         return DEPLOY_TYPE_STARDEW_VALLEY
     if aid == DUCKOV_APP_ID:
         return DEPLOY_TYPE_DUCKOV
+    if aid == CIVILIZATION_VI_APP_ID:
+        return DEPLOY_TYPE_FOLDER_COPY
     key = (deploy_type or DEPLOY_TYPE_FOLDER_COPY).strip() or DEPLOY_TYPE_FOLDER_COPY
     return key
 
@@ -119,6 +126,7 @@ def supported_deploy_types() -> tuple[str, ...]:
 
 __all__ = [
     "ANNO_1800_APP_ID",
+    "CIVILIZATION_VI_APP_ID",
     "DEPLOY_TYPE_ANNO_1800",
     "DEPLOY_TYPE_CUSTOM_PATH",
     "DEPLOY_TYPE_FOLDER_COPY",

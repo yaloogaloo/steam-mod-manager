@@ -219,12 +219,16 @@ def _run_worker(
     root_logger.setLevel(prev_level)
 
     result = holder["result"]
+    if result is None and isinstance(holder.get("failed"), dict):
+        # Failure terminal is deploy_failed-only (no dual deploy_finished).
+        result = holder["failed"]
     if result is None:
+        failed = holder.get("failed")
         result = {
             "success": False,
             "status": "FAILED",
             "mod_id": mod_id,
-            "error": "smoke: no terminal DeployWorker result",
+            "error": str(failed or "smoke: no terminal DeployWorker result"),
             "error_code": "smoke_no_result",
         }
     return result, list(capture.lines)

@@ -53,12 +53,40 @@ class OtherImporter(ModImporter):
                 error="Mod目录不存在",
                 platform=self.platform,
             )
+        try:
+            from services.mod_path_validation import (
+                InvalidModRootError,
+                validate_import_source_root,
+            )
+
+            validate_import_source_root(folder, library_root=library_root or None)
+        except InvalidModRootError as exc:
+            return ImportResult(
+                success=False,
+                error=str(exc),
+                platform=self.platform,
+            )
 
         url = str(source_url or "").strip()
         suffix = str(_kwargs.get("external_id_suffix") or "").strip()
-        local_key = suffix or folder.name
-        external_id = f"local/{local_key}"
-        name = (title or "").strip() or local_key
+        explicit = str(_kwargs.get("external_id") or "").strip()
+        if explicit.startswith("local/"):
+            external_id = explicit
+            local_key = explicit.removeprefix("local/")
+        elif suffix:
+            from services.importers.nexus import local_nexus_external_id
+
+            local_key = suffix
+            external_id = local_nexus_external_id(local_key)
+        else:
+            import uuid
+
+            from services.importers.nexus import local_nexus_external_id
+
+            # Import-time mint only — never derive external_id from path/folder.
+            local_key = uuid.uuid4().hex
+            external_id = local_nexus_external_id(local_key)
+        name = (title or "").strip() or Path(folder).name or local_key
 
         db = self._database()
         from services.importers.duplicate_check import check_import_duplicate

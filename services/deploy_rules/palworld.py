@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult, is_rel_path_allowed
+from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult, is_rel_path_allowed, inert_strategy_deploy
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestFileEntry,
@@ -37,11 +36,6 @@ ENTRY_TYPE_FOLDER = "folder_copy"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _copy_file(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
 
 
 def _iter_pak_files(directory: Path) -> list[Path]:
@@ -271,130 +265,9 @@ class PalworldStrategy(DeployStrategy):
             files=tagged,
         )
 
-    def _copy_entries(
-        self, entries: list[ManifestFileEntry]
-    ) -> StrategyResult | list[ManifestFileEntry]:
-        out: list[ManifestFileEntry] = []
-        for entry in entries:
-            src = Path(entry.source)
-            dst = Path(entry.target)
-            try:
-                _copy_file(src, dst)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False,
-                        error=f"Permission denied：{src} → {dst}（{exc}）",
-                        deploy_type=self.deploy_type,
-                    )
-                return StrategyResult(
-                    success=False,
-                    error=f"复制失败：{src} → {dst}（{exc}）",
-                    deploy_type=self.deploy_type,
-                )
-            out.append(
-                ManifestFileEntry(
-                    source=str(src.resolve()),
-                    target=str(dst.resolve()),
-                    type=entry.type,
-                )
-            )
-        return out
-
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        source = ctx.source.resolve()
-        has_paks = self._has_pak_sources(source, ctx)
-
-        if not has_paks:
-            # Step 3 — fallback to generic folder_copy (do not fail for missing pak)
-            result = self._folder.deploy(ctx)
-            if not result.success:
-                return StrategyResult(
-                    success=False,
-                    error=result.error,
-                    deploy_type=self.deploy_type,
-                )
-            when = result.deploy_time or _utc_now()
-            tagged = [
-                ManifestFileEntry(
-                    source=e.source, target=e.target, type=ENTRY_TYPE_FOLDER
-                )
-                for e in result.files
-            ]
-            manifest = DeployManifest(
-                mod_id=ctx.mod_id,
-                deploy_time=when,
-                deploy_type=self.deploy_type,
-                files=tagged,
-            )
-            return StrategyResult(
-                success=True,
-                target=result.target,
-                copied_files=len(tagged),
-                deploy_type=self.deploy_type,
-                deploy_time=when,
-                files=tagged,
-                manifest=manifest,
-            )
-
-        # Steps 1–2: pak rules
-        paks = self._paks_root(ctx)
-        if isinstance(paks, StrategyResult):
-            return paks
-        try:
-            (paks / TILDE_MODS).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return StrategyResult(
-                success=False,
-                error=f"无法创建 ~mods 目录：{paks / TILDE_MODS}（{exc}）",
-                deploy_type=self.deploy_type,
-            )
-
-        entries = self._collect_pak_entries(ctx, paks)
-
-        # Case D: also folder_copy remaining when mod_path is set
-        if str(ctx.config.mod_path or "").strip():
-            folder_plan = self._folder_entries_excluding_paks(ctx)
-            if not folder_plan.success:
-                return StrategyResult(
-                    success=False,
-                    error=folder_plan.error,
-                    deploy_type=self.deploy_type,
-                )
-            if folder_plan.files:
-                # Ensure mod_path exists via folder strategy mkdir path
-                mod_path = Path(str(ctx.config.mod_path).strip()).expanduser()
-                try:
-                    mod_path.mkdir(parents=True, exist_ok=True)
-                except OSError as exc:
-                    return StrategyResult(
-                        success=False,
-                        error=f"无法创建 Mod 部署目录：{mod_path}（{exc}）",
-                        deploy_type=self.deploy_type,
-                    )
-                entries.extend(folder_plan.files)
-
-        copied = self._copy_entries(entries)
-        if isinstance(copied, StrategyResult):
-            return copied
-
-        when = _utc_now()
-        manifest = DeployManifest(
-            mod_id=ctx.mod_id,
-            deploy_time=when,
-            deploy_type=self.deploy_type,
-            files=copied,
-        )
-        return StrategyResult(
-            success=True,
-            target=str(paks.resolve()),
-            copied_files=len(copied),
-            deploy_type=self.deploy_type,
-            deploy_time=when,
-            files=copied,
-            manifest=manifest,
-        )
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

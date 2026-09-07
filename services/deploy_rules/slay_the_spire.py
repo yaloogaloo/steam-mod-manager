@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,6 +13,7 @@ from services.deploy_rules.base import (
     DeployStrategy,
     StrategyResult,
     is_rel_path_allowed,
+    inert_strategy_deploy,
 )
 from services.deploy_rules.manifest import (
     DeployManifest,
@@ -67,7 +67,7 @@ def _is_prerequisite_mod(ctx: DeployContext, meta: Mapping[str, Any] | None) -> 
     data = dict(meta or {})
     for candidate in (
         getattr(ctx, "workspace_id", "") or "",
-        ctx.mod_id,
+        ctx.internal_id,
         data.get("workspace_id"),
         data.get("published_file_id"),
     ):
@@ -120,11 +120,6 @@ def _iter_source_files(
             continue
         files.append(path)
     return files
-
-
-def _copy_file(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
 
 
 class SlayTheSpireStrategy(DeployStrategy):
@@ -193,84 +188,8 @@ class SlayTheSpireStrategy(DeployStrategy):
         )
 
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        planned = self.plan(ctx)
-        if not planned.success:
-            return planned
-
-        root = _install_root(ctx)
-        if isinstance(root, StrategyResult):
-            return root
-
-        meta = self._meta(ctx)
-        is_prereq = _is_prerequisite_mod(ctx, meta)
-        if not is_prereq:
-            mods_dir = root / MODS_DIR_NAME
-            try:
-                os.makedirs(mods_dir, exist_ok=True)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False,
-                        error=f"Permission denied：无法创建 mods 目录（{exc}）",
-                        deploy_type=self.deploy_type,
-                    )
-                return StrategyResult(
-                    success=False,
-                    error=f"无法创建 mods 目录：{mods_dir}（{exc}）",
-                    deploy_type=self.deploy_type,
-                )
-
-        copied: list[ManifestFileEntry] = []
-        for entry in planned.files:
-            src = Path(entry.source)
-            dst = Path(entry.target)
-            try:
-                _copy_file(src, dst)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False,
-                        error=f"Permission denied：{src} → {dst}（{exc}）",
-                        deploy_type=self.deploy_type,
-                    )
-                return StrategyResult(
-                    success=False,
-                    error=f"复制失败：{src} → {dst}（{exc}）",
-                    deploy_type=self.deploy_type,
-                )
-            copied.append(
-                ManifestFileEntry(
-                    source=str(src.resolve()),
-                    target=str(dst.resolve()),
-                    type=entry.type,
-                )
-            )
-
-        when = _utc_now()
-        manifest = DeployManifest(
-            mod_id=ctx.mod_id,
-            deploy_time=when,
-            deploy_type=self.deploy_type,
-            files=copied,
-        )
-        logger.info(
-            "[DEPLOY] slay_the_spire mod_id=%s prereq=%s files=%s target=%s",
-            ctx.mod_id,
-            is_prereq,
-            len(copied),
-            planned.target,
-        )
-        return StrategyResult(
-            success=True,
-            target=planned.target,
-            copied_files=len(copied),
-            deploy_type=self.deploy_type,
-            deploy_time=when,
-            files=copied,
-            manifest=manifest,
-        )
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

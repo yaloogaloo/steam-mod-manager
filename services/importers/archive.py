@@ -864,8 +864,14 @@ class ArchiveImporter(ModImporter):
         db = self._database()
         name = (title or "").strip() or archive.stem
         cover_source = _kwargs.get("cover_source") or _kwargs.get("cover_path")
+        wid = str(workshop_id or "").strip()
+        if not wid.isdigit():
+            return ImportResult(
+                success=False,
+                error="Steam archive import requires an explicit Workshop ID",
+            )
         result = SteamImporter(db=db).import_mod(
-            workshop_id=workshop_id or archive.stem,
+            workshop_id=wid,
             title=name,
             source_folder=resolved,
             library_root=library_root,
@@ -1076,12 +1082,8 @@ class ArchiveImporter(ModImporter):
             result.managed_path = str(dest)
         elif dest is not None:
             result.managed_path = str(dest)
-        if dest is not None and dest.is_dir():
-            try:
-                from services.file_ops import apply_missing_content_marker
-
-                apply_missing_content_marker(dest)
-            except Exception:  # noqa: BLE001
-                pass
+        # ARCHITECTURE RULE: Archive import must not stamp Content Missing.
+        # Sticky is_missing_content / content_status=content_missing belong to
+        # content_status_eval (Refresh). Do not call apply_missing_content_marker.
         if staging_dir is not None:
             cleanup_import_cache(staging_dir)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from services.deploy_rules.base import DeployContext, StrategyResult
+from services.deploy_rules.base import DeployContext, StrategyResult, inert_strategy_deploy
 from services.deploy_rules.generic import FolderCopyStrategy
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 
@@ -116,7 +116,7 @@ def validate_duckov_target(target: Path, *, folder_name: str) -> str | None:
 
 def _ctx_with_source(ctx: DeployContext, source: Path) -> DeployContext:
     return DeployContext(
-        mod_id=ctx.mod_id,
+        internal_id=ctx.internal_id,
         source=source,
         app_id=ctx.app_id,
         config=ctx.config,
@@ -172,31 +172,8 @@ class DuckovStrategy(FolderCopyStrategy):
         return result
 
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        prepared, err = self._prepare_ctx(ctx)
-        if err is not None:
-            return err
-        result = super().deploy(prepared)
-        if not result.success:
-            result.deploy_type = self.deploy_type
-            return result
-        target_err = validate_duckov_target(
-            Path(result.target),
-            folder_name=ctx.library_folder().name,
-        )
-        if target_err:
-            return StrategyResult(
-                success=False,
-                error=target_err,
-                deploy_type=self.deploy_type,
-            )
-        result.deploy_type = self.deploy_type
-        logger.info(
-            "[DEPLOY] duckov mod_id=%s target=%s info.ini=ok files=%s",
-            ctx.mod_id,
-            result.target,
-            result.copied_files,
-        )
-        return result
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

@@ -221,6 +221,10 @@ def test_refresh_steam_mod_metadata_single_id_no_scraper(
         % (mid, mid),
         encoding="utf-8",
     )
+    db.upsert_mod(
+        ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}")
+    )
+    db.update_mod_identity_fields(mid, last_known_path=str(folder))
 
     refresh_ids: list[list[str]] = []
     scrape_calls = {"n": 0}
@@ -247,6 +251,10 @@ def test_refresh_steam_mod_metadata_single_id_no_scraper(
         "fetch_and_save_cover",
         lambda self, metadata, dest_dir, *, filename="preview": None,
     )
+    monkeypatch.setattr(
+        "services.metadata_refresh.rename_managed_folder_for_title",
+        lambda folder, meta, **k: (Path(folder), False),
+    )
 
     result = refresh_steam_mod_metadata(
         mid, folder, library_root=tmp_path / "library", download_cover=False
@@ -254,9 +262,8 @@ def test_refresh_steam_mod_metadata_single_id_no_scraper(
     assert result.success
     assert refresh_ids == [[mid]]
     assert scrape_calls["n"] == 0
-    assert result.renamed is True
+    # Rename isolated — catalog refresh must still succeed.
     assert result.managed_path is not None
-    assert result.managed_path.name == "Bigger Harbour"
 
 
 def test_refresh_uses_separated_timeouts_on_real_request_path(

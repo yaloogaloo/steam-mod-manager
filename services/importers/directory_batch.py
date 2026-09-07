@@ -95,9 +95,16 @@ def discover_mod_directories(selected: str | Path) -> list[Path]:
     - No child dirs → ``[selected]`` (single Mod).
     - Parent looks like a multi-Mod container → each immediate child dir is a Mod.
     - Otherwise → ``[selected]`` (single Mod with internal structure).
+
+    Application / library / data roots are rejected (Path Lifecycle gate).
     """
     root = Path(selected).expanduser()
     if not root.is_dir():
+        return []
+
+    from services.mod_path_validation import is_forbidden_mod_root
+
+    if is_forbidden_mod_root(root):
         return []
 
     children = _child_dirs(root)
@@ -115,7 +122,7 @@ def discover_mod_directories(selected: str | Path) -> list[Path]:
 
     # Multiple sibling folders, or a container with only sidecar files at top.
     if len(children) >= 2 or _only_sidecar_top_files(root):
-        return children
+        return [c for c in children if not is_forbidden_mod_root(c)]
 
     return [root]
 

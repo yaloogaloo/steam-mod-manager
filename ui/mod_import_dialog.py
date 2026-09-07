@@ -114,6 +114,13 @@ class ModImportDialog(QDialog):
 
     Supports local folder or zip/7z/rar. Heavy work runs on :class:`ImportWorker`.
     Source radios come from :func:`get_available_sources` (mod.io for Anno / BG3).
+
+    ARCHITECTURE RULE
+    -----------------
+    Import Mod once produced orphan semi-transparent Qt floating windows when
+    platform radios called ``setVisible`` while still parentless (layout not yet
+    on this dialog). Never bypass window ownership — parent controls / attach
+    layouts before any visibility change. See ``ui.window_lifecycle``.
     """
 
     imported = Signal(object)  # ImportResult
@@ -125,7 +132,12 @@ class ModImportDialog(QDialog):
         *,
         game_context: dict | None = None,
     ) -> None:
-        super().__init__(parent)
+        # ARCHITECTURE RULE: dialog must have an explicit parent (no orphan floats).
+        from ui.window_lifecycle import register_toplevel, require_dialog_parent
+
+        owner = require_dialog_parent(parent, what="ModImportDialog")
+        super().__init__(owner)
+        register_toplevel(self)
         self.library_root = Path(library_root)
         self._result: ImportResult | None = None
         self._worker: ImportWorker | None = None
@@ -149,9 +161,9 @@ class ModImportDialog(QDialog):
         self._main_layout = root
 
         context_row = QHBoxLayout()
-        context_caption = QLabel("目标游戏：")
+        context_caption = QLabel("目标游戏：", self)
         context_caption.setObjectName("subtitleLabel")
-        self.game_context_label = QLabel(self.game_name or "—")
+        self.game_context_label = QLabel(self.game_name or "—", self)
         self.game_context_label.setObjectName("detailPanelTitle")
         self.game_context_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -164,18 +176,23 @@ class ModImportDialog(QDialog):
             "从来源平台登记 Mod（选项随当前游戏变化）。\n"
             "Nexus / GitHub / mod.io / 其它 将导入到上方目标游戏（不自动推断游戏）。\n"
             "可选择本机文件夹，或直接导入 zip / 7z / rar 压缩包。\n"
-            "「其它」无需源链接或离线页面；Nexus / GitHub 支持一次多选多个压缩包。"
+            "「其它」无需源链接或离线页面；Nexus / GitHub 支持一次多选多个压缩包。",
+            self,
         )
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
+        # Attach platform row + stack to this dialog BEFORE any setVisible /
+        # setChecked — free QHBoxLayout does not reparent until on a widget.
         plat_row = QHBoxLayout()
+        root.addLayout(plat_row)
         self._plat_group = QButtonGroup(self)
-        self.stack = QStackedWidget()
+        self.stack = QStackedWidget(self)
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
+        root.addWidget(self.stack)
         page_builders = {
             PLATFORM_STEAM: self._build_steam_page,
             PLATFORM_NEXUS: self._build_nexus_page,
@@ -185,7 +202,8 @@ class ModImportDialog(QDialog):
         }
         sources = get_available_sources(self.game_name, self.game_id)
         for plat_id, label in sources:
-            radio = QRadioButton(label)
+            # Parent to self first — never show a parentless QRadioButton.
+            radio = QRadioButton(label, self)
             self._plat_group.addButton(radio)
             plat_row.addWidget(radio)
             self._platform_radios[plat_id] = radio
@@ -195,6 +213,7 @@ class ModImportDialog(QDialog):
             idx = self.stack.addWidget(builder())
             self._platform_stack_index[plat_id] = idx
             radio.toggled.connect(self._on_platform_toggled)
+        plat_row.addStretch(1)
         if self._platform_radios:
             next(iter(self._platform_radios.values())).setChecked(True)
         self._apply_game_platform_rules()
@@ -204,20 +223,18 @@ class ModImportDialog(QDialog):
         self.radio_github = self._platform_radios.get(PLATFORM_GITHUB)
         self.radio_modio = self._platform_radios.get(PLATFORM_MODIO)
         self.radio_other = self._platform_radios.get(PLATFORM_OTHER)
-        plat_row.addStretch(1)
-        root.addLayout(plat_row)
-        root.addWidget(self.stack)
 
         root.addWidget(self._build_cover_row())
         root.addWidget(self._build_offline_html_row())
 
-        self.status_label = QLabel("")
+        self.status_label = QLabel("", self)
         self.status_label.setObjectName("subtitleLabel")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
         buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
         )
         self._ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
         self._ok_btn.setText("导入")
@@ -325,7 +342,7 @@ class ModImportDialog(QDialog):
         self.adjustSize()
 
     def _build_steam_page(self) -> QWidget:
-        page = QWidget()
+        page = QWidget(self.stack)
         form = QFormLayout(page)
         form.setSpacing(10)
         self.steam_id_edit = QLineEdit()
@@ -351,11 +368,11 @@ class ModImportDialog(QDialog):
         folder_radio: str,
         archive_radio: str,
     ) -> tuple[QWidget, QRadioButton, QRadioButton]:
-        wrap = QWidget()
+        wrap = QWidget(self)
         row = QHBoxLayout(wrap)
         row.setContentsMargins(0, 0, 0, 0)
-        r_folder = QRadioButton(folder_radio)
-        r_archive = QRadioButton(archive_radio)
+        r_folder = QRadioButton(folder_radio, wrap)
+        r_archive = QRadioButton(archive_radio, wrap)
         r_folder.setChecked(True)
         grp = QButtonGroup(wrap)
         grp.addButton(r_folder)
@@ -372,12 +389,12 @@ class ModImportDialog(QDialog):
         browse_slot,
     ) -> QWidget:
         """LineEdit + browse button wrapped so the whole form row can hide."""
-        wrap = QWidget()
+        wrap = QWidget(self)
         row = QHBoxLayout(wrap)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         row.addWidget(edit, stretch=1)
-        browse = QPushButton("浏览…")
+        browse = QPushButton("浏览…", wrap)
         browse.setObjectName("browseButton")
         browse.clicked.connect(browse_slot)
         row.addWidget(browse)
@@ -412,7 +429,7 @@ class ModImportDialog(QDialog):
         self._relayout_dialog()
 
     def _build_nexus_page(self) -> QWidget:
-        page = QWidget()
+        page = QWidget(self.stack)
         form = QFormLayout(page)
         form.setSpacing(10)
         self.nexus_url_edit = QLineEdit()
@@ -455,7 +472,7 @@ class ModImportDialog(QDialog):
         return page
 
     def _build_github_page(self) -> QWidget:
-        page = QWidget()
+        page = QWidget(self.stack)
         form = QFormLayout(page)
         form.setSpacing(10)
         self.github_url_edit = QLineEdit()
@@ -496,7 +513,7 @@ class ModImportDialog(QDialog):
         return page
 
     def _build_modio_page(self) -> QWidget:
-        page = QWidget()
+        page = QWidget(self.stack)
         form = QFormLayout(page)
         form.setSpacing(10)
         self.modio_url_edit = QLineEdit()
@@ -537,7 +554,7 @@ class ModImportDialog(QDialog):
         return page
 
     def _build_other_page(self) -> QWidget:
-        page = QWidget()
+        page = QWidget(self.stack)
         form = QFormLayout(page)
         form.setSpacing(10)
         self.other_url_edit = QLineEdit()
@@ -612,16 +629,16 @@ class ModImportDialog(QDialog):
         )
 
     def _build_cover_row(self) -> QWidget:
-        wrap = QWidget()
+        wrap = QWidget(self)
         form = QFormLayout(wrap)
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
-        self.cover_status_label = QLabel("未选择")
+        self.cover_status_label = QLabel("未选择", wrap)
         self.cover_status_label.setObjectName("subtitleLabel")
-        pick = QPushButton("选择图片")
+        pick = QPushButton("选择图片", wrap)
         pick.setObjectName("browseButton")
         pick.clicked.connect(self._browse_cover)
-        clear = QPushButton("清除")
+        clear = QPushButton("清除", wrap)
         clear.setObjectName("browseButton")
         clear.clicked.connect(self._clear_cover)
         row = QHBoxLayout()
@@ -629,24 +646,25 @@ class ModImportDialog(QDialog):
         row.addWidget(pick)
         row.addWidget(clear)
         form.addRow("展示图片（可选）", row)
-        hint = QLabel("支持 png / jpg / jpeg / jfif / webp。跳过则使用默认占位图。")
+        hint = QLabel("支持 png / jpg / jpeg / jfif / webp。跳过则使用默认占位图。", wrap)
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
         form.addRow("", hint)
         return wrap
 
     def _build_offline_html_row(self) -> QWidget:
-        wrap = QWidget()
+        # Parent to dialog before hide — never setVisible on a parentless wrap.
+        wrap = QWidget(self)
         self.offline_html_row = wrap
         form = QFormLayout(wrap)
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
-        self.offline_html_status = _ElidingFileLabel("未选择")
+        self.offline_html_status = _ElidingFileLabel("未选择", wrap)
         self.offline_html_status.setObjectName("subtitleLabel")
-        pick = QPushButton("选择HTML页面")
+        pick = QPushButton("选择HTML页面", wrap)
         pick.setObjectName("browseButton")
         pick.clicked.connect(self._browse_offline_html)
-        clear = QPushButton("清除")
+        clear = QPushButton("清除", wrap)
         clear.setObjectName("browseButton")
         clear.clicked.connect(self._clear_offline_html)
         row = QHBoxLayout()
@@ -655,7 +673,7 @@ class ModImportDialog(QDialog):
         row.addWidget(pick)
         row.addWidget(clear)
         form.addRow("离线页面（可选）", row)
-        self.offline_clean_check = QCheckBox("优化离线页面布局（推荐）")
+        self.offline_clean_check = QCheckBox("优化离线页面布局（推荐）", wrap)
         self.offline_clean_check.setChecked(True)
         self.offline_clean_check.setToolTip(
             "对浏览器保存的 MHTML 清洗广告/登录壳与大面积空白，保留 Mod 核心阅读区。"
@@ -664,13 +682,14 @@ class ModImportDialog(QDialog):
         form.addRow("", self.offline_clean_check)
         hint = QLabel(
             "请使用浏览器保存 Nexus 页面后导入。\n"
-            "支持 .html / .htm / .mhtml / .mht。跳过则导入后 offline_status=none。"
+            "支持 .html / .htm / .mhtml / .mht。跳过则导入后 offline_status=none。",
+            wrap,
         )
         hint.setObjectName("subtitleLabel")
         hint.setWordWrap(True)
         form.addRow("", hint)
         wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        wrap.setVisible(False)
+        wrap.hide()
         return wrap
 
     def _set_offline_html_path(self, path: str) -> None:

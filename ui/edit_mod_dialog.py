@@ -47,6 +47,9 @@ class EditModDialog(QDialog):
 
     When ``mod_ids`` has more than one entry, only the source platform combo
     stays editable — name / description / URL are disabled and ignored on save.
+
+    ARCHITECTURE RULE: callers must pass an explicit parent. Import Mod once
+    spawned orphan Qt floats from parentless visibility — see ui.window_lifecycle.
     """
 
     def __init__(
@@ -67,7 +70,11 @@ class EditModDialog(QDialog):
         custom_deploy_path: str = "",
         game_version: str = "",
     ) -> None:
+        from ui.window_lifecycle import register_toplevel
+
         super().__init__(parent)
+        if parent is not None:
+            register_toplevel(self)
         self._game_name = str(game_name or "").strip()
         self._game_id = int(game_id or 0)
         install = str(game_install_path or game_root or "").strip()
@@ -86,7 +93,7 @@ class EditModDialog(QDialog):
 
         # Prefer live mod→game→install_path resolution over a stale caller string.
         resolved = resolve_game_install_path(
-            mod_id=(self._mod_ids[0] if self._mod_ids else ""),
+            internal_id=(self._mod_ids[0] if self._mod_ids else ""),
             app_id=self._game_id,
         )
         if resolved:
@@ -284,7 +291,7 @@ class EditModDialog(QDialog):
         Falls back to the constructor-injected path only when the game is unknown.
         """
         mid = self._mod_ids[0] if self._mod_ids else ""
-        resolved = resolve_game_install_path(mod_id=mid, app_id=self._game_id)
+        resolved = resolve_game_install_path(internal_id=mid, app_id=self._game_id)
         if resolved:
             return resolved
         return str(self._game_install_path or "").strip()

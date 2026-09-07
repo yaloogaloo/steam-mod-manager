@@ -558,6 +558,12 @@ def refresh_modio_mod_metadata(
         cover_err = ""
         cover_rel = ""
 
+        from services.file_ops import read_info_metadata_dict
+        from services.metadata_backup_sync import metadata_fingerprint
+
+        # Capture before any provider write — compare after to gate backup dirty.
+        pre_refresh_fp = metadata_fingerprint(read_info_metadata_dict(folder) or {})
+
         # Rename first (atomic or content-move fallback). Identity fields are
         # written on the *final* path so every rename method shares one success path.
         prepare_managed_folder_for_rename(folder)
@@ -733,9 +739,17 @@ def refresh_modio_mod_metadata(
             new_path,
         )
         try:
-            from services.metadata_backup_sync import sync_after_metadata_change
+            from services.file_ops import read_info_metadata_dict
+            from services.metadata_backup_sync import (
+                metadata_fingerprint,
+                sync_after_metadata_change,
+            )
 
-            sync_after_metadata_change(mid, new_path, "refresh")
+            # ARCHITECTURE RULE: Refresh dirties backup only when metadata
+            # actually changed. Identical provider payload → no enqueue.
+            new_fp = metadata_fingerprint(read_info_metadata_dict(new_path) or {})
+            if new_fp != pre_refresh_fp:
+                sync_after_metadata_change(mid, new_path, "refresh")
         except Exception:  # noqa: BLE001
             pass
         return MetadataRefreshResult(

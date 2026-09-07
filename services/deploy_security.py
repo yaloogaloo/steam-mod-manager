@@ -228,6 +228,7 @@ def validate_entry_for_save(
     validate_manifest_targets(
         DeployManifest(
             mod_id="_",
+            internal_id="_",
             deploy_time="",
             deploy_type="",
             files=[entry],
@@ -241,6 +242,7 @@ def validate_entry_for_save(
         validate_manifest_sources(
             DeployManifest(
                 mod_id="_",
+                internal_id="_",
                 deploy_time="",
                 deploy_type="",
                 files=[entry],
@@ -264,20 +266,23 @@ def validate_manifest_for_save(
     *,
     managed: Path,
     ctx: DeployContext,
+    planned_targets: Iterable[str | Path] | None = None,
 ) -> None:
-    """Full manifest validation before ``save_manifest``."""
-    validate_manifest_mod_id(manifest, ctx.mod_id)
+    """Full manifest validation before ``save_manifest``.
+
+    ``planned_targets`` must come from the current ``strategy.plan()``, never
+    from ``manifest.files`` (that would let a manifest approve itself).
+    """
+    validate_manifest_mod_id(manifest, ctx.internal_id)
     roots = collect_allowed_target_roots(ctx)
     workspace = [
         _resolve(ctx.library_folder()),
         _resolve(ctx.content_root()),
     ]
-    # Targets already produced by the active strategy for this deploy are
-    # accepted when they match the entry list (absolute / no ``..`` still enforced).
     validate_manifest_targets(
         manifest,
         allowed_roots=roots,
-        planned_targets=[e.target for e in manifest.files],
+        planned_targets=planned_targets,
     )
     for entry in manifest.files:
         validate_entry_for_save(
@@ -296,6 +301,7 @@ def validate_planned_sources(
     """Refuse plan/deploy when any source escapes the mod workspace."""
     probe = DeployManifest(
         mod_id="_",
+        internal_id="_",
         deploy_time="",
         deploy_type="",
         files=list(entries),

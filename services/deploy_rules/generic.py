@@ -7,7 +7,13 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult, is_rel_path_allowed
+from services.deploy_rules.base import (
+    DeployContext,
+    DeployStrategy,
+    StrategyResult,
+    inert_strategy_deploy,
+    is_rel_path_allowed,
+)
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestFileEntry,
@@ -19,6 +25,35 @@ from services.importers.local_scanner import is_skipped_mod_path_part
 logger = logging.getLogger(__name__)
 
 _IGNORE_DIR_NAMES = frozenset({INFO_DIR_NAME, LEGACY_INFO_DIR_NAME, "历史版本"})
+
+# CJK Unified Ideographs — Civ VI deploy-folder rule only (not a global path validator).
+_CJK_HAN_START = "\u4e00"
+_CJK_HAN_END = "\u9fff"
+
+
+def contains_chinese(text: str) -> bool:
+    """True when *text* contains at least one CJK Unified Ideograph (汉字)."""
+    return any(_CJK_HAN_START <= ch <= _CJK_HAN_END for ch in str(text or ""))
+
+
+def _civ6_deploy_folder_name(ctx: DeployContext) -> str:
+    """
+    Civ VI only: Chinese library folder names cannot activate in-game.
+
+    Map deploy target folder to ``workspace_id`` only. Never use
+    ``ctx.internal_id`` here — in DeployContext that field holds the SQLite
+    ``mods.mod_id`` PK, which must not become the on-disk deploy folder name.
+    Never rename the library source folder.
+    """
+    folder_name = ctx.library_folder().name
+    from core.mod_platform import is_civilization_vi_game
+
+    if not is_civilization_vi_game(game_id=ctx.app_id):
+        return folder_name
+    if not contains_chinese(folder_name):
+        return folder_name
+    wid = str(ctx.workspace_id or "").strip()
+    return wid if wid else folder_name
 
 
 def _deploy_ignore(directory: str, names: list[str]) -> set[str]:
@@ -65,7 +100,7 @@ class FolderCopyStrategy(DeployStrategy):
             return StrategyResult(success=False, error="请先配置游戏部署目录")
 
         mod_path = Path(mod_path_raw).expanduser()
-        folder_name = ctx.library_folder().name
+        folder_name = _civ6_deploy_folder_name(ctx)
         target = (mod_path / folder_name).resolve()
         source = ctx.content_root().resolve()
 
@@ -101,116 +136,8 @@ class FolderCopyStrategy(DeployStrategy):
         )
 
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        planned = self.plan(ctx)
-        if not planned.success:
-            return planned
-
-        mod_path = Path(str(ctx.config.mod_path).strip()).expanduser()
-        try:
-            mod_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            err = str(exc).lower()
-            if "permission" in err or "denied" in err or "拒绝" in str(exc):
-                msg = f"Permission denied：无法创建 Mod 部署目录（{exc}）"
-            else:
-                msg = f"无法创建 Mod 部署目录：{mod_path}（{exc}）"
-            return StrategyResult(success=False, error=msg)
-
-        target = Path(planned.target)
-        source = ctx.content_root().resolve()
-
-        # Legacy: full tree copy when no mod_files allow-list.
-        # Multi-file Mods: copy only enabled entries.
-        if ctx.allowed_rel_paths is None:
-            try:
-                shutil.copytree(
-                    source,
-                    target,
-                    dirs_exist_ok=True,
-                    ignore=_deploy_ignore,
-                )
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False, error=f"Permission denied：{exc}"
-                    )
-                return StrategyResult(success=False, error=f"复制失败：{exc}")
-        else:
-            from services.deploy_file_ops_log import (
-                log_deploy_file_failed,
-                log_deploy_file_start,
-                log_deploy_file_success,
-            )
-
-            for entry in planned.files:
-                src = Path(entry.source)
-                dst = Path(entry.target)
-                log_deploy_file_start(source=src, target=dst, mode="copy")
-                try:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-                except OSError as exc:
-                    err = str(exc).lower()
-                    log_deploy_file_failed(
-                        source=src,
-                        target=dst,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
-                    )
-                    if "permission" in err or "denied" in err:
-                        return StrategyResult(
-                            success=False, error=f"Permission denied：{exc}"
-                        )
-                    return StrategyResult(success=False, error=f"复制失败：{exc}")
-                try:
-                    nbytes = int(dst.stat().st_size)
-                except OSError:
-                    nbytes = 0
-                log_deploy_file_success(source=src, target=dst, bytes_written=nbytes)
-
-        for banned in _IGNORE_DIR_NAMES:
-            if (target / banned).exists():
-                return StrategyResult(
-                    success=False,
-                    error=f"部署异常：目标不应包含 {banned}",
-                )
-
-        when = _utc_now()
-        # Reuse plan manifest — do not rescan the source tree after copy.
-        if planned.files:
-            entries = list(planned.files)
-        else:
-            manifest_files = _iter_deployable_files(
-                source, allowed_rel_paths=ctx.allowed_rel_paths
-            )
-            entries = [
-                ManifestFileEntry(
-                    source=str(src_file),
-                    target=str((target / src_file.relative_to(source)).resolve()),
-                )
-                for src_file in manifest_files
-            ]
-        if not entries:
-            return StrategyResult(
-                success=False,
-                error="没有可部署的文件（Mod 目录为空或全部被排除）",
-            )
-        manifest = DeployManifest(
-            mod_id=ctx.mod_id,
-            deploy_time=when,
-            deploy_type=self.deploy_type,
-            files=entries,
-        )
-        return StrategyResult(
-            success=True,
-            target=str(target),
-            copied_files=len(entries),
-            deploy_type=self.deploy_type,
-            deploy_time=when,
-            files=entries,
-            manifest=manifest,
-        )
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

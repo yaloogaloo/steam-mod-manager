@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from core.models import ModMetadata
 from core.sanitize import sanitize_folder_name
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
+from services.file_ops import ModFileManager
 from services.importers.image_picker import apply_cover_to_mod
 from services.importers.importer_base import (
     MISSING_GAME_CONTEXT,
@@ -19,23 +18,19 @@ from services.importers.importer_base import (
 
 
 def find_managed_mod_path(library_root: str | Path, mod_id: str | int) -> Path | None:
-    """Locate ``…/<mod>/.info/mod.json`` whose published_file_id matches *mod_id*."""
+    """Locate managed folder by Internal ID (``.info.internal_id`` proof only)."""
     mid = str(mod_id).strip()
     root = Path(library_root)
     if not mid or not root.is_dir():
         return None
-    for info_dir in root.rglob(INFO_DIR_NAME):
-        if not info_dir.is_dir():
-            continue
-        meta_path = info_dir / METADATA_FILENAME
-        if not meta_path.is_file():
-            continue
-        try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
-            continue
-        if str(data.get("published_file_id") or "").strip() == mid:
-            return info_dir.parent
+    try:
+        from services.path_lifecycle import resolve_managed_folder
+
+        resolved = resolve_managed_folder(mid, library_root=root, db=None)
+        if resolved.path is not None and resolved.path.is_dir():
+            return resolved.path
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
@@ -95,7 +90,15 @@ def materialize_imported_mod(
     """
     del cover_flat_roots, cover_search_roots
     mid = str(mod_id).strip()
-    name = (title or "").strip() or f"Unknown_Mod_{mid}"
+    from core.models import is_unknown_mod_title, library_mod_folder_fallback
+
+    raw_title = (title or "").strip()
+    # Persist a display title when provided; never invent ``Unknown_Mod_*`` for
+    # the library leaf — ``mod_folder_name`` / allocate use ``Mod_<id>``.
+    if raw_title and not is_unknown_mod_title(raw_title, published_file_id=mid):
+        name = raw_title
+    else:
+        name = library_mod_folder_fallback(mid)
     game = sanitize_folder_name(
         resolve_materialize_game_name(
             game_name,
@@ -116,6 +119,16 @@ def materialize_imported_mod(
         cover_path="",
     )
     src = Path(str(source_folder)).expanduser() if source_folder else None
+    if src is not None and src.is_dir():
+        from services.mod_path_validation import (
+            InvalidModRootError,
+            validate_import_source_root,
+        )
+
+        try:
+            validate_import_source_root(src, library_root=library_root)
+        except InvalidModRootError as exc:
+            raise ValueError(str(exc)) from exc
     ignore_files: list[Path] = list(copy_ignore or ())
     cover_raw = str(cover_source or "").strip()
     effective_cover: Path | None = Path(cover_raw).expanduser() if cover_raw else None
@@ -164,19 +177,25 @@ def materialize_imported_mod(
         except Exception:  # noqa: BLE001
             pass
 
-    # Portable snapshot for folder-copy reimport.
+    # Portable snapshot for folder-copy reimport — must include internal_id proof.
     try:
-        from services.info_sidecar import write_sidecar_for_mod
+        from services.info_sidecar import ensure_registration_info_proof
 
-        write_sidecar_for_mod(dest, mid, sync_backup=False)
-    except Exception:  # noqa: BLE001
-        pass
+        ensure_registration_info_proof(dest, mid)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(str(exc) or "registration .info proof failed") from exc
 
-    # Empty dir / empty archive payloads are allowed — mark missing content.
+    # Content Validator: Import materializes entity+files, then authority
+    # evaluates payload → content_status. Do not call apply_missing_content_marker.
     try:
-        from services.file_ops import apply_missing_content_marker
+        from services.content_status_eval import persist_evaluated_content_status
 
-        apply_missing_content_marker(dest, sync_backup=False)
+        persist_evaluated_content_status(
+            mid,
+            dest,
+            folder_present=True,
+            sync_sticky_marker=True,
+        )
     except Exception:  # noqa: BLE001
         pass
 

@@ -9,6 +9,7 @@ import pytest
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
+    DEPLOY_STATUS_FAILED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
@@ -188,7 +189,8 @@ def test_case2_missing_targets_fail_deploy(
     assert any("ghost.txt" in t for t in (out.get("missing_targets") or []))
     info = db.get_mod_deploy_info("92001")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()
     assert load_manifest(mod_dir) is None
 
 
@@ -269,7 +271,8 @@ def test_case4_validation_failure_triggers_rollback(
     assert load_manifest(mod_dir) is None
     info = db.get_mod_deploy_info("92001")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()
 
 
 # ---------------------------------------------------------------------------

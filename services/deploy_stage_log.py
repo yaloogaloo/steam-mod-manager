@@ -19,7 +19,7 @@ SLOW_THRESHOLD_MS = 1000.0
 
 @dataclass
 class DeployStageContext:
-    mod_id: str = ""
+    internal_id: str = ""
     app_id: int = 0
     strategy: str = ""
     source: str = ""
@@ -37,7 +37,7 @@ class StageTiming:
 
 @dataclass
 class DeployTimingSession:
-    mod_id: str = ""
+    internal_id: str = ""
     mod_name: str = ""
     source: str = ""
     target: str = ""
@@ -62,7 +62,7 @@ class DeployTimingSession:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "mod_id": self.mod_id,
+            "mod_id": self.internal_id,
             "mod_name": self.mod_name,
             "source": self.source,
             "target": self.target,
@@ -94,7 +94,7 @@ def current_deploy_timing() -> DeployTimingSession | None:
 @contextmanager
 def deploy_timing_session(
     *,
-    mod_id: str = "",
+    internal_id: str = "",
     mod_name: str = "",
     source: str = "",
     target: str = "",
@@ -102,7 +102,7 @@ def deploy_timing_session(
     archive_type: str = "",
 ) -> Iterator[DeployTimingSession]:
     sess = DeployTimingSession(
-        mod_id=str(mod_id),
+        internal_id=str(internal_id),
         mod_name=str(mod_name),
         source=str(source),
         target=str(target),
@@ -112,8 +112,8 @@ def deploy_timing_session(
     )
     token = _TIMING.set(sess)
     logger.info(
-        "[DEPLOY_START] mod_id=%s mod_name=%s source=%s target=%s strategy=%s archive_type=%s",
-        sess.mod_id,
+        "[DEPLOY_START] internal_id=%s mod_name=%s source=%s target=%s strategy=%s archive_type=%s",
+        sess.internal_id,
         sess.mod_name or "",
         sess.source or "",
         sess.target or "",
@@ -181,15 +181,15 @@ def deploy_stage(
     stage: str,
     *,
     ctx: DeployStageContext | None = None,
-    mod_id: str = "",
+    internal_id: str = "",
     extra: str = "",
     files: int = 0,
     bytes_count: int = 0,
 ) -> Iterator[None]:
     """Log structured ``[DEPLOY_STAGE]`` start/finish; warn when slow."""
-    c = ctx or DeployStageContext(mod_id=mod_id)
+    c = ctx or DeployStageContext(internal_id=internal_id)
     parts = [
-        f"mod_id={c.mod_id}" if c.mod_id else "",
+        f"internal_id={c.internal_id}" if c.internal_id else "",
         f"app_id={c.app_id}" if c.app_id else "",
         f"strategy={c.strategy}" if c.strategy else "",
         f"stage={stage}",
@@ -212,7 +212,7 @@ def deploy_stage(
         if sess is not None:
             sess.add(stage, elapsed_ms, files=files, bytes_count=bytes_count)
         finished = [
-            f"mod_id={c.mod_id}" if c.mod_id else "",
+            f"internal_id={c.internal_id}" if c.internal_id else "",
             f"app_id={c.app_id}" if c.app_id else "",
             f"strategy={c.strategy}" if c.strategy else "",
             f"stage={stage}",

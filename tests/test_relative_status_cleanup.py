@@ -130,6 +130,13 @@ def test_case1_record_filter_shows_extra_for_deployed_d(
         record_id=int(record.id),
         record_name=record.name,
     )
+    # _apply_view_filter empties entries when no game rows — restore for overlay sync.
+    view._card_entries = [
+        (_index("1", deployed=True), cards["1"]),
+        (_index("2", deployed=True), cards["2"]),
+        (_index("3", deployed=True), cards["3"]),
+        (_index("4", deployed=True), cards["4"]),
+    ]
     view._cached_record_mod_ids = frozenset({"1", "2", "3"})
     view._last_filter_sig = None
     view._sync_record_overlays()
@@ -169,6 +176,12 @@ def test_case2_all_filter_clears_every_relative_badge(
         record_id=int(record.id),
         record_name="ABC",
     )
+    view._card_entries = [
+        (_index("1", deployed=True), cards["1"]),
+        (_index("2", deployed=True), cards["2"]),
+        (_index("3", deployed=False), cards["3"]),
+        (_index("4", deployed=True), cards["4"]),
+    ]
     view._cached_record_mod_ids = frozenset({"1", "2", "3"})
     view._sync_record_overlays()
     assert cards["3"].record_badge.text() == RECORD_STATUS_LABEL_MISSING
@@ -239,6 +252,12 @@ def test_case4_reenter_record_filter_recomputes_extra(
         record_id=int(record.id),
         record_name="ABC",
     )
+    view._card_entries = [
+        (_index("1", deployed=True), view._card_cache["0"]),
+        (_index("2", deployed=True), view._card_cache["1"]),
+        (_index("3", deployed=True), view._card_cache["2"]),
+        (_index("4", deployed=True), card_d),
+    ]
     view._cached_record_mod_ids = frozenset({"1", "2", "3"})
     view._sync_record_overlays()
     assert card_d.record_badge.text() == RECORD_STATUS_LABEL_EXTRA
@@ -256,6 +275,12 @@ def test_case4_reenter_record_filter_recomputes_extra(
         record_id=int(record.id),
         record_name="ABC",
     )
+    view._card_entries = [
+        (_index("1", deployed=True), view._card_cache["0"]),
+        (_index("2", deployed=True), view._card_cache["1"]),
+        (_index("3", deployed=True), view._card_cache["2"]),
+        (_index("4", deployed=True), card_d),
+    ]
     view._cached_record_mod_ids = frozenset({"1", "2", "3"})
     view._sync_record_overlays()
     assert card_d.record_badge.text() == RECORD_STATUS_LABEL_EXTRA

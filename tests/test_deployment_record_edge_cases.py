@@ -127,6 +127,7 @@ def test_case1_delete_active_record_returns_to_all(
         record_id=int(record.id),
         record_name=record.name,
     )
+    view._card_entries = [(_index("9", deployed=True), card)]
     view._cached_record_mod_ids = frozenset({"1", "2"})
     view._sync_record_overlays()
     assert view._status_filter == FILTER_DEPLOYMENT_RECORD
@@ -224,6 +225,8 @@ def test_case5_ordinary_filters_clear_record_badge(qapp, tmp_path: Path) -> None
         view._set_library_status_filter(
             FILTER_DEPLOYMENT_RECORD, record_id=1, record_name="x"
         )
+        view._card_entries = [(_index("4", deployed=True), card)]
+        view._card_cache = {"4": card}
         view._cached_record_mod_ids = frozenset({"1"})
         view._sync_record_overlays()
         assert not card.record_badge.isHidden()
@@ -232,6 +235,9 @@ def test_case5_ordinary_filters_clear_record_badge(qapp, tmp_path: Path) -> None
         assert view._status_filter == key
         assert getattr(card, "_record_relative", None) is None
         assert card.record_badge.isHidden()
+        # Re-attach for next iteration (empty filter path clears entries).
+        view._card_entries = [(_index("4", deployed=True), card)]
+        view._card_cache = {"4": card}
 
 
 def test_no_active_record_apis_in_production(qapp) -> None:

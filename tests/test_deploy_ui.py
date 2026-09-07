@@ -66,11 +66,24 @@ def _pump(ms: int = 50) -> None:
 
 def test_humanize_deploy_errors() -> None:
     assert humanize_deploy_error("请先配置游戏部署目录") == "请先配置游戏部署目录"
-    assert humanize_deploy_error("源 Mod 目录不存在（库：x）") == "内容目录不存在，无法部署"
+    # Source / custom / install lifecycle messages stay specific.
+    assert (
+        humanize_deploy_error("源 Mod 目录不存在（库：x）")
+        == "源 Mod 目录不存在（库：x）"
+    )
+    assert (
+        humanize_deploy_error("Mod自定义部署路径不存在: D:/old/path")
+        == "Mod自定义部署路径不存在: D:/old/path"
+    )
+    assert (
+        humanize_deploy_error("游戏安装目录不存在: F:/missing")
+        == "游戏安装目录不存在: F:/missing"
+    )
     assert humanize_deploy_error("复制失败：disk full") == "部署失败：文件复制错误"
+    # Legacy English must not collapse into vague "请检查游戏设置".
     assert (
         humanize_deploy_error("Target mod directory does not exist")
-        == "Mod 安装目录不存在，请检查游戏设置"
+        == "Target mod directory does not exist"
     )
 
 
@@ -142,7 +155,7 @@ def test_success_result_refreshes_panel_status(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir)
+    panel.show_mod(mod_dir, mod_id="8001")
     panel.set_deploy_busy(True)
     panel.apply_deploy_result(
         {
@@ -150,6 +163,7 @@ def test_success_result_refreshes_panel_status(
             "mod_id": "8001",
             "target": str(tmp_path / "Mods" / "DeployMe"),
             "copied_files": 1,
+            "deploy_time": "2026-01-01T00:00:00+00:00",
         }
     )
 
@@ -175,7 +189,7 @@ def test_failure_shows_error(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir)
+    panel.show_mod(mod_dir, mod_id="8001")
     panel.set_deploy_busy(True)
     panel.apply_deploy_result(
         {"success": False, "error": "请先配置游戏部署目录"}
@@ -204,20 +218,25 @@ def test_deploy_mod_runs_off_ui_thread(
     ui_thread = threading.get_ident()
     seen: dict[str, int] = {}
 
-    real_deploy = __import__("services.deploy", fromlist=["ModDeployer"]).ModDeployer.deploy_mod
+    results: list[dict] = []
 
     def tracking_deploy(self, mod_id):  # noqa: ANN001
         seen["thread"] = threading.get_ident()
-        return real_deploy(self, mod_id)
+        return {
+            "success": True,
+            "mod_id": str(mod_id),
+            "target": str(game_mods / "DeployMe"),
+            "copied_files": 1,
+        }
 
     monkeypatch.setattr(
         "services.deploy.ModDeployer.deploy_mod",
         tracking_deploy,
     )
 
-    results: list[dict] = []
     worker = DeployWorker("8001", library_root=library)
     worker.deploy_finished.connect(lambda r: results.append(r))
+    worker.deploy_failed.connect(lambda r: results.append(r if isinstance(r, dict) else {"success": False, "error": r}))
     worker.start()
     assert worker.wait(10_000)
     _pump(20)

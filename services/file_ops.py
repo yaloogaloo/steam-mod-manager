@@ -74,7 +74,15 @@ def apply_missing_content_marker(
     *,
     sync_backup: bool = True,
 ) -> bool:
-    """Detect empty payload, write ``is_missing_content``, return the flag."""
+    """Detect empty payload, write ``is_missing_content``, return the flag.
+
+    ARCHITECTURE RULE
+    -----------------
+    This updates the sticky ``.info`` marker only. It must **not** be used by
+    Import / Deploy / Archive / Reconcile as a shortcut to set
+    ``mods.content_status=content_missing``. Persist missing via
+    ``services.content_status_eval`` (Refresh) instead.
+    """
     missing = is_missing_mod_content(managed_path)
     root = Path(managed_path)
     if not root.is_dir():
@@ -189,16 +197,43 @@ class ModFileManager:
 
     def mod_folder_name(self, metadata: ModMetadata) -> str:
         """
-        Sanitized Mod folder name from the real title.
+        Sanitized Mod folder name from a real title when available.
 
-        Never returns a pure numeric ID. Missing titles become
-        ``Unknown_Mod_<id>``.
+        Never persists ``Unknown Mod …`` / ``Unknown_Mod_*`` as a library
+        folder name. Missing titles use ``Mod_<id>``.
         """
-        fallback = f"Unknown_Mod_{metadata.published_file_id}"
-        raw = metadata.effective_title()
-        name = sanitize_folder_name(raw, fallback=fallback)
-        if name.isdigit() or name == metadata.published_file_id:
-            name = sanitize_folder_name(fallback, fallback=fallback)
+        from core.models import (
+            is_placeholder_library_folder_name,
+            is_unknown_mod_title,
+            library_mod_folder_fallback,
+        )
+
+        mid = str(metadata.published_file_id or "").strip()
+        clean_fallback = library_mod_folder_fallback(mid)
+
+        raw = ""
+        title = (metadata.title or "").strip()
+        if title and not title.isdigit() and not is_unknown_mod_title(
+            title, published_file_id=mid
+        ):
+            raw = title
+        else:
+            custom = (metadata.json_display_name or "").strip()
+            if custom and not is_unknown_mod_title(custom, published_file_id=mid):
+                raw = custom
+
+        if not raw:
+            return clean_fallback
+
+        name = sanitize_folder_name(raw, fallback=clean_fallback)
+        if (
+            not name
+            or name.isdigit()
+            or (mid and name == mid)
+            or is_placeholder_library_folder_name(name, published_file_id=mid)
+            or is_unknown_mod_title(name, published_file_id=mid)
+        ):
+            return clean_fallback
         return name
 
     def allocate_destination(self, metadata: ModMetadata) -> Path:
@@ -493,29 +528,57 @@ class ModFileManager:
             mods.extend(self._list_mod_dirs(entry))
         return mods
 
-    def index_by_published_id(self) -> dict[str, Path]:
-        """Build ``published_file_id → managed folder`` once (O(n)), then reuse."""
+    def index_by_internal_id(self) -> dict[str, Path]:
+        """Build ``internal_id → managed folder`` from ``.info`` only (no DB bind).
+
+        Does **not** call ``ensure_mod_identity`` — indexing is a resource map,
+        not entity creation. Prefer :meth:`find_by_internal_id` / path cache for
+        hot lookups.
+        """
         if self._pub_index is not None:
             return self._pub_index
+        from services.mod_identity import read_internal_id
+
         mapping: dict[str, Path] = {}
         for folder in self.list_managed_mods():
-            mid = ""
-            meta = self.load_metadata(folder)
-            if meta and str(meta.published_file_id or "").strip():
-                mid = str(meta.published_file_id).strip()
-            if not mid.isdigit() and folder.name.isdigit():
-                mid = folder.name
-            if mid.isdigit():
-                mapping[mid] = folder
+            raw = dict(read_info_metadata_dict(folder) or {})
+            iid = read_internal_id(raw)
+            if not iid:
+                continue
+            mapping[iid] = folder
         self._pub_index = mapping
         return mapping
 
-    def find_by_published_id(self, published_file_id: str) -> Path | None:
-        """Locate an already-managed Mod by ID stored in ``.info/metadata.json``."""
-        needle = str(published_file_id or "").strip()
+    def clear_internal_id_index(self) -> None:
+        """Drop cached folder index (call after Reconcile / bulk moves)."""
+        self._pub_index = None
+
+    def index_by_published_id(self) -> dict[str, Path]:
+        """Deprecated alias of :meth:`index_by_internal_id` (never published_file_id)."""
+        return self.index_by_internal_id()
+
+    def find_by_internal_id(self, mod_id: str) -> Path | None:
+        """Locate managed folder by entity id (``mods.mod_id`` / ``.info.internal_id``)."""
+        needle = str(mod_id or "").strip()
         if not needle:
             return None
-        return self.index_by_published_id().get(needle)
+        try:
+            from services.path_lifecycle import resolve_managed_folder
+
+            resolved = resolve_managed_folder(
+                needle,
+                library_root=self.target_root,
+                db=None,
+            )
+            if resolved.path is not None and resolved.path.is_dir():
+                return resolved.path
+        except Exception:  # noqa: BLE001
+            pass
+        return self.index_by_internal_id().get(needle)
+
+    def find_by_published_id(self, published_file_id: str) -> Path | None:
+        """Deprecated name — Internal ID lookup only (ignores published_file_id axis)."""
+        return self.find_by_internal_id(str(published_file_id or "").strip())
 
     def game_name_for_path(self, managed_path: Path) -> str:
         """Infer game folder name from ``…/<game>/<mod>`` layout."""
@@ -676,8 +739,13 @@ def persist_unified_metadata_dict(
     if sync_backup:
         try:
             from services.metadata_backup_sync import sync_after_metadata_change
+            from services.metadata_owner_guard import resolve_owner_mod_id_from_info
 
-            mid = str(payload.get("published_file_id") or "").strip() or None
+            mid = resolve_owner_mod_id_from_info(dict(payload)) or None
+            if not mid:
+                # Caller may already stamp numeric internal_id in the payload.
+                candidate = str(payload.get("internal_id") or "").strip()
+                mid = candidate if candidate.isdigit() else None
             sync_after_metadata_change(mid, root, sync_reason)
         except Exception:  # noqa: BLE001
             pass

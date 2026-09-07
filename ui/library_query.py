@@ -25,9 +25,16 @@ FILTER_CONFLICT = "conflict"
 FILTER_DISABLED = "disabled"
 # Lifecycle content_status filters (Phase 7)
 FILTER_CONTENT_MISSING = "content_missing"
-FILTER_FOLDER_MISSING = "folder_missing"
-FILTER_BACKUP_INVALID = "backup_invalid"
-FILTER_IDENTITY_CONFLICT = "identity_conflict"
+# Deleted Mod-status filter keys (never match — kept only so mis-wired callers fail closed).
+_DELETED_STATUS_FILTERS = frozenset(
+    {
+        "folder_missing",
+        "backup_invalid",
+        "metadata_missing",
+        "identity_conflict",
+        "file_missing",
+    }
+)
 # User-facing aggregate (UI only — does not change content_status)
 FILTER_ANOMALY = "anomaly"
 # Same rank as 全部/收藏/… — not a separate “record mode”
@@ -43,6 +50,7 @@ FILTER_CATEGORY_ALL = "category_all"
 
 SORT_MTIME = "mtime"
 SORT_NAME = "name"
+SORT_NAME_DESC = "name_desc"
 
 
 def resolve_mod_library_title(
@@ -93,16 +101,9 @@ PLATFORM_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_PLATFORM_LOCAL, "Local"),
 )
 
-# content_status values rolled into the user-facing 「异常」 chip.
-# content_missing stays a dedicated chip and is excluded here.
-ANOMALY_CONTENT_STATUSES: frozenset[str] = frozenset(
-    {
-        FILTER_IDENTITY_CONFLICT,
-        FILTER_BACKUP_INVALID,
-        FILTER_FOLDER_MISSING,
-        "metadata_missing",
-    }
-)
+# Reduced model: content_status only healthy|content_missing.
+# content_missing has its own chip; 「异常」 is user flags only.
+ANOMALY_CONTENT_STATUSES: frozenset[str] = frozenset()
 
 _SOURCE_TOKEN_TO_KEY: dict[str, str] = {
     "steam": FILTER_PLATFORM_STEAM,
@@ -154,6 +155,7 @@ class ModFilterIndex:
     enabled: bool = True
     category_tags: str = ""
     content_status: str = ""
+    identity_status: str = "ok"
     source_type: str = ""
 
 
@@ -315,20 +317,17 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
     if key == FILTER_INVALID:
         return bool(index.is_invalid or index.invalid)
     if key == FILTER_CONTENT_MISSING:
-        return str(index.content_status or "").strip() == FILTER_CONTENT_MISSING
-    if key == FILTER_FOLDER_MISSING:
-        return str(index.content_status or "").strip() == FILTER_FOLDER_MISSING
-    if key == FILTER_BACKUP_INVALID:
-        return str(index.content_status or "").strip() == FILTER_BACKUP_INVALID
-    if key == FILTER_IDENTITY_CONFLICT:
-        return str(index.content_status or "").strip() == FILTER_IDENTITY_CONFLICT
+        from services.status_authority import normalize_content_axis
+
+        return normalize_content_axis(index.content_status) == FILTER_CONTENT_MISSING
+    if key in _DELETED_STATUS_FILTERS:
+        return False
     if key == FILTER_ANOMALY:
         return index_is_anomaly(index)
     if key == FILTER_CONFLICT:
+        # User conflict annotation only — never identity_conflict / content_status.
         status = normalize_conflict_status(index.conflict_status)
-        return bool(index.conflict) or status == CONFLICT_STATUS_CONFLICT or str(
-            index.content_status or ""
-        ).strip() == FILTER_IDENTITY_CONFLICT
+        return status == CONFLICT_STATUS_CONFLICT
     if key == FILTER_DISABLED:
         return not bool(index.enabled)
     # Platform keys accidentally passed as status → defer to platform matcher
@@ -362,15 +361,11 @@ def effective_source_token(index: ModFilterIndex) -> str:
 
 
 def index_is_anomaly(index: ModFilterIndex) -> bool:
-    """User-facing 「异常」: conflicts, invalid, backup/folder/metadata issues."""
-    cs = str(index.content_status or "").strip()
-    if cs in ANOMALY_CONTENT_STATUSES:
-        return True
+    """User-facing 「异常」: user conflict / invalid / disabled only."""
     if bool(index.is_invalid or index.invalid):
         return True
     status = normalize_conflict_status(index.conflict_status)
-    # File conflict only — soft ``warning`` is not an anomaly badge
-    if bool(index.conflict) or status == CONFLICT_STATUS_CONFLICT:
+    if status == CONFLICT_STATUS_CONFLICT:
         return True
     if not bool(index.enabled):
         return True
@@ -469,10 +464,26 @@ def matches_category_filter(index: ModFilterIndex, category_key: str) -> bool:
 
 
 def sort_key(index: ModFilterIndex, sort_mode: str):
+    """
+    Library Query sort keys.
+
+    ARCHITECTURE RULE: 「最近修改」 must not fall back to name as the secondary
+    key — equal ``mtime`` (common after system status recovery) would make
+    SORT_MTIME identical to SORT_NAME and sorting would appear broken.
+    """
     mode = sort_mode or SORT_MTIME
+    mid = str(index.mod_id or "")
+    name = index.sort_name.casefold()
     if mode == SORT_NAME:
-        return (index.sort_name.casefold(), index.mod_id)
-    return (-index.mtime, index.sort_name.casefold(), index.mod_id)
+        return (name, mid)
+    if mode == SORT_NAME_DESC:
+        # Ascending key; callers apply reverse=True for DESC.
+        return (name, mid)
+    try:
+        mid_num = int(mid) if mid.isdigit() else 0
+    except ValueError:
+        mid_num = 0
+    return (-float(index.mtime or 0.0), -mid_num, mid)
 
 
 def filter_and_sort(
@@ -508,5 +519,39 @@ def filter_and_sort(
         if not matches_category_filter(index, category_key):
             continue
         matched.append((index, payload))
-    matched.sort(key=lambda pair: sort_key(pair[0], sort_mode))
+    reverse = (sort_mode or "") == SORT_NAME_DESC
+    mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
+    matched.sort(key=lambda pair: sort_key(pair[0], mode), reverse=reverse)
     return [payload for _, payload in matched]
+
+
+def filter_sort_entries(
+    entries: list[tuple[ModFilterIndex, object]],
+    *,
+    query: str = "",
+    filter_key: str = FILTER_ALL,
+    platform_key: str = FILTER_PLATFORM_ALL,
+    category_key: str = FILTER_CATEGORY_ALL,
+    sort_mode: str = SORT_MTIME,
+    record_mod_ids: frozenset[str] | None = None,
+) -> list[tuple[ModFilterIndex, object]]:
+    """Like ``filter_and_sort`` but keeps ``(index, payload)`` pairs."""
+    matched: list[tuple[ModFilterIndex, object]] = []
+    use_record = filter_key == FILTER_DEPLOYMENT_RECORD
+    for index, payload in entries:
+        if use_record:
+            if not matches_record_visibility(index, record_mod_ids):
+                continue
+        elif not matches_status_filter(index, filter_key):
+            continue
+        if not matches_search(index, query):
+            continue
+        if not matches_platform_filter(index, platform_key):
+            continue
+        if not matches_category_filter(index, category_key):
+            continue
+        matched.append((index, payload))
+    reverse = (sort_mode or "") == SORT_NAME_DESC
+    mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
+    matched.sort(key=lambda pair: sort_key(pair[0], mode), reverse=reverse)
+    return matched

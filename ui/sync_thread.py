@@ -254,6 +254,11 @@ def summarize_result(result: SyncResult) -> str:
     if result.baselined:
         parts.append(f"基准 {len(result.baselined)}")
     parts.append(f"失败 {len(result.failed)}")
+    if result.source_count:
+        parts.append(
+            f"实体 {result.library_count}/{result.source_count}"
+            f"（新建 {result.entity_created_count}）"
+        )
     return "同步完成：" + "，".join(parts)
 
 

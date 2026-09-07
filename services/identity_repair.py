@@ -1802,18 +1802,18 @@ def _apply_quarantine_only(
             encoding="utf-8",
         )
     if cand.ghost_mod_id.isdigit():
+        from services.status_authority import IDENTITY_STATUS_UNRESOLVED
+
         with db._lock:  # noqa: SLF001
+            # ARCHITECTURE RULE: never write mods.conflict_status (user annotation).
+            # Identity unresolved is identity_status only.
             db._conn.execute(  # noqa: SLF001
                 """
-                UPDATE mods SET folder_present = 0, library_status = ?,
-                       conflict_status = ?, conflict_note = ?, updated_at = ?
+                UPDATE mods SET folder_present = 0, identity_status = ?
                 WHERE mod_id = ?
                 """,
                 (
-                    "IDENTITY_UNRESOLVED",
-                    "identity_conflict",
-                    "quarantined leftover; no canonical mint",
-                    _utc_now(),
+                    IDENTITY_STATUS_UNRESOLVED,
                     int(cand.ghost_mod_id),
                 ),
             )
@@ -1953,21 +1953,29 @@ def _apply_remove_invalid_duplicate(
 
 
 def _apply_mark_conflict(db: Any, cand: RepairCandidate) -> dict[str, Any]:
+    """Mark identity conflict on identity_status — never user conflict_status.
+
+    ARCHITECTURE RULE: ``mods.conflict_status`` is user annotation (flag chip).
+    Identity-repair conflicts are ``identity_status`` only.
+    Never map identity issues onto ``content_status``.
+    """
+    from services.status_authority import IDENTITY_STATUS_CONFLICT
+
     ids = [
         part.strip()
         for part in (cand.ghost_mod_id + "," + cand.candidate_mod_id).split(",")
         if part.strip().isdigit()
     ]
     note = cand.relationship + ": " + "; ".join(cand.blocking_reasons or cand.evidence)
+    del note  # kept for audit via repair log; not written to conflict_note
     with db._lock:  # noqa: SLF001
         for mid in ids:
             db._conn.execute(  # noqa: SLF001
                 """
-                UPDATE mods SET conflict_status = ?, conflict_note = ?,
-                       library_status = ?, updated_at = ?
+                UPDATE mods SET identity_status = ?
                 WHERE mod_id = ?
                 """,
-                ("identity_conflict", note[:500], "IDENTITY_CONFLICT", _utc_now(), int(mid)),
+                (IDENTITY_STATUS_CONFLICT, int(mid)),
             )
     return {"marked": ids}
 
@@ -1979,8 +1987,8 @@ def _apply_scrub_url(db: Any, cand: RepairCandidate) -> dict[str, Any]:
     mid = int(cand.ghost_mod_id)
     with db._lock:  # noqa: SLF001
         db._conn.execute(  # noqa: SLF001
-            "UPDATE mods SET source_url = ?, updated_at = ? WHERE mod_id = ?",
-            (new_url, _utc_now(), mid),
+            "UPDATE mods SET source_url = ? WHERE mod_id = ?",
+            (new_url, mid),
         )
     return {"source_url": new_url}
 

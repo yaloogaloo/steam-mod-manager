@@ -123,6 +123,13 @@ class ConflictDetector:
     """
     Detect deploy *target* path issues via ``.info/deploy_manifest.json``.
 
+    ARCHITECTURE RULE
+    -----------------
+    Conflict (``mods.conflict_status``) is **user annotation** only — same
+    class as invalid / abandoned. This detector MUST NEVER write
+    ``conflict_status``. It may only emit diagnostics (report entries,
+    ``conflict_trace.json``) and optionally touch ``last_check_time``.
+
     Scheme B — two layers:
 
     Layer A (diagnostic, deterministic, Path.resolve() equality only):
@@ -130,18 +137,17 @@ class ConflictDetector:
       multiple enabled Mods. This is a filesystem fact, not a conflict
       relationship. No filename heuristic and no last-deploy winner guess.
 
-    Layer B (conflict relationship):
-    - Only a user-declared ``mod_relationships`` row of type conflict, or an
-      explicit user ``conflict_status`` write, is a conflict relationship.
-    - FILE_OVERWRITE must not auto-write ``conflict_status=conflict``.
-    - ``persist=True`` must not restore conflict_status from path overlap after
-      the user resolved / cleared it.
+    Layer B (user-declared relationship edges — diagnostic listing only):
+    - ``mod_relationships`` rows of type conflict are user peer links.
+    - Listing them in a report is fine; promoting them to
+      ``conflict_status=conflict`` is forbidden (that column is the flag chip).
 
     ``ConflictType.PAK_OVERLAP`` is retained for compatibility but is **not**
     generated (same-dir distinct ``.pak`` files are legal).
 
     Disabled Mods are excluded from path detection.
     Detector never creates Mods, identities, workspace_ids, or relationships.
+    Detector never creates or restores user conflict annotation.
     """
 
     def __init__(
@@ -241,39 +247,38 @@ class ConflictDetector:
     def _relationship_status(
         self, conflicts: list[ConflictEntry]
     ) -> tuple[str, str]:
-        """Layer B only: RELATIONSHIP is a conflict; FILE_OVERWRITE is not."""
+        """Report status for diagnostics only — never written to mods.conflict_status.
+
+        RELATIONSHIP edges appear in the report as facts. Report ``status``
+        uses CONFLICT when a user relationship edge is present so UI detail
+        text can list them — the DB flag chip is a separate user annotation.
+        """
         rel = self._relationship_entries(conflicts)
         if rel:
             return CONFLICT_STATUS_CONFLICT, self._summarize(rel)
         return CONFLICT_STATUS_NONE, ""
 
-    def _persist_allowed(
-        self,
-        mid: str,
-        *,
-        relationship: list[ConflictEntry],
-    ) -> None:
-        """Persist allowed facts only. Never promote path overlap to conflict."""
+    def _touch_check_time(self, mid: str) -> None:
+        """Diagnostic last_check_time only — never writes conflict_status."""
         if not mid.isdigit():
             return
         if self._database().get_mod(mid) is None:
             logger.info(
-                "[CONFLICT_SKIP] persist skipped missing mod_id=%s",
+                "[CONFLICT_SKIP] touch skipped missing mod_id=%s",
                 mid,
             )
             return
-        if relationship:
-            self._database().update_mod_status(
-                mid,
-                conflict_status=CONFLICT_STATUS_CONFLICT,
-                conflict_note=self._summarize(relationship),
-                touch_check_time=True,
-            )
-            return
-        # Diagnostic last_check_time only — leave user conflict_status unchanged.
+        # ARCHITECTURE RULE: leave user conflict_status unchanged.
         self._database().update_mod_status(mid, touch_check_time=True)
 
-    def check_all_mods(self, *, persist: bool = True) -> dict[str, ConflictReport]:
+    def check_all_mods(self, *, persist: bool = False) -> dict[str, ConflictReport]:
+        """
+        Scan deploy targets.
+
+        ``persist=True`` writes diagnostic traces + last_check_time only.
+        It NEVER writes ``mods.conflict_status`` (user annotation).
+        Default is ``False`` (read-only scan).
+        """
         owners = self._collect_target_owners()
         per_mod: dict[str, list[ConflictEntry]] = {}
         all_manifest_mods: set[str] = set()
@@ -293,7 +298,8 @@ class ConflictDetector:
             for mid in mods:
                 per_mod.setdefault(mid, []).append(entry)
 
-        # Layer B — user-declared conflict relationships (never auto-inserted)
+        # Layer B — user-declared conflict relationships (never auto-inserted;
+        # never promoted to mods.conflict_status)
         try:
             with self._database()._lock:
                 rel_rows = self._database()._conn.execute(
@@ -332,34 +338,32 @@ class ConflictDetector:
         for mid in sorted(all_manifest_mods):
             conflicts = per_mod.get(mid) or []
             status, note = self._relationship_status(conflicts)
+            del note  # diagnostic note is not persisted to conflict_note
             traces = traces_by_mod.get(mid) or []
             reports[mid] = ConflictReport(
                 status=status, conflicts=conflicts, mod_id=mid, traces=traces
             )
             if persist:
-                self._persist_allowed(
-                    mid,
-                    relationship=self._relationship_entries(conflicts),
-                )
+                self._touch_check_time(mid)
         if persist:
             self._write_conflict_traces(reports)
         return reports
 
-    def check_mod(self, mod_id: int | str, *, persist: bool = True) -> ConflictReport:
+    def check_mod(self, mod_id: int | str, *, persist: bool = False) -> ConflictReport:
         mid = str(mod_id).strip()
         if mid.isdigit() and not self._is_enabled(mid):
             report = ConflictReport(
                 status=CONFLICT_STATUS_NONE, conflicts=[], mod_id=mid
             )
             if persist:
-                self._persist_allowed(mid, relationship=[])
+                self._touch_check_time(mid)
             return report
         all_reports = self.check_all_mods(persist=persist)
         if mid in all_reports:
             return all_reports[mid]
         report = ConflictReport(status=CONFLICT_STATUS_NONE, conflicts=[], mod_id=mid)
         if persist:
-            self._persist_allowed(mid, relationship=[])
+            self._touch_check_time(mid)
         return report
 
     def preview_targets(

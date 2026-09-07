@@ -50,6 +50,7 @@ def _write_meta(mod_dir: Path, *, mid: str, title: str, app_id: int) -> None:
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mid}",\n'
         f'  "published_file_id": "{mid}",\n'
         f'  "title": "{title}",\n'
         f'  "app_id": {app_id}\n'
@@ -139,7 +140,18 @@ def test_custom_deploy_path_overrides_pak_mod_path(
     custom = tmp_path / "custom_target"
     custom.mkdir()
     db.upsert_mod(
-        ModMetadata(published_file_id="82001", title="CustomPak", app_id=BG3_APP_ID)
+        ModMetadata(
+            published_file_id="82001",
+            title="CustomPak",
+            app_id=BG3_APP_ID,
+            managed_path=str(managed),
+        )
+    )
+    db.update_mod_identity_fields(
+        "82001",
+        internal_id="82001",
+        last_known_path=str(managed.resolve()),
+        folder_present=True,
     )
     db.update_mod_user_metadata(
         82001,

@@ -667,24 +667,31 @@ def scan_reconcile_identity_lifecycle(
             "legacy fields cannot create; only bind existing validated entities",
         )
 
-    if "def resolve_mod_identity" in auth and "find_mod_by_workspace_id" not in auth:
+    if "def resolve_mod_identity" in auth and "find_mod_by_workspace_id(" in auth:
         add(
             authority,
             DUPLICATE_WORKSPACE_ID_CREATION,
-            "resolve_mod_identity/create_mod_identity never look up workspace_id; "
-            "a second INSERT can reuse the same user-facing Workspace ID",
-            "refuse create when workspace_id already bound; bind/rebind instead",
+            "resolve_mod_identity still looks up workspace_id as identity — "
+            "Workspace ID must be registration-scoped only",
+            "identity resolve must use find_mod_for_registration(platform, app_id, workspace_id)",
         )
-    if (
-        "create_mod_identity(" in rec
-        and "find_mod_by_workspace_id" not in rec
-        and "find_mod_by_workspace_id" not in ident
-    ):
+    if "def resolve_existing_mod_id" in ident and "_lookup_workspace(" in ident:
+        # Only flag if resolve_existing still calls it (not merely defines helper).
+        resolve_start = ident.find("def resolve_existing_mod_id")
+        resolve_body = ident[resolve_start : resolve_start + 6000]
+        if "_lookup_workspace(" in resolve_body:
+            add(
+                identity,
+                DUPLICATE_WORKSPACE_ID_CREATION,
+                "resolve_existing_mod_id uses workspace_id reverse lookup",
+                "bind via internal_id only; registration uses find_mod_for_registration",
+            )
+    if "find_mod_by_workspace_id(" in rec:
         add(
             reconcile,
             DUPLICATE_WORKSPACE_ID_CREATION,
-            "reconcile create path does not query existing workspace_id before INSERT",
-            "match workspace_id (+ platform/app_id) before create_mod_identity",
+            "reconcile still calls find_mod_by_workspace_id for identity bind",
+            "rebind via .info internal_id only — never registration or external",
         )
 
     sidecar = root / "services" / "info_sidecar.py"

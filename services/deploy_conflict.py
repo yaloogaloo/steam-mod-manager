@@ -73,7 +73,7 @@ def index_manifest_targets(
 
 def detect_deploy_conflicts(
     library_root: str | Path,
-    mod_id: int | str,
+    internal_id: int | str,
     planned_targets: Iterable[str | Path],
 ) -> ConflictResult:
     """
@@ -82,7 +82,7 @@ def detect_deploy_conflicts(
 
     Detection only — callers decide whether to warn or proceed.
     """
-    mid = str(mod_id).strip()
+    mid = str(internal_id).strip()
     owned = index_manifest_targets(library_root, exclude_mod_id=mid)
     hits: list[ConflictFile] = []
     seen: set[str] = set()

@@ -105,6 +105,7 @@ LIFECYCLE_DEPLOY = "deploy"
 LIFECYCLE_METADATA = "metadata"
 LIFECYCLE_SIDECAR = "sidecar"
 LIFECYCLE_REPAIR = "repair"
+LIFECYCLE_SYNC = "sync"
 
 _ALLOCATE_FORBIDDEN = frozenset(
     {
@@ -114,6 +115,9 @@ _ALLOCATE_FORBIDDEN = frozenset(
         LIFECYCLE_METADATA,
         LIFECYCLE_SIDECAR,
         LIFECYCLE_REPAIR,
+        # Reconcile binds existing entities / emits OrphanCandidate only.
+        # Create belongs to Import/Sync (import_orphan_candidates).
+        LIFECYCLE_RECONCILE,
     }
 )
 _CREATE_FORBIDDEN = _ALLOCATE_FORBIDDEN
@@ -211,8 +215,12 @@ def has_official_platform_identity(
         return False
     if not plat:
         return False
-    if ext.startswith("stub:") or ext.startswith("local/") or is_internal_mod_id(ext):
+    if ext.startswith("stub:") or is_internal_mod_id(ext):
         return False
+    # Directory-import placeholders (``local/…``). Prefer these over bare
+    # filesystem folder names, which must not be treated as platform IDs.
+    if ext.startswith("local/"):
+        return len(ext) > len("local/")
     if is_provisional_external_id(ext):
         return False
     if ext:
@@ -466,6 +474,27 @@ def create_mod_identity(
     op = (operation or current_lifecycle() or LIFECYCLE_IMPORT).strip().lower()
     assert_lifecycle_may_create(op)
     display = str(title or "").strip()
+    # Resolve Workspace ID before any title-based refuse. Display names like
+    # ``Unknown_Mod_<digits>`` embed Workspace ID — that is identity, not absence.
+    from core.mod_platform import steam_workshop_url
+    from services.mod_identity import extract_workspace_id
+
+    ws = extract_workspace_id(
+        external_id=str(external_id or ""),
+        title=display,
+        source_url=str(source_url or ""),
+        legacy_token=str(workshop_id or ""),
+    )
+    if ws:
+        if not str(workshop_id or "").strip():
+            workshop_id = ws
+        if not str(external_id or "").strip():
+            external_id = ws
+        plat = normalize_platform(platform)
+        if plat in ("", PLATFORM_STEAM) and not str(source_url or "").strip():
+            source_url = steam_workshop_url(ws)
+            if not plat:
+                platform = PLATFORM_STEAM
     official = has_official_platform_identity(
         platform=platform,
         external_id=external_id,
@@ -486,13 +515,14 @@ def create_mod_identity(
         )
         title = ""
         display = ""
+    # Unknown display is fine when Workspace ID / platform identity is present.
     if is_unknown_mod_title(display) and not official:
         logger.error(
-            "[IDENTITY_GUARD] Unknown Mod cannot mint identity title=%s",
+            "[IDENTITY_GUARD] no Workspace ID for Unknown title=%s",
             display,
         )
         raise IdentityCreateBypassError(
-            f"Unknown Mod cannot mint identity: {display}"
+            f"Unknown Mod without resolvable Workspace ID: {display}"
         )
     if not official:
         logger.error(
@@ -623,9 +653,7 @@ def persist_identity(
     }
     allowed = {
         "internal_id",
-        "library_status",
         "source_type",
-        "content_status",
         "last_known_path",
         "folder_present",
         "game_name",
@@ -636,6 +664,7 @@ def persist_identity(
         "workspace_id",
         "app_id",
         "sticky_source",
+        "identity_status",
     }
     patch = {k: v for k, v in fields.items() if k in allowed}
     if patch:

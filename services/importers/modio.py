@@ -83,10 +83,18 @@ class ModioImporter(ModImporter):
 
         url = str(modio_url or source_url or "").strip()
         ext = parse_modio_id(url, modio_id)
-        if not ext:
-            ext = folder.name
-        name = (title or "").strip() or folder.name
         is_batch = bool(_kwargs.get("is_batch_mode"))
+        if not ext or (
+            not str(ext).isdigit()
+            and not str(ext).startswith("local/")
+            and not url
+        ):
+            import uuid
+
+            from services.importers.nexus import local_nexus_external_id
+
+            ext = local_nexus_external_id(uuid.uuid4().hex)
+        name = (title or "").strip() or folder.name
         if is_batch:
             # Batch folder import: never invent / default source URLs.
             url = ""

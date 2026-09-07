@@ -54,7 +54,7 @@ def test_refresh_button_is_labeled_push_button(
         ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="3413520661")
     qapp.processEvents()
     btn = panel.btn_refresh_mod
     assert isinstance(btn, QPushButton)
@@ -71,7 +71,7 @@ def test_refresh_button_state_machine(
         ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="3413520661")
     qapp.processEvents()
 
     panel._set_refresh_button_state("running")
@@ -94,8 +94,8 @@ def test_refresh_button_state_machine(
 
     panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
     assert "刷新失败" in panel.btn_refresh_mod.text()
-    assert "timeout" in (panel._status_banner_body.text() or "")
-    assert not panel._status_banner.isHidden()
+    assert "timeout" in (panel.op_status_label.text() or "")
+    assert panel._status_banner.isHidden()
 
 
 def test_click_sets_running_immediately_and_blocks_duplicate(
@@ -107,7 +107,7 @@ def test_click_sets_running_immediately_and_blocks_duplicate(
         ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="3413520661")
     qapp.processEvents()
 
     monkeypatch.setattr(
@@ -156,7 +156,7 @@ def test_success_handler_sets_updated_label(
         ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="3413520661")
     monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
     result = MetadataRefreshResult(
         mod_id="3413520661",
@@ -167,11 +167,14 @@ def test_success_handler_sets_updated_label(
     )
     panel._on_metadata_refresh_finished(result)
     assert "已更新" in panel.btn_refresh_mod.text()
+    assert "刷新完成" in (panel.op_status_label.text() or "")
+    assert panel._status_banner.isHidden()
 
 
-def test_refresh_success_banner_uses_success_tone(
+def test_refresh_success_never_shows_status_banner(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
+    """Refresh soft feedback is op_status only — never detailStatusBanner."""
     lib = tmp_path / "lib"
     folder = _seed(lib)
     db.upsert_mod(
@@ -179,7 +182,7 @@ def test_refresh_success_banner_uses_success_tone(
     )
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="3413520661")
     monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
     qapp.processEvents()
 
@@ -194,16 +197,21 @@ def test_refresh_success_banner_uses_success_tone(
         )
     )
     qapp.processEvents()
-    assert not panel._status_banner.isHidden()
-    assert "刷新成功" in (panel._status_banner_body.text() or "") or "成功" in (
-        panel._status_banner_body.text() or ""
-    )
-    assert panel._status_banner.property("tone") == "success"
+    assert "已更新" in panel.btn_refresh_mod.text()
+    assert "刷新完成" in (panel.op_status_label.text() or "")
+    assert panel._status_banner.isHidden()
+    assert panel._status_banner.isVisible() is False
 
     panel._set_refresh_button_state("failure", detail="network timeout", restore_ms=50)
     qapp.processEvents()
-    assert panel._status_banner.property("tone") == "error"
-    assert "刷新失败" in (panel._status_banner_body.text() or "")
+    assert "刷新失败" in panel.btn_refresh_mod.text()
+    assert "timeout" in (panel.op_status_label.text() or "")
+    assert panel._status_banner.isHidden()
+    assert panel._status_banner.isVisible() is False
+
+    # Success tone on the legacy API must not resurrect the green box.
+    panel._show_status_banner("刷新成功", tone="success")
+    assert panel._status_banner.isHidden()
 
 
 def test_refresh_clears_missing_content_when_files_exist(
@@ -223,7 +231,7 @@ def test_refresh_clears_missing_content_when_files_exist(
         ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="3413520661")
     panel._current_platform = PLATFORM_OTHER
     monkeypatch.setattr("services.info_sidecar.rescan_mod_folder", lambda *a, **k: None)
     panel._on_refresh_mod()

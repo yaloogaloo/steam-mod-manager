@@ -198,12 +198,23 @@ def test_custom_deploy_path_copies_contents_not_shell(
     (nested / "inner.bin").write_text("bin", encoding="utf-8")
     (managed / INFO_DIR_NAME).mkdir()
     (managed / INFO_DIR_NAME / "mod.json").write_text(
-        '{"published_file_id":"88001","title":"SpecialMod","app_id":100}',
+        '{"internal_id":"88001","published_file_id":"88001","title":"SpecialMod","app_id":100}',
         encoding="utf-8",
     )
 
     db.upsert_mod(
-        ModMetadata(published_file_id="88001", title="SpecialMod", app_id=100)
+        ModMetadata(
+            published_file_id="88001",
+            title="SpecialMod",
+            app_id=100,
+            managed_path=str(managed),
+        )
+    )
+    db.update_mod_identity_fields(
+        "88001",
+        internal_id="88001",
+        last_known_path=str(managed.resolve()),
+        folder_present=True,
     )
     custom = tmp_path / "game_root" / "custom_target"
     custom.mkdir(parents=True)

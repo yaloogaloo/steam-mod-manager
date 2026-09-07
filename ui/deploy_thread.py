@@ -24,12 +24,15 @@ class DeployWorker(QThread):
     Signal names use a ``deploy_`` prefix because ``QThread`` already owns
     ``started`` / ``finished``.
 
-    Always emits a terminal ``deploy_finished`` payload with unified ``status``.
+    Terminal routing (exactly one terminal signal per run):
+      SUCCESS / CANCELLED / TIMEOUT → ``deploy_finished``
+      FAILED                        → ``deploy_failed`` only
     """
 
     deploy_started = Signal()
     deploy_finished = Signal(object)
-    deploy_failed = Signal(str)
+    # Full normalized result dict (not a bare error string) so UI can paint once.
+    deploy_failed = Signal(object)
 
     def __init__(
         self,
@@ -62,10 +65,9 @@ class DeployWorker(QThread):
         if status == DeployStatus.TIMEOUT.value:
             self.deploy_finished.emit(normalized)
             return
-        # FAILED and legacy paths
-        self.deploy_finished.emit(normalized)
-        if not normalized.get("success"):
-            self.deploy_failed.emit(str(normalized.get("error") or "部署失败"))
+        # FAILED (and legacy non-success): single terminal via deploy_failed only.
+        # Do NOT also emit deploy_finished — that caused dual projection refresh.
+        self.deploy_failed.emit(normalized)
 
     def run(self) -> None:
         self.deploy_started.emit()
@@ -81,18 +83,18 @@ class DeployWorker(QThread):
             if self.isInterruptionRequested():
                 result = DeployResult(
                     status=DeployStatus.CANCELLED,
-                    mod_id=self.mod_id,
+                    internal_id=self.mod_id,
                     error="部署已取消",
                 ).to_dict()
         except Exception as exc:  # noqa: BLE001 — surface to UI
             logger.exception(
-                "[DEPLOY_FAILED] mod_id=%s action=%s unhandled error_code=worker_exception",
+                "[DEPLOY_FAILED] internal_id=%s action=%s unhandled error_code=worker_exception",
                 self.mod_id,
                 self.action,
             )
             result = DeployResult(
                 status=DeployStatus.FAILED,
-                mod_id=self.mod_id,
+                internal_id=self.mod_id,
                 error=str(exc),
                 error_code="worker_exception",
             ).to_dict()
@@ -100,13 +102,13 @@ class DeployWorker(QThread):
             if self.isInterruptionRequested() and result is None:
                 result = DeployResult(
                     status=DeployStatus.CANCELLED,
-                    mod_id=self.mod_id,
+                    internal_id=self.mod_id,
                     error="部署已取消",
                 ).to_dict()
             if result is None:
                 result = DeployResult(
                     status=DeployStatus.FAILED,
-                    mod_id=self.mod_id,
+                    internal_id=self.mod_id,
                     error="部署失败：未知错误（无结果）",
                     error_code="empty_result",
                 ).to_dict()

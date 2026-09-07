@@ -1,8 +1,17 @@
-"""Unified metadata backup sync entry (.info → backup only)."""
+"""Unified metadata backup sync entry (.info → backup only).
+
+ARCHITECTURE RULE
+-----------------
+Backup is **not** part of the business critical path. Callers mark dirty and
+return; a background worker copies metadata/cover/offline only.
+
+Never backup Mod payloads / Workshop files / hashes / deploy caches.
+"""
 
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
 from pathlib import Path
@@ -22,6 +31,7 @@ SyncReason = Literal[
     "rescan",
     "restore",
     "repair",
+    "sync",
 ]
 
 VALID_REASONS: frozenset[str] = frozenset(
@@ -34,28 +44,166 @@ VALID_REASONS: frozenset[str] = frozenset(
         "rescan",
         "restore",
         "repair",
+        "sync",
     }
 )
+
+# Only explicit repair may run inline. import / restore / edit / refresh / sync /
+# reconcile must mark dirty and return (BackupWorker). Use wait=True in tests.
+_INLINE_REASONS: frozenset[str] = frozenset({"repair"})
 
 _rebuild_lock = threading.Lock()
 _rebuild_running = False
 _rebuild_shutdown = False
 _rebuild_thread: threading.Thread | None = None
 
+_backup_queue: queue.Queue[tuple[str, str, str]] = queue.Queue()
+_backup_worker_lock = threading.Lock()
+_backup_worker: threading.Thread | None = None
+_backup_worker_stop = False
+
+
+def _ensure_backup_worker() -> None:
+    global _backup_worker, _backup_worker_stop
+    with _backup_worker_lock:
+        if _backup_worker is not None and _backup_worker.is_alive():
+            return
+        _backup_worker_stop = False
+
+        def _run() -> None:
+            while not _backup_worker_stop:
+                try:
+                    mid, path, reason = _backup_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                t0 = time.perf_counter()
+                try:
+                    _sync_backup_now(mid, path, reason)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "backup worker failed mod_id=%s path=%s reason=%s",
+                        mid,
+                        path,
+                        reason,
+                    )
+                finally:
+                    try:
+                        from services.library_perf_metrics import (
+                            get_library_perf_metrics,
+                        )
+
+                        get_library_perf_metrics().record_backup_worker_latency(
+                            (time.perf_counter() - t0) * 1000.0
+                        )
+                        get_library_perf_metrics().record_backup_queue(
+                            _backup_queue.qsize()
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _backup_queue.task_done()
+
+        _backup_worker = threading.Thread(
+            target=_run, name="backup-worker", daemon=True
+        )
+        _backup_worker.start()
+
+
+def mark_backup_dirty(
+    mod_id: int | str | None,
+    managed_path: str | Path | None,
+    reason: str,
+) -> bool:
+    """Enqueue backup work and return immediately (user-facing ops)."""
+    mid = str(mod_id or "").strip()
+    path = str(managed_path or "").strip()
+    reason_key = str(reason or "").strip() or "rescan"
+    if reason_key not in VALID_REASONS:
+        reason_key = "rescan"
+    _ensure_backup_worker()
+    _backup_queue.put((mid, path, reason_key))
+    qsize = _backup_queue.qsize()
+    try:
+        from services.library_perf_metrics import get_library_perf_metrics
+
+        get_library_perf_metrics().record_backup_queue(qsize)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.debug(
+        "backup dirty enqueued mod_id=%s path=%s reason=%s qsize=%s",
+        mid or "?",
+        path,
+        reason_key,
+        qsize,
+    )
+    return True
+
+
+def backup_queue_size() -> int:
+    """Pending + in-flight backup jobs (tests / observability)."""
+    return int(_backup_queue.unfinished_tasks)
+
+
+def metadata_fingerprint(data: dict | None) -> str:
+    """Stable fingerprint of user-facing metadata fields for change detection."""
+    import json
+
+    src = data or {}
+    keys = (
+        "title",
+        "display_name",
+        "description",
+        "preview_url",
+        "cover",
+        "cover_path",
+        "url",
+        "source_url",
+        "workspace_id",
+        "external_id",
+        "published_file_id",
+        "mod_version",
+        "game_version",
+        "tags",
+    )
+    payload = {k: src.get(k) for k in keys if k in src}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def drain_backup_queue(*, timeout: float = 5.0) -> None:
+    """Test / shutdown helper: wait for queued backups to finish."""
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        if _backup_queue.unfinished_tasks == 0:
+            return
+        time.sleep(0.05)
+
 
 def sync_after_metadata_change(
     mod_id: int | str | None,
     managed_path: str | Path | None,
     reason: str,
+    *,
+    wait: bool = False,
 ) -> bool:
     """
-    Sync ``data/mod_backup/<id>`` from ``.info`` after a metadata write.
+    Protect user metadata after a write.
 
-    Rules:
-    - Mod folder must exist; otherwise backup write is forbidden.
-    - Never writes back into ``.info``.
-    - Updates SQLite backup status after sync + validate.
+    Default lifecycle: mark dirty → BackupWorker (non-blocking).
+    Inline only for restore/repair or ``wait=True`` (tests / explicit repair).
     """
+    reason_key = str(reason or "").strip() or "rescan"
+    if reason_key not in VALID_REASONS:
+        reason_key = "rescan"
+    if wait or reason_key in _INLINE_REASONS:
+        return _sync_backup_now(mod_id, managed_path, reason_key)
+    return mark_backup_dirty(mod_id, managed_path, reason_key)
+
+
+def _sync_backup_now(
+    mod_id: int | str | None,
+    managed_path: str | Path | None,
+    reason: str,
+) -> bool:
+    """Synchronous .info → backup copy (worker / restore / repair only)."""
     reason_key = str(reason or "").strip() or "rescan"
     if reason_key not in VALID_REASONS:
         logger.debug("Unknown backup sync reason %r; treating as rescan", reason_key)
@@ -88,15 +236,16 @@ def sync_after_metadata_change(
         return False
 
     if not mid.isdigit():
-        mid = root.name if root.name.isdigit() else ""
-        if not mid.isdigit():
-            try:
-                from services.file_ops import read_info_metadata_dict
+        mid = ""
+        try:
+            from services.file_ops import read_info_metadata_dict
+            from services.metadata_owner_guard import resolve_owner_mod_id_from_info
 
-                data = read_info_metadata_dict(root) or {}
-                mid = str(data.get("published_file_id") or "").strip()
-            except Exception:  # noqa: BLE001
-                mid = ""
+            data = read_info_metadata_dict(root) or {}
+            # Ownership: internal_id only — never published_file_id / workspace / folder.
+            mid = resolve_owner_mod_id_from_info(data)
+        except Exception:  # noqa: BLE001
+            mid = ""
 
     meta_file = root / INFO_DIR_NAME / METADATA_FILENAME
     if not meta_file.is_file():
@@ -133,7 +282,7 @@ def sync_after_metadata_change(
         try:
             note_backup_started()
             note_mod_id(mid)
-            sync_metadata_backup(root)
+            sync_metadata_backup(root, mod_id=mid if mid.isdigit() else None)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "backup sync failed mod_id=%s path=%s reason=%s: %s",
@@ -152,11 +301,12 @@ def sync_after_metadata_change(
         if not mid.isdigit():
             try:
                 from services.file_ops import read_info_metadata_dict
+                from services.metadata_owner_guard import resolve_owner_mod_id_from_info
 
                 data = read_info_metadata_dict(root) or {}
-                mid = str(data.get("published_file_id") or "").strip()
+                mid = resolve_owner_mod_id_from_info(data)
             except Exception:  # noqa: BLE001
-                mid = root.name if root.name.isdigit() else ""
+                mid = ""
 
         if mid.isdigit():
             try:
@@ -216,7 +366,10 @@ def rebuild_metadata_backup(
     Use for startup backfill, health checks, and migrations — never from Resolver.
     """
     return sync_after_metadata_change(
-        mod_id, managed_path, reason if reason in VALID_REASONS else "repair"
+        mod_id,
+        managed_path,
+        reason if reason in VALID_REASONS else "repair",
+        wait=True,
     )
 
 
@@ -258,13 +411,13 @@ def rebuild_missing_metadata_backup(
         mid = ""
         try:
             from services.file_ops import read_info_metadata_dict
+            from services.metadata_owner_guard import resolve_owner_mod_id_from_info
 
             data = read_info_metadata_dict(managed) or {}
-            mid = str(data.get("published_file_id") or "").strip()
+            # Never use folder.name / published_file_id as backup owner key.
+            mid = resolve_owner_mod_id_from_info(data)
         except Exception:  # noqa: BLE001
             data = {}
-        if not mid.isdigit() and managed.name.isdigit():
-            mid = managed.name
         if not mid.isdigit():
             continue
         backup_meta = backup_root(mid) / "metadata.json"

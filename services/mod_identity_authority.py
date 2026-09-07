@@ -24,7 +24,7 @@ from core.mod_platform import (
 )
 from services.importers.duplicate_check import (
     find_duplicate_mod,
-    find_mod_by_source_url_relaxed,
+    find_mod_by_source_url,
     normalize_source_url,
 )
 
@@ -111,8 +111,15 @@ def resolve_mod_identity(
     workshop_id: str = "",
     app_id: int = 0,
     mod_id: str = "",
+    workspace_id: str = "",
 ) -> ResolvedIdentity:
-    """Locate an existing Mod without creating one."""
+    """Locate an existing Mod without creating one.
+
+    Registration rematch: ``(platform, app_id, workspace_id)`` with ``app_id > 0``.
+    Entity bind elsewhere uses ``internal_id`` only.
+    """
+    from services.mod_identity import extract_workspace_id
+
     out = ResolvedIdentity(
         platform=normalize_platform(platform),
         external_id=sanitize_platform_external_id(
@@ -121,6 +128,9 @@ def resolve_mod_identity(
         source_url=normalize_source_url(source_url),
         app_id=int(app_id or 0),
     )
+    if out.app_id <= 0 and out.platform != PLATFORM_STEAM:
+        return out
+
     if str(mod_id or "").strip().isdigit():
         info = db.get_mod_display_info(str(mod_id).strip())
         if info is not None:
@@ -129,58 +139,77 @@ def resolve_mod_identity(
             out.notes.append("matched_mod_id")
             return out
 
-    wid = str(workshop_id or "").strip()
-    if (
-        out.platform == PLATFORM_STEAM
-        and wid.isdigit()
-        and not is_internal_mod_id(wid)
-    ):
-        info = db.get_mod_display_info(wid)
-        if info is not None:
-            out.mod_id = str(info.mod_id)
-            out.reused = True
-            out.notes.append("matched_workshop_id")
-            return out
+    ws = extract_workspace_id(
+        workspace_id=str(workspace_id or ""),
+        external_id=out.external_id,
+        source_url=out.source_url,
+        legacy_token=str(workshop_id or ""),
+    )
+    out.workspace_id = ws
 
-    ws_key = out.external_id or wid
-    if ws_key and not is_internal_mod_id(ws_key):
-        try:
-            found = db.find_mod_by_workspace_id(
-                ws_key, platform=out.platform or None, app_id=out.app_id
-            )
-            if found:
-                out.mod_id = str(found)
+    # Steam with app_id: registration requires game scope when available.
+    aid = out.app_id
+    if out.platform == PLATFORM_STEAM and aid <= 0 and ws:
+        # Steam Workshop IDs are globally unique; still require registration API
+        # with app_id when known. Without app_id, fall through to URL only.
+        pass
+
+    if ws and aid > 0 and out.platform:
+        hit = db.find_mod_for_registration(out.platform, aid, ws)
+        if hit is not None and int(getattr(hit, "app_id", 0) or 0) == aid:
+            from services.importers.duplicate_check import nexus_source_urls_compatible
+
+            if out.platform == PLATFORM_NEXUS and not nexus_source_urls_compatible(
+                str(getattr(hit, "source_url", "") or ""),
+                out.source_url,
+            ):
+                pass
+            else:
+                out.mod_id = str(hit.mod_id)
                 out.reused = True
-                out.notes.append("matched_workspace_id")
+                out.notes.append("matched_registration")
                 return out
-        except Exception:  # noqa: BLE001
-            logger.debug("workspace_id create-gate lookup failed", exc_info=True)
 
     dup = find_duplicate_mod(
         db,
         platform=out.platform,
         external_id=out.external_id,
         source_url=out.source_url,
-        workshop_id=wid,
+        workshop_id=str(workshop_id or ""),
         app_id=out.app_id,
+        workspace_id=ws,
     )
     if dup is not None:
+        row_app = int(getattr(dup, "app_id", 0) or 0)
+        if row_app <= 0 and out.platform != PLATFORM_STEAM:
+            return out
+        if out.app_id > 0 and row_app > 0 and row_app != out.app_id:
+            return out
+        from services.importers.duplicate_check import nexus_source_urls_compatible
+
+        if out.platform == PLATFORM_NEXUS and not nexus_source_urls_compatible(
+            str(getattr(dup, "source_url", "") or ""),
+            out.source_url,
+        ):
+            return out
         out.mod_id = str(dup.mod_id)
         out.reused = True
         out.notes.append("matched_duplicate_gate")
         return out
 
-    if out.source_url:
-        hit = find_mod_by_source_url_relaxed(
+    if out.source_url and out.app_id > 0:
+        hit = find_mod_by_source_url(
             db,
             out.source_url,
             platform=out.platform,
             app_id=out.app_id,
         )
         if hit is not None:
-            out.mod_id = str(hit.mod_id)
-            out.reused = True
-            out.notes.append("matched_source_url")
+            row_app = int(getattr(hit, "app_id", 0) or 0)
+            if row_app == out.app_id:
+                out.mod_id = str(hit.mod_id)
+                out.reused = True
+                out.notes.append("matched_source_url")
     return out
 
 
@@ -205,6 +234,9 @@ def create_mod_identity(
     Non-Steam: ``register_external_mod`` allocates Internal ID, then binds
     platform identity. Workspace is resolved from ``external_id``/URL or
     generated — never copied from Internal ID.
+
+    Never reuse a row whose ``app_id`` differs from the requested game scope
+    (including dirty ``app_id=0`` Nexus rows with a colliding Mod ID).
     """
     existing = resolve_mod_identity(
         db,
@@ -215,7 +247,60 @@ def create_mod_identity(
         app_id=app_id,
     )
     if existing.mod_id:
-        return existing
+        info = db.get_mod_display_info(existing.mod_id)
+        row_app = int(getattr(info, "app_id", 0) or 0) if info else 0
+        want_app = int(app_id or 0)
+        from services.importers.duplicate_check import nexus_source_urls_compatible
+
+        plat_norm = normalize_platform(platform)
+        url_in = normalize_source_url(source_url)
+        row_url = str(getattr(info, "source_url", "") or "") if info else ""
+        cross_game = want_app > 0 and row_app != want_app
+        nexus_slug_conflict = (
+            plat_norm == PLATFORM_NEXUS
+            and url_in
+            and not nexus_source_urls_compatible(row_url, url_in)
+        )
+        dirty_zero_app = (
+            row_app <= 0 and want_app > 0 and plat_norm != PLATFORM_STEAM
+        )
+        if cross_game or nexus_slug_conflict or dirty_zero_app:
+            # Cross-game / dirty app_id=0 / Nexus URL game mismatch — new entity.
+            existing = ResolvedIdentity(
+                platform=plat_norm,
+                external_id=sanitize_platform_external_id(platform, external_id),
+                source_url=url_in,
+                app_id=want_app,
+            )
+        else:
+            # Same-scope reuse: refresh import metadata onto the existing entity.
+            # Never rewrite app_id here — scope was already verified equal.
+            if info is not None and (title or url_in):
+                try:
+                    db.update_mod_platform_info(
+                        existing.mod_id,
+                        source_url=url_in or None,
+                        title=str(title or "").strip() or None,
+                        touch_updated_at=True,
+                        updated_at_reason="user_import",
+                    )
+                    refreshed = db.get_mod_display_info(existing.mod_id)
+                    if refreshed is not None:
+                        existing.workspace_id = str(refreshed.workspace_id or "")
+                        existing.source_url = str(refreshed.source_url or url_in)
+                        existing.external_id = str(
+                            refreshed.external_id or existing.external_id
+                        )
+                        existing.app_id = int(refreshed.app_id or want_app or 0)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "import metadata refresh failed for %s",
+                        existing.mod_id,
+                        exc_info=True,
+                    )
+            existing.reused = True
+            existing.notes.append("reused_same_scope_refreshed")
+            return existing
 
     plat = normalize_platform(platform)
     ext = sanitize_platform_external_id(plat, external_id)

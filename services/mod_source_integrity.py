@@ -127,24 +127,22 @@ def _resolve_managed_path(
     managed_path: Path | str | None = None,
     db: DatabaseManager | None = None,
 ) -> Path | None:
-    if managed_path is not None:
-        root = Path(managed_path).expanduser()
-        if root.is_dir():
-            return root
+    from services.deploy_paths import resolve_deploy_identity, resolve_deploy_managed_path
+    from core.paths import default_mod_library
+
     database = db if db is not None else get_db()
-    mid = str(mod_id).strip()
-    if mid.isdigit():
-        row = database.get_mod_backup_row(mid) or {}
-        lkp = str(row.get("last_known_path") or "").strip()
-        if lkp and Path(lkp).is_dir():
-            return Path(lkp)
-        info = database.get_mod_display_info(mid)
-        if info:
-            for raw in (getattr(info, "managed_path", None), getattr(info, "local_path", None)):
-                text = str(raw or "").strip()
-                if text and Path(text).is_dir():
-                    return Path(text)
-    return None
+    mid = resolve_deploy_identity(mod_id, db=database)
+    library_root = None
+    try:
+        library_root = default_mod_library()
+    except Exception:  # noqa: BLE001
+        library_root = None
+    return resolve_deploy_managed_path(
+        mid,
+        db=database,
+        library_root=library_root,
+        explicit=managed_path,
+    )
 
 
 def _entry_path_names(entry: ModFileEntry) -> list[str]:
@@ -638,7 +636,12 @@ def validate_content_root(
 
 
 def enrich_manifest_source_hashes(manifest: Any) -> None:
-    """Attach optional ``source_hash`` to manifest file entries (backward compatible)."""
+    """Attach optional ``source_hash`` to manifest file entries (backward compatible).
+
+    Memoize by resolved source path — Anno archives share one zip across thousands
+    of members; hashing that zip once per entry is a confirmed multi-minute stall.
+    """
+    cache: dict[str, str] = {}
     for entry in list(getattr(manifest, "files", None) or []):
         raw = str(getattr(entry, "source", "") or "").strip()
         if not raw:
@@ -647,9 +650,16 @@ def enrich_manifest_source_hashes(manifest: Any) -> None:
         if not path.is_file():
             continue
         try:
-            digest = _sha256_file(path)
+            key = str(path.resolve())
         except OSError:
-            continue
+            key = str(path)
+        digest = cache.get(key)
+        if digest is None:
+            try:
+                digest = _sha256_file(path)
+            except OSError:
+                continue
+            cache[key] = digest
         if hasattr(entry, "source_hash"):
             entry.source_hash = digest
 

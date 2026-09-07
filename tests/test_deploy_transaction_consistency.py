@@ -138,7 +138,8 @@ def test_case1_deploy_fail_rollback_ok_cleans_state(
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"
     info = db.get_mod_deploy_info("95001")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()
 
 
 # ---------------------------------------------------------------------------

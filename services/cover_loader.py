@@ -55,7 +55,12 @@ def resolve_cover_path(
     managed_path: str | Path,
     cover_ref: str = "",
 ) -> Path | None:
-    """Resolve a cover file path via Metadata Resolver (safe off the GUI thread)."""
+    """Resolve a cover file path (resource locator — never invents Mod identity).
+
+    Chain: managed folder → cover_ref / ``.info/cover.*`` → optional metadata
+    resolver when ``mod_id`` can be read from ``.info.internal_id`` (DB bind only).
+    """
+    root = Path(managed_path) if managed_path is not None else Path()
     ref = str(cover_ref or "").strip()
     if ref:
         direct = Path(ref)
@@ -64,14 +69,61 @@ def resolve_cover_path(
                 return direct.resolve()
         except OSError:
             pass
-    try:
-        from services.mod_metadata_resolver import resolve_cover_path as resolve_meta
+        if root.is_dir():
+            try:
+                nested = (root / ref).resolve()
+                if nested.is_file():
+                    return nested
+            except OSError:
+                pass
+    if root.is_dir():
+        try:
+            from services.file_ops import INFO_DIR_NAME
+            from services.mod_metadata_resolver import _find_info_cover
 
-        found = resolve_meta(None, managed_path)
-        if found is not None:
-            return found
-    except Exception:  # noqa: BLE001
-        logger.debug("metadata resolver cover failed for %s", managed_path, exc_info=True)
+            found = _find_info_cover(root / INFO_DIR_NAME)
+            if found is not None:
+                return found
+        except Exception:  # noqa: BLE001
+            logger.debug("info cover scan failed for %s", root, exc_info=True)
+        try:
+            from services.file_ops import read_info_metadata_dict
+
+            info = read_info_metadata_dict(root) or {}
+            cref = str(info.get("cover_path") or "").strip()
+            if cref:
+                nested = root / cref
+                if nested.is_file():
+                    return nested.resolve()
+                if Path(cref).is_file():
+                    return Path(cref).resolve()
+        except Exception:  # noqa: BLE001
+            pass
+        # Entity-backed cover (backup / DB) — bind via .info.internal_id only.
+        try:
+            from services.file_ops import read_info_metadata_dict
+            from services.mod_identity import read_internal_id
+            from services.mod_metadata_resolver import resolve_cover_path as resolve_meta
+
+            raw = read_info_metadata_dict(root) or {}
+            proof = read_internal_id(raw)
+            mid = ""
+            if proof:
+                from core.db_manager import get_db
+
+                found_pk = get_db().find_mod_by_internal_id(proof)
+                if found_pk is not None:
+                    mid = str(found_pk)
+                elif proof.isdigit():
+                    mid = proof
+            if mid.isdigit():
+                found = resolve_meta(mid, root)
+                if found is not None:
+                    return found
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "metadata resolver cover failed for %s", managed_path, exc_info=True
+            )
     return None
 
 

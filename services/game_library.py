@@ -1,13 +1,13 @@
-"""Unified Game Library resolution (Phase 6 Part 3 + 6-C status).
+"""Unified Game Library resolution (Sync / Reconcile filesystem merge).
 
-Priority (highest first):
+ARCHITECTURE RULE
+-----------------
+Library Read Projection must **not** call ``resolve_games``. Library sidebar
+uses :func:`services.game_sidebar.build_game_sidebar_view_models` (``games`` +
+``mods`` SQL only).
 
-1. Real on-disk game folders under the Mod library
-2. Historical paths from backup / ``last_known_path`` (via mod counts)
-3. ``games`` table configuration
-
-Status summaries aggregate existing Mod ``content_status`` only — no second
-status system, no .info / backup file re-reads.
+This module remains for Sync/Reconcile-era tooling that intentionally merges
+filesystem discovery with DB configuration.
 """
 
 from __future__ import annotations
@@ -25,12 +25,13 @@ from services.game_status import (
     aggregate_from_hints,
 )
 from services.library_status import (
-    CONTENT_FOLDER_MISSING,
+    CONTENT_CONTENT_MISSING,
     CONTENT_HEALTHY,
     GAME_STATUS_HEALTHY,
     GAME_STATUS_MISSING_FOLDER,
     compute_game_status,
     row_content_status,
+    row_identity_status,
 )
 
 ORIGIN_FILESYSTEM = "filesystem"
@@ -192,7 +193,7 @@ def resolve_games(
                     ModStatusHint(
                         game_folder=key,
                         content_status=(
-                            CONTENT_FOLDER_MISSING
+                            CONTENT_CONTENT_MISSING
                             if ent.game_status == GAME_STATUS_MISSING_FOLDER
                             else CONTENT_HEALTHY
                         ),
@@ -232,25 +233,28 @@ def _derive_mod_hints(library_root: Path) -> list[ModStatusHint]:
                 continue
             mid = str(getattr(item, "published_file_id", "") or "").strip()
             cs = CONTENT_HEALTHY
+            identity = "ok"
             absent = False
             try:
                 if mid:
                     brow = db.get_mod_backup_row(mid)
                     if brow is not None:
                         cs = row_content_status(brow) or CONTENT_HEALTHY
+                        identity = row_identity_status(brow) or "ok"
                         absent = not bool(int(brow.get("folder_present") or 0))
                         if absent and cs == CONTENT_HEALTHY:
-                            cs = CONTENT_FOLDER_MISSING
+                            cs = CONTENT_CONTENT_MISSING
             except Exception:  # noqa: BLE001
                 pass
             if not bool(getattr(item, "folder_present", True)):
                 absent = True
                 if cs == CONTENT_HEALTHY:
-                    cs = CONTENT_FOLDER_MISSING
+                    cs = CONTENT_CONTENT_MISSING
             hints.append(
                 ModStatusHint(
                     game_folder=folder,
                     content_status=cs,
+                    identity_status=identity,
                     folder_absent=absent,
                 )
             )

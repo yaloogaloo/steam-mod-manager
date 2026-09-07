@@ -1,9 +1,11 @@
-"""Game-level status aggregation from existing Mod ``content_status`` (Phase 6-C).
+"""Game-level status aggregation from reduced Mod user status.
 
-Does **not** invent a second status system. Aggregates:
+Aggregates only user-visible Mod signals::
 
-- ``content_status`` / ``library_status`` (via mapping)
-- ``game_status`` (folder presence)
+  content_status ∈ {healthy, content_missing}
+  (user conflict / invalid / abandoned are card-level — not game identity)
+
+Identity facts are never aggregated into user-facing game status.
 """
 
 from __future__ import annotations
@@ -12,18 +14,13 @@ from dataclasses import asdict, dataclass
 from typing import Iterable, Sequence
 
 from services.library_status import (
-    CONTENT_BACKUP_INVALID,
     CONTENT_CONTENT_MISSING,
-    CONTENT_FOLDER_MISSING,
     CONTENT_HEALTHY,
-    CONTENT_IDENTITY_CONFLICT,
-    CONTENT_METADATA_MISSING,
     GAME_STATUS_HEALTHY,
     GAME_STATUS_MISSING_FOLDER,
-    library_status_to_content_status,
 )
+from services.status_authority import normalize_content_axis
 
-# Game overall_status (aggregated — not a new Mod field)
 OVERALL_HEALTHY = "healthy"
 OVERALL_WARNING = "warning"
 OVERALL_MISSING = "missing"
@@ -43,8 +40,11 @@ class ModStatusHint:
 
     game_folder: str
     content_status: str = CONTENT_HEALTHY
+    identity_status: str = "ok"  # ignored for user-facing aggregates
     category: str = ""
     folder_absent: bool = False
+    conflict_status: str = "none"
+    invalid: bool = False
 
 
 @dataclass
@@ -52,11 +52,11 @@ class GameStatusSummary:
     game_name: str
     total_mods: int = 0
     healthy_count: int = 0
-    folder_missing_count: int = 0
+    folder_missing_count: int = 0  # always 0 — deleted Mod-status dimension
     content_missing_count: int = 0
-    metadata_missing_count: int = 0
-    conflict_count: int = 0
-    backup_only_count: int = 0
+    metadata_missing_count: int = 0  # always 0 — deleted Mod-status dimension
+    conflict_count: int = 0  # user conflict_status only (never identity)
+    backup_only_count: int = 0  # always 0 — backup is not Mod status
     game_status: str = GAME_STATUS_HEALTHY
     overall_status: str = OVERALL_HEALTHY
 
@@ -65,83 +65,73 @@ class GameStatusSummary:
 
     @property
     def anomaly_count(self) -> int:
-        return int(
-            self.folder_missing_count
-            + self.content_missing_count
-            + self.metadata_missing_count
-            + self.conflict_count
-        )
+        return int(self.content_missing_count + self.conflict_count)
 
 
 def normalize_content_status(value: str | None) -> str:
-    key = str(value or "").strip()
-    if not key:
-        return CONTENT_HEALTHY
-    mapped = library_status_to_content_status(key)
-    return mapped or CONTENT_HEALTHY
+    return normalize_content_axis(value)
 
 
 def aggregate_game_status(
     game_name: str,
     *,
     content_statuses: Sequence[str] = (),
+    identity_statuses: Sequence[str] = (),
     game_status: str = GAME_STATUS_HEALTHY,
     folder_absent_flags: Sequence[bool] | None = None,
+    conflict_statuses: Sequence[str] = (),
 ) -> GameStatusSummary:
     """
-    Aggregate Mod ``content_status`` values into a GameStatusSummary.
+    Aggregate Mod content (+ optional user conflict) into GameStatusSummary.
 
-    Priority for ``overall_status``:
-
-    ``conflict`` > ``missing`` (game folder gone) > ``warning`` > ``healthy``
+    ``identity_statuses`` is accepted for call-site compat but **ignored** —
+    identity is not a user-facing Mod / game status.
     """
+    del identity_statuses  # never user-facing
     name = str(game_name or "").strip()
     gstatus = str(game_status or "").strip() or GAME_STATUS_HEALTHY
     statuses = [normalize_content_status(s) for s in content_statuses]
     absent = list(folder_absent_flags or [])
+    conflicts = [str(c or "").strip().lower() for c in conflict_statuses]
 
     healthy = 0
-    folder_missing = 0
     content_missing = 0
-    metadata_missing = 0
     conflict = 0
-    backup_only = 0
 
     for i, cs in enumerate(statuses):
         is_absent = bool(absent[i]) if i < len(absent) else False
         if is_absent and cs == CONTENT_HEALTHY:
-            cs = CONTENT_FOLDER_MISSING
-        if cs in (CONTENT_IDENTITY_CONFLICT, CONTENT_BACKUP_INVALID):
+            cs = CONTENT_CONTENT_MISSING
+        if i < len(conflicts) and conflicts[i] == "conflict":
             conflict += 1
-        elif cs == CONTENT_FOLDER_MISSING:
-            folder_missing += 1
-            backup_only += 1
-        elif cs == CONTENT_CONTENT_MISSING:
+        if cs == CONTENT_CONTENT_MISSING:
             content_missing += 1
-        elif cs == CONTENT_METADATA_MISSING:
-            metadata_missing += 1
         elif cs == CONTENT_HEALTHY:
             healthy += 1
         else:
             content_missing += 1
 
-    total = len(statuses)
+    for j in range(len(statuses), len(conflicts)):
+        if conflicts[j] == "conflict":
+            conflict += 1
+
+    total = max(len(statuses), len(conflicts)) if (statuses or conflicts) else 0
+    if not total:
+        total = len(statuses)
     overall = _compute_overall(
         game_status=gstatus,
         conflict_count=conflict,
-        folder_missing_count=folder_missing,
         content_missing_count=content_missing,
-        metadata_missing_count=metadata_missing,
     )
     return GameStatusSummary(
         game_name=name,
         total_mods=total,
         healthy_count=healthy,
-        folder_missing_count=folder_missing,
+        folder_missing_count=0,
         content_missing_count=content_missing,
-        metadata_missing_count=metadata_missing,
+        metadata_missing_count=0,
         conflict_count=conflict,
-        backup_only_count=backup_only,
+        backup_only_count=0,
         game_status=gstatus,
         overall_status=overall,
     )
@@ -153,12 +143,19 @@ def aggregate_from_hints(
     *,
     game_status: str = GAME_STATUS_HEALTHY,
 ) -> GameStatusSummary:
-    items = [h for h in hints if str(h.game_folder or "").strip() == str(game_name or "").strip()]
+    items = [
+        h
+        for h in hints
+        if str(h.game_folder or "").strip() == str(game_name or "").strip()
+    ]
     return aggregate_game_status(
         game_name,
         content_statuses=[h.content_status for h in items],
         game_status=game_status,
         folder_absent_flags=[bool(h.folder_absent) for h in items],
+        conflict_statuses=[
+            str(getattr(h, "conflict_status", "") or "none") for h in items
+        ],
     )
 
 
@@ -183,6 +180,9 @@ def aggregate_category_status(
         content_statuses=[h.content_status for h in matched],
         game_status=GAME_STATUS_HEALTHY,
         folder_absent_flags=[bool(h.folder_absent) for h in matched],
+        conflict_statuses=[
+            str(getattr(h, "conflict_status", "") or "none") for h in matched
+        ],
     )
 
 
@@ -190,19 +190,13 @@ def _compute_overall(
     *,
     game_status: str,
     conflict_count: int,
-    folder_missing_count: int,
     content_missing_count: int,
-    metadata_missing_count: int,
 ) -> str:
     if int(conflict_count) > 0:
         return OVERALL_CONFLICT
     if str(game_status or "").strip() == GAME_STATUS_MISSING_FOLDER:
         return OVERALL_MISSING
-    if (
-        int(folder_missing_count) > 0
-        or int(content_missing_count) > 0
-        or int(metadata_missing_count) > 0
-    ):
+    if int(content_missing_count) > 0:
         return OVERALL_WARNING
     return OVERALL_HEALTHY
 
@@ -218,18 +212,12 @@ def format_status_tooltip(summary: GameStatusSummary | None) -> str:
         lines.append("全部正常")
         return "\n".join(lines)
     if summary.overall_status == OVERALL_CONFLICT:
-        lines.append("发现身份冲突或备份异常")
+        lines.append("发现冲突标记")
     lines.append(f"正常: {summary.healthy_count}")
     if summary.content_missing_count:
         lines.append(f"内容缺失: {summary.content_missing_count}")
-    if summary.folder_missing_count:
-        lines.append(f"目录缺失: {summary.folder_missing_count}")
-    if summary.metadata_missing_count:
-        lines.append(f"元数据缺失: {summary.metadata_missing_count}")
     if summary.conflict_count:
-        lines.append(f"冲突/异常: {summary.conflict_count}")
-    if summary.backup_only_count and summary.folder_missing_count:
-        lines.append(f"仅备份: {summary.backup_only_count}")
+        lines.append(f"冲突: {summary.conflict_count}")
     return "\n".join(lines)
 
 
@@ -237,7 +225,7 @@ def leading_icon_for_overall(overall_status: str, *, kind: str = "game") -> str:
     """Compact tree leading mark. Healthy games stay 🎮 (no green noise)."""
     key = str(overall_status or "").strip() or OVERALL_HEALTHY
     if kind == "category":
-        return "📂"
+        return "📁"
     if key == OVERALL_CONFLICT:
         return "❌"
     if key in {OVERALL_WARNING, OVERALL_MISSING}:
@@ -252,14 +240,10 @@ def header_status_line(summary: GameStatusSummary | None) -> str:
     if summary.overall_status == OVERALL_HEALTHY:
         return "状态: 全部正常"
     if summary.overall_status == OVERALL_CONFLICT:
-        return f"状态: ❌ {summary.conflict_count} 个冲突/异常"
+        return f"状态: ❌ {summary.conflict_count} 个冲突"
     parts: list[str] = [f"正常 {summary.healthy_count}"]
-    if summary.folder_missing_count:
-        parts.append(f"目录缺失 {summary.folder_missing_count}")
     if summary.content_missing_count:
         parts.append(f"内容缺失 {summary.content_missing_count}")
-    if summary.metadata_missing_count:
-        parts.append(f"元数据缺失 {summary.metadata_missing_count}")
     if summary.overall_status == OVERALL_MISSING:
         return "状态: ⚠ 游戏目录缺失 · " + " · ".join(parts)
     return "状态: ⚠ " + " · ".join(parts)

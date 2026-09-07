@@ -9,6 +9,7 @@ import pytest
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
+    DEPLOY_STATUS_FAILED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
@@ -194,7 +195,8 @@ def test_case3_validation_failure_has_no_result_files(
     assert load_manifest(mod_dir) is None
     info = db.get_mod_deploy_info("93003")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()
 
 
 def test_case4_backup_restore_unaffected_by_result_detail(

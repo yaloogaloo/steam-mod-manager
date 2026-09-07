@@ -79,7 +79,11 @@ class OfflinePageWorker(QThread):
 
 
 class ModDetailDialog(QDialog):
-    """Rich detail view for a single managed Mod."""
+    """Rich detail view for a single managed Mod.
+
+    ARCHITECTURE RULE: pass an explicit parent. See ui.window_lifecycle
+    (Import Mod orphan float accident).
+    """
 
     def __init__(
         self,
@@ -88,7 +92,11 @@ class ModDetailDialog(QDialog):
         *,
         mod_id: str | int | None = None,
     ) -> None:
+        from ui.window_lifecycle import register_toplevel
+
         super().__init__(parent)
+        if parent is not None:
+            register_toplevel(self)
         from services.mod_metadata_resolver import resolve_mod_metadata
 
         self.managed_path = Path(managed_path) if managed_path is not None else Path()

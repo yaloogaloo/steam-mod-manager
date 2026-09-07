@@ -31,7 +31,6 @@ from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
     DEPLOY_STATUS_FAILED,
     DEPLOY_STATUS_NOT_DEPLOYED,
-    get_db,
 )
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
@@ -45,9 +44,7 @@ from services.file_ops import (
     INFO_DIR_NAME,
     LEGACY_INFO_DIR_NAME,
     ModFileManager,
-    read_is_missing_content,
 )
-from services.metadata_backup import is_mod_folder_absent
 from ui.styles import (
     ACCENT_DISABLED_BG,
     ACCENT_DISABLED_BORDER,
@@ -148,13 +145,13 @@ class ModCardWidget(QFrame):
     details live in cover overlays, status strip, and hover tooltip.
     """
 
-    selection_requested = Signal(object)  # Path managed_path
-    detail_requested = Signal(object)
+    selection_requested = Signal(str)  # internal_id
+    detail_requested = Signal(str)  # internal_id
     metadata_changed = Signal(object)
-    edit_requested = Signal(object)  # Path
+    edit_requested = Signal(str)  # internal_id
     deploy_requested = Signal(str)  # mod_id
-    open_folder_requested = Signal(object)  # Path
-    open_steam_requested = Signal(object)  # Path
+    open_folder_requested = Signal(str)  # internal_id
+    open_steam_requested = Signal(str)  # internal_id
     favorite_toggle_requested = Signal(str)  # mod_id
     context_menu_opening = Signal()
     set_category_requested = Signal(str)  # category label; "" = clear
@@ -434,8 +431,8 @@ class ModCardWidget(QFrame):
                 "ModCardWidget.mousePressEvent",
                 detail=str(self.managed_path),
             )
-            self.selection_requested.emit(self.managed_path)
-            self.detail_requested.emit(self.managed_path)
+            self.selection_requested.emit(self._mod_id())
+            self.detail_requested.emit(self._mod_id())
         super().mousePressEvent(event)
 
     def set_category_options(self, options: list[str]) -> None:
@@ -456,16 +453,17 @@ class ModCardWidget(QFrame):
         act_fav = QAction("取消收藏" if fav else "收藏", menu)
 
         act_detail.triggered.connect(self._emit_view_detail)
-        act_edit.triggered.connect(
-            lambda: self.edit_requested.emit(self.managed_path)
-        )
-        folder_absent = is_mod_folder_absent(self._mod_id(), self.managed_path)
+        act_edit.triggered.connect(lambda: self.edit_requested.emit(self._mod_id()))
+        folder_absent = False
+        data = getattr(self, "_card_data", None)
+        if data is not None:
+            folder_absent = bool(data.folder_absent)
         act_deploy.triggered.connect(self._emit_deploy)
         act_folder.triggered.connect(
-            lambda: self.open_folder_requested.emit(self.managed_path)
+            lambda: self.open_folder_requested.emit(self._mod_id())
         )
         act_steam.triggered.connect(
-            lambda: self.open_steam_requested.emit(self.managed_path)
+            lambda: self.open_steam_requested.emit(self._mod_id())
         )
         act_fav.triggered.connect(self._emit_favorite_toggle)
 
@@ -518,8 +516,10 @@ class ModCardWidget(QFrame):
         event.accept()
 
     def _emit_view_detail(self) -> None:
-        self.selection_requested.emit(self.managed_path)
-        self.detail_requested.emit(self.managed_path)
+        mid = self._mod_id()
+        if mid:
+            self.selection_requested.emit(mid)
+            self.detail_requested.emit(mid)
 
     def _emit_deploy(self) -> None:
         mid = self._mod_id()
@@ -535,14 +535,7 @@ class ModCardWidget(QFrame):
         data = getattr(self, "_card_data", None)
         if data is not None:
             return bool(data.favorite)
-        mid = self._mod_id()
-        if not mid:
-            return False
-        try:
-            info = get_db().get_mod_display_info(mid)
-        except Exception:  # noqa: BLE001
-            return False
-        return bool(info and info.favorite)
+        return False
 
     def set_selected(self, selected: bool) -> None:
         self._selected = bool(selected)
@@ -609,46 +602,27 @@ class ModCardWidget(QFrame):
         self._render_relation_badge()
 
     def _mod_id(self) -> str:
+        """Entity identity from Projection only — never path / published_file_id."""
         data = getattr(self, "_card_data", None)
         if data is not None and str(getattr(data, "id", "") or "").strip():
             return str(data.id).strip()
-        meta = self.metadata
-        if meta and meta.published_file_id:
-            return str(meta.published_file_id)
-        if self.managed_path.name.isdigit():
-            return self.managed_path.name
-        try:
-            from services.mod_metadata_resolver import resolve_mod_metadata
-
-            resolved = resolve_mod_metadata(None, self.managed_path)
-        except Exception:  # noqa: BLE001
-            resolved = None
-        if resolved is not None and resolved.published_file_id:
-            if self.metadata is None:
-                self.metadata = resolved.to_mod_metadata()
-            return str(resolved.published_file_id)
         return ""
 
     def _display_info(self):
+        """Projection-only display namespace — never live DB for Library paint."""
         data = getattr(self, "_card_data", None)
-        if data is not None:
-            from types import SimpleNamespace
+        if data is None:
+            return None
+        from types import SimpleNamespace
 
-            return SimpleNamespace(
-                steam_name=data.steam_name,
-                favorite=data.favorite,
-                platform=data.platform,
-                offline_status=data.offline_status,
-                user_display_name=data.json_display_name or data.title,
-                display_name=data.title,
-            )
-        mid = self._mod_id()
-        if not mid:
-            return None
-        try:
-            return get_db().get_mod_display_info(mid)
-        except Exception:  # noqa: BLE001
-            return None
+        return SimpleNamespace(
+            steam_name=data.steam_name,
+            favorite=data.favorite,
+            platform=data.platform,
+            offline_status=data.offline_status,
+            user_display_name=data.json_display_name or data.title,
+            display_name=data.title,
+        )
 
     def _apply_titles(self) -> None:
         from ui.library_query import resolve_mod_library_title
@@ -657,30 +631,28 @@ class ModCardWidget(QFrame):
         steam_name = ""
         db_display = ""
         data = getattr(self, "_card_data", None)
+        folder_ok = True
         if data is not None:
             folder_ok = not bool(data.folder_absent)
-        else:
-            try:
-                folder_ok = self.managed_path.is_dir()
-            except OSError:
-                folder_ok = False
         if info is not None:
             if folder_ok:
                 steam_name = (info.steam_name or "").strip()
                 db_display = (info.user_display_name or "").strip()
-        if not steam_name and self.metadata:
-            steam_name = (self.metadata.title or "").strip()
+        if not steam_name and data is not None:
+            steam_name = (data.steam_name or data.title or "").strip()
         meta_display = (
             (self.metadata.json_display_name or "").strip() if self.metadata else ""
         )
         meta_title = (self.metadata.title or "").strip() if self.metadata else ""
         display = resolve_mod_library_title(
-            metadata_display_name=meta_display,
-            metadata_title=meta_title,
+            metadata_display_name=meta_display if data is None else (db_display or meta_display),
+            metadata_title=meta_title if data is None else (steam_name or meta_title),
             db_display_name=db_display if folder_ok else "",
             db_steam_name=steam_name if folder_ok else "",
             folder_name=self.managed_path.name,
         )
+        if data is not None and str(data.title or "").strip():
+            display = str(data.title).strip()
 
         width = TEXT_WIDTH
         avail = int(self.title_label.width() or 0)
@@ -693,22 +665,10 @@ class ModCardWidget(QFrame):
         self._cached_steam_name = steam_name
 
     def _has_offline_page(self) -> bool:
+        """Projection-only: ``ModCardData.has_offline`` (never FS scan)."""
         data = getattr(self, "_card_data", None)
         if data is not None:
             return bool(data.has_offline)
-        from services.mod_metadata_resolver import resolve_offline_page
-
-        found = resolve_offline_page(self._mod_id() or None, self.managed_path)
-        if found is not None:
-            return True
-        ref = ""
-        if self.metadata and self.metadata.offline_page_path:
-            ref = str(self.metadata.offline_page_path).strip()
-        if ref:
-            try:
-                return Path(ref).is_file()
-            except OSError:
-                return False
         return False
 
     def _offline_needs_attention(self) -> tuple[bool, str]:
@@ -716,15 +676,15 @@ class ModCardWidget(QFrame):
         Return ``(show_badge, tip)``.
 
         Show only when offline is missing / failed — never for successful sync.
+        Reads Projection fields only (``offline_status`` / ``has_offline``).
         """
-        info = self._display_info()
-        status = OFFLINE_STATUS_NONE
-        if info is not None:
-            raw = getattr(info, "offline_status", OFFLINE_STATUS_NONE)
-            if not isinstance(raw, str):
-                raw = OFFLINE_STATUS_NONE
-            status = normalize_offline_status(raw)
-        has_page = self._has_offline_page()
+        data = getattr(self, "_card_data", None)
+        if data is None:
+            return False, ""
+        status = normalize_offline_status(
+            str(data.offline_status or OFFLINE_STATUS_NONE)
+        )
+        has_page = bool(data.has_offline)
         if status == OFFLINE_STATUS_FAILED:
             return True, "离线页面保存失败"
         if status in (OFFLINE_STATUS_GENERATED, OFFLINE_STATUS_ARCHIVED) or has_page:
@@ -732,6 +692,7 @@ class ModCardWidget(QFrame):
         return True, "离线页面未保存"
 
     def _render_offline_badge(self) -> None:
+        """Original offline attention badge — text stays ``OFFLINE_MISSING_LABEL``."""
         show, tip = self._offline_needs_attention()
         if not show:
             self.offline_badge.hide()
@@ -751,72 +712,24 @@ class ModCardWidget(QFrame):
         self.offline_badge.show()
 
     def _overlay_user_flags(self) -> tuple[bool, bool, bool, list[str]]:
-        """Read existing conflict/invalid/disabled flags — display only, no writes."""
-        mid = self._mod_id()
-        conflict = False
-        invalid = False
-        disabled = False
+        """Read projected conflict/invalid/disabled — no live DB inference."""
         tip_parts: list[str] = []
         data = getattr(self, "_card_data", None)
-        if data is not None:
-            conflict = bool(getattr(data, "conflict", False))
-            invalid = bool(getattr(data, "invalid", False) or getattr(data, "is_invalid", False))
-            disabled = not bool(getattr(data, "enabled", True))
-            if conflict:
-                tip_parts.append("存在冲突")
-            if invalid:
-                tip_parts.append("已失效")
-            if disabled:
-                tip_parts.append("已禁用")
-            return conflict, invalid, disabled, tip_parts
-        if not mid:
+        if data is None:
             return False, False, False, []
-        try:
-            st = get_db().get_mod_status(mid)
-        except Exception:  # noqa: BLE001
-            st = None
-        try:
-            enabled = get_db().is_mod_enabled(mid)
-        except Exception:  # noqa: BLE001
-            enabled = True
-        disabled = not enabled
-        if st is not None:
-            if st.conflict_status == "conflict":
-                conflict = True
-                tip_parts.append(
-                    "文件覆盖冲突"
-                    + (
-                        f"：{st.conflict_note}"
-                        if (st.conflict_note or "").strip()
-                        else ""
-                    )
-                )
-            elif st.conflict_status == "warning" and (st.conflict_note or "").strip():
-                # Soft warning — independent tip, not file-conflict badge
-                tip_parts.append(f"警告：{st.conflict_note.strip()}")
-            if st.invalid:
-                invalid = True
-                tip_parts.append(
-                    "已失效"
-                    + (
-                        f"：{st.invalid_reason}"
-                        if (st.invalid_reason or "").strip()
-                        else ""
-                    )
-                )
-        if not conflict and not invalid:
-            try:
-                flags = get_db().get_mods_tag_flags([mid]).get(mid)
-            except Exception:  # noqa: BLE001
-                flags = None
-            if flags is not None:
-                if flags.conflict:
-                    conflict = True
-                    tip_parts.append("存在冲突")
-                if flags.invalid:
-                    invalid = True
-                    reason = (flags.invalid_reason or "").strip()
-                    tip_parts.append("已失效" + (f"：{reason}" if reason else ""))
+        conflict = bool(getattr(data, "conflict", False)) or (
+            str(getattr(data, "conflict_status", "") or "").strip().lower() == "conflict"
+        )
+        invalid = bool(
+            getattr(data, "invalid", False) or getattr(data, "is_invalid", False)
+        )
+        disabled = not bool(getattr(data, "enabled", True))
+        if conflict:
+            tip_parts.append("已标记冲突")
+        if invalid:
+            tip_parts.append("已失效")
+        if disabled:
+            tip_parts.append("已禁用")
         return conflict, invalid, disabled, tip_parts
 
     def _hide_cover_state_overlay(self) -> None:
@@ -850,19 +763,11 @@ class ModCardWidget(QFrame):
         chip.adjustSize()
 
     def _is_abandoned(self) -> bool:
+        """Projection-only — never query tags / DB for Mod status."""
         data = getattr(self, "_card_data", None)
-        if data is not None and bool(getattr(data, "abandoned", False)):
-            return True
-        mid = self._mod_id()
-        if not mid:
+        if data is None:
             return False
-        try:
-            return any(
-                str(tag.tag_type or "") == TAG_TYPE_ABANDONED
-                for tag in get_db().get_mod_tags(mid)
-            )
-        except Exception:  # noqa: BLE001
-            return False
+        return bool(getattr(data, "abandoned", False))
 
     def _render_footer_status_chips(self) -> None:
         """Bottom status row, right side: invalid / disabled / abandoned / favorite."""
@@ -1009,17 +914,11 @@ class ModCardWidget(QFrame):
         self.record_badge.show()
 
     def _render_category_badge(self) -> None:
-        mid = self._mod_id()
         label = ""
         data = getattr(self, "_card_data", None)
         if data is not None:
-            label = str((data.category_tags or "").split()[:1][0] if (data.category_tags or "").split() else "").strip()
-        elif mid:
-            try:
-                tags = get_db().get_category_tags(mid)
-                label = str(tags[0] if tags else "").strip()
-            except Exception:  # noqa: BLE001
-                label = ""
+            parts = str(data.category_tags or "").split()
+            label = str(parts[0] if parts else "").strip()
         if not label:
             self.category_badge.hide()
             self.category_badge.clear()
@@ -1031,76 +930,31 @@ class ModCardWidget(QFrame):
         self.category_badge.raise_()
 
     def _render_missing_content_badge(self) -> None:
-        """Unified status badge (top-right under source). Silent when healthy."""
+        """User Mod status: content_missing only — never identity/backup/library."""
         from services.library_status import (
             CONTENT_CONTENT_MISSING,
-            CONTENT_FOLDER_MISSING,
-            CONTENT_HEALTHY,
-            CONTENT_IDENTITY_CONFLICT,
             content_status_badge_label,
             content_status_badge_tip,
-            library_status_to_content_status,
         )
+        from services.status_authority import normalize_content_axis
 
-        mid = self._mod_id()
         data = getattr(self, "_card_data", None)
-        content_status = ""
-        if data is not None:
-            folder_absent = bool(data.folder_absent)
-            missing_payload = bool(data.missing_content) and not folder_absent
-            content_status = str(getattr(data, "content_status", "") or "").strip()
-            if not content_status:
-                content_status = library_status_to_content_status(
-                    str(getattr(data, "library_status", "") or "")
-                )
-        else:
-            folder_absent = is_mod_folder_absent(mid, self.managed_path)
-            missing_payload = False if folder_absent else read_is_missing_content(
-                self.managed_path
-            )
-            # Prefer live DB after Detail refresh cleared the snapshot.
-            if mid:
-                try:
-                    from core.db_manager import get_db
-                    from services.library_status import row_content_status
-
-                    brow = get_db().get_mod_backup_row(mid)
-                    if brow is not None:
-                        content_status = str(row_content_status(brow) or "").strip()
-                except Exception:  # noqa: BLE001
-                    content_status = ""
-        if not content_status:
-            if folder_absent:
-                content_status = CONTENT_FOLDER_MISSING
-            elif missing_payload:
-                content_status = CONTENT_CONTENT_MISSING
-            else:
-                content_status = CONTENT_HEALTHY
-
-        conflict_flag, _, _, conflict_tips = self._overlay_user_flags()
-        if content_status == CONTENT_HEALTHY and not conflict_flag:
+        if data is None:
+            self.missing_badge.hide()
+            self.missing_badge.clear()
+            self.missing_badge.setToolTip("")
+            return
+        content_status = normalize_content_axis(
+            str(getattr(data, "content_status", "") or "")
+        )
+        if content_status != CONTENT_CONTENT_MISSING:
             self.missing_badge.hide()
             self.missing_badge.clear()
             self.missing_badge.setToolTip("")
             return
 
-        if content_status == CONTENT_IDENTITY_CONFLICT or (
-            content_status == CONTENT_HEALTHY and conflict_flag
-        ):
-            status_label = "❌ " + (
-                content_status_badge_label(CONTENT_IDENTITY_CONFLICT)
-                if content_status == CONTENT_IDENTITY_CONFLICT
-                else "冲突"
-            )
-            status_tip = (
-                content_status_badge_tip(CONTENT_IDENTITY_CONFLICT)
-                if content_status == CONTENT_IDENTITY_CONFLICT
-                else ("\n".join(conflict_tips) or "存在冲突")
-            )
-        else:
-            status_label = "⚠ " + content_status_badge_label(content_status)
-            status_tip = content_status_badge_tip(content_status)
-
+        status_label = "⚠ " + content_status_badge_label(content_status)
+        status_tip = content_status_badge_tip(content_status)
         self.missing_badge.setText(status_label)
         self.missing_badge.setToolTip(status_tip)
         self.missing_badge.setStyleSheet(
@@ -1175,7 +1029,6 @@ class ModCardWidget(QFrame):
         """Cover bottom-right: green/red dot; hide when not deployed."""
         status = DEPLOY_STATUS_NOT_DEPLOYED
         tip = "尚未部署到游戏目录"
-        mid = self._mod_id()
         data = getattr(self, "_card_data", None)
         if data is not None:
             status = data.deploy_status or DEPLOY_STATUS_NOT_DEPLOYED
@@ -1183,17 +1036,12 @@ class ModCardWidget(QFrame):
                 tip = "已部署到游戏 Mod 目录"
             elif status == DEPLOY_STATUS_FAILED:
                 tip = "最近一次部署失败"
-        elif mid:
-            try:
-                info = get_db().get_mod_deploy_info(mid)
-            except Exception:  # noqa: BLE001
-                info = None
-            if info is not None:
-                status = info.deploy_status or DEPLOY_STATUS_NOT_DEPLOYED
-                if status == DEPLOY_STATUS_DEPLOYED:
-                    tip = info.deploy_path or "已部署到游戏 Mod 目录"
-                elif status == DEPLOY_STATUS_FAILED:
-                    tip = "最近一次部署失败"
+        else:
+            self.deploy_dot.hide()
+            self.deploy_dot.clear()
+            self.deploy_dot.setToolTip("")
+            self._cached_deploy_label = "Not deployed"
+            return
 
         if status == DEPLOY_STATUS_DEPLOYED:
             color = ACCENT_SUCCESS
@@ -1227,19 +1075,12 @@ class ModCardWidget(QFrame):
 
     def _render_relation_badge(self) -> None:
         """Cover bottom-left counts — overlay only, no layout height."""
-        mid = self._mod_id()
         deps = 0
         confs = 0
         data = getattr(self, "_card_data", None)
         if data is not None:
             deps = int(data.relation_deps or 0)
             confs = int(data.relation_conflicts or 0)
-        elif mid:
-            try:
-                counts = get_db().get_relationship_counts([mid]).get(mid, (0, 0))
-                deps, confs = int(counts[0]), int(counts[1])
-            except Exception:  # noqa: BLE001
-                deps, confs = 0, 0
         parts: list[str] = []
         tips: list[str] = []
         if confs:
@@ -1409,25 +1250,22 @@ class ModCardWidget(QFrame):
             return
 
     def _resolve_cover(self) -> Path | None:
-        from services.mod_metadata_resolver import resolve_cover_path
-
-        found = resolve_cover_path(self._mod_id() or None, self.managed_path)
-        if found is not None:
-            return found
-        ref = ""
-        if self.metadata and self.metadata.cover_path:
+        """Resolve cover file from Projection cover ref only (no FS scan service)."""
+        data = getattr(self, "_card_data", None)
+        ref = str(getattr(data, "cover", "") or "").strip() if data is not None else ""
+        if not ref and self.metadata and self.metadata.cover_path:
             ref = str(self.metadata.cover_path).strip()
         if not ref:
             return None
         try:
             direct = Path(ref)
-            if not direct.is_file():
-                return None
-            if INFO_DIR_NAME in direct.parts and not self.managed_path.is_dir():
-                return None
-            return direct.resolve()
+            if not direct.is_absolute():
+                direct = self.managed_path / ref
+            if direct.is_file():
+                return direct.resolve()
         except OSError:
             return None
+        return None
 
     def _set_cover(self, path: Path | None) -> None:
         """Synchronous fallback — load via bytes to avoid Windows file locks."""

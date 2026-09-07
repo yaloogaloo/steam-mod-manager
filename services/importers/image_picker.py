@@ -159,6 +159,13 @@ def apply_cover_to_mod(
                 )
         except Exception as exc:  # noqa: BLE001
             logger.debug("update_mod_cover_path failed: %s", exc)
+        else:
+            try:
+                from services.mod_projection_events import notify_mod_changed
+
+                notify_mod_changed(mod_id)
+            except Exception:  # noqa: BLE001
+                pass
     if sync_backup:
         try:
             from services.metadata_backup_sync import sync_after_metadata_change

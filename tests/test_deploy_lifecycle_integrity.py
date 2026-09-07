@@ -10,6 +10,7 @@ import pytest
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
+    DEPLOY_STATUS_FAILED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DEPLOY_TYPE_FOLDER_COPY,
     DatabaseManager,
@@ -154,7 +155,8 @@ def test_case2_manifest_absent_after_failed_deploy(
     assert prior.read_text(encoding="utf-8") == "GAME"
     info = db.get_mod_deploy_info("94002")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()
 
 
 def test_case2_manifest_removed_on_undeploy(
@@ -251,7 +253,8 @@ def test_case4_partial_deploy_failure_restores(
     assert not transaction_path_for(source).is_file()
     info = db.get_mod_deploy_info("94005")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +383,14 @@ def test_case7_transaction_recovery_from_backup_done(
     prior.write_text("GAME", encoding="utf-8")
 
     mgr = BackupManager(source)
-    prep = mgr.prepare_overwrite([prior])
+    prep = mgr.prepare_overwrite([prior], mod_id="94020")
     assert prep.by_target[str(prior.resolve())] is not None
-    # Simulate crash after backup_done: target already overwritten, txn left
+    # Simulate crash after backup_done: target already overwritten, txn left.
+    # Process restart clears the in-memory active-txn registry.
+    from services.deploy_txn import unregister_active_deploy_transaction
+
     prior.write_text("PARTIAL-MOD", encoding="utf-8")
+    unregister_active_deploy_transaction(source)
     txn = mgr.load_transaction()
     assert txn is not None
     assert txn.get("status") == TXN_BACKUP_DONE
@@ -397,6 +404,9 @@ def test_case7_transaction_recovery_from_backup_done(
     info = db.get_mod_deploy_info("94020")
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    err = str(info.deploy_error or "")
+    assert "rollback completed" in err
+    assert "interrupted deploy" in err
 
 
 def test_case7_failed_transaction_needs_attention(tmp_path: Path) -> None:

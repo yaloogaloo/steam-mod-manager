@@ -325,6 +325,23 @@ CYBERPUNK_2077_NAME_ALIASES = frozenset(
     }
 )
 
+# Civilization VI / 文明Ⅵ — Steam Workshop folder_copy into configured mod_path.
+CIVILIZATION_VI_APP_IDS = frozenset({289070})
+CIVILIZATION_VI_NAME_ALIASES = frozenset(
+    {
+        "civilization vi",
+        "civilizationvi",
+        "civ vi",
+        "civvi",
+        "sid meier's civilization vi",
+        "sid meiers civilization vi",
+        "文明ⅵ",
+        "文明vi",
+        "文明6",
+        "文明Ⅵ",
+    }
+)
+
 
 def _normalize_game_key(game_name: str | None) -> str:
     text = str(game_name or "").strip().casefold()
@@ -403,6 +420,26 @@ def is_cyberpunk_2077_game(game_name: str = "", game_id: int | str = 0) -> bool:
     if key in aliases:
         return True
     return "cyberpunk2077" in key
+
+
+def is_civilization_vi_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Civilization VI / 文明Ⅵ."""
+    gid = _coerce_game_id(game_id)
+    if gid in CIVILIZATION_VI_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    if "文明" in raw and ("Ⅵ" in raw or "ⅵ" in raw or "VI" in raw or "vi" in raw):
+        return True
+    if "文明" in raw and re.search(r"6\b", raw):
+        return True
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in CIVILIZATION_VI_NAME_ALIASES}
+    if key in aliases:
+        return True
+    # Avoid matching the "vi" inside the word "civilization" itself.
+    return key in {"civilizationvi", "civvi", "civ6"} or key.endswith("civilizationvi")
 
 
 def omits_steam_workshop_source(game_name: str = "", game_id: int | str = 0) -> bool:

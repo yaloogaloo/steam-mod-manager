@@ -274,6 +274,11 @@ def _run_gui() -> int:
         from ui.widget_show_trace import install_widget_show_trace
 
         install_widget_show_trace(app)
+    # Always enforce window ownership — refuse parentless control show
+    # (Import Mod orphan float accident class). See ui.window_lifecycle.
+    from ui.window_lifecycle import install_window_ownership_guard
+
+    install_window_ownership_guard(app)
     # App-level sheet so top-level popups (QMenu / QToolTip / combo lists) inherit dark tokens.
     app.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
     log_startup("app.setStyleSheet done")

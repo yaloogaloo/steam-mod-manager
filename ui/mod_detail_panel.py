@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as html_module
+import logging
 import os
 import re
 import sys
@@ -210,9 +211,17 @@ def humanize_deploy_error(error: str) -> str:
     text = (error or "").strip()
     if not text:
         return "未知错误"
+    # Path lifecycle — never collapse into generic game-settings copy.
+    from services.deploy_path_lifecycle import (
+        FORBIDDEN_VAGUE_MOD_PATH_COPY,
+        is_path_lifecycle_error,
+    )
+
+    if is_path_lifecycle_error(text):
+        return text
     if text in (
         "内容目录不存在，无法部署",
-        "Mod 安装目录不存在，请检查游戏设置",
+        FORBIDDEN_VAGUE_MOD_PATH_COPY,
         "目标目录已存在其他内容，无法部署",
         "无法写入游戏 Mod 目录，请检查权限",
         "部署失败：文件复制错误",
@@ -225,15 +234,16 @@ def humanize_deploy_error(error: str) -> str:
     if text == "Target mod directory does not exist" or text.startswith(
         "Target mod directory does not exist"
     ):
-        return "Mod 安装目录不存在，请检查游戏设置"
+        # Legacy English — keep concrete; do not map to vague settings copy.
+        return text
     if text.startswith("Permission denied"):
         return "无法写入游戏 Mod 目录，请检查权限"
     if "请先配置游戏部署目录" in text or (
         "部署目录" in text and "配置" in text
     ):
-        return "请先配置游戏部署目录"
+        return text if "code=" in text or "app_id=" in text else "请先配置游戏部署目录"
     if "源 Mod 目录不存在" in text or "源文件不存在" in text:
-        return "内容目录不存在，无法部署"
+        return text if "SOURCE_MOD_PATH_MISSING" in text else "内容目录不存在，无法部署"
     if text.startswith("复制失败") or "复制失败" in text:
         return "部署失败：文件复制错误"
     if text == "Unknown deploy error":
@@ -293,14 +303,99 @@ def _format_description_rich_html(text: str) -> str:
     Render description for QLabel RichText.
 
     HTML descriptions (mod.io / Steam) keep a safe tag subset; plain text is
-    escaped with newlines → ``<br>``.
+    escaped with newlines → ``<br>``. Consecutive blank blocks are collapsed so
+    Workshop padding cannot invent giant vertical gaps.
     """
     raw = str(text or "").strip()
     if not raw:
         return ""
     if _DESC_HTML_HINT.search(raw):
-        return _sanitize_description_html(raw)
-    return html_module.escape(raw).replace("\n", "<br>")
+        return _collapse_description_html_gaps(_sanitize_description_html(raw))
+    escaped = html_module.escape(raw).replace("\n", "<br/>")
+    return _collapse_description_html_gaps(escaped)
+
+
+# Description panel: high capacity but still bounded (not free expand).
+# Soft feedback / layout must stay stable across Mods of different lengths.
+META_DESC_MAX_HEIGHT_PX = 560
+# Frame includes caption + truncated hint + inner margins.
+META_DESC_FRAME_MAX_HEIGHT_PX = META_DESC_MAX_HEIGHT_PX + 56
+# Name / 原名 block: at most two lines.
+META_RICH_MAX_HEIGHT_PX = 48
+# Footer single-line fields.
+META_FOOTER_LINE_MAX_HEIGHT_PX = 22
+META_SOURCE_LINE_MAX_HEIGHT_PX = 40
+META_SECTION_SPACING_PX = 8
+# Extreme-only plain-text guard — normal Workshop copy should rarely hit this.
+META_DESC_MAX_PLAIN_CHARS = 5000
+META_DESC_TRUNCATED_HINT = "内容过长，已截断"
+
+
+def _description_plain_text(text: str) -> str:
+    """Strip light HTML to plain text for length / tooltip."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if _DESC_HTML_HINT.search(raw):
+        plain = re.sub(r"<br\s*/?>", "\n", raw, flags=re.IGNORECASE)
+        plain = re.sub(r"</p\s*>", "\n", plain, flags=re.IGNORECASE)
+        plain = re.sub(r"<[^>]+>", "", plain)
+        return html_module.unescape(plain).strip()
+    return raw
+
+
+def _truncate_description_for_panel(
+    text: str, *, max_chars: int = META_DESC_MAX_PLAIN_CHARS
+) -> tuple[str, bool]:
+    """
+    Return ``(display_source, truncated)``.
+
+    When over budget, fall back to plain text cut so the height-capped
+    QLabel never needs an internal scrollbar. Callers show
+    ``META_DESC_TRUNCATED_HINT`` separately.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return "", False
+    plain = _description_plain_text(raw)
+    if len(plain) <= max_chars:
+        return raw, False
+    cut = plain[:max_chars].rstrip()
+    for sep in ("\n\n", "\n", "。", ". ", "，", ", ", " "):
+        idx = cut.rfind(sep)
+        if idx >= max_chars // 2:
+            cut = cut[: idx + len(sep)].rstrip()
+            break
+    return cut, True
+
+
+def _collapse_description_html_gaps(html: str) -> str:
+    """Collapse empty paragraphs and runaway ``<br>`` runs from Steam HTML."""
+    text = str(html or "")
+    if not text:
+        return ""
+    # Empty / whitespace-only paragraphs.
+    text = re.sub(
+        r"<p(?:\s[^>]*)?>\s*(?:&nbsp;|\u00a0|\s)*</p>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # 3+ consecutive breaks → at most two.
+    text = re.sub(
+        r"(?:<br\s*/?>\s*){3,}",
+        "<br/><br/>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Adjacent empty-ish paragraphs left after sanitize.
+    text = re.sub(
+        r"(?:<p(?:\s[^>]*)?>\s*</p>\s*){2,}",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
 
 
 def _sanitize_description_html(html: str) -> str:
@@ -329,7 +424,8 @@ def _sanitize_description_html(html: str) -> str:
                 return f'<a href="{safe}">'
             return "<a>"
         if name == "p":
-            return '<p style="margin:0.55em 0;">'
+            # Tight margins — Steam Workshop often injects empty <p> padding.
+            return '<p style="margin:0.15em 0;padding:0;">'
         if name == "em" or name == "i":
             return f"<{name} style='font-style:italic;'>"
         return f"<{name}>"
@@ -550,6 +646,73 @@ class ModDetailPanel(QWidget):
         self._fill_view()
         self.setEnabled(True)
         perf.end()
+        self._schedule_fs_observation_on_show(mid)
+
+    def _schedule_fs_observation_on_show(self, mod_id: str) -> None:
+        """Detail enter: L0 on this thread; dirty → background L1 (never L2)."""
+        mid = str(mod_id or "").strip()
+        if not mid or not mid.isdigit():
+            return
+        # Avoid re-entry loops when projection notify rebinds show_mod.
+        if getattr(self, "_fs_observe_show_guard", None) == mid:
+            return
+        try:
+            from services.mod_fs_observer import (
+                LEVEL_PROBE,
+                LEVEL_STATE,
+                observe_mod_fs,
+                schedule_observe_mod_fs,
+            )
+
+            self._fs_observe_show_guard = mid
+            result = observe_mod_fs(
+                mid,
+                LEVEL_PROBE,
+                managed_path=self._managed_path,
+            )
+            if result.dirty:
+                schedule_observe_mod_fs(
+                    mid,
+                    LEVEL_STATE,
+                    managed_path=self._managed_path,
+                )
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self._fs_observe_show_guard = ""
+
+    def _reload_current_detail_from_projection(
+        self,
+        managed_path: str | Path | None = None,
+        *,
+        mod_id: str | int | None = None,
+    ) -> None:
+        """Re-bind Detail from DB/resolver projection after a mutation.
+
+        Always reload by ``internal_id`` (mod_id). Path-only ``show_mod``
+        returns empty metadata because the resolver refuses path invention.
+        """
+        mid = str(mod_id or self.current_mod_id() or "").strip()
+        path: Path | None
+        if managed_path is not None:
+            path = Path(managed_path)
+        else:
+            path = self._managed_path
+        if path is None and not mid:
+            return
+        if path is not None:
+            try:
+                from services.metadata_cache import invalidate_metadata
+
+                invalidate_metadata(path)
+            except Exception:  # noqa: BLE001
+                pass
+        self.show_mod(
+            path,
+            mod_id=mid or None,
+            game_id=self._context_game_id or None,
+            game_name=self._context_game_name,
+        )
 
     def clear(self) -> None:
         """Empty / unselected state."""
@@ -724,19 +887,42 @@ class ModDetailPanel(QWidget):
         Updates SQLite only — never renames the managed Mod folder.
         Batch mode updates ``platform`` only for every selected Mod.
         """
+        logger = logging.getLogger(__name__)
+
         if self._batch_mod_ids and len(self._batch_mod_ids) > 1:
             self._open_batch_edit_dialog()
             return
         if self._managed_path is None or self._metadata is None:
+            QMessageBox.warning(
+                self,
+                "无法编辑",
+                "当前没有可编辑的 Mod 详情（缺少 metadata 或目录绑定）。",
+            )
             return
         meta = self._metadata
         info = self._display_info
-        # Prefer the Mod ID used to load display_info (workspace / published id).
+        # Runtime identity: mods.mod_id PK (= internal_id). Never workspace_id/path.
         mid = ""
         if info is not None:
             mid = str(info.mod_id or "").strip()
+        if not mid and self._resolved is not None:
+            mid = str(self._resolved.published_file_id or "").strip()
         if not mid:
-            mid = str(self.current_mod_id() or meta.published_file_id or "").strip()
+            mid = str(self.current_mod_id() or "").strip()
+        if not mid.isdigit():
+            logger.warning(
+                "open_edit_info_dialog: missing internal_id "
+                "managed_path=%r display_info=%s resolved=%s",
+                self._managed_path,
+                info is not None,
+                self._resolved is not None,
+            )
+            QMessageBox.warning(
+                self,
+                "无法编辑",
+                "缺少有效的 Mod internal_id，无法打开编辑对话框。",
+            )
+            return
         steam = ""
         if info:
             steam = info.steam_name
@@ -761,7 +947,22 @@ class ModDetailPanel(QWidget):
 
         from services.deploy_status import resolve_game_install_path
 
-        game_install_path = resolve_game_install_path(mod_id=mid, app_id=game_id)
+        try:
+            game_install_path = resolve_game_install_path(
+                internal_id=mid, app_id=game_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "resolve_game_install_path failed internal_id=%s app_id=%s",
+                mid,
+                game_id,
+            )
+            QMessageBox.critical(
+                self,
+                "无法打开编辑",
+                f"解析游戏安装目录失败：\n{exc}",
+            )
+            return
 
         game_name = str(meta.game_name or "").strip() if meta else ""
         if not game_name:
@@ -774,22 +975,33 @@ class ModDetailPanel(QWidget):
             except Exception:  # noqa: BLE001
                 pass
 
-        dlg = EditModDialog(
-            self,
-            mod_id=mid,
-            display_name=info.user_display_name if info else "",
-            steam_name=steam,
-            description=info.custom_description if info else "",
-            source_url=self._current_source_url(),
-            platform=self._current_platform,
-            game_name=game_name,
-            game_id=game_id,
-            game_install_path=game_install_path,
-            custom_deploy_path=(
-                info.custom_deploy_path if info else ""
-            ),
-            game_version=(info.game_version if info else ""),
-        )
+        try:
+            dlg = EditModDialog(
+                self,
+                mod_id=mid,
+                display_name=info.user_display_name if info else "",
+                steam_name=steam,
+                description=info.custom_description if info else "",
+                source_url=self._current_source_url(),
+                platform=self._current_platform,
+                game_name=game_name,
+                game_id=game_id,
+                game_install_path=game_install_path,
+                custom_deploy_path=(
+                    info.custom_deploy_path if info else ""
+                ),
+                game_version=(info.game_version if info else ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "EditModDialog open failed internal_id=%s app_id=%s", mid, game_id
+            )
+            QMessageBox.critical(
+                self,
+                "无法打开编辑",
+                f"打开编辑对话框失败：\n{exc}",
+            )
+            return
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -882,13 +1094,15 @@ class ModDetailPanel(QWidget):
         if self._library_root is None:
             return
         try:
-            from services.file_ops import ModFileManager
             from services.info_sidecar import write_sidecar_for_mod
+            from services.path_lifecycle import resolve_managed_folder
 
-            mgr = ModFileManager(self._library_root)
             for mid in mod_ids:
-                folder = mgr.find_by_published_id(str(mid))
-                if folder is not None:
+                resolved = resolve_managed_folder(
+                    str(mid), library_root=self._library_root, db=None
+                )
+                folder = resolved.path
+                if folder is not None and folder.is_dir():
                     write_sidecar_for_mod(folder, mid)
         except Exception:  # noqa: BLE001
             pass
@@ -1134,17 +1348,23 @@ class ModDetailPanel(QWidget):
         return header
 
     def _build_status_banner(self) -> QFrame:
-        """Hidden by default; shown for status messages (success or failure)."""
-        self._status_banner = QFrame()
+        """Hidden by default; error-only banner (deploy / irrecoverable failures).
+
+        Refresh / metadata soft feedback must use ``op_status_label`` only —
+        never this frame.
+        """
+        # ARCHITECTURE RULE: parent before any visibility — parentless QFrame
+        # show() becomes an orphan top-level float (Import Mod accident class).
+        self._status_banner = QFrame(self)
         self._status_banner.setObjectName("detailStatusBanner")
         self._status_banner.setProperty("tone", "error")
         layout = QVBoxLayout(self._status_banner)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(4)
-        title = QLabel("状态")
+        title = QLabel("状态", self._status_banner)
         title.setObjectName("detailPanelSection")
         layout.addWidget(title)
-        self._status_banner_body = QLabel()
+        self._status_banner_body = QLabel(self._status_banner)
         self._status_banner_body.setObjectName("detailStatusBannerBody")
         self._status_banner_body.setWordWrap(True)
         self._status_banner_body.setTextInteractionFlags(
@@ -1155,22 +1375,25 @@ class ModDetailPanel(QWidget):
         return self._status_banner
 
     def _set_status_banner_tone(self, tone: str) -> None:
-        """Apply success/error presentation to the shared status banner."""
+        """Error banner presentation only — success tone is not supported."""
         if not hasattr(self, "_status_banner"):
             return
-        key = str(tone or "error").strip().lower()
-        if key not in {"success", "error"}:
-            key = "error"
-        self._status_banner.setProperty("tone", key)
-        # Qt picks up dynamic property selectors only after re-polish.
+        # Force error; refuse success so refresh cannot paint a green box.
+        del tone
+        self._status_banner.setProperty("tone", "error")
         style = self._status_banner.style()
         if style is not None:
             style.unpolish(self._status_banner)
             style.polish(self._status_banner)
         self._status_banner.update()
 
-    def _show_status_banner(self, message: str, *, tone: str = "error") -> None:
-        """Show the shared status banner with the correct success/error style."""
+    def _show_error_banner(self, message: str) -> None:
+        """
+        Show the Detail error banner for deploy / irrecoverable system failures.
+
+        Forbidden: refresh success/failure soft feedback, metadata_saved UX,
+        or any ``tone=success`` presentation. Those use ``_set_op_status`` only.
+        """
         text = str(message or "").strip()
         if not text or not hasattr(self, "_status_banner"):
             return
@@ -1180,9 +1403,22 @@ class ModDetailPanel(QWidget):
             log_popup("detailStatusBanner.show", detail=text[:120])
         except Exception:  # noqa: BLE001
             pass
-        self._set_status_banner_tone(tone)
+        self._set_status_banner_tone("error")
         self._status_banner_body.setText(text)
         self._status_banner.show()
+
+    def _show_status_banner(self, message: str, *, tone: str = "error") -> None:
+        """Deprecated alias — error banner only. Success tone is ignored."""
+        if str(tone or "").strip().lower() == "success":
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "detailStatusBanner refused success tone; use op_status_label "
+                "(message=%r)",
+                message,
+            )
+            return
+        self._show_error_banner(message)
 
     def _hide_status_banner(self) -> None:
         if hasattr(self, "_status_banner"):
@@ -1248,7 +1484,7 @@ class ModDetailPanel(QWidget):
             body = msg
         else:
             body = f"部署失败：\n{msg}"
-        self._show_status_banner(body, tone="error")
+        self._show_error_banner(body)
 
     def _build_flag_tags_section(self) -> QFrame:
         """Conflict / Invalid toggle chips — active chip moves to front."""
@@ -1307,18 +1543,26 @@ class ModDetailPanel(QWidget):
         actions.setContentsMargins(8, 10, 8, 12)
         actions.setSpacing(8)
 
+        # ARCHITECTURE NOTE (UI-002):
+        # Operation status feedback lives on the header row
+        # (「操作」+ stretch + status_label). Do NOT restore the old vertical
+        # layout that placed an empty status label under the title — that
+        # reserved a blank strip whenever there was no message.
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
         caption = QLabel("操作")
         caption.setObjectName("detailPanelSection")
-        actions.addWidget(caption)
-
-        # Fixed-height op feedback — never grows the footer when messages appear.
+        header.addWidget(caption)
+        header.addStretch(1)
         self.op_status_label = QLabel("")
         self.op_status_label.setObjectName("detailOpStatus")
         self.op_status_label.setFixedHeight(16)
         self.op_status_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        actions.addWidget(self.op_status_label)
+        header.addWidget(self.op_status_label)
+        actions.addLayout(header)
         self._op_status_timer: QTimer | None = None
 
         self.btn_folder = QPushButton("打开目录")
@@ -1591,16 +1835,22 @@ class ModDetailPanel(QWidget):
         return frame
 
     def _build_metadata_section(self) -> QFrame:
-        """Inline Chinese metadata — one field per line, no stacked captions."""
+        """
+        Stable field layout: fixed spacing + height-capped description frame.
+
+        Name / 原名 / 来源 / Workspace ID do not expand with content.
+        Description may grow only up to ``META_DESC_MAX_HEIGHT_PX`` (no scrollbar).
+        """
         frame = QFrame()
         frame.setObjectName("detailSection")
         body = QVBoxLayout(frame)
         body.setContentsMargins(10, 10, 10, 10)
-        body.setSpacing(4)
+        body.setSpacing(META_SECTION_SPACING_PX)
         caption = QLabel("元数据")
         caption.setObjectName("detailPanelSection")
         body.addWidget(caption)
 
+        # Short identity lines only (name / 原名) — never embed the long description.
         self.meta_rich_label = QLabel()
         self.meta_rich_label.setObjectName("detailMetaLine")
         self.meta_rich_label.setWordWrap(True)
@@ -1608,7 +1858,62 @@ class ModDetailPanel(QWidget):
         self.meta_rich_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
+        self.meta_rich_label.setMaximumHeight(META_RICH_MAX_HEIGHT_PX)
+        self.meta_rich_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         body.addWidget(self.meta_rich_label)
+
+        # Independent description frame — hard max height, never Expanding.
+        self.meta_desc_frame = QFrame()
+        self.meta_desc_frame.setObjectName("detailMetaDescFrame")
+        self.meta_desc_frame.setMaximumHeight(META_DESC_FRAME_MAX_HEIGHT_PX)
+        self.meta_desc_frame.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        self.meta_desc_frame.hide()
+        desc_layout = QVBoxLayout(self.meta_desc_frame)
+        desc_layout.setContentsMargins(8, 8, 8, 8)
+        desc_layout.setSpacing(4)
+
+        self.meta_desc_caption = QLabel("介绍：")
+        self.meta_desc_caption.setObjectName("detailMetaLine")
+        self.meta_desc_caption.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        desc_layout.addWidget(self.meta_desc_caption)
+
+        self.meta_desc_label = QLabel()
+        self.meta_desc_label.setObjectName("detailMetaDescription")
+        self.meta_desc_label.setWordWrap(True)
+        self.meta_desc_label.setTextFormat(Qt.TextFormat.RichText)
+        self.meta_desc_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self.meta_desc_label.setOpenExternalLinks(True)
+        self.meta_desc_label.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        self.meta_desc_label.setMaximumHeight(META_DESC_MAX_HEIGHT_PX)
+        self.meta_desc_label.setMinimumHeight(0)
+        self.meta_desc_label.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        desc_layout.addWidget(self.meta_desc_label, 0)
+
+        self.meta_desc_truncated_hint = QLabel(META_DESC_TRUNCATED_HINT)
+        self.meta_desc_truncated_hint.setObjectName("detailMetaDescTruncated")
+        self.meta_desc_truncated_hint.setWordWrap(True)
+        self.meta_desc_truncated_hint.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.meta_desc_truncated_hint.hide()
+        desc_layout.addWidget(self.meta_desc_truncated_hint)
+
+        body.addWidget(self.meta_desc_frame)
+        # Back-compat alias for older tests / callers.
+        self.meta_desc_browser = self.meta_desc_label
 
         self.meta_name_line = QLabel("名称：—")
         self.meta_desc_line = QLabel("介绍：—")
@@ -1617,15 +1922,27 @@ class ModDetailPanel(QWidget):
         self.meta_author_line = QLabel("作者：—")
         self.meta_version_line = QLabel("版本：—")
         self.meta_updated_line = QLabel("更新时间：—")
-        for lab in (
-            self.meta_name_line,
-            self.meta_desc_line,
-            self.meta_source_line,
-            self.meta_workspace_line,
-            self.meta_author_line,
-            self.meta_version_line,
-            self.meta_updated_line,
+        # Always-visible footer metadata (must stay outside the description frame).
+        for lab, max_h, wrap in (
+            (self.meta_source_line, META_SOURCE_LINE_MAX_HEIGHT_PX, True),
+            (self.meta_workspace_line, META_FOOTER_LINE_MAX_HEIGHT_PX, False),
+            (self.meta_author_line, META_FOOTER_LINE_MAX_HEIGHT_PX, False),
+            (self.meta_version_line, META_FOOTER_LINE_MAX_HEIGHT_PX, False),
+            (self.meta_updated_line, META_FOOTER_LINE_MAX_HEIGHT_PX, False),
         ):
+            lab.setObjectName("detailMetaLine")
+            lab.setWordWrap(wrap)
+            lab.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            lab.setMaximumHeight(max_h)
+            lab.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
+            body.addWidget(lab)
+
+        # Legacy mirrors kept for fill helpers / older tests (not in the layout).
+        for lab in (self.meta_name_line, self.meta_desc_line):
             lab.setObjectName("detailMetaLine")
             lab.setWordWrap(True)
             lab.setTextInteractionFlags(
@@ -2284,13 +2601,6 @@ class ModDetailPanel(QWidget):
         self._render_backup_status_badge()
         self._refresh_action_buttons()
 
-    def _render_content_status_badge(self) -> None:
-        """No-op: content_status is not shown in Detail Header Metadata Row."""
-        badge = getattr(self, "content_status_badge", None)
-        if badge is not None:
-            badge.hide()
-            badge.clear()
-
     def _render_backup_status_badge(self) -> None:
         """Keep badge hidden and out of the Source/Size metadata row."""
         badge = getattr(self, "backup_status_badge", None)
@@ -2302,13 +2612,13 @@ class ModDetailPanel(QWidget):
         """Pick a new folder for a missing Mod — path update only."""
         from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-        from services.library_status import CONTENT_FOLDER_MISSING
+        from services.library_status import CONTENT_CONTENT_MISSING
         from services.mod_relocate import relocate_mod_folder
 
         mid = self.current_mod_id()
         if not mid:
             return
-        # Only meaningful when folder is missing
+        # Only meaningful when folder is missing / content_missing
         content_status = ""
         try:
             from core.db_manager import get_db
@@ -2319,7 +2629,10 @@ class ModDetailPanel(QWidget):
                 content_status = row_content_status(brow)
         except Exception:  # noqa: BLE001
             pass
-        if not getattr(self, "_folder_absent", False) and content_status != CONTENT_FOLDER_MISSING:
+        if (
+            not getattr(self, "_folder_absent", False)
+            and content_status != CONTENT_CONTENT_MISSING
+        ):
             QMessageBox.information(
                 self, "重新定位", "当前 Mod 目录存在，无需重新定位。"
             )
@@ -2456,13 +2769,20 @@ class ModDetailPanel(QWidget):
         workshop_id: str = "",
         game_version_label: str = "",
     ) -> None:
-        """Rich-text metadata block — bold prefixes, isolated long description."""
+        """
+        Render metadata with a height-capped, non-scrolling description frame.
+
+        Long Steam Workshop copy is truncated to a plain-text budget; the
+        framed QLabel expands only up to ``META_DESC_MAX_HEIGHT_PX``. Footer
+        lines (来源 / Workspace ID / …) stay outside that frame with fixed
+        vertical size policies so field gaps stay stable across Mods.
+        """
         del workshop_id  # Platform Workshop ID is not a second user-facing Mod ID.
         esc = html_module.escape
 
         def _line(inner: str) -> str:
             # Zero top/bottom margin so QLabel RichText does not sink content.
-            return f'<p style="margin:0;padding:0;line-height:1.45;">{inner}</p>'
+            return f'<p style="margin:0;padding:0;line-height:1.35;">{inner}</p>'
 
         parts: list[str] = [
             _line(f"<b>名称：</b> {esc(name_value or '—')}"),
@@ -2470,35 +2790,71 @@ class ModDetailPanel(QWidget):
         orig = str(original_name or "").strip()
         if orig and orig != str(name_value or "").strip():
             parts.append(_line(f"<b>原名：</b> {esc(orig)}"))
-        if desc_text:
-            desc_html = _strip_leading_html_blank(
-                _format_description_rich_html(desc_text)
-            )
-            parts.append(_line("<b>介绍：</b>"))
-            parts.append(
-                f"<div style='margin:0;padding:0;line-height:1.55;'>{desc_html}</div>"
-            )
-        parts.append(_line(f"<b>来源：</b> {esc(platform_name)}"))
-        parts.append(
-            _line(f"<b>Workspace ID:</b> {esc(workspace_id or '—')}")
-        )
-        debug_internal = str(internal_id or "").strip()
-        if debug_internal:
-            parts.append(
-                _line(f"<b>Internal Database ID:</b> {esc(debug_internal)}")
-            )
-        # Witcher 3 ONLY — mapped label, never a raw token / Mod.io version string.
-        if game_version_label:
-            parts.append(_line(f"<b>版本：</b> {esc(game_version_label)}"))
-        if author:
-            parts.append(_line(f"<b>作者：</b> {esc(author)}"))
-        if version and not game_version_label:
-            parts.append(_line(f"<b>版本：</b> {esc(version)}"))
-        if updated:
-            parts.append(_line(f"<b>更新时间：</b> {esc(updated)}"))
-
         html_body = _strip_leading_html_blank("".join(parts))
         self.meta_rich_label.setText(html_body)
+
+        desc = str(desc_text or "").strip()
+        if desc:
+            display_src, truncated = _truncate_description_for_panel(desc)
+            desc_html = _strip_leading_html_blank(
+                _format_description_rich_html(display_src)
+            )
+            self.meta_desc_label.setText(desc_html)
+            tip = _description_plain_text(desc)
+            if truncated and tip:
+                tip = tip[:4000] + ("…" if len(tip) > 4000 else "")
+                self.meta_desc_label.setToolTip(tip)
+                self.meta_desc_truncated_hint.setText(META_DESC_TRUNCATED_HINT)
+                self.meta_desc_truncated_hint.show()
+            else:
+                self.meta_desc_label.setToolTip("")
+                self.meta_desc_truncated_hint.hide()
+            self.meta_desc_caption.show()
+            self.meta_desc_frame.show()
+        else:
+            self.meta_desc_label.clear()
+            self.meta_desc_label.setToolTip("")
+            self.meta_desc_truncated_hint.hide()
+            self.meta_desc_caption.hide()
+            self.meta_desc_frame.hide()
+
+        self.meta_source_line.setText(f"来源：{platform_name}")
+        self.meta_source_line.show()
+
+        ws_text = f"Workspace ID: {workspace_id or '—'}"
+        debug_internal = str(internal_id or "").strip()
+        if debug_internal:
+            ws_text = (
+                f"Workspace ID: {workspace_id or '—'}  |  "
+                f"Internal Database ID: {debug_internal}"
+            )
+        self.meta_workspace_line.setText(ws_text)
+        self.meta_workspace_line.show()
+
+        # Witcher 3 ONLY — mapped label, never a raw token / Mod.io version string.
+        if game_version_label:
+            self.meta_version_line.setText(f"版本：{game_version_label}")
+            self.meta_version_line.show()
+        elif version:
+            self.meta_version_line.setText(f"版本：{version}")
+            self.meta_version_line.show()
+        else:
+            self.meta_version_line.clear()
+            self.meta_version_line.hide()
+
+        if author:
+            self.meta_author_line.setText(f"作者：{author}")
+            self.meta_author_line.show()
+        else:
+            self.meta_author_line.clear()
+            self.meta_author_line.hide()
+
+        if updated:
+            self.meta_updated_line.setText(f"更新时间：{updated}")
+            self.meta_updated_line.show()
+        else:
+            self.meta_updated_line.clear()
+            self.meta_updated_line.hide()
 
     def _resolve_cover_path(self) -> Path | None:
         from services.mod_metadata_resolver import resolve_cover_path
@@ -2529,7 +2885,8 @@ class ModDetailPanel(QWidget):
         if not rel:
             QMessageBox.warning(self, "更换封面", "无法保存封面图片")
             return
-        self.show_mod(self._managed_path)
+        # apply_cover_to_mod already notifies mod_changed(mod_id).
+        self._reload_current_detail_from_projection(self._managed_path, mod_id=mid)
 
     def _recheck_missing_content(self, managed_path: Path | None = None) -> bool:
         """If payload files exist, clear ``is_missing_content`` and persist."""
@@ -2572,6 +2929,23 @@ class ModDetailPanel(QWidget):
 
         self._set_refresh_button_state("running")
         mid = self.current_mod_id()
+        if not str(mid or "").strip().isdigit():
+            _log.error(
+                "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 title=%r "
+                "stage=ui_identity reason=missing mods.mod_id (PK) exception=—",
+                mid or "—",
+                (
+                    self._managed_path.name
+                    if self._managed_path is not None
+                    else "—"
+                ),
+            )
+            self._set_refresh_button_state(
+                "failure",
+                detail="刷新失败：缺少内部 Mod ID（mods.mod_id）",
+            )
+            self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
+            return
 
         _log.info("Selecting metadata provider platform=%s", platform or "(empty)")
 
@@ -2608,7 +2982,7 @@ class ModDetailPanel(QWidget):
         """
         Visible refresh-button states: idle / running / success / failure.
 
-        *detail* (failure) is shown in the existing status banner.
+        Soft feedback uses ``op_status_label`` only — never ``detailStatusBanner``.
         """
         if not hasattr(self, "btn_refresh_mod"):
             return
@@ -2644,6 +3018,7 @@ class ModDetailPanel(QWidget):
             err = (detail or "").strip() or "元数据刷新失败"
             btn.setToolTip(err)
             btn.setEnabled(False)
+            self._set_op_status(f"⚠ {err}", tone="error")
             self._schedule_refresh_button_idle(restore_ms)
             return
 
@@ -2689,6 +3064,9 @@ class ModDetailPanel(QWidget):
             len(entries),
             self,
         )
+        from ui.window_lifecycle import register_toplevel
+
+        register_toplevel(progress)
         progress.setWindowTitle("刷新元数据")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
@@ -2735,7 +3113,7 @@ class ModDetailPanel(QWidget):
             except Exception:  # noqa: BLE001
                 pass
             self._recheck_missing_content(path)
-            self.show_mod(path)
+            self._reload_current_detail_from_projection(path, mod_id=mid)
             self.metadata_saved.emit(path)
             self.tags_saved.emit(path)
         if result.success or result.skipped:
@@ -2749,7 +3127,28 @@ class ModDetailPanel(QWidget):
         self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
 
     def _on_metadata_refresh_failed(self, error: str) -> None:
+        import logging
+
         err = (error or "").strip() or "元数据刷新失败"
+        mid = self.current_mod_id()
+        ws = ""
+        app_id = 0
+        title = ""
+        if self._display_info is not None:
+            ws = str(self._display_info.workspace_id or "").strip()
+            app_id = int(self._display_info.app_id or 0)
+            title = str(self._display_info.display_name or "").strip()
+        if not title and self._metadata is not None:
+            title = str(self._metadata.title or "").strip()
+        logging.getLogger(__name__).error(
+            "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=%s app_id=%s title=%r "
+            "stage=ui_refresh_failed reason=%s exception=—",
+            mid or "—",
+            ws or "—",
+            app_id,
+            title or "—",
+            err,
+        )
         self._set_refresh_button_state("failure", detail=err)
         self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
         from services.path_lifecycle import resolve_managed_folder
@@ -2761,7 +3160,7 @@ class ModDetailPanel(QWidget):
             or self._managed_path
         )
         if heal_path is not None:
-            self.show_mod(heal_path)
+            self._reload_current_detail_from_projection(heal_path, mod_id=mid)
 
     def _on_metadata_batch_progress(self, done: int, total: int, message: str) -> None:
         dlg = self._metadata_progress_dialog
@@ -3473,7 +3872,7 @@ class ModDetailPanel(QWidget):
         text, ok = QInputDialog.getText(
             self,
             "添加依赖",
-            "请输入被依赖 Mod 的 Workspace ID：",
+            "请输入被依赖 Mod 的 Internal ID（数据库 ID）：",
         )
         if not ok:
             return
@@ -3481,12 +3880,12 @@ class ModDetailPanel(QWidget):
         if not wid:
             return
         db = get_db()
-        target = db.find_mod_id_by_workspace_id(wid)
+        target = wid if wid.isdigit() and db.get_mod(wid) is not None else None
         if not target:
             QMessageBox.warning(
                 self,
                 "添加依赖失败",
-                f"本地库中未找到 Workspace ID：{wid}",
+                f"本地库中未找到 Internal ID：{wid}",
             )
             return
         if target == mid:
@@ -3511,8 +3910,8 @@ class ModDetailPanel(QWidget):
                     for x in (data.get("dependencies") or [])
                     if str(x or "").strip()
                 ]
-                if wid not in deps:
-                    deps.append(wid)
+                if target not in deps:
+                    deps.append(target)
                 data["dependencies"] = deps
                 persist_unified_metadata_dict(self._managed_path, data)
             except Exception:  # noqa: BLE001
@@ -3811,6 +4210,28 @@ class ModDetailPanel(QWidget):
         if self._managed_path is not None:
             self.tags_saved.emit(self._managed_path)
 
+    def _persist_conflict_annotation(self, *, conflict: bool, note: str = "") -> None:
+        """Sole UI writer path for user conflict marks."""
+        mid = self.current_mod_id()
+        if not mid or not mid.isdigit():
+            return
+        try:
+            from services.user_annotation import apply_conflict_annotation
+
+            st = apply_conflict_annotation(mid, conflict=conflict, note=note)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "更新状态失败", str(exc))
+            return
+        self._apply_status_to_widgets(st)
+        try:
+            self._display_info = get_db().get_mod_display_info(mid)
+        except Exception:  # noqa: BLE001
+            pass
+        if hasattr(self, "btn_tag_conflict"):
+            self._sync_flag_tags_from_status()
+        if self._managed_path is not None:
+            self.tags_saved.emit(self._managed_path)
+
     def _on_mark_invalid(self) -> None:
         self._persist_status(
             invalid=True,
@@ -3821,17 +4242,13 @@ class ModDetailPanel(QWidget):
         self._persist_status(invalid=False, invalid_reason="")
 
     def _on_mark_conflict(self) -> None:
-        note = self._status_reason_text() or "已标记冲突"
-        self._persist_status(
-            conflict_status=CONFLICT_STATUS_CONFLICT,
-            conflict_note=note,
+        self._persist_conflict_annotation(
+            conflict=True,
+            note=self._status_reason_text() or "已标记冲突",
         )
 
     def _on_clear_conflict(self) -> None:
-        self._persist_status(
-            conflict_status=CONFLICT_STATUS_NONE,
-            conflict_note="",
-        )
+        self._persist_conflict_annotation(conflict=False)
 
     def _sync_flag_tags_from_status(self) -> None:
         """Mirror DB invalid/conflict onto flag chips without recursive toggles."""
@@ -3880,16 +4297,13 @@ class ModDetailPanel(QWidget):
         row.addStretch(1)
 
     def _on_flag_conflict_toggled(self, checked: bool) -> None:
-        if checked:
-            self._persist_status(
-                conflict_status=CONFLICT_STATUS_CONFLICT,
-                conflict_note=self._status_reason_text() or "已标记冲突",
-            )
-        else:
-            self._persist_status(
-                conflict_status=CONFLICT_STATUS_NONE,
-                conflict_note="",
-            )
+        # ARCHITECTURE RULE: Conflict is user annotation only (same class as
+        # invalid / abandoned). This chip is the only legal UI writer.
+        # Path: Detail Panel → user_annotation → mods.conflict_status.
+        self._persist_conflict_annotation(
+            conflict=bool(checked),
+            note=self._status_reason_text() or "已标记冲突",
+        )
         self._reorder_flag_chips()
 
     def _on_flag_invalid_toggled(self, checked: bool) -> None:
@@ -4483,15 +4897,19 @@ class ModDetailPanel(QWidget):
 
     def _on_offline_archive_finished(self, path: str) -> None:
         del path
+        mid = self.current_mod_id() or ""
+        payload: object = mid if mid else self._managed_path
         if self._offline_batch_active:
-            if self._managed_path is not None:
-                self.offline_page_updated.emit(self._managed_path)
+            if payload is not None:
+                self.offline_page_updated.emit(payload)
             self._update_offline_download_button()
             return
-        if self._managed_path is not None:
-            self.offline_page_updated.emit(self._managed_path)
-            # Refresh local labels without full library rescan
-            self.show_mod(self._managed_path)
+        if payload is not None:
+            self.offline_page_updated.emit(payload)
+            # Mutation → projection → view: reload by internal_id, never path alone.
+            self._reload_current_detail_from_projection(
+                self._managed_path, mod_id=mid or None
+            )
         else:
             self._refresh_offline_status_label()
         self._update_offline_download_button()
@@ -4503,7 +4921,7 @@ class ModDetailPanel(QWidget):
             self._update_offline_download_button()
             return
         if self._managed_path is not None:
-            self.show_mod(self._managed_path)
+            self._reload_current_detail_from_projection(self._managed_path)
         else:
             self._refresh_offline_status_label()
         self._update_offline_download_button()
@@ -4524,7 +4942,7 @@ class ModDetailPanel(QWidget):
             return
         self.view_offline.setText(f"[Offline] Failed — {err}")
         self._apply_tone(self.view_offline, "error")
-        self._show_status_banner(f"离线页面保存失败：\n{err}", tone="error")
+        self._show_error_banner(f"离线页面保存失败：\n{err}")
         self._set_op_status("⚠ 离线保存失败", tone="error", auto_clear_ms=2400)
         self._update_offline_download_button()
 
@@ -4916,26 +5334,15 @@ class ModDetailPanel(QWidget):
             DEPLOYMENT_CONFLICT,
             DEPLOYMENT_DEPLOYED,
             DEPLOYMENT_OUTDATED,
-            deploy_block_reason_for_content_status,
-        )
-        from services.library_status import (
-            CONTENT_BACKUP_INVALID,
-            CONTENT_FOLDER_MISSING,
-            CONTENT_IDENTITY_CONFLICT,
-            row_content_status,
+            deploy_block_reason_for_mod_row,
         )
 
         content_blocked = False
         block_tip = ""
         try:
             brow = get_db().get_mod_backup_row(self.current_mod_id() or "")
-            cs = row_content_status(brow)
-            block_tip = deploy_block_reason_for_content_status(cs) or ""
-            content_blocked = bool(block_tip) or cs in {
-                CONTENT_FOLDER_MISSING,
-                CONTENT_BACKUP_INVALID,
-                CONTENT_IDENTITY_CONFLICT,
-            }
+            block_tip = deploy_block_reason_for_mod_row(brow) or ""
+            content_blocked = bool(block_tip)
         except Exception:  # noqa: BLE001
             pass
 
@@ -5179,12 +5586,24 @@ class ModDetailPanel(QWidget):
             self.view_deploy_error.setText(f"原因：{err}" if err else "原因：—")
             self._show_deploy_failure_banner(err or "未知错误")
         else:
-            self._hide_status_banner()
-            self.view_deploy.setText("[Deploy] 状态：未部署")
-            self._apply_tone(self.view_deploy, "secondary")
-            self.view_deploy_path.clear()
-            self.view_deploy_time.clear()
-            self.view_deploy_error.clear()
+            # not_deployed: surface residual deploy_error as failure (legacy rows
+            # may still carry error text without status=failed).
+            residual = str((info.deploy_error if info else "") or "").strip()
+            if residual:
+                self.view_deploy.setText("[Deploy] 状态：部署失败")
+                self._apply_tone(self.view_deploy, "error")
+                self.view_deploy_path.clear()
+                self.view_deploy_time.clear()
+                self.view_deploy_error.setText(f"原因：{residual}")
+                self._show_deploy_failure_banner(residual)
+                status = DEPLOY_STATUS_FAILED
+            else:
+                self._hide_status_banner()
+                self.view_deploy.setText("[Deploy] 状态：未部署")
+                self._apply_tone(self.view_deploy, "secondary")
+                self.view_deploy_path.clear()
+                self.view_deploy_time.clear()
+                self.view_deploy_error.clear()
 
         self.view_deploy_conflict.setText(self._conflict_hint)
         self._set_deploy_buttons(status)

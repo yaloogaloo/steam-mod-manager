@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -607,7 +608,44 @@ def _detail_folder(lib: Path, game: str, title: str, payload: dict) -> Path:
 
 
 def _meta_text(panel) -> str:
-    return str(panel.meta_rich_label.text() or "")
+    """Aggregate visible metadata text (rich name + footer lines)."""
+    chunks = [str(panel.meta_rich_label.text() or "")]
+    for lab in (
+        getattr(panel, "meta_desc_caption", None),
+        getattr(panel, "meta_source_line", None),
+        getattr(panel, "meta_workspace_line", None),
+        getattr(panel, "meta_author_line", None),
+        getattr(panel, "meta_version_line", None),
+        getattr(panel, "meta_updated_line", None),
+    ):
+        if lab is None:
+            continue
+        try:
+            if lab.isHidden():
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        text = str(lab.text() or "").strip()
+        if text:
+            chunks.append(text)
+    browser = getattr(panel, "meta_desc_label", None) or getattr(
+        panel, "meta_desc_browser", None
+    )
+    if browser is not None:
+        try:
+            if not browser.isHidden():
+                plain = str(browser.text() if hasattr(browser, "text") else "")
+                if hasattr(browser, "toPlainText"):
+                    plain = str(browser.toPlainText() or "").strip()
+                else:
+                    # RichText QLabel — strip tags lightly for aggregation.
+                    plain = re.sub(r"<[^>]+>", "", plain)
+                    plain = str(plain or "").strip()
+                if plain:
+                    chunks.append(plain)
+        except Exception:  # noqa: BLE001
+            pass
+    return "\n".join(chunks)
 
 
 def test_detail_panel_shows_witcher3_game_version_labels(
@@ -650,7 +688,7 @@ def test_detail_panel_shows_witcher3_game_version_labels(
     panel.show_mod(folder, mod_id=mid, game_id=W3, game_name="巫师3")
     html = _meta_text(panel)
     assert "次世代版" in html
-    assert "<b>版本：</b>" in html
+    assert "版本：次世代版" in html
     assert "next_gen" not in html
     assert ident_before.game_version == WITCHER3_VERSION_NEXT_GEN
 
@@ -662,7 +700,7 @@ def test_detail_panel_shows_witcher3_game_version_labels(
         db.set_mod_game_version(mid, token)
         panel.show_mod(folder, mod_id=mid, game_id=W3, game_name="巫师3")
         html = _meta_text(panel)
-        assert f"<b>版本：</b> {label}" in html
+        assert f"版本：{label}" in html
         assert token not in html.replace(label, "")
         for other in ("原版", "次世代版", "重制版"):
             if other != label:
@@ -710,7 +748,7 @@ def test_detail_panel_hides_game_version_for_other_games(
     assert "重制版" not in html
     assert "next_gen" not in html
     # No Witcher 3 game_version row. Author mod_version is empty, so no 版本 line.
-    assert "<b>版本：</b>" not in html
+    assert "版本：" not in html
     panel.close()
 
 
@@ -759,7 +797,7 @@ def test_detail_panel_refresh_after_edit_dialog_save(
     monkeypatch.setattr(EditModDialog, "exec", _accept)
     panel.open_edit_info_dialog()
     html = _meta_text(panel)
-    assert "<b>版本：</b> 原版" in html
+    assert "版本：原版" in html
     assert "次世代版" not in html
     info = db.get_mod_display_info(mid)
     assert info is not None

@@ -1,206 +1,181 @@
 # Mod Entity Identity Lifecycle Contract
 
-**Status:** FROZEN  
+**Status:** FROZEN — Minimal Model (Identity Convergence)  
 **Audience:** humans and AI agents modifying this repository  
 **Authority:** this document is the long-term identity architecture law
 
 ---
 
-## Chain of truth
+## Final Identity Model
+
+Only **two** ID concepts:
+
+| Concept | Role |
+|---------|------|
+| `internal_id` | Sole **entity** identity (DB PK / `.info` / Reconcile / Backup / Deploy assoc / Projection assoc) |
+| `workspace_id` | External platform **registration** number + UI display |
 
 ```
-DB internal_id  →  .info registration proof  →  Projection  →  UI
+Steam Workshop Sync / User Import
+    → (platform, app_id, workspace_id) registration
+    → create_mod_identity()
+    → internal_id entity
+    → .info proof
+    → Reconcile binds path
+    → Library displays
 ```
 
-Anything outside this chain is not an identity authority.
+Create entries: **Steam Workshop Sync** and **Import** only.
 
----
-
-## 1. Mod entity definition
-
-A **Mod Entity** is a database row whose durable primary key is:
-
-| Field | Role |
-|-------|------|
-| `internal_id` (`mods.mod_id` / `mods.internal_id`) | **Only** entity identity |
-
-### Forbidden identity keys
-
-These must never be treated as the Mod entity key:
-
-- `workspace_id`
-- filesystem `path` / `last_known_path`
-- folder / directory name
-- `external_id` alone (without `platform` + `app_id`)
-
-### Allowed non-identity fields
-
-| Field | Role |
-|-------|------|
-| `workspace_id` | Display / user-facing label only |
-| `external_id` | Platform-native id; match only as `(platform, app_id, external_id)` |
-| path / folder | Storage carrier for files |
-
-Changing path or folder name must not create, delete, or merge Mod entities.
-
-See also: `.cursor/rules/id-architecture.mdc`.
-
----
-
-## 2. Registration entry points
-
-### Only allowed creators
-
-1. **Steam Workshop Sync**
-2. **User-initiated Import**
-
-Both must go through the Identity Creation Gate (`create_mod_identity` / IdentityService create path).
-
-### Forbidden creators
-
-- Reconcile
-- Backup restore
-- Orphan auto-import / auto-register
-- Deploy / Status / Projection
-- Folder scan that invents UUIDs
-- Reading forged `.info` and inserting a DB row
-
-If a folder has no DB entity: **ignore or surface for human Import** — never mint.
-
----
-
-## 3. `.info` rules
-
-`.info` is **registration proof**, not an authority that can invent entities.
-
-### Valid proof
+Stable shape:
 
 ```
-DB.internal_id == .info.internal_id
+DB Entity:     internal_id
+                   |
+                   +---- workspace_id (display / registration number)
+
+Registration:  platform + app_id + workspace_id
 ```
 
-Only then may the sidecar participate in path binding / projection.
-
-### Otherwise
-
-Ignore the `.info` (and its folder for identity purposes).
-
-### Forbidden
-
-- Creating a DB Mod from `.info` that does not already exist in DB
-- Trusting `.info` when `internal_id` is missing, forged, or not in DB
-- Using `.info.workspace_id` to look up or create entities
+There is **no** third Mod identity.
 
 ---
 
-## 4. Directory rules
+## ID Boundary
 
-Directories are **file carriers only**.
+### `internal_id`
 
-### Allowed
+Unique Mod **entity** identity.
 
-- Rename the folder
-- Move the folder within / across library roots
-- Re-bind `last_known_path` for an existing DB entity when `.info` proves the same `internal_id`
+Authority: highest.
 
-### Forbidden effects
+Used for: DB entity, `.info`, Reconcile bind, Backup restore proof, Deploy association, Library Projection association.
 
-- Rename / move must **not** create a new Mod
-- Rename / move must **not** delete a Mod
-- Rename / move must **not** change `internal_id` or mint a new `workspace_id` as identity
+Any question “is this the same Mod?” → **only** `internal_id`.
 
----
+### `workspace_id`
 
-## 5. Reconcile duties
+External **platform identifier** (Steam Workshop ID, Nexus Mod ID, etc.).
 
-Reconcile may only:
+Allowed: Sync / Import **registration** rematch via `find_mod_for_registration`.
 
-```
-existing DB entity  +  valid .info (same internal_id)
-        → bind / refresh path relationship
-```
+Forbidden: global entity query; Library / Reconcile / Backup / Deploy / UI entity logic; merge key.
 
-### Forbidden
+`find_mod_by_workspace_id` is a permanent no-op.
 
-- Mint `internal_id` / UUID
-- Call `create_mod_identity`
-- Create Mods from orphans
-- Resolve entity by `workspace_id`, path, or folder digits
-- Auto-fix historical pollution
+### `app_id`
 
-No `.info` or forged `.info` → ignore (optional: queue human Import). Never create.
+**Game scope** — not a Mod identity, not a third Mod ID.
 
----
+Allowed: registration matching as part of `(platform, app_id, workspace_id)` with `app_id > 0`.
 
-## 6. Backup duties
+Forbidden:
 
-Backup may only **restore `.info` for an already-existing DB entity** when identity axes match:
+- stored as Mod identity
+- substitute for `internal_id`
+- standalone Mod query (“find mod by app_id”)
 
-- `internal_id`
-- `platform`
-- `app_id`
-- `external_id`
+### `external_id`
 
-### Forbidden
+**Legacy metadata only** (historical audit column). Retained; not dropped in hygiene phase.
 
-- Creating a Mod from backup metadata
-- Using backup to invent `internal_id`
-- Merging two DB entities because backup looks similar
+Forbidden:
 
-If ownership is not 100% confirmed: **skip**. Prefer leftover orphan data over wrong entity binding.
+- Identity lookup
+- Duplicate detection (except deprecated alias that delegates to registration)
+- Reconcile binding
+- Backup restore identity
+
+Do **not** restore the old multi-identity model:
+
+`internal_id + workspace_id + external_id + app_id` as four Mod identities.
 
 ---
 
-## 7. `workspace_id` rules
+## 1. `internal_id`
 
-`workspace_id` is a **display field**.
+- Answers: “is this the same Mod?”
+- Create **only** via `create_mod_identity()` from Steam Sync or User Import
+- Never mint from path / folder / workspace reverse lookup
 
-### Forbidden
+## 2. `workspace_id`
 
-- `find_mod_by_workspace_id` as a real entity lookup (API must remain a no-op / always `None`)
-- UI / Sync / Import / Reconcile using workspace id as primary key
-- Showing Internal ID / Steam Workshop ID / Nexus ID as the ordinary user Mod id beside Workspace ID (debug UI excepted)
+- Registration key scoped as `(platform, app_id, workspace_id)` with `app_id > 0`
+- Lookup API: `find_mod_for_registration` — **Sync / Import / create gate only**
+- `find_mod_by_workspace_id` is a **permanent no-op**
+- Forbidden for: Library query, Reconcile bind, Backup restore, Deploy locate, UI entity logic, merge
 
-Derivation (never invert):
+Same `workspace_id` on different `app_id` ⇒ **two** Mods (e.g. Nexus BG3 1333 ≠ Stardew 1333).
 
-```
-Steam Workshop ID → external_id → workspace_id
-Nexus Mod ID      → external_id → workspace_id
-Other             → system-generated workspace_id (never from Internal ID)
-```
-
----
-
-## 8. AI modification protection
-
-When changing code, **do not reintroduce** these patterns:
-
-| Forbidden pattern | Why |
-|-------------------|-----|
-| Effective `find_mod_by_workspace_id` / workspace reverse lookup | Display field ≠ entity key |
-| Path-as-identity resolve | Paths are storage only |
-| Folder-name / digit-folder identity (`Unknown Mod 123…`) | Digits in titles are not proof |
-| `external_id` global lookup without `platform` + `app_id` | Cross-game collisions |
-| Orphan auto-import / auto-create | Only Sync / Import create |
-| Reconcile mint UUID / `create_mod_identity` | Reconcile binds paths only |
-| Backup → create Mod | Backup restores `.info` only |
-| `.info` → INSERT mods | `.info` proves; DB owns |
-
-### Safe defaults for agents
-
-1. Prefer leaving orphan / dirty data over wrong bind.
-2. Do not “helpfully” restore old identity shortcuts.
-3. Do not expand identity scope in cleanup / UI / deploy PRs.
-4. New games needing a version axis need a **new product spec** — do not overload `game_version` (Witcher 3 only).
+Same `(platform, app_id, workspace_id)` ⇒ **one** Mod (duplicate registration must rematch / refuse a second entity).
 
 ---
 
-## Related tests (regression locks)
+## 3. Deleted identity concepts
 
-- `tests/test_identity_lifecycle_strict.py`
-- `tests/test_identity_lifecycle_contract_freeze.py`
-- `tests/test_lifecycle_boundary_architecture.py`
-- `tests/test_startup_identity_resolve_architecture.py`
-- `tests/test_identity_authority_final.py`
+Must not participate in identity:
 
-If a change contradicts this contract, **the change is wrong** — update code to obey the contract, do not weaken the contract without an explicit architecture decision.
+- `external_id` (legacy; registration uses `workspace_id`)
+- `published_file_id`
+- `workshop_id`
+- `sidecar_published_file_id`
+- path / folder name as identity
+- `source_url` as entity key (metadata / optional Sync assist only)
+
+Do **not** add `platform_id` / `external_key` / `registration_id` or any third identity field.
+
+---
+
+## 4. `.info` rules
+
+Must contain: `internal_id`, `workspace_id`  
+Must not use for identity: `external_id`, `published_file_id`, `workshop_id`
+
+Match: read `.info.internal_id` → DB. Missing / forged ⇒ ignore (never create / merge).
+
+---
+
+## 5. Reconcile
+
+`.info` → `internal_id` → DB → update `last_known_path`  
+Forbidden: create, mint UUID, workspace match, external match, folder digits.
+
+---
+
+## 6. Backup
+
+Restore `.info` only when `backup.internal_id == DB.internal_id`.  
+Forbidden: create Mod; infer from workspace / external / folder name.
+
+---
+
+## 6b. Orphan auto
+
+Orphan auto-import is bind-only: never create entities; never invent identity from folder digits.
+
+---
+
+## 7. Data hygiene (non-lifecycle)
+
+Hygiene may **plan** `workspace_id` corrections only after manual confirm.
+
+Forbidden in hygiene: create / delete / merge; modify `internal_id` or `app_id`; auto-apply.
+
+See: `tools/identity_data_hygiene_audit.py`, `tools/identity_data_hygiene_plan.py`.
+
+---
+
+## 8. AI / contributor protection
+
+Forbidden patterns:
+
+- Effective `find_mod_by_workspace_id` entity lookup
+- `find_mod_by_external` as a separate identity axis (use registration API)
+- Path / folder-name identity
+- Orphan auto / backup auto-create
+- Reconcile `create_mod_identity`
+- Treating `app_id` / `external_id` / `published_file_id` / `workshop_id` as a third Mod identity
+
+If a module still needs a third persisted identity key: **stop** and prove necessity.
+
+See also: `.cursor/rules/id-architecture.mdc`, `tests/test_identity_minimal_model.py`, `tests/test_identity_boundary_contract.py`.

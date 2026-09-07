@@ -10,6 +10,7 @@ import pytest
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
+    DEPLOY_STATUS_FAILED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
@@ -432,4 +433,5 @@ def test_case8_failure_rolls_back_backup(
     assert load_manifest(managed) is None
     info = db.get_mod_deploy_info("94008")
     assert info is not None
-    assert info.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert info.deploy_status == DEPLOY_STATUS_FAILED
+    assert str(info.deploy_error or "").strip()

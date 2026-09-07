@@ -62,10 +62,10 @@ def _badge_kind(entry: ModFileEntry) -> str | None:
 class InfoSidecar:
     """Portable ``.info`` snapshot.
 
-    User identity: ``workspace_id`` only.
+    Entity proof: ``internal_id`` (required after Sync/Import registration).
+    User display: ``workspace_id``.
     Platform identity: ``url`` / ``published_file_id`` (Steam Workshop ID for
-    recovery — not a second user-facing Mod ID).
-    Internal database PK is never written here.
+    recovery — not a second user-facing Mod ID / not a runtime locator).
     """
 
     display_name: str = ""
@@ -78,6 +78,8 @@ class InfoSidecar:
     cover_path: str = ""
     # Steam Workshop ID for technical recovery only — not a second user Mod ID.
     published_file_id: str = ""
+    # Entity proof — matches mods.internal_id (or mod_id PK when UUID empty).
+    internal_id: str = ""
     category: str = ""
     # Workspace IDs this Mod depends on (deploy-before list).
     dependencies: list[str] = field(default_factory=list)
@@ -162,6 +164,7 @@ class InfoSidecar:
             ).strip(),
             cover_path=str(raw.get("cover_path") or "").strip(),
             published_file_id=str(raw.get("published_file_id") or "").strip(),
+            internal_id=str(raw.get("internal_id") or "").strip(),
             category=str(raw.get("category") or "").strip(),
             dependencies=dependencies,
             file_roles=roles,
@@ -377,7 +380,26 @@ def build_sidecar_from_db(
         except Exception:  # noqa: BLE001
             pass
 
-    return InfoSidecar(
+    proof_internal = ""
+    if info is not None:
+        row = None
+        try:
+            row = database.get_mod_backup_row(mod_id)
+        except Exception:  # noqa: BLE001
+            row = None
+        proof_internal = str((row or {}).get("internal_id") or "").strip()
+        if not proof_internal:
+            proof_internal = str(info.mod_id or mod_id).strip()
+        if not str((row or {}).get("internal_id") or "").strip() and proof_internal:
+            try:
+                database.update_mod_identity_fields(
+                    str(info.mod_id or mod_id),
+                    internal_id=proof_internal,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    sidecar = InfoSidecar(
         display_name=display_name,
         description=description,
         source_type=source_type,
@@ -387,11 +409,13 @@ def build_sidecar_from_db(
         offline_page_path=offline_page_path,
         cover_path=cover_path,
         published_file_id=published,
+        internal_id=proof_internal,
         category=category,
         dependencies=dependencies,
         file_roles=file_roles_from_bundle(bundle),
         game_version=game_version,
     )
+    return sidecar
 
 
 def write_sidecar_for_mod(
@@ -410,17 +434,119 @@ def write_sidecar_for_mod(
     if not mid:
         data = read_info_metadata_dict(root)
         if data:
-            mid = str(data.get("published_file_id") or "").strip()
+            from services.mod_identity import read_internal_id
+
+            mid = read_internal_id(data)
+            if not mid.isdigit():
+                mid = ""
     if not mid or not mid.isdigit():
         return None
     try:
         sidecar = build_sidecar_from_db(mid, root, db=db)
-        return save_info_sidecar(
+        path = save_info_sidecar(
             root, sidecar, sync_backup=sync_backup, sync_reason=sync_reason
         )
+        # Ensure entity proof + registration axes are present on disk.
+        from core.db_manager import get_db
+
+        database = db if db is not None else get_db()
+        info = database.get_mod_display_info(mid)
+        patch: dict[str, Any] = {}
+        if sidecar.internal_id:
+            patch["internal_id"] = sidecar.internal_id
+        elif mid:
+            # Historical rows may store entity key only as PK until UUID backfill.
+            patch["internal_id"] = mid
+        if info is not None:
+            if int(getattr(info, "app_id", 0) or 0) > 0:
+                patch["app_id"] = int(info.app_id)
+            plat = normalize_platform_if_known(info.platform) or str(info.platform or "")
+            if plat:
+                patch["platform"] = plat
+                patch[METADATA_SOURCE_TYPE_KEY] = plat
+            ws = str(info.workspace_id or "").strip()
+            if ws:
+                patch["workspace_id"] = ws
+        if patch:
+            base = read_info_metadata_dict(root) or {}
+            merged = _merge_metadata_patch(base, patch)
+            persist_unified_metadata_dict(
+                root, merged, sync_backup=False, sync_reason=sync_reason
+            )
+        return path
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to write info sidecar for %s: %s", root, exc)
         return None
+
+
+def ensure_registration_info_proof(
+    managed_path: str | Path,
+    mod_id: int | str,
+    *,
+    db=None,
+) -> None:
+    """
+    After Sync/Import entity registration: require ``.info`` with
+    ``internal_id`` + ``workspace_id`` (when DB has a workspace).
+
+    Raises ``ValueError`` when proof cannot be written — DB entity must not
+    remain without disk identity proof. Never writes external/workshop-only
+    sidecar as sole identity. Never writes workspace_id / external_id alone.
+    """
+    from services.mod_identity import read_internal_id
+
+    mid = str(mod_id or "").strip()
+    root = Path(managed_path)
+    if not mid.isdigit() or not root.is_dir():
+        raise ValueError("registration failed: missing managed folder or mod_id")
+    written = write_sidecar_for_mod(
+        root, mid, db=db, sync_backup=False, sync_reason="import"
+    )
+    data = read_info_metadata_dict(root) or {}
+    disk_iid = read_internal_id(data)
+    if not disk_iid:
+        raise ValueError(
+            f"registration failed: .info missing internal_id for mod_id={mid}"
+        )
+    try:
+        from core.db_manager import get_db
+
+        database = db if db is not None else get_db()
+        info = database.get_mod_display_info(mid)
+        expected_ws = str(getattr(info, "workspace_id", "") or "").strip() if info else ""
+        row = database.get_mod_backup_row(mid) or {}
+        expected_iid = str(row.get("internal_id") or "").strip() or mid
+    except Exception:  # noqa: BLE001
+        expected_ws = ""
+        expected_iid = mid
+    if expected_iid and disk_iid != expected_iid:
+        # Force UUID proof onto disk when DB already has entity UUID.
+        patch = dict(data)
+        patch["internal_id"] = expected_iid
+        if expected_ws:
+            patch["workspace_id"] = expected_ws
+        from services.file_ops import persist_unified_metadata_dict
+
+        persist_unified_metadata_dict(
+            root, patch, sync_backup=False, sync_reason="import"
+        )
+        data = read_info_metadata_dict(root) or {}
+        disk_iid = read_internal_id(data)
+        if disk_iid != expected_iid:
+            raise ValueError(
+                f"registration failed: .info internal_id mismatch "
+                f"disk={disk_iid!r} db={expected_iid!r} for mod_id={mid}"
+            )
+    disk_ws = str(data.get("workspace_id") or "").strip()
+    if expected_ws and disk_ws != expected_ws:
+        raise ValueError(
+            f"registration failed: .info missing workspace_id={expected_ws!r} "
+            f"for mod_id={mid}"
+        )
+    if written is None and not root.joinpath(INFO_DIR_NAME).is_dir():
+        raise ValueError(
+            f"registration failed: could not write .info for mod_id={mid}"
+        )
 
 
 def _apply_roles_to_bundle(

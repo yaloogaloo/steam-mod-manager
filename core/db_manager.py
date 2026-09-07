@@ -253,11 +253,15 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("library_status", "TEXT NOT NULL DEFAULT ''"),
     ("source_type", "TEXT NOT NULL DEFAULT ''"),
     ("content_status", "TEXT NOT NULL DEFAULT ''"),
+    ("identity_status", "TEXT NOT NULL DEFAULT 'ok'"),
     ("official_metadata_synced", "INTEGER NOT NULL DEFAULT 0"),
     ("user_override_fields", "TEXT NOT NULL DEFAULT '{}'"),
     # Witcher 3 ONLY compatibility edition. NULL = not applicable (non-Witcher 3).
     # Never DEFAULT 'next_gen' — that would stamp every game.
     ("game_version", "TEXT"),
+    # Filesystem observation stamps (NOT identity). Cheap L0 probe memory only.
+    ("fs_observed_at", "TEXT NOT NULL DEFAULT ''"),
+    ("fs_root_mtime", "REAL"),
 )
 
 DEPLOY_STATUS_NOT_DEPLOYED = "not_deployed"
@@ -302,6 +306,52 @@ _MOD_SELECT_COLS = (
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _append_mods_updated_at(
+    sets: list[str],
+    params: list[Any],
+    *,
+    reason: str,
+) -> None:
+    """
+    Append ``updated_at = ?`` only after authority validation.
+
+    ARCHITECTURE RULE: every mods.updated_at write must pass a legal reason
+    (see ``services.updated_at_authority``). System paths must omit this helper.
+    """
+    from services.updated_at_authority import validate_updated_at_reason
+
+    validate_updated_at_reason(reason)
+    sets.append("updated_at = ?")
+    params.append(_utc_now())
+
+
+def _mods_updated_at_now(*, reason: str) -> str:
+    """Return UTC now only when *reason* is a legal ``mods.updated_at`` reason."""
+    from services.updated_at_authority import validate_updated_at_reason
+
+    validate_updated_at_reason(reason)
+    return _utc_now()
+
+
+def updated_at_to_mtime(value: str | None) -> float:
+    """
+    Convert ``mods.updated_at`` ISO text to a Library sort epoch.
+
+    ARCHITECTURE RULE: Library 「最近修改」 uses DB ``updated_at`` only —
+    never filesystem mtime, never ``backup_updated_at``.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return float(parsed.timestamp())
+    except ValueError:
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -423,6 +473,8 @@ class ModSearchFields:
     conflict_status: str = CONFLICT_STATUS_NONE
     enabled: bool = True
     category_tags: str = ""
+    # Library sort authority (ISO → epoch via updated_at_to_mtime).
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -650,6 +702,10 @@ class DatabaseManager:
             self._backfill_witcher3_game_version()
             self._backfill_steam_platform_fields()
             self._backfill_workspace_ids()
+            self._clear_system_inferred_conflict_pollution()
+            self._clear_illegal_content_missing_pollution()
+            self._clear_identity_pollution_from_user_status()
+            self._run_status_recovery_db_phase()
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_mods_platform ON mods(platform)"
             )
@@ -858,16 +914,195 @@ class DatabaseManager:
                 (wid, int(mid)),
             )
 
+    def _clear_system_inferred_conflict_pollution(self) -> None:
+        """One-shot clear of historically polluted ``conflict_status`` values.
+
+        Previous versions incorrectly generated conflict state from system
+        inference (FILE_OVERWRITE scans, relationship→status promotion,
+        identity_repair writing ``identity_conflict`` into the user column).
+
+        Conflict is user-owned metadata (equivalent to invalid / abandoned).
+        All previous generated values are invalid and are cleared once.
+        Users may re-mark via Detail Panel flag chips after this migration.
+
+        Idempotent via ``schema_flags.cleared_system_conflict_v1``.
+        """
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_flags (
+                flag TEXT PRIMARY KEY NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        done = self._conn.execute(
+            "SELECT 1 FROM schema_flags WHERE flag = ?",
+            ("cleared_system_conflict_v1",),
+        ).fetchone()
+        if done is not None:
+            return
+        cols = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(mods)").fetchall()
+        }
+        if "conflict_status" in cols:
+            self._conn.execute(
+                """
+                UPDATE mods
+                SET conflict_status = 'none',
+                    conflict_note = ''
+                WHERE conflict_status IS NOT NULL
+                  AND TRIM(conflict_status) != ''
+                  AND LOWER(TRIM(conflict_status)) != 'none'
+                """
+            )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO schema_flags (flag, applied_at) VALUES (?, ?)",
+            ("cleared_system_conflict_v1", _utc_now()),
+        )
+
+    def _clear_illegal_content_missing_pollution(self) -> None:
+        """One-shot clear of illegally stamped ``content_status=content_missing``.
+
+        Previous versions let library Reconcile (and Import sticky markers)
+        write ``content_missing`` from incomplete / shallow payload probes.
+        That polluted DB state, appeared under the 「内容缺失」 filter, cleared
+        on Detail Refresh, then reappeared on the next background reconcile.
+
+        Content Missing is system-derived and may only be re-established by
+        ``services.content_status_eval`` (Refresh). Rows with
+        ``folder_present=1`` and ``content_missing`` are reset to healthy;
+        authentic empty payloads are re-evaluated on the next Refresh.
+
+        Idempotent via ``schema_flags.cleared_illegal_content_missing_v1``.
+        """
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_flags (
+                flag TEXT PRIMARY KEY NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        done = self._conn.execute(
+            "SELECT 1 FROM schema_flags WHERE flag = ?",
+            ("cleared_illegal_content_missing_v1",),
+        ).fetchone()
+        if done is not None:
+            return
+        cols = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(mods)").fetchall()
+        }
+        if "content_status" in cols:
+            self._conn.execute(
+                """
+                UPDATE mods
+                SET content_status = 'healthy',
+                    library_status = CASE
+                        WHEN TRIM(COALESCE(library_status, '')) IN (
+                            'missing', 'content_missing'
+                        ) THEN 'normal'
+                        ELSE library_status
+                    END
+                WHERE LOWER(TRIM(COALESCE(content_status, ''))) = 'content_missing'
+                  AND COALESCE(folder_present, 0) = 1
+                """
+            )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO schema_flags (flag, applied_at) VALUES (?, ?)",
+            ("cleared_illegal_content_missing_v1", _utc_now()),
+        )
+
+    def _clear_identity_pollution_from_user_status(self) -> None:
+        """
+        One-shot: identity facts must not live on user Mod status columns.
+
+        Clears::
+          - content_status ∈ {identity_conflict, …} → healthy
+          - library_status ∈ {conflict, identity_*} → normal
+
+        Does **not** mass-reset ``identity_status`` (internal fact column).
+        Does **not** touch ``conflict_status`` / deploy / overlays.
+        Idempotent via ``schema_flags.cleared_identity_user_status_v1``.
+        """
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_flags (
+                flag TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        done = self._conn.execute(
+            "SELECT 1 FROM schema_flags WHERE flag = ?",
+            ("cleared_identity_user_status_v1",),
+        ).fetchone()
+        if done is not None:
+            return
+        cols = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(mods)").fetchall()
+        }
+        if "content_status" in cols:
+            self._conn.execute(
+                """
+                UPDATE mods
+                SET content_status = 'healthy'
+                WHERE LOWER(TRIM(COALESCE(content_status, ''))) IN (
+                    'identity_conflict',
+                    'identity_unresolved',
+                    'unresolved',
+                    'conflict'
+                )
+                """
+            )
+        if "library_status" in cols:
+            self._conn.execute(
+                """
+                UPDATE mods
+                SET library_status = 'normal'
+                WHERE LOWER(TRIM(COALESCE(library_status, ''))) IN (
+                    'conflict',
+                    'identity_conflict',
+                    'identity_unresolved',
+                    'unresolved'
+                )
+                """
+            )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO schema_flags (flag, applied_at) VALUES (?, ?)",
+            ("cleared_identity_user_status_v1", _utc_now()),
+        )
+
+    def _run_status_recovery_db_phase(self) -> None:
+        """Peel identity pollution off content_status into identity_status.
+
+        Full filesystem re-eval runs from reconcile / startup via
+        ``services.status_recovery.run_status_recovery``.
+        """
+        try:
+            from services.status_recovery import migrate_identity_pollution_from_content
+
+            migrate_identity_pollution_from_content(self)
+        except Exception:  # noqa: BLE001
+            logger.debug("status recovery db phase failed", exc_info=True)
+
     def _ensure_mod_workspace_id_locked(self, mod_id: int) -> str:
         """
         Ensure ``mods.workspace_id`` is set (caller must hold ``_lock``).
 
         Returns the final workspace_id. Never overwrites a legal non-empty
         value. Never copies Internal ID into Workspace ID.
+
+        ``workspace_id`` is a registration/display number. The same digits may
+        appear on multiple rows when ``app_id`` differs (e.g. Nexus 1333 on
+        Stardew and BG3). Uniqueness is ``(platform, app_id, workspace_id)``,
+        never ``workspace_id`` alone.
         """
         row = self._conn.execute(
             """
-            SELECT mod_id, platform, source_url, external_id, workspace_id
+            SELECT mod_id, platform, source_url, external_id, workspace_id, app_id
             FROM mods WHERE mod_id = ?
             """,
             (int(mod_id),),
@@ -892,13 +1127,25 @@ class DatabaseManager:
         if wid and is_internal_mod_id(mid) and wid == mid:
             wid = ""
         if not wid:
-            if plat not in (PLATFORM_GITHUB, PLATFORM_MODIO, PLATFORM_OTHER):
+            # Steam Workshop display id is the Workshop ID — never invent one.
+            if plat in ("", PLATFORM_STEAM):
+                return ""
+            # Nexus digits come from URL/external — never invent.
+            if plat == PLATFORM_NEXUS:
+                return ""
+            if plat not in (
+                PLATFORM_GITHUB,
+                PLATFORM_MODIO,
+                PLATFORM_OTHER,
+            ):
                 return ""
             taken = {
                 str(r["workspace_id"] or "").strip()
                 for r in self._conn.execute(
                     "SELECT workspace_id FROM mods "
                     "WHERE workspace_id IS NOT NULL AND TRIM(workspace_id) != ''"
+                    " AND mod_id != ?",
+                    (int(mod_id),),
                 ).fetchall()
             }
             taken.discard("")
@@ -919,7 +1166,6 @@ class DatabaseManager:
         """
         try:
             mid = int(str(mod_id).strip())
-            now = _utc_now()
             with self._lock:
                 row = self._conn.execute(
                     """
@@ -937,12 +1183,24 @@ class DatabaseManager:
                 )
                 if not new_wid:
                     return None
+                clash = self._conn.execute(
+                    """
+                    SELECT mod_id FROM mods
+                    WHERE TRIM(COALESCE(workspace_id, '')) = ?
+                      AND mod_id != ?
+                    LIMIT 1
+                    """,
+                    (new_wid, mid),
+                ).fetchone()
+                if clash is not None:
+                    # Display id already owned — leave unique assignment alone.
+                    return None
                 self._conn.execute(
                     """
-                    UPDATE mods SET workspace_id = ?, updated_at = ?
+                    UPDATE mods SET workspace_id = ?
                     WHERE mod_id = ?
                     """,
-                    (new_wid, now, mid),
+                    (new_wid, mid),
                 )
                 self._conn.commit()
                 return new_wid
@@ -1123,6 +1381,101 @@ class DatabaseManager:
                 "SELECT app_id, name, header_url, description FROM games ORDER BY name COLLATE NOCASE"
             ).fetchall()
         return [_game_from_row(r) for r in rows]
+
+    def list_game_sidebar_aggregates(self) -> list[dict[str, Any]]:
+        """
+        Library sidebar source: ``games`` + ``mods`` counts (SQL only).
+
+        ARCHITECTURE RULE: Library Read Projection. Callers must not merge
+        filesystem ``list_games`` / ``iterdir`` into this result.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    g.app_id AS app_id,
+                    g.name AS name,
+                    COUNT(m.mod_id) AS mod_count,
+                    COALESCE(SUM(CASE WHEN COALESCE(m.folder_present, 0) = 0
+                                      THEN 1 ELSE 0 END), 0) AS absent_count
+                FROM games AS g
+                LEFT JOIN mods AS m ON m.app_id = g.app_id
+                WHERE g.app_id > 0
+                GROUP BY g.app_id, g.name
+                ORDER BY g.name COLLATE NOCASE
+                """
+            ).fetchall()
+            # Mods whose app_id is missing from games still need a sidebar key.
+            orphan_rows = self._conn.execute(
+                """
+                SELECT
+                    m.app_id AS app_id,
+                    '' AS name,
+                    COUNT(m.mod_id) AS mod_count,
+                    COALESCE(SUM(CASE WHEN COALESCE(m.folder_present, 0) = 0
+                                      THEN 1 ELSE 0 END), 0) AS absent_count,
+                    MAX(m.last_known_path) AS sample_path
+                FROM mods AS m
+                LEFT JOIN games AS g ON g.app_id = m.app_id
+                WHERE m.app_id > 0 AND g.app_id IS NULL
+                GROUP BY m.app_id
+                """
+            ).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            app_id = int(row["app_id"] or 0)
+            name = str(row["name"] or "").strip()
+            folder = sanitize_folder_name(name, fallback=f"App_{app_id}")
+            out.append(
+                {
+                    "app_id": app_id,
+                    "name": name,
+                    "folder": folder,
+                    "mod_count": int(row["mod_count"] or 0),
+                    "absent_count": int(row["absent_count"] or 0),
+                }
+            )
+        from pathlib import Path as _Path
+
+        for row in orphan_rows:
+            app_id = int(row["app_id"] or 0)
+            sample = str(row["sample_path"] or "").strip()
+            folder = ""
+            if sample:
+                try:
+                    folder = _Path(sample).parent.name
+                except Exception:  # noqa: BLE001
+                    folder = ""
+            if not folder:
+                folder = f"App_{app_id}"
+            out.append(
+                {
+                    "app_id": app_id,
+                    "name": folder,
+                    "folder": folder,
+                    "mod_count": int(row["mod_count"] or 0),
+                    "absent_count": int(row["absent_count"] or 0),
+                }
+            )
+        return out
+
+    def resolve_game_id_for_folder(self, game_folder: str | None) -> int | None:
+        """Map library folder name → ``games.app_id`` via SQL (no FS scan)."""
+        key = str(game_folder or "").strip()
+        if not key:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT app_id, name FROM games WHERE app_id > 0"
+            ).fetchall()
+        for row in rows:
+            app_id = int(row["app_id"] or 0)
+            name = str(row["name"] or "").strip()
+            folder = sanitize_folder_name(name, fallback=f"App_{app_id}")
+            if key == folder or key == name:
+                return app_id
+        return None
 
     # ------------------------------------------------------------------
     # Games — deploy configuration (never overwritten by Steam upsert)
@@ -1360,8 +1713,7 @@ class DatabaseManager:
                         WHEN mods.source_url IS NULL OR TRIM(mods.source_url) = ''
                         THEN excluded.source_url
                         ELSE mods.source_url
-                    END,
-                    updated_at = excluded.updated_at
+                    END
                 """,
                 (
                     mid,
@@ -1373,7 +1725,7 @@ class DatabaseManager:
                     source,  # URL from Workshop ID (platform identity)
                     str(mid),  # external_id = Workshop ID
                     str(mid),  # workspace_id FROM Workshop ID (equals PK by Steam scheme)
-                    _utc_now(),
+                    _utc_now(),  # INSERT only — Sync must not bump updated_at
                 ),
             )
             self._ensure_witcher3_game_version_default_locked(
@@ -1382,7 +1734,11 @@ class DatabaseManager:
             self._conn.commit()
 
     def upsert_mods(self, metas: Iterable[ModMetadata]) -> int:
-        """Batch Steam upsert — user columns are preserved on conflict."""
+        """Batch Steam **update** for existing rows only — never INSERT.
+
+        Entity create is Sync/Import via IdentityService only. Catalog refresh
+        must not mint Mod entities.
+        """
         rows: list[tuple[Any, ...]] = []
         for meta in metas:
             if not meta.published_file_id or not str(meta.published_file_id).isdigit():
@@ -1394,7 +1750,6 @@ class DatabaseManager:
                 continue
             rows.append(
                 (
-                    mid,
                     int(meta.app_id or 0),
                     meta.title,
                     meta.preview_url or "",
@@ -1403,45 +1758,43 @@ class DatabaseManager:
                     steam_workshop_url(mid),
                     str(mid),
                     str(mid),
-                    _utc_now(),
+                    mid,
                 )
             )
         if not rows:
             return 0
         with self._lock:
+            before = self._conn.total_changes
             self._conn.executemany(
                 """
-                INSERT INTO mods (
-                    mod_id, app_id, title, preview_url, description,
-                    display_name, custom_description, user_notes, favorite,
-                    platform, source_url, external_id, workspace_id, mod_files, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, ?, '{}', ?)
-                ON CONFLICT(mod_id) DO UPDATE SET
-                    app_id = excluded.app_id,
-                    title = excluded.title,
-                    preview_url = excluded.preview_url,
-                    description = excluded.description,
-                    workspace_id = CASE
-                        WHEN mods.workspace_id = '' OR mods.workspace_id IS NULL
-                        THEN excluded.workspace_id
-                        ELSE mods.workspace_id
-                    END,
+                UPDATE mods SET
+                    app_id = ?,
+                    title = ?,
+                    preview_url = ?,
+                    description = ?,
+                    platform = ?,
                     source_url = CASE
-                        WHEN mods.source_url IS NULL OR TRIM(mods.source_url) = ''
-                        THEN excluded.source_url
-                        ELSE mods.source_url
+                        WHEN source_url IS NULL OR TRIM(source_url) = ''
+                        THEN ?
+                        ELSE source_url
                     END,
-                    updated_at = excluded.updated_at
+                    external_id = CASE
+                        WHEN external_id IS NULL OR TRIM(external_id) = ''
+                        THEN ?
+                        ELSE external_id
+                    END,
+                    workspace_id = CASE
+                        WHEN workspace_id IS NULL OR TRIM(workspace_id) = ''
+                        THEN ?
+                        ELSE workspace_id
+                    END
+                WHERE mod_id = ?
                 """,
                 rows,
             )
-            for row in rows:
-                self._ensure_witcher3_game_version_default_locked(
-                    int(row[0]), int(row[1] or 0)
-                )
+            updated = int(self._conn.total_changes - before)
             self._conn.commit()
-        return len(rows)
+            return updated
 
     def missing_mod_ids(self, mod_ids: Iterable[int | str]) -> list[str]:
         """Return IDs that are not yet stored (or stored without a title)."""
@@ -1520,56 +1873,182 @@ class DatabaseManager:
         platform: str | None = None,
         app_id: int = 0,
     ) -> str | None:
-        key = str(workspace_id or "").strip()
-        if not key:
-            return None
-        plat = normalize_platform(platform) if platform else ""
-        aid = int(app_id or 0)
-        with self._lock:
-            if plat and aid > 0:
-                row = self._conn.execute(
-                    """
-                    SELECT mod_id FROM mods
-                    WHERE TRIM(workspace_id) = ? AND platform = ? AND app_id = ?
-                    LIMIT 1
-                    """,
-                    (key, plat, aid),
-                ).fetchone()
-                if row is not None:
-                    return str(row["mod_id"])
-            if plat:
-                rows = self._conn.execute(
-                    """
-                    SELECT mod_id FROM mods
-                    WHERE TRIM(workspace_id) = ? AND platform = ?
-                    """,
-                    (key, plat),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    """
-                    SELECT mod_id, platform FROM mods
-                    WHERE TRIM(workspace_id) = ?
-                    """,
-                    (key,),
-                ).fetchall()
-        ids = []
-        for row in rows:
-            mid = str(row["mod_id"] or "").strip()
-            if mid and mid not in ids:
-                ids.append(mid)
-        if len(ids) == 1:
-            return ids[0]
+        """
+        REMOVED as an identity API — always returns ``None``.
+
+        ``workspace_id`` is never a general entity key. Sync/Import registration
+        must use :meth:`find_mod_for_registration` with ``(platform, app_id,
+        workspace_id)`` and ``app_id > 0``.
+        """
+        _ = (workspace_id, platform, app_id)
         return None
+
+    def find_mod_for_registration(
+        self,
+        platform: str,
+        app_id: int,
+        workspace_id: str,
+    ) -> ModDisplayInfo | None:
+        """
+        Sync / Import registration lookup only.
+
+        Match ``(platform, app_id, workspace_id)`` with ``app_id > 0``.
+        Never call from Reconcile / Backup / Deploy / Library / UI.
+        """
+        plat = normalize_platform(platform)
+        wid = str(workspace_id or "").strip()
+        aid = int(app_id or 0)
+        if not plat or not wid or aid <= 0:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT {_MOD_SELECT_COLS} FROM mods
+                WHERE platform = ?
+                  AND app_id = ?
+                  AND TRIM(COALESCE(workspace_id, '')) = ?
+                LIMIT 1
+                """,
+                (plat, aid, wid),
+            ).fetchone()
+        if row is None:
+            return None
+        return _display_info_from_row(row)
+
+    def resolve_mod_id_by_scoped_workspace(
+        self,
+        *,
+        platform: str,
+        app_id: int,
+        workspace_id: str,
+    ) -> str | None:
+        """
+        Map a platform workspace_id to ``mods.mod_id`` within one game.
+
+        Match ``(platform, app_id, workspace_id)`` with ``app_id > 0``.
+        Returns the Internal Database ID (PK) string, or ``None``.
+
+        Used to translate metadata dependency tokens (stored as workspace_id)
+        into runtime PKs. Never treats ``workspace_id`` as a cross-game PK.
+        """
+        plat = normalize_platform(platform)
+        wid = str(workspace_id or "").strip()
+        aid = int(app_id or 0)
+        if not plat or not wid or aid <= 0:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id FROM mods
+                WHERE platform = ?
+                  AND app_id = ?
+                  AND TRIM(COALESCE(workspace_id, '')) = ?
+                LIMIT 1
+                """,
+                (plat, aid, wid),
+            ).fetchone()
+        if row is None:
+            return None
+        mid = str(row["mod_id"] or "").strip()
+        return mid if mid.isdigit() else None
+
+    def update_mod_content_status(
+        self,
+        mod_id: int | str,
+        *,
+        content_status: str,
+        library_status: str | None = None,
+        folder_present: bool | None = None,
+        last_known_path: str | None = None,
+        touch_updated_at: bool = False,
+    ) -> bool:
+        """
+        Persist system content-axis status.
+
+        ARCHITECTURE RULE: only ``services.content_status_eval`` may call this.
+        Identity / Sync / Deploy / Repair must not write ``content_status``.
+
+        ``touch_updated_at`` must stay False — content eval is a forbidden
+        ``updated_at`` reason (see ``services.updated_at_authority``).
+
+        Returns True when any written column actually changed.
+        """
+        from services.library_status import content_status_to_library_status
+        from services.status_authority import SUPPORTED_CONTENT_STATUSES
+        from services.updated_at_authority import UpdatedAtAuthorityError
+
+        if touch_updated_at:
+            raise UpdatedAtAuthorityError(
+                "update_mod_content_status must not touch mods.updated_at "
+                "(reason would be content_eval — forbidden)"
+            )
+
+        mid = int(str(mod_id).strip())
+        cs = str(content_status or "").strip().lower()
+        if cs not in SUPPORTED_CONTENT_STATUSES:
+            raise ValueError(
+                f"illegal content_status={content_status!r}; "
+                f"allowed={SUPPORTED_CONTENT_STATUSES}"
+            )
+        ls = (
+            str(library_status).strip()
+            if library_status is not None
+            else content_status_to_library_status(cs)
+        )
+        sets: list[str] = [
+            "content_status = ?",
+            "library_status = ?",
+        ]
+        params: list[Any] = [cs, ls]
+        if folder_present is not None:
+            sets.append("folder_present = ?")
+            params.append(1 if folder_present else 0)
+        if last_known_path is not None:
+            sets.append("last_known_path = ?")
+            params.append(str(last_known_path or "").strip())
+        params.append(mid)
+        with self._lock:
+            prev = self._conn.execute(
+                """
+                SELECT content_status, library_status, folder_present, last_known_path
+                FROM mods WHERE mod_id = ?
+                """,
+                (mid,),
+            ).fetchone()
+            if prev is None:
+                logger.warning(
+                    "update_mod_content_status refused: no mods row for %s", mid
+                )
+                return False
+            changed = False
+            if str(prev["content_status"] or "").strip().lower() != cs:
+                changed = True
+            if str(prev["library_status"] or "").strip() != ls:
+                changed = True
+            if folder_present is not None:
+                if int(prev["folder_present"] or 0) != (1 if folder_present else 0):
+                    changed = True
+            if last_known_path is not None:
+                if str(prev["last_known_path"] or "").strip() != str(
+                    last_known_path or ""
+                ).strip():
+                    changed = True
+            if not changed:
+                return False
+            self._conn.execute(
+                f"UPDATE mods SET {', '.join(sets)} WHERE mod_id = ?",
+                tuple(params),
+            )
+            self._conn.commit()
+            return True
 
     def update_mod_identity_fields(
         self,
         mod_id: int | str,
         *,
         internal_id: str | None = None,
-        library_status: str | None = None,
         source_type: str | None = None,
-        content_status: str | None = None,
+        identity_status: str | None = None,
         last_known_path: str | None = None,
         folder_present: bool | None = None,
         game_name: str | None = None,
@@ -1580,21 +2059,27 @@ class DatabaseManager:
         workspace_id: str | None = None,
         app_id: int | None = None,
         sticky_source: bool = True,
+        content_status: str | None = None,
+        library_status: str | None = None,
     ) -> None:
-        """Patch identity / library-status fields used by reconcile."""
+        """Patch identity / path fields (never content_status)."""
+        if content_status is not None or library_status is not None:
+            raise TypeError(
+                "content_status/library_status must be written via "
+                "update_mod_content_status (content_status_eval only)"
+            )
         mid = int(str(mod_id).strip())
-        now = _utc_now()
-        sets: list[str] = ["updated_at = ?"]
-        params: list[Any] = [now]
+        # Identity / path / platform patches must not bump Library sort time.
+        sets: list[str] = []
+        params: list[Any] = []
         if internal_id is not None:
             sets.append("internal_id = ?")
             params.append(str(internal_id or "").strip())
-        if library_status is not None:
-            sets.append("library_status = ?")
-            params.append(str(library_status or "").strip())
-        if content_status is not None:
-            sets.append("content_status = ?")
-            params.append(str(content_status or "").strip())
+        if identity_status is not None:
+            from services.status_authority import normalize_identity_status
+
+            sets.append("identity_status = ?")
+            params.append(normalize_identity_status(identity_status))
         if source_type is not None and str(source_type).strip():
             src = str(source_type).strip().lower()
             if sticky_source:
@@ -1633,7 +2118,9 @@ class DatabaseManager:
         ext_param_set = False
         if external_id is not None:
             ext_val = str(external_id or "").strip()
-            if is_modio_external_id_pollution(ext_val, mod_id=mid) or is_internal_mod_id(ext_val):
+            if is_modio_external_id_pollution(ext_val, mod_id=mid) or is_internal_mod_id(
+                ext_val
+            ):
                 ext_val = ""
             if ext_val:
                 sets.append("external_id = ?")
@@ -1659,6 +2146,8 @@ class DatabaseManager:
         if app_id is not None and int(app_id) > 0:
             sets.append("app_id = ?")
             params.append(int(app_id))
+        if not sets:
+            return
         params.append(mid)
         with self._lock:
             present = self._conn.execute(
@@ -1684,24 +2173,15 @@ class DatabaseManager:
         *,
         app_id: int = 0,
     ) -> ModDisplayInfo | None:
-        """Locate a Mod by platform + game app_id + external reference."""
-        plat = normalize_platform(platform)
-        ext = str(external_id or "").strip()
-        if not ext:
-            return None
-        aid = int(app_id or 0)
-        with self._lock:
-            row = self._conn.execute(
-                f"""
-                SELECT {_MOD_SELECT_COLS} FROM mods
-                WHERE platform = ? AND app_id = ? AND external_id = ?
-                LIMIT 1
-                """,
-                (plat, aid, ext),
-            ).fetchone()
-        if row is None:
-            return None
-        return _display_info_from_row(row)
+        """
+        DEPRECATED identity API.
+
+        Retained as a thin alias of :meth:`find_mod_for_registration` where
+        *external_id* digits are treated as ``workspace_id``. New code must
+        call ``find_mod_for_registration`` directly. Do not use from Reconcile /
+        Backup / Deploy / Library / UI.
+        """
+        return self.find_mod_for_registration(platform, int(app_id or 0), str(external_id or ""))
 
     def find_mod_by_last_known_path(self, path: str) -> str | None:
         """Return ``mod_id`` when *path* matches ``last_known_path`` exactly."""
@@ -1710,6 +2190,32 @@ class DatabaseManager:
             return None
         mid = str(row.get("mod_id") or "").strip()
         return mid if mid.isdigit() else None
+
+    def touch_mod_updated_at(self, mod_id: int | str, *, reason: str) -> None:
+        """
+        Sole intentional bump of ``mods.updated_at`` for an existing row.
+
+        Requires an explicit legal *reason* (``user_edit`` / ``user_import`` /
+        ``user_create``). Forbidden system reasons raise
+        :class:`UpdatedAtAuthorityError`.
+        """
+        mid = int(str(mod_id).strip())
+        sets: list[str] = []
+        params: list[Any] = []
+        _append_mods_updated_at(sets, params, reason=reason)
+        params.append(mid)
+        with self._lock:
+            present = self._conn.execute(
+                "SELECT 1 FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+            if present is None:
+                return
+            self._conn.execute(
+                f"UPDATE mods SET {', '.join(sets)} WHERE mod_id = ?",
+                tuple(params),
+            )
+            self._conn.commit()
 
     def update_mod_platform_info(
         self,
@@ -1722,6 +2228,8 @@ class DatabaseManager:
         app_id: int | None = None,
         description: str | None = None,
         preview_url: str | None = None,
+        touch_updated_at: bool = False,
+        updated_at_reason: str | None = None,
     ) -> ModDisplayInfo:
         """
         Create or update platform identity fields (never writes ``.info``).
@@ -1730,10 +2238,14 @@ class DatabaseManager:
         ``(platform, app_id, external_id)`` triple is free (or is this same row).
 
         Optional ``description`` / ``preview_url`` update remote catalog text
-        (used by Mod.io refresh; Steam refresh still uses ``upsert_mod``).
+        (Steam / Mod.io refresh write official fields via this method —
+        never ``upsert_mod(published_file_id=workshop)`` after Identity split).
+
+        Default: does **not** bump ``mods.updated_at`` (refresh / identity
+        authority). Pass ``touch_updated_at=True`` with a legal reason for
+        explicit user edits only.
         """
         mid = int(str(mod_id).strip())
-        now = _utc_now()
         with self._lock:
             self._ensure_mod_stub(mid)
             row = self._conn.execute(
@@ -1805,47 +2317,35 @@ class DatabaseManager:
                     )
 
             try:
+                sets: list[str] = [
+                    "platform = ?",
+                    "source_url = ?",
+                    "external_id = ?",
+                    "title = CASE WHEN ? != '' THEN ? ELSE title END",
+                    "app_id = ?",
+                ]
+                params: list[Any] = [
+                    plat,
+                    url,
+                    ext,
+                    new_title,
+                    new_title,
+                    new_app,
+                ]
                 if description is not None or preview_url is not None:
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET
-                            platform = ?,
-                            source_url = ?,
-                            external_id = ?,
-                            title = CASE WHEN ? != '' THEN ? ELSE title END,
-                            app_id = ?,
-                            description = ?,
-                            preview_url = ?,
-                            updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (
-                            plat,
-                            url,
-                            ext,
-                            new_title,
-                            new_title,
-                            new_app,
-                            new_description,
-                            new_preview,
-                            now,
-                            mid,
-                        ),
+                    sets.extend(["description = ?", "preview_url = ?"])
+                    params.extend([new_description, new_preview])
+                if touch_updated_at:
+                    _append_mods_updated_at(
+                        sets,
+                        params,
+                        reason=str(updated_at_reason or "user_edit"),
                     )
-                else:
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET
-                            platform = ?,
-                            source_url = ?,
-                            external_id = ?,
-                            title = CASE WHEN ? != '' THEN ? ELSE title END,
-                            app_id = ?,
-                            updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (plat, url, ext, new_title, new_title, new_app, now, mid),
-                    )
+                params.append(mid)
+                self._conn.execute(
+                    f"UPDATE mods SET {', '.join(sets)} WHERE mod_id = ?",
+                    tuple(params),
+                )
                 self._ensure_mod_workspace_id_locked(mid)
                 from core.witcher3_game_version import is_witcher3_game
 
@@ -1874,12 +2374,17 @@ class DatabaseManager:
         self,
         mod_ids: Sequence[int | str],
         platform: str,
+        *,
+        touch_updated_at: bool = True,
+        updated_at_reason: str = "user_edit",
     ) -> int:
         """
         Update only ``mods.platform`` for many Mods.
 
         Never touches display_name / custom_description / source_url / external_id.
         Returns the number of rows updated.
+
+        Default bumps ``updated_at`` with ``user_edit`` (Detail Panel batch).
         """
         plat = normalize_platform(platform)
         ids: list[int] = []
@@ -1891,16 +2396,19 @@ class DatabaseManager:
                     ids.append(mid)
         if not ids:
             return 0
-        now = _utc_now()
         updated = 0
         with self._lock:
             for mid in ids:
+                sets: list[str] = ["platform = ?"]
+                params: list[Any] = [plat]
+                if touch_updated_at:
+                    _append_mods_updated_at(
+                        sets, params, reason=updated_at_reason
+                    )
+                params.append(mid)
                 cur = self._conn.execute(
-                    """
-                    UPDATE mods SET platform = ?, updated_at = ?
-                    WHERE mod_id = ?
-                    """,
-                    (plat, now, mid),
+                    f"UPDATE mods SET {', '.join(sets)} WHERE mod_id = ?",
+                    tuple(params),
                 )
                 updated += int(cur.rowcount or 0)
             self._conn.commit()
@@ -1950,15 +2458,14 @@ class DatabaseManager:
 
         parsed.files = list(filter_out_history_version_entries(parsed.files))
         payload = parsed.to_json()
-        now = _utc_now()
         with self._lock:
             self._ensure_mod_stub(mid)
             self._conn.execute(
                 """
-                UPDATE mods SET mod_files = ?, updated_at = ?
+                UPDATE mods SET mod_files = ?
                 WHERE mod_id = ?
                 """,
-                (payload, now, mid),
+                (payload, mid),
             )
             self._conn.commit()
         return parsed
@@ -1974,8 +2481,9 @@ class DatabaseManager:
         """
         Patch offline page status columns (SQLite only).
 
-        Omitted kwargs leave existing values. ``updated_at`` defaults to now
-        when any field is written.
+        Omitted kwargs leave existing values. ``offline_updated_at`` defaults
+        to now when any field is written. Does **not** bump ``mods.updated_at``
+        (offline is a forbidden reason).
         """
         mid = int(str(mod_id).strip())
         now = _utc_now()
@@ -2017,27 +2525,29 @@ class DatabaseManager:
                 UPDATE mods SET
                     offline_status = ?,
                     offline_provider = ?,
-                    offline_updated_at = ?,
-                    updated_at = ?
+                    offline_updated_at = ?
                 WHERE mod_id = ?
                 """,
-                (new_status, new_provider, new_updated, now, mid),
+                (new_status, new_provider, new_updated, mid),
             )
             self._conn.commit()
 
     def update_mod_cover_path(self, mod_id: int | str, cover_path: str = "") -> None:
-        """Set ``mods.cover_path`` (relative ``.info/cover.ext`` or empty)."""
+        """Set ``mods.cover_path`` (relative ``.info/cover.ext`` or empty).
+
+        Does not bump ``mods.updated_at`` — cover sync / offline merge is not
+        a user Library-sort event (call ``touch_mod_updated_at`` from user save).
+        """
         mid = int(str(mod_id).strip())
         value = str(cover_path or "").strip()
-        now = _utc_now()
         with self._lock:
             self._ensure_mod_stub(mid)
             self._conn.execute(
                 """
-                UPDATE mods SET cover_path = ?, updated_at = ?
+                UPDATE mods SET cover_path = ?
                 WHERE mod_id = ?
                 """,
-                (value, now, mid),
+                (value, mid),
             )
             self._conn.commit()
 
@@ -2056,6 +2566,8 @@ class DatabaseManager:
         now = _utc_now()
         with self._lock:
             self._ensure_mod_stub(mid)
+            # Backup completion must not bump ``updated_at`` — Library sort
+            # authority is user/import/metadata lifecycle, not async backup.
             self._conn.execute(
                 """
                 UPDATE mods SET
@@ -2064,8 +2576,7 @@ class DatabaseManager:
                     backup_updated_at = ?,
                     backup_metadata_json = ?,
                     backup_cover_path = ?,
-                    backup_offline_path = ?,
-                    updated_at = ?
+                    backup_offline_path = ?
                 WHERE mod_id = ?
                 """,
                 (
@@ -2075,7 +2586,6 @@ class DatabaseManager:
                     str(backup_metadata_json or ""),
                     str(backup_cover_path or "").strip(),
                     str(backup_offline_path or "").strip(),
-                    now,
                     mid,
                 ),
             )
@@ -2099,37 +2609,96 @@ class DatabaseManager:
                     """
                     UPDATE mods SET
                         backup_status = ?,
-                        backup_last_validate_at = ?,
-                        updated_at = ?
+                        backup_last_validate_at = ?
                     WHERE mod_id = ?
                     """,
-                    (value, now, now, mid),
+                    (value, now, mid),
                 )
             else:
                 self._conn.execute(
                     """
                     UPDATE mods SET
-                        backup_status = ?,
-                        updated_at = ?
+                        backup_status = ?
                     WHERE mod_id = ?
                     """,
-                    (value, now, mid),
+                    (value, mid),
                 )
             self._conn.commit()
 
     def set_mod_folder_present(self, mod_id: int | str, *, present: bool) -> None:
         mid = int(str(mod_id).strip())
-        now = _utc_now()
         with self._lock:
             self._ensure_mod_stub(mid)
             self._conn.execute(
                 """
-                UPDATE mods SET folder_present = ?, updated_at = ?
+                UPDATE mods SET folder_present = ?
                 WHERE mod_id = ?
                 """,
-                (1 if present else 0, now, mid),
+                (1 if present else 0, mid),
             )
             self._conn.commit()
+
+    def update_mod_fs_observation(
+        self,
+        mod_id: int | str,
+        *,
+        observed_at: str,
+        root_mtime: float | None,
+        root_exists: bool | None = None,
+    ) -> None:
+        """Persist filesystem observation stamp (not identity, not content_status)."""
+        del root_exists  # stamp records mtime/time only; presence lives on folder_present
+        mid = int(str(mod_id).strip())
+        stamp = str(observed_at or "").strip()
+        with self._lock:
+            present = self._conn.execute(
+                "SELECT 1 FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+            if present is None:
+                return
+            self._conn.execute(
+                """
+                UPDATE mods SET
+                    fs_observed_at = ?,
+                    fs_root_mtime = ?
+                WHERE mod_id = ?
+                """,
+                (stamp, root_mtime, mid),
+            )
+            self._conn.commit()
+
+    def get_mod_fs_observation(self, mod_id: int | str) -> dict[str, Any] | None:
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id, last_known_path, folder_present,
+                       content_status, fs_observed_at, fs_root_mtime
+                FROM mods WHERE mod_id = ?
+                """,
+                (mid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {str(k): row[k] for k in row.keys()}
+
+    def list_mod_ids_for_fs_observe(self) -> list[str]:
+        """Internal IDs with a bound path — batch L0 candidates (no FS scan)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id FROM mods
+                WHERE TRIM(COALESCE(last_known_path, '')) != ''
+                ORDER BY mod_id
+                """
+            ).fetchall()
+        out: list[str] = []
+        for row in rows:
+            mid = str(row["mod_id"] or "").strip()
+            if mid.isdigit():
+                out.append(mid)
+        return out
 
     def get_mods_backup_rows(
         self, mod_ids: list[str] | list[int]
@@ -2162,6 +2731,181 @@ class DatabaseManager:
             out[mid] = {str(k): row[k] for k in row.keys()}
         return out
 
+    def list_mod_list_items(
+        self,
+        *,
+        game_id: int | None = None,
+        app_id: int | None = None,
+        game_folder: str | None = None,
+        mod_id: int | str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        DB-first Library Layer-1 rows (no filesystem scan).
+
+        Returns dicts compatible with ``services.mod_list_item.ModListItem``.
+
+        ARCHITECTURE RULE: game filtering is SQL-pushed via ``m.app_id = ?``.
+        ``game_id`` is the preferred parameter (maps to ``mods.app_id``).
+        ``game_folder`` is resolved to ``game_id`` first — never load the full
+        mods table then filter in Python.
+        ``mod_id`` fetches a single Mod row for projection patch (not a full reload).
+        """
+        from pathlib import Path as _Path
+
+        # Prefer explicit game_id; app_id is a legacy alias for the same column.
+        gid: int | None = None
+        if game_id is not None and int(game_id) > 0:
+            gid = int(game_id)
+        elif app_id is not None and int(app_id) > 0:
+            gid = int(app_id)
+        elif str(game_folder or "").strip():
+            resolved = self.resolve_game_id_for_folder(game_folder)
+            if resolved is None or int(resolved) <= 0:
+                return []
+            gid = int(resolved)
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        mid_filter = str(mod_id or "").strip()
+        if mid_filter.isdigit():
+            clauses.append("m.mod_id = ?")
+            params.append(int(mid_filter))
+        if gid is not None and gid > 0:
+            # SQL: WHERE game_id (= mods.app_id) = ?
+            clauses.append("m.app_id = ?")
+            params.append(gid)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT
+                    m.mod_id,
+                    m.workspace_id,
+                    m.app_id,
+                    m.title,
+                    m.display_name,
+                    m.favorite,
+                    m.cover_path,
+                    m.backup_cover_path,
+                    m.last_known_path,
+                    m.folder_present,
+                    m.deploy_status,
+                    m.platform,
+                    m.content_status,
+                    m.library_status,
+                    m.conflict_status,
+                    m.identity_status,
+                    m.is_invalid,
+                    m.enabled,
+                    m.offline_status,
+                    m.external_id,
+                    m.source_url,
+                    m.source_type,
+                    m.user_notes,
+                    m.backup_offline_path,
+                    m.updated_at,
+                    COALESCE(g.name, '') AS game_name
+                FROM mods AS m
+                LEFT JOIN games AS g ON g.app_id = m.app_id
+                {where}
+                ORDER BY m.updated_at DESC, m.mod_id DESC
+                """,
+                params,
+            ).fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            mid = str(row["mod_id"])
+            path = str(row["last_known_path"] or "").strip()
+            game_name = str(row["game_name"] or "").strip()
+            derived_folder = ""
+            if path:
+                try:
+                    derived_folder = _Path(path).parent.name
+                except Exception:  # noqa: BLE001
+                    derived_folder = ""
+            if not derived_folder and game_name:
+                derived_folder = sanitize_folder_name(
+                    game_name, fallback=game_name
+                )
+
+            display = str(row["display_name"] or "").strip()
+            steam = str(row["title"] or "").strip()
+            name = display or steam or ( _Path(path).name if path else mid)
+            cover = str(row["cover_path"] or "").strip() or str(
+                row["backup_cover_path"] or ""
+            ).strip()
+            deploy_status = str(row["deploy_status"] or "not_deployed")
+            conflict_status = str(row["conflict_status"] or "none")
+            offline_status = str(row["offline_status"] or "none")
+            backup_offline = str(row["backup_offline_path"] or "").strip()
+            folder_present = bool(int(row["folder_present"] or 0))
+            notes = str(row["user_notes"] or "")
+            # Keep search light — truncate notes preview.
+            notes_preview = notes[:120] if notes else ""
+            content_status = str(row["content_status"] or "")
+            try:
+                from services.status_authority import normalize_content_axis
+                from services.status_authority import normalize_identity_status as _norm_id
+
+                content_status = normalize_content_axis(content_status)
+                identity_status = _norm_id(
+                    str(row["identity_status"] or "")
+                    if "identity_status" in row.keys()
+                    else ""
+                )
+            except Exception:  # noqa: BLE001
+                identity_status = "ok"
+            # User Mod status badge token: content axis only.
+            # Identity / folder_absent / library_status never become status_badge.
+            status_badge = (
+                content_status if content_status == "content_missing" else ""
+            )
+            has_offline = offline_status in ("archived", "generated") or bool(
+                backup_offline
+            )
+            out.append(
+                {
+                    "internal_id": mid,
+                    "workspace_id": str(row["workspace_id"] or "").strip(),
+                    "game_id": int(row["app_id"] or 0),
+                    "game_folder": derived_folder,
+                    "name": name,
+                    "favorite": bool(int(row["favorite"] or 0)),
+                    "cover_path": cover,
+                    "status_badge": status_badge,
+                    "managed_path": path,
+                    "platform": str(row["platform"] or "").strip(),
+                    "deployed": deploy_status == DEPLOY_STATUS_DEPLOYED,
+                    "folder_absent": not folder_present,
+                    "content_status": content_status,
+                    "identity_status": identity_status,
+                    "conflict": conflict_status == CONFLICT_STATUS_CONFLICT,
+                    "conflict_status": conflict_status,
+                    "invalid": bool(int(row["is_invalid"] or 0)),
+                    "enabled": bool(int(row["enabled"] if row["enabled"] is not None else 1)),
+                    "has_offline": has_offline,
+                    "mtime": updated_at_to_mtime(
+                        str(row["updated_at"] or "")
+                        if "updated_at" in row.keys()
+                        else ""
+                    ),
+                    "category_tags": "",
+                    "external_id": str(row["external_id"] or "").strip(),
+                    "source_url": str(row["source_url"] or "").strip(),
+                    "source_type": str(row["source_type"] or "").strip(),
+                    "deploy_status": deploy_status,
+                    "offline_status": offline_status,
+                    "library_status": str(row["library_status"] or "").strip(),
+                    "steam_name": steam,
+                    "relation_deps": 0,
+                    "relation_conflicts": 0,
+                    "notes_preview": notes_preview,
+                }
+            )
+        return out
+
     def get_mod_backup_row(self, mod_id: int | str) -> dict[str, Any] | None:
         mid = int(str(mod_id).strip())
         with self._lock:
@@ -2172,7 +2916,9 @@ class DatabaseManager:
                        backup_cover_path, backup_offline_path,
                        backup_status, backup_last_validate_at,
                        offline_status, internal_id, library_status,
-                       source_type, content_status, platform
+                       source_type, content_status, identity_status,
+                       platform, workspace_id,
+                       fs_observed_at, fs_root_mtime
                 FROM mods WHERE mod_id = ?
                 """,
                 (mid,),
@@ -2350,6 +3096,21 @@ class DatabaseManager:
 
         existing = self.find_mod_by_external(plat, ext, app_id=resolved_app)
         if existing is not None:
+            # Refuse to rewrite a row whose Nexus game slug disagrees with the
+            # incoming source URL (historical hybrid / cross-game pollution).
+            if plat == PLATFORM_NEXUS and source_url:
+                from services.importers.duplicate_check import (
+                    nexus_source_urls_compatible,
+                )
+
+                row_url = str(getattr(existing, "source_url", "") or "")
+                if row_url and not nexus_source_urls_compatible(row_url, source_url):
+                    raise ValueError(
+                        "nexus identity conflict: existing row source_url game "
+                        "slug does not match import URL "
+                        f"(mod_id={existing.mod_id}, row={row_url!r}, "
+                        f"import={source_url!r})"
+                    )
             mid = int(existing.mod_id)
         else:
             mid = int(mod_id) if mod_id is not None else None
@@ -2440,22 +3201,73 @@ class DatabaseManager:
             ),
         )
 
+    def update_mod_conflict_annotation(
+        self,
+        mod_id: int | str,
+        *,
+        conflict: bool,
+        note: str = "",
+    ) -> ModStatus:
+        """
+        Sole DB writer for ``mods.conflict_status`` / ``conflict_note``.
+
+        ARCHITECTURE RULE: only ``services.user_annotation`` (Detail Panel
+        flag chips) may call this. Sync / Refresh / Deploy / Reconcile /
+        Identity / Repair / ConflictDetector must never touch this column.
+        """
+        mid = int(str(mod_id).strip())
+        now = _utc_now()
+        new_cstatus = (
+            CONFLICT_STATUS_CONFLICT if conflict else CONFLICT_STATUS_NONE
+        )
+        new_cnote = str(note or "") if conflict else ""
+        stamp = _mods_updated_at_now(reason="user_edit")
+        with self._lock:
+            present = self._conn.execute(
+                "SELECT 1 FROM mods WHERE mod_id = ?", (mid,)
+            ).fetchone()
+            if present is None:
+                logger.warning(
+                    "update_mod_conflict_annotation skipped missing mod_id=%s "
+                    "(must not mint identity)",
+                    mid,
+                )
+                return ModStatus()
+            self._conn.execute(
+                """
+                UPDATE mods SET
+                    conflict_status = ?,
+                    conflict_note = ?,
+                    last_check_time = ?,
+                    updated_at = ?
+                WHERE mod_id = ?
+                """,
+                (new_cstatus, new_cnote, now, stamp, mid),
+            )
+            self._conn.commit()
+        return self.get_mod_status(mid)
+
     def update_mod_status(
         self,
         mod_id: int | str,
         *,
         invalid: bool | None = None,
         invalid_reason: str | None = None,
-        conflict_status: str | None = None,
-        conflict_note: str | None = None,
         last_check_time: str | None = None,
         touch_check_time: bool = False,
     ) -> ModStatus:
         """
-        Patch lifecycle status columns. Omitted kwargs leave existing values.
+        Patch invalid / last_check_time columns. Omitted kwargs leave values.
+
+        ARCHITECTURE RULE: this API **cannot** write ``conflict_status``.
+        User conflict marks go through ``update_mod_conflict_annotation``
+        via ``services.user_annotation`` only. ``touch_check_time`` alone is
+        allowed for diagnostic scans (ConflictDetector).
 
         When ``touch_check_time`` is True and ``last_check_time`` is None,
         sets ``last_check_time`` to now (UTC).
+
+        Never bumps ``mods.updated_at`` (status scan / recovery is forbidden).
         """
         mid = int(str(mod_id).strip())
         now = _utc_now()
@@ -2466,7 +3278,7 @@ class DatabaseManager:
             if present is None:
                 logger.warning(
                     "update_mod_status skipped missing mod_id=%s "
-                    "(conflict/status persist must not mint identity)",
+                    "(status persist must not mint identity)",
                     mid,
                 )
                 return ModStatus()
@@ -2484,42 +3296,26 @@ class DatabaseManager:
                 pass
             if invalid is False and invalid_reason is None:
                 new_reason = ""
-            new_cstatus = (
-                normalize_conflict_status(conflict_status)
-                if conflict_status is not None
-                else current.conflict_status
-            )
-            new_cnote = (
-                str(conflict_note)
-                if conflict_note is not None
-                else current.conflict_note
-            )
-            if conflict_status == CONFLICT_STATUS_NONE and conflict_note is None:
-                new_cnote = ""
             if last_check_time is not None:
                 new_check = str(last_check_time)
             elif touch_check_time:
                 new_check = now
             else:
                 new_check = current.last_check_time
+            # Never SET conflict_status / conflict_note here — those columns
+            # belong exclusively to update_mod_conflict_annotation.
             self._conn.execute(
                 """
                 UPDATE mods SET
                     is_invalid = ?,
                     invalid_reason = ?,
-                    conflict_status = ?,
-                    conflict_note = ?,
-                    last_check_time = ?,
-                    updated_at = ?
+                    last_check_time = ?
                 WHERE mod_id = ?
                 """,
                 (
                     1 if new_invalid else 0,
                     new_reason,
-                    new_cstatus,
-                    new_cnote,
                     new_check,
-                    now,
                     mid,
                 ),
             )
@@ -2610,17 +3406,17 @@ class DatabaseManager:
                 new_checked = now
             else:
                 new_checked = current.version_checked_at
+            # Version probes / platform sync must not bump Library sort time.
             self._conn.execute(
                 """
                 UPDATE mods SET
                     mod_version = ?,
                     installed_version = ?,
                     version_source = ?,
-                    version_checked_at = ?,
-                    updated_at = ?
+                    version_checked_at = ?
                 WHERE mod_id = ?
                 """,
-                (new_mod_v, new_inst, new_src, new_checked, now, mid),
+                (new_mod_v, new_inst, new_src, new_checked, mid),
             )
             self._conn.commit()
         return self.get_mod_version(mid)
@@ -2653,7 +3449,7 @@ class DatabaseManager:
 
     def _set_mod_enabled(self, mod_id: int | str, enabled: bool) -> bool:
         mid = int(str(mod_id).strip())
-        now = _utc_now()
+        stamp = _mods_updated_at_now(reason="user_edit")
         with self._lock:
             self._ensure_mod_stub(mid)
             self._conn.execute(
@@ -2661,7 +3457,7 @@ class DatabaseManager:
                 UPDATE mods SET enabled = ?, updated_at = ?
                 WHERE mod_id = ?
                 """,
-                (1 if enabled else 0, now, mid),
+                (1 if enabled else 0, stamp, mid),
             )
             self._conn.commit()
         return self.is_mod_enabled(mid)
@@ -2728,6 +3524,7 @@ class DatabaseManager:
                     m.is_invalid,
                     m.conflict_status,
                     m.enabled,
+                    m.updated_at,
                     COALESCE(g.name, '') AS game_name
                 FROM mods AS m
                 LEFT JOIN games AS g ON g.app_id = m.app_id
@@ -2804,6 +3601,9 @@ class DatabaseManager:
                 ),
                 enabled=enabled,
                 category_tags=" ".join(cat_map.get(mid) or []),
+                updated_at=(
+                    str(row["updated_at"] or "") if "updated_at" in keys else ""
+                ),
             )
         return out
 
@@ -2839,7 +3639,7 @@ class DatabaseManager:
             if touch_custom_deploy
             else None
         )
-        now = _utc_now()
+        now = _mods_updated_at_now(reason="user_edit")
 
         with self._lock:
             existing = self._conn.execute(
@@ -2988,6 +3788,11 @@ class DatabaseManager:
             if existing is None:
                 raise RuntimeError(f"set_mod_game_version: no mods row for {mid}")
             self._apply_mod_game_version_locked(mid, value)
+            stamp = _mods_updated_at_now(reason="user_edit")
+            self._conn.execute(
+                "UPDATE mods SET updated_at = ? WHERE mod_id = ?",
+                (stamp, mid),
+            )
             self._conn.commit()
             row = self._conn.execute(
                 f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?",
@@ -3013,15 +3818,15 @@ class DatabaseManager:
         app_id = int(row["app_id"] or 0)
         if not is_witcher3_game("", app_id):
             self._conn.execute(
-                "UPDATE mods SET game_version = NULL, updated_at = ? WHERE mod_id = ?",
-                (_utc_now(), mid),
+                "UPDATE mods SET game_version = NULL WHERE mod_id = ?",
+                (mid,),
             )
             return
         text = "" if value is None else str(value).strip()
         stored = WITCHER3_DEFAULT_VERSION if not text else validate_witcher3_game_version(text)
         self._conn.execute(
-            "UPDATE mods SET game_version = ?, updated_at = ? WHERE mod_id = ?",
-            (stored, _utc_now(), mid),
+            "UPDATE mods SET game_version = ? WHERE mod_id = ?",
+            (stored, mid),
         )
 
     def get_user_override_fields(self, mod_id: int | str) -> dict[str, bool]:
@@ -3067,12 +3872,13 @@ class DatabaseManager:
                 current[key] = True
             else:
                 current.pop(key, None)
+            stamp = _mods_updated_at_now(reason="user_edit")
             self._conn.execute(
                 """
                 UPDATE mods SET user_override_fields = ?, updated_at = ?
                 WHERE mod_id = ?
                 """,
-                (serialize_user_override_fields(current), _utc_now(), mid),
+                (serialize_user_override_fields(current), stamp, mid),
             )
             self._conn.commit()
 
@@ -3106,12 +3912,13 @@ class DatabaseManager:
             current.pop(FIELD_DISPLAY_NAME, None)
         if custom_description.strip():
             current[FIELD_DESCRIPTION] = True
+        # Parent ``update_mod_user_metadata`` already stamped updated_at.
         self._conn.execute(
             """
-            UPDATE mods SET user_override_fields = ?, updated_at = ?
+            UPDATE mods SET user_override_fields = ?
             WHERE mod_id = ?
             """,
-            (serialize_user_override_fields(current), _utc_now(), mod_id),
+            (serialize_user_override_fields(current), mod_id),
         )
 
     def is_official_metadata_synced(self, mod_id: int | str) -> bool:
@@ -3130,13 +3937,22 @@ class DatabaseManager:
     ) -> None:
         mid = int(str(mod_id).strip())
         with self._lock:
-            self._ensure_mod_stub(mid)
+            present = self._conn.execute(
+                "SELECT 1 FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+            if present is None:
+                logger.warning(
+                    "set_official_metadata_synced refused: no mods row for %s",
+                    mid,
+                )
+                return
             self._conn.execute(
                 """
-                UPDATE mods SET official_metadata_synced = ?, updated_at = ?
+                UPDATE mods SET official_metadata_synced = ?
                 WHERE mod_id = ?
                 """,
-                (1 if synced else 0, _utc_now(), mid),
+                (1 if synced else 0, mid),
             )
             self._conn.commit()
 
@@ -3197,7 +4013,6 @@ class DatabaseManager:
         status = str(deploy_status or "").strip() or DEPLOY_STATUS_NOT_DEPLOYED
         path = str(deploy_path or "").strip()
         when = deploy_time if deploy_time is not None else _utc_now()
-        now = _utc_now()
 
         with self._lock:
             existing = self._conn.execute(
@@ -3227,11 +4042,10 @@ class DatabaseManager:
                         deploy_status = ?,
                         deploy_time = ?,
                         deploy_path = ?,
-                        deploy_error = ?,
-                        updated_at = ?
+                        deploy_error = ?
                     WHERE mod_id = ?
                     """,
-                    (int(app_id), status, when, path, err, now, mid),
+                    (int(app_id), status, when, path, err, mid),
                 )
             else:
                 self._conn.execute(
@@ -3240,11 +4054,10 @@ class DatabaseManager:
                         deploy_status = ?,
                         deploy_time = ?,
                         deploy_path = ?,
-                        deploy_error = ?,
-                        updated_at = ?
+                        deploy_error = ?
                     WHERE mod_id = ?
                     """,
-                    (status, when, path, err, now, mid),
+                    (status, when, path, err, mid),
                 )
             self._conn.commit()
             row = self._conn.execute(
@@ -3280,6 +4093,7 @@ class DatabaseManager:
             raise ValueError("tag_type is required")
         value = str(tag_value or "")
         now = _utc_now()
+        stamp = _mods_updated_at_now(reason="user_edit")
         with self._lock:
             self._ensure_mod_stub(mid)
             if ttype in (TAG_TYPE_INVALID, TAG_TYPE_CONFLICT):
@@ -3333,6 +4147,10 @@ class DatabaseManager:
                         (mid, ttype, value, now, now),
                     )
                     row_id = int(cur.lastrowid)
+            self._conn.execute(
+                "UPDATE mods SET updated_at = ? WHERE mod_id = ?",
+                (stamp, mid),
+            )
             self._conn.commit()
             row = self._conn.execute(
                 """
@@ -3360,6 +4178,7 @@ class DatabaseManager:
         ttype = str(tag_type or "").strip()
         if not ttype:
             return 0
+        stamp = _mods_updated_at_now(reason="user_edit")
         with self._lock:
             if tag_value is None:
                 cur = self._conn.execute(
@@ -3374,8 +4193,14 @@ class DatabaseManager:
                     """,
                     (mid, ttype, str(tag_value)),
                 )
+            deleted = int(cur.rowcount or 0)
+            if deleted:
+                self._conn.execute(
+                    "UPDATE mods SET updated_at = ? WHERE mod_id = ?",
+                    (stamp, mid),
+                )
             self._conn.commit()
-            return int(cur.rowcount or 0)
+            return deleted
 
     def get_mod_tags(self, mod_id: int | str) -> list[ModTag]:
         if not str(mod_id).strip().isdigit():
@@ -3866,6 +4691,42 @@ class DatabaseManager:
             if commit:
                 self._conn.commit()
 
+    def detach_mods_from_game(self, app_id: int | str) -> int:
+        """Clear ``mods.app_id`` mapping for a game without deleting Mod rows."""
+        try:
+            aid = int(str(app_id).strip())
+        except (TypeError, ValueError):
+            return 0
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE mods SET app_id = 0, updated_at = ? WHERE app_id = ?",
+                (_utc_now(), aid),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def delete_game_record(self, app_id: int | str) -> bool:
+        """
+        Remove ``games`` + ``game_categories`` for ``app_id``.
+
+        Does not delete Mod rows or touch the filesystem.
+        """
+        try:
+            aid = int(str(app_id).strip())
+        except (TypeError, ValueError):
+            return False
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM game_categories WHERE app_id = ?",
+                (aid,),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM games WHERE app_id = ?",
+                (aid,),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) > 0
+
     def delete_mod_record(self, mod_id: int | str) -> bool:
         """
         Remove SQLite rows for ``mod_id`` (mods + tags + relations).
@@ -3895,6 +4756,13 @@ class DatabaseManager:
                 "DELETE FROM deployment_record_items WHERE mod_id = ?",
                 (mid,),
             )
+            try:
+                self._conn.execute(
+                    "DELETE FROM identity_audit_log WHERE mod_id = ?",
+                    (mid,),
+                )
+            except sqlite3.OperationalError:
+                pass
             cur = self._conn.execute("DELETE FROM mods WHERE mod_id = ?", (mid,))
             self._conn.commit()
             return int(cur.rowcount or 0) > 0
@@ -4139,32 +5007,17 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     def find_mod_id_by_workspace_id(
-        self, workspace_id: int | str
+        self, workspace_id: int | str, *, app_id: int = 0
     ) -> str | None:
-        """Resolve a Workspace ID to ``mods.mod_id`` (Internal ID).
-
-        Does not treat Internal ID as a Workspace ID except Steam-range PK
-        coincidence (Steam PK historically equals Workshop ID).
         """
-        wid = str(workspace_id or "").strip()
-        if not wid:
-            return None
-        with self._lock:
-            row = self._conn.execute(
-                """
-                SELECT mod_id FROM mods
-                WHERE TRIM(COALESCE(workspace_id, '')) = ?
-                   OR (
-                        mod_id > 0 AND mod_id < ?
-                        AND CAST(mod_id AS TEXT) = ?
-                   )
-                LIMIT 1
-                """,
-                (wid, NON_STEAM_MOD_ID_BASE, wid),
-            ).fetchone()
-        if row is None:
-            return None
-        return str(row["mod_id"])
+        REMOVED as an identity API — always returns ``None``.
+
+        ``workspace_id`` cannot locate a Mod entity. Callers must pass
+        Internal ID (``mods.mod_id``) or resolve via
+        ``(platform, app_id, external_id)``.
+        """
+        _ = (workspace_id, app_id)
+        return None
 
     def add_mod_relationship(
         self,

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -34,7 +35,6 @@ DEFAULT_TIMEOUT = 10
 DEFAULT_USER_AGENT = (
     "SteamModManager/0.1 (+https://github.com/local/steam-mod-manager; desktop)"
 )
-NO_PROXY: dict[str, str | None] = {"http": None, "https": None}
 
 # Manual refresh path only (``refresh_details``). Cached ``get_details_batch``
 # keeps ``DEFAULT_TIMEOUT`` and does not use these retries.
@@ -44,15 +44,60 @@ REFRESH_MAX_ATTEMPTS = 3
 # Backoff after failed attempts 1 / 2 / 3 before the next try (or final return).
 REFRESH_BACKOFF_SEC = (1.0, 3.0, 5.0)
 
+# Steam GetPublishedFileDetails ``result`` codes we surface distinctly.
+_STEAM_RESULT_NOT_FOUND = 9
+_STEAM_RESULT_ACCESS_DENIED = 15
+
 
 class SteamAPIError(Exception):
     """Raised when the Steam Web API returns an unexpected response."""
 
 
-def _build_session(user_agent: str) -> requests.Session:
+def _resolve_proxies(
+    proxies: Mapping[str, str | None] | None = None,
+    *,
+    proxy_url: str | None = None,
+) -> dict[str, str] | None:
+    """
+    Reuse Sync Center / Archive proxy contract (same as Mod.io).
+
+    Explicit ``proxies`` / ``proxy_url`` win; otherwise ``archive_proxies_dict``.
+    Never force a permanent NO_PROXY that bypasses the user's proxy settings —
+    that caused ``api.steampowered.com`` HTTPS timeouts on networks that need
+    the configured proxy.
+    """
+    if proxies is not None:
+        cleaned = {
+            str(k): str(v)
+            for k, v in proxies.items()
+            if v is not None and str(v).strip()
+        }
+        return cleaned or None
+    if proxy_url is not None:
+        url = str(proxy_url or "").strip()
+        return {"http": url, "https": url} if url else None
+    try:
+        from services.archive import archive_proxies_dict
+
+        return archive_proxies_dict(None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Steam API proxy resolution failed; using direct: %s", exc
+        )
+        return None
+
+
+def _build_session(
+    user_agent: str,
+    *,
+    proxies: dict[str, str] | None = None,
+) -> requests.Session:
     session = requests.Session()
+    # Ignore process env proxies; apply Sync Center / archive proxy explicitly.
     session.trust_env = False
-    session.proxies.update({"http": None, "https": None})
+    session.proxies.clear()
+    if proxies:
+        session.proxies.update(proxies)
     session.headers.setdefault("User-Agent", user_agent)
     retry = Retry(
         total=2,
@@ -67,6 +112,57 @@ def _build_session(user_agent: str) -> requests.Session:
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
+
+
+def _format_steam_network_error(
+    exc: BaseException,
+    *,
+    url: str,
+    proxy_enabled: bool,
+) -> str:
+    """Classify transport failures without treating them as empty Steam payloads."""
+    hostname = "api.steampowered.com"
+    try:
+        hostname = urlparse(url).hostname or hostname
+    except Exception:  # noqa: BLE001
+        pass
+    name = type(exc).__name__
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "args", [None])[0]
+    for candidate in (exc, cause):
+        cname = type(candidate).__name__ if candidate is not None else ""
+        text = str(candidate or "")
+        if "ConnectTimeout" in cname or "ConnectTimeout" in text:
+            name = "ConnectTimeout"
+            break
+        if (
+            "ReadTimeout" in cname
+            or "ReadTimeout" in text
+            or "timed out" in text.lower()
+        ):
+            name = "ReadTimeout"
+            break
+        if "ProxyError" in cname:
+            name = "ProxyError"
+            break
+        if "SSLError" in cname:
+            name = "SSLError"
+            break
+        if "ConnectionError" in cname:
+            name = "ConnectionError"
+            break
+    proxy_label = "proxy=enabled" if proxy_enabled else "proxy=direct"
+    return f"Steam API network failure: {name} {hostname} ({proxy_label})"
+
+
+def _steam_result_fetch_error(result: int, file_id: str) -> str:
+    """Map Steam ``result`` codes to distinct non-network failure messages."""
+    if result == _STEAM_RESULT_NOT_FOUND:
+        return f"Steam Workshop item not found (result=9) id={file_id}"
+    if result == _STEAM_RESULT_ACCESS_DENIED:
+        return f"Steam Workshop item access denied (result=15) id={file_id}"
+    if result == 0:
+        return f"Steam API returned empty result (result=0) id={file_id}"
+    return f"Steam API result code: {result} id={file_id}"
 
 
 class SteamWorkshopClient:
@@ -86,20 +182,32 @@ class SteamWorkshopClient:
         user_agent: str = DEFAULT_USER_AGENT,
         enable_scrape_fallback: bool = True,
         db: DatabaseManager | None = None,
+        proxies: Mapping[str, str | None] | None = None,
+        proxy_url: str | None = None,
     ) -> None:
         self.timeout = timeout
         self.batch_size = max(1, min(batch_size, 100))
         self.request_interval = max(0.0, request_interval)
         self.enable_scrape_fallback = enable_scrape_fallback
         self._owns_session = session is None
-        self._session = session or _build_session(user_agent)
+        self._proxies = _resolve_proxies(proxies, proxy_url=proxy_url)
+        self._session = session or _build_session(
+            user_agent, proxies=self._proxies
+        )
         if session is not None:
             self._session.trust_env = False
             self._session.headers.setdefault("User-Agent", user_agent)
+            if self._proxies:
+                self._session.proxies.clear()
+                self._session.proxies.update(self._proxies)
         self._last_request_at = 0.0
         self._scraper: WorkshopPageScraper | None = None
         self._failed_app_ids: set[str] = set()
         self.db = db or get_db()
+        logger.info(
+            "Steam API HTTP proxy %s",
+            "enabled" if self._proxies else "disabled",
+        )
 
     @property
     def session(self) -> requests.Session:
@@ -134,7 +242,8 @@ class SteamWorkshopClient:
         timeout: float | tuple[float, float] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        kwargs.setdefault("proxies", NO_PROXY)
+        if self._proxies:
+            kwargs.setdefault("proxies", self._proxies)
         kwargs.setdefault("timeout", timeout if timeout is not None else self.timeout)
         self._throttle()
         return self._session.request(method, url, **kwargs)
@@ -252,6 +361,7 @@ class SteamWorkshopClient:
                     enable_scrape_fallback=False,
                     request_interval=0.05,
                     db=self.db,
+                    proxies=self._proxies,
                 ) as client:
                     return app_id, client.get_game_info(app_id)
 
@@ -330,9 +440,13 @@ class SteamWorkshopClient:
         enable_scrape_fallback: bool | None = None,
     ) -> list[ModMetadata]:
         """
-        Force network re-fetch for the given IDs (ignores SQLite cache hits).
+        Force network re-fetch for the given Workshop IDs (ignores SQLite cache).
 
-        Manual-refresh path only: connect/read timeouts + up to 3 attempts with
+        Returns ``ModMetadata`` list only — does **not** write ``mods`` rows.
+        Workshop ``published_file_id`` is not ``mods.mod_id``; callers must
+        UPDATE the existing entity by internal PK (see metadata_refresh).
+
+        Manual-refresh path: connect/read timeouts + up to 3 attempts with
         backoff (1s / 3s / 5s). Does not change ``get_details_batch`` caching.
 
         Workshop HTML scrape is off by default here so a single-mod refresh does
@@ -359,13 +473,10 @@ class SteamWorkshopClient:
                 batch = self._parallel_scrape_fallback(
                     batch, max_workers=scrape_workers
                 )
-            to_store: list[ModMetadata] = []
+            # Provider-only: never upsert by published_file_id (Workshop ≠ PK).
+            # Callers (metadata_refresh) UPDATE the existing mods.mod_id row.
             for meta in batch:
                 fetched[meta.published_file_id] = meta
-                if meta.title and not meta.fetch_error:
-                    to_store.append(meta)
-            if to_store:
-                self.db.upsert_mods(to_store)
             done += len(chunk)
             if on_progress:
                 on_progress(done, total)
@@ -556,12 +667,16 @@ class SteamWorkshopClient:
         **kwargs: Any,
     ) -> requests.Response:
         """One-shot HTTP call without urllib3 Retry (manual refresh owns backoff)."""
-        kwargs.setdefault("proxies", NO_PROXY)
+        if self._proxies:
+            kwargs.setdefault("proxies", self._proxies)
         kwargs["timeout"] = timeout
         self._throttle()
         session = requests.Session()
         session.trust_env = False
         session.headers.update(dict(self._session.headers))
+        if self._proxies:
+            session.proxies.clear()
+            session.proxies.update(self._proxies)
         adapter = HTTPAdapter(max_retries=0)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
@@ -649,6 +764,12 @@ class SteamWorkshopClient:
             form[f"publishedfileids[{index}]"] = file_id
 
         req_timeout = self.timeout if timeout is None else timeout
+        proxy_on = bool(self._proxies)
+        logger.info(
+            "Calling Steam GetPublishedFileDetails count=%s proxy=%s",
+            len(published_file_ids),
+            "enabled" if proxy_on else "direct",
+        )
         try:
             if disable_adapter_retries:
                 response = self._request_without_adapter_retries(
@@ -667,9 +788,14 @@ class SteamWorkshopClient:
             response.raise_for_status()
             payload = response.json()
         except requests.RequestException as exc:
-            logger.error("Steam API request failed: %s", exc)
+            msg = _format_steam_network_error(
+                exc,
+                url=STEAM_PUBLISHED_FILE_DETAILS_URL,
+                proxy_enabled=proxy_on,
+            )
+            logger.error("%s original=%s", msg, exc)
             return [
-                ModMetadata(published_file_id=fid, fetch_error=str(exc))
+                ModMetadata(published_file_id=fid, fetch_error=msg)
                 for fid in published_file_ids
             ]
         except ValueError as exc:
@@ -694,11 +820,33 @@ class SteamWorkshopClient:
                 for fid in published_file_ids
             ]
 
-        by_id = {
-            str(item.get("publishedfileid", "")): ModMetadata.from_api_response(item)
-            for item in details
-            if isinstance(item, dict)
-        }
+        if not isinstance(details, list) or not details:
+            logger.error(
+                "Steam API returned empty publishedfiledetails for %s id(s)",
+                len(published_file_ids),
+            )
+            return [
+                ModMetadata(
+                    published_file_id=fid,
+                    fetch_error="Steam API returned empty publishedfiledetails",
+                )
+                for fid in published_file_ids
+            ]
+
+        by_id: dict[str, ModMetadata] = {}
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            file_id = str(item.get("publishedfileid", "") or "")
+            result = int(item.get("result", 0) or 0)
+            if result != 1:
+                by_id[file_id] = ModMetadata(
+                    published_file_id=file_id,
+                    fetch_error=_steam_result_fetch_error(result, file_id),
+                )
+            else:
+                by_id[file_id] = ModMetadata.from_api_response(item)
+
         ordered: list[ModMetadata] = []
         for file_id in published_file_ids:
             meta = by_id.get(file_id)

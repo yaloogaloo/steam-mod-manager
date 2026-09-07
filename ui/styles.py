@@ -947,10 +947,6 @@ QFrame#detailStatusBanner[tone="error"] {{
     background-color: {ACCENT_ERROR_BG};
     border: 1px solid {ACCENT_ERROR_BORDER};
 }}
-QFrame#detailStatusBanner[tone="success"] {{
-    background-color: {ACCENT_SUCCESS_BG};
-    border: 1px solid {ACCENT_SUCCESS_BORDER};
-}}
 QLabel#detailStatusBannerBody {{
     font-size: 13px;
     line-height: 1.4;
@@ -958,9 +954,6 @@ QLabel#detailStatusBannerBody {{
 }}
 QFrame#detailStatusBanner[tone="error"] QLabel#detailStatusBannerBody {{
     color: {ACCENT_ERROR};
-}}
-QFrame#detailStatusBanner[tone="success"] QLabel#detailStatusBannerBody {{
-    color: {ACCENT_SUCCESS};
 }}
 QFrame#detailActionArea {{
     background-color: {BACKGROUND_SECTION};
@@ -1000,6 +993,24 @@ QLabel#detailMetaLine {{
     font-size: 13px;
     line-height: 1.55;
     padding: 1px 0;
+}}
+QFrame#detailMetaDescFrame {{
+    background-color: {BACKGROUND_INPUT};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 6px;
+}}
+QLabel#detailMetaDescription {{
+    color: {TEXT_BODY};
+    font-size: 13px;
+    line-height: 1.55;
+    background: transparent;
+    border: none;
+    padding: 0;
+}}
+QLabel#detailMetaDescTruncated {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    padding: 2px 0 0 0;
 }}
 QPushButton#detailFlagChip {{
     background-color: {BACKGROUND_INPUT};
@@ -1176,10 +1187,6 @@ QLabel#detailFilesPrimary {{
     font-size: 13px;
 }}
 QLabel#detailFilesSecondary {{
-    color: {TEXT_MUTED};
-    font-size: 11px;
-}}
-QLabel#detailFilesLegacyHint {{
     color: {TEXT_MUTED};
     font-size: 11px;
 }}

@@ -46,13 +46,28 @@ def backup_root(mod_id: int | str) -> Path:
 
 
 def _resolve_mod_id(mod_path: Path, data: dict[str, Any] | None) -> str:
+    """Resolve backup target Internal ID — never from directory name."""
     payload = dict(data or {})
+    from services.mod_identity import read_internal_id
+
+    sidecar_uuid = read_internal_id(payload)
+    if sidecar_uuid:
+        try:
+            from core.db_manager import get_db
+
+            db = get_db()
+            found = db.find_mod_by_internal_id(sidecar_uuid)
+            if found is not None:
+                return str(found)
+            if sidecar_uuid.isdigit() and db.get_mod(sidecar_uuid) is not None:
+                return sidecar_uuid
+        except Exception:  # noqa: BLE001
+            logger.debug("backup internal_id lookup failed", exc_info=True)
     try:
         payload.setdefault(
             "_managed_path",
             str(mod_path.resolve()) if mod_path.exists() else str(mod_path),
         )
-        payload.setdefault("_folder_name", mod_path.name)
         from services.mod_identity import resolve_existing_mod_id
 
         found = resolve_existing_mod_id(payload)
@@ -60,10 +75,7 @@ def _resolve_mod_id(mod_path: Path, data: dict[str, Any] | None) -> str:
             return found
     except Exception:  # noqa: BLE001
         logger.debug("backup identity resolve failed for %s", mod_path, exc_info=True)
-    mid = str(payload.get("published_file_id") or "").strip()
-    if not mid.isdigit() and mod_path.name.isdigit():
-        mid = mod_path.name
-    return mid
+    return ""
 
 
 def _file_sha256(path: Path) -> str:
@@ -234,12 +246,20 @@ def _copy_offline_tree(src_offline: Path, dest_offline: Path) -> str:
     return ""
 
 
-def snapshot_from_mod_folder(mod_path: str | Path) -> BackupSnapshot | None:
+def snapshot_from_mod_folder(
+    mod_path: str | Path,
+    *,
+    owner_mod_id: str | int | None = None,
+) -> BackupSnapshot | None:
     """
     Read ``.info/metadata.json`` and mirror cover / offline into ``data/mod_backup/``.
 
     Never writes back to the Mod folder. Missing ``.info`` assets delete matching
     backup assets (folder-absent is handled by callers — not this function).
+
+    ``owner_mod_id`` is the Internal Database ID (caller-proven). When omitted,
+    ownership is resolved from ``.info.internal_id`` only — never from
+    published_file_id / workspace_id / folder name.
     """
     root = Path(mod_path)
     if not root.is_dir():
@@ -247,7 +267,9 @@ def snapshot_from_mod_folder(mod_path: str | Path) -> BackupSnapshot | None:
 
     t_scan = time.perf_counter()
     data = read_info_metadata_dict(root) or {}
-    mid = _resolve_mod_id(root, data)
+    mid = str(owner_mod_id or "").strip()
+    if not mid.isdigit():
+        mid = _resolve_mod_id(root, data)
     try:
         from services.reconcile_observability import add_scan_ms
 
@@ -431,21 +453,116 @@ def restore_check(
     return False
 
 
-def sync_metadata_backup(mod_path: str | Path) -> None:
+def restore_info_sidecar_from_backup(
+    mod_id: int | str,
+    managed_path: str | Path,
+    *,
+    db: Any | None = None,
+) -> bool:
+    """
+    Restore ``.info`` from backup for an **existing** DB entity only.
+
+    Refuses when backup identity does not match the DB row (no create, no
+    guess, no fallback).
+    """
+    mid = str(mod_id).strip()
+    folder = Path(managed_path)
+    if not mid.isdigit() or not folder.is_dir():
+        return False
+    info_meta = folder / INFO_DIR_NAME / METADATA_FILENAME
+    if info_meta.is_file():
+        return False
+    try:
+        from core.db_manager import get_db
+
+        database = db if db is not None else get_db()
+        row = database.get_mod_backup_row(mid)
+        if row is None:
+            return False
+        bak_root = backup_root(mid)
+        bak_meta = bak_root / BACKUP_METADATA_NAME
+        if not bak_meta.is_file():
+            return False
+        payload = json.loads(bak_meta.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return False
+
+        def _t(v: Any) -> str:
+            return str(v or "").strip()
+
+        bak_uuid = _t(payload.get("internal_id"))
+        bak_ws = _t(payload.get("workspace_id"))
+        bak_plat = _t(payload.get("source_type") or payload.get("platform")).lower()
+        bak_app = int(payload.get("app_id") or 0)
+        row_uuid = _t(row.get("internal_id"))
+        row_ws = _t(row.get("workspace_id"))
+        row_plat = _t(row.get("platform") or row.get("source_type")).lower()
+        row_app = int(row.get("app_id") or 0)
+
+        if bak_uuid and row_uuid and bak_uuid != row_uuid:
+            logger.warning("backup restore refused mid=%s internal_id mismatch", mid)
+            return False
+        # Cross-game isolation: app_id is evidence, not identity — refuse foreign metadata.
+        if bak_app and row_app and bak_app != row_app:
+            logger.warning("backup restore refused mid=%s app_id mismatch", mid)
+            return False
+        if not bak_app and row_app:
+            from services.metadata_owner_guard import metadata_payload_is_foreign
+
+            if metadata_payload_is_foreign(payload, entity_app_id=row_app):
+                logger.warning(
+                    "backup restore refused mid=%s foreign metadata url/app evidence",
+                    mid,
+                )
+                return False
+        if bak_plat and row_plat and bak_plat != row_plat:
+            logger.warning("backup restore refused mid=%s platform mismatch", mid)
+            return False
+        # workspace_id is display/registration only — never a restore ownership key.
+        _ = bak_ws, row_ws
+
+        # Stamp DB authority onto restored sidecar.
+        payload["internal_id"] = row_uuid or bak_uuid or mid
+        if row_ws:
+            payload["workspace_id"] = row_ws
+        if row_plat:
+            payload["platform"] = row_plat
+            payload["source_type"] = row_plat
+        if row_app:
+            payload["app_id"] = row_app
+
+        from services.file_ops import persist_unified_metadata_dict
+
+        persist_unified_metadata_dict(
+            folder, payload, sync_backup=False, sync_reason="restore"
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("restore_info_sidecar_from_backup failed mid=%s: %s", mid, exc)
+        return False
+
+
+def sync_metadata_backup(
+    mod_path: str | Path,
+    *,
+    mod_id: str | int | None = None,
+) -> None:
     """
     Low-level ``.info`` → ``data/mod_backup`` snapshot.
 
     Prefer :func:`services.metadata_backup_sync.sync_after_metadata_change`
     for write-event callers (adds reason logging + validation status).
 
+    ``mod_id`` must be the Internal Database ID when provided. Ownership is never
+    taken from workspace_id / external_id / published_file_id / folder name.
+
     When the Mod folder exists: snapshot ``.info`` → backup, mark folder present.
     When absent: mark missing only (does not create backup).
     """
     root = Path(mod_path)
     if not root.is_dir():
-        mid = ""
-        if root.name.isdigit():
-            mid = root.name
+        # Never treat folder/workspace digits as ownership — path → DB row only.
+        mid = str(mod_id or "").strip()
         if not mid.isdigit():
             try:
                 from core.db_manager import get_db
@@ -453,13 +570,21 @@ def sync_metadata_backup(mod_path: str | Path) -> None:
                 row = get_db().get_mod_backup_row_by_path(str(root))
                 if row:
                     mid = str(row.get("mod_id") or "")
+                if not mid.isdigit():
+                    try:
+                        resolved = root.resolve()
+                    except OSError:
+                        resolved = root
+                    row = get_db().get_mod_backup_row_by_path(str(resolved))
+                    if row:
+                        mid = str(row.get("mod_id") or "")
             except Exception:  # noqa: BLE001
                 mid = ""
         if mid.isdigit():
             mark_missing(mid)
         return
 
-    snapshot = snapshot_from_mod_folder(root)
+    snapshot = snapshot_from_mod_folder(root, owner_mod_id=mod_id)
     if snapshot is None:
         return
 

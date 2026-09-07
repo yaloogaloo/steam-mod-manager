@@ -107,6 +107,11 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
         "fetch_and_save_cover",
         lambda *a, **k: None,
     )
+    # Isolate catalog write from path rename / Path Lifecycle (tested elsewhere).
+    monkeypatch.setattr(
+        "services.metadata_refresh.rename_managed_folder_for_title",
+        lambda folder, meta, **k: (Path(folder), False),
+    )
 
     result = refresh_steam_mod_metadata(
         mid, folder, library_root=lib, force=True, download_cover=False
@@ -141,7 +146,7 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
 
     # Detail panel must show the Workshop title, not Unknown Mod.
     panel = ModDetailPanel()
-    panel.show_mod(result.managed_path)
+    panel.show_mod(result.managed_path, mod_id=mid)
     qapp.processEvents()
     title_text = (panel.view_title.text() or "").replace("\u200b", "")
     assert "Test Workshop Mod" in title_text
