@@ -35,7 +35,7 @@ def prune_protection(protected: Iterable[Path] | None) -> Iterator[None]:
 
 @dataclass
 class ManifestBackupInfo:
-    """Pre-overwrite original file saved under ``.info/backups/``."""
+    """Pre-overwrite original game file (``data/deploy_backup/<internal_id>/``)."""
 
     path: str
     hash: str = ""

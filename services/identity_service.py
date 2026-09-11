@@ -1,31 +1,38 @@
 """Canonical Identity Service — sole production identity create/bind/persist gate.
 
-ID ARCHITECTURE CONTRACT (product semantics — do not reinterpret):
+ID ARCHITECTURE CONTRACT (Frozen Minimal Model — do not reinterpret):
 
-* Internal ID (``mods.mod_id`` / code ``internal_id``)
-  Database-only identity. SQLite PK, Python lookups, workers, FKs.
-  NEVER user-facing. NEVER search. NEVER Workspace ID. NEVER external_id.
-  NEVER a platform URL. NEVER a folder name. NEVER user metadata.
-  MUST NEVER generate Workspace ID (no ``workspace_id = internal_id`` fallback).
-  Steam historically stores Workshop ID as the PK; that coincidence is an
-  implementation detail, not permission to treat Internal ID as Workspace ID.
+* ``internal_id`` (TEXT ``mods.internal_id``)
+  Durable business Entity Identity. Answers “is this the same Mod?”.
+  Minted at create; persisted on the row and in ``.info.internal_id``.
+  Independent of the SQLite PK. Never ``internal_id = str(mod_id)``.
+  Never ``correlation_id``. Never ``workspace_id``.
+
+* ``mods.mod_id`` (code: ``mod_id``)
+  SQLite implementation PK and FK target (``collection_mods.mod_id``,
+  ``deployment_record_items.mod_id``, ``mod_tags.mod_id``, …).
+  Not the business Entity Identity. Business callers resolve::
+
+      internal_id → resolve_mod_pk() → mods.mod_id → DB/FK
 
 * Workspace ID (``mods.workspace_id``)
-  The ONLY user-facing Mod identifier. Search, metadata, lists, user ops.
+  Platform / display identity only. The user-facing registration number.
+  NEVER Library / Reconcile / Backup / Deploy / UI entity identity.
+  ``find_mod_by_workspace_id`` is a permanent no-op.
 
 * external_id (``mods.external_id``)
-  Platform-native identity (Steam Workshop ID, Nexus Mod ID, …).
-  Not a second user Mod ID. Ordinary UI must not show it beside Workspace ID.
+  Platform-native metadata (Steam Workshop ID, Nexus Mod ID, …).
+  Not a second user Mod ID.
 
 Derivation (never invert):
 
     Steam Workshop ID  → external_id → workspace_id
     Nexus Mod ID       → external_id → workspace_id
     Other (no stable numeric platform id) → system-generated workspace_id
-                                            (never from Internal ID)
+                                            (never from Internal ID or PK)
 
-Use explicit names: ``internal_id``, ``workspace_id``, ``external_id``.
-Do not use ambiguous ``mod_id`` to mean more than one of these.
+Steam PK may numerically equal Workshop ID (historical). Same digits ≠ same
+semantics. Do not use ambiguous ``mod_id`` for more than one of these.
 """
 
 from __future__ import annotations
@@ -417,8 +424,101 @@ def resolve_workspace_id(
     )
 
 
+def resolve_internal_id_from_workspace_id(
+    workspace_id: str,
+    *,
+    platform: str,
+    app_id: int,
+    db: Any = None,
+) -> str:
+    """Map user-facing Workspace ID → Internal ID within one game.
+
+    Runtime lookup for user operations (bind dependency). Does **not** change
+    Identity bind/create: ``resolve_existing`` / ``resolve_existing_mod_id``
+    stay Internal-ID-only.
+
+    Never treats the token as a PK. Never falls back to ``get_mod``.
+    """
+    from core.db_manager import get_db as _get_db
+
+    wid = str(workspace_id or "").strip()
+    plat = normalize_platform(platform)
+    try:
+        aid = int(app_id or 0)
+    except (TypeError, ValueError):
+        aid = 0
+    if not wid or not plat or aid <= 0:
+        return ""
+    manager = db if db is not None else _get_db()
+    found = manager.resolve_mod_id_by_scoped_workspace(
+        platform=plat,
+        app_id=aid,
+        workspace_id=wid,
+    )
+    return str(found or "").strip()
+
+
+def resolve_mod_pk(internal_id: int | str, *, db: Any) -> str:
+    """Canonical business resolver: Frozen ``internal_id`` → ``mods.mod_id``.
+
+    Step 1 (canonical): ``mods.internal_id`` TEXT match via
+    ``find_mod_by_internal_id``.
+    Step 2 (compatibility, not Frozen identity): if *internal_id* is a
+    decimal token and that SQLite PK exists, return it. Workers and Layer-1
+    session keys still pass PK handles; this is an in-process handle, not
+    permission to treat ``mods.mod_id`` as Entity Identity.
+
+    Never resolves ``workspace_id`` / ``external_id`` / path / folder name.
+    Returns ``""`` when the token is not a known Mod.
+    """
+    token = str(internal_id or "").strip()
+    if not token:
+        return ""
+    try:
+        found = db.find_mod_by_internal_id(token)
+    except Exception:  # noqa: BLE001
+        logger.debug("find_mod_by_internal_id failed token=%s", token, exc_info=True)
+        found = None
+    pk = str(found or "").strip()
+    if pk.isdigit():
+        return pk
+    if token.isdigit():
+        try:
+            if db.get_mod(token) is not None:
+                return token
+        except Exception:  # noqa: BLE001
+            logger.debug("get_mod failed for pk handle token=%s", token, exc_info=True)
+    return ""
+
+
+def ensure_durable_internal_id(db: Any, mod_id: int | str) -> str:
+    """Mint TEXT ``mods.internal_id`` when empty. Never collapse to ``str(mod_id)``.
+
+    Existing UUID values and pre-existing collapsed ``internal_id == str(mod_id)``
+    rows are left unchanged (no migration in this Gate).
+    """
+    pk = str(mod_id or "").strip()
+    if not pk.isdigit():
+        return ""
+    try:
+        row = db.get_mod_backup_row(pk) or {}
+    except Exception:  # noqa: BLE001
+        logger.debug("ensure_durable_internal_id read failed pk=%s", pk, exc_info=True)
+        return ""
+    existing = str(row.get("internal_id") or "").strip()
+    if existing:
+        return existing
+    proof = str(uuid.uuid4())
+    try:
+        db.update_mod_identity_fields(pk, internal_id=proof)
+    except Exception:  # noqa: BLE001
+        logger.warning("failed to persist durable internal_id pk=%s", pk, exc_info=True)
+        return ""
+    return proof
+
+
 def allocate_internal_id(db: Any) -> int:
-    """Sole production wrapper around ``DatabaseManager.allocate_mod_id``."""
+    """Allocate a SQLite ``mods.mod_id`` PK. This is not Frozen Entity Identity."""
     assert_lifecycle_may_allocate()
     with identity_create_scope():
         mid = int(db.allocate_mod_id())
@@ -556,6 +656,9 @@ def create_mod_identity(
         ensure_witcher3_game_version_default(
             db, out.mod_id, app_id=app_id, game_name=game_name
         )
+        proof = ensure_durable_internal_id(db, out.mod_id)
+        if proof:
+            out.internal_id = proof
     return out
 
 
@@ -569,8 +672,8 @@ def persist_identity(
     **fields: Any,
 ) -> None:
     """Validate + sanitize + persist identity fields. Never invents a Mod."""
-    mid = str(mod_id or "").strip()
-    if not mid.isdigit():
+    mid = resolve_mod_pk(mod_id, db=db)
+    if not mid:
         return
     info = db.get_mod_display_info(mid)
     if info is None:
@@ -667,6 +770,19 @@ def persist_identity(
         "identity_status",
     }
     patch = {k: v for k, v in fields.items() if k in allowed}
+    if "internal_id" in patch and patch["internal_id"] is not None:
+        proposed = str(patch["internal_id"] or "").strip()
+        try:
+            current = str((db.get_mod_backup_row(mid) or {}).get("internal_id") or "").strip()
+        except Exception:  # noqa: BLE001
+            current = ""
+        # Never collapse a durable identity onto str(mod_id). Never rewrite an
+        # existing UUID this Gate (including 166 collapsed rows).
+        if current:
+            if proposed != current:
+                patch.pop("internal_id", None)
+        elif proposed == str(mid) or not proposed:
+            patch.pop("internal_id", None)
     if patch:
         db.update_mod_identity_fields(mid, **patch)
     after = db.get_mod_display_info(mid)

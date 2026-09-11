@@ -16,6 +16,7 @@ from services.deploy_rules.manifest import ManifestFileEntry
 from services.deploy_verifier import verify_file_plan
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.library_status import CONTENT_HEALTHY
 
 @pytest.fixture()
@@ -164,7 +165,8 @@ def test_folder_deploy_via_moddeployer_uses_fileplan_counts(tmp_path: Path, db: 
     (folder / 'data').mkdir()
     (folder / 'data' / 'c.bin').write_bytes(b'\x00\x01')
     db.update_game_deploy_config(1, name='Game', install_path='', mod_path=str(mods), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='88011', title='ModA', app_id=1, game_name='Game', managed_path=str(folder)))
+    create_steam_test_mod(db, external_id='88011', title='ModA', app_id=1, game_name='Game')
+    bind_managed_path(db, '88011', folder, title='ModA', game_name='Game')
     _prove_managed_folder(
         db,
         '88011',
@@ -329,3 +331,169 @@ def test_anno_fixture_legendary_items_overwrite_succeeds(tmp_path: Path, db: Dat
     assert int(out.get('planned_files') or 0) == n
     assert int(out.get('applied_files') or 0) == n
     assert int(out.get('verified_files') or 0) == n
+
+
+def test_large_copy_hashes_during_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import hashlib
+    from unittest.mock import patch
+
+    from services import deploy_apply as apply_mod
+    from services.deploy_rules.manifest import DeployManifest, ManifestFileEntry
+    from services.mod_source_integrity import enrich_manifest_source_hashes
+
+    monkeypatch.setattr(apply_mod, "_HASH_WHILE_COPY_MIN_BYTES", 1)
+    src = tmp_path / "src"
+    src.mkdir()
+    payload = b"PACKDATA" * 2048
+    pack = src / "a.pack"
+    pack.write_bytes(payload)
+    dest_root = tmp_path / "dest"
+    dest_root.mkdir()
+    plan = DeployFilePlan(
+        internal_id="1",
+        deploy_type="warhammer3_pack",
+        source=str(src),
+        source_kind="folder",
+        content_root=str(src),
+        managed_path=str(src),
+        target_root=str(dest_root),
+        files=[
+            DeployFilePlanEntry(
+                source_relative="a.pack",
+                target_relative="a.pack",
+                target_absolute=str(dest_root / "a.pack"),
+                source=str(pack),
+                op=OP_COPY,
+            )
+        ],
+    )
+    plan.refresh_planned_count()
+    applied = apply_file_plan(plan, staging_parent=tmp_path / "stage")
+    assert applied.success
+    assert (dest_root / "a.pack").read_bytes() == payload
+    key = str(pack.resolve())
+    digest = hashlib.sha256(payload).hexdigest()
+    assert apply_mod.current_apply_source_hashes()[key] == digest
+
+    manifest = DeployManifest(
+        mod_id="1",
+        deploy_time="t0",
+        deploy_type="warhammer3_pack",
+        files=[
+            ManifestFileEntry(
+                source=str(pack),
+                target=str(dest_root / "a.pack"),
+                type="pack",
+            )
+        ],
+    )
+    with patch("services.mod_source_integrity._sha256_file") as hashed:
+        enrich_manifest_source_hashes(manifest)
+        hashed.assert_not_called()
+    assert manifest.files[0].source_hash == digest
+
+
+def test_extract_member_streams_to_target_without_apply_staging(tmp_path: Path) -> None:
+    """OP_EXTRACT_MEMBER writes the planned file only; never builds apply_*."""
+    staging = tmp_path / "stage"
+    staging.mkdir()
+    parts = ["[Gameplay] DeepMod", "data", *[f"seg_{i:02d}" for i in range(12)]]
+    member = "/".join(parts) + "/payload.txt"
+    unplanned = "/".join(parts) + "/secret.txt"
+    zpath = tmp_path / "mod.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr(member, "planned-bytes")
+        zf.writestr(unplanned, "should-not-extract")
+        zf.writestr("other/root.txt", "also-unplanned")
+    dest_root = tmp_path / "out"
+    dest = dest_root.joinpath(*member.split("/"))
+    assert not dest.parent.exists()
+    plan = DeployFilePlan(
+        internal_id="d",
+        deploy_type="folder_copy",
+        source=str(tmp_path),
+        source_kind="zip",
+        target_root=str(dest_root),
+        archives=[str(zpath)],
+        files=[
+            DeployFilePlanEntry(
+                source_relative=member,
+                target_relative=member,
+                target_absolute=str(dest),
+                source=str(zpath),
+                op=OP_EXTRACT_MEMBER,
+                type="archive",
+            )
+        ],
+    )
+    plan.refresh_planned_count()
+    result = apply_file_plan(plan, staging_parent=staging)
+    assert result.success, result.error
+    assert dest.is_file()
+    assert dest.read_text(encoding="utf-8") == "planned-bytes"
+    assert not list(staging.glob("apply_*"))
+    assert not (dest.parent / "secret.txt").exists()
+    assert not (dest_root / "other" / "root.txt").exists()
+    staging_abs = str((staging / f"apply_{'a' * 32}").joinpath(*member.split("/")))
+    assert len(str(dest)) < len(staging_abs)
+
+
+def test_extract_member_missing_archive_entry_fails(tmp_path: Path) -> None:
+    zpath = tmp_path / "mod.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("keep/a.txt", "A")
+    dest = tmp_path / "out" / "missing.txt"
+    plan = DeployFilePlan(
+        internal_id="m",
+        deploy_type="folder_copy",
+        source=str(tmp_path),
+        source_kind="zip",
+        target_root=str(tmp_path / "out"),
+        archives=[str(zpath)],
+        files=[
+            DeployFilePlanEntry(
+                source_relative="keep/missing.txt",
+                target_relative="keep/missing.txt",
+                target_absolute=str(dest),
+                source=str(zpath),
+                op=OP_EXTRACT_MEMBER,
+                type="archive",
+            )
+        ],
+    )
+    plan.refresh_planned_count()
+    result = apply_file_plan(plan, staging_parent=tmp_path / "stage")
+    assert result.success is False
+    assert "缺少成员" in (result.error or "")
+    assert not dest.exists()
+    assert not list((tmp_path / "stage").glob("apply_*"))
+
+
+def test_extract_member_creates_missing_target_parent(tmp_path: Path) -> None:
+    zpath = tmp_path / "mod.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("nested/inner/a.txt", "ok")
+    dest = tmp_path / "mods" / "nested" / "inner" / "a.txt"
+    assert not dest.parent.exists()
+    plan = DeployFilePlan(
+        internal_id="p",
+        deploy_type="folder_copy",
+        source=str(tmp_path),
+        source_kind="zip",
+        target_root=str(tmp_path / "mods"),
+        archives=[str(zpath)],
+        files=[
+            DeployFilePlanEntry(
+                source_relative="nested/inner/a.txt",
+                target_relative="nested/inner/a.txt",
+                target_absolute=str(dest),
+                source=str(zpath),
+                op=OP_EXTRACT_MEMBER,
+                type="archive",
+            )
+        ],
+    )
+    plan.refresh_planned_count()
+    result = apply_file_plan(plan)
+    assert result.success, result.error
+    assert dest.read_text(encoding="utf-8") == "ok"

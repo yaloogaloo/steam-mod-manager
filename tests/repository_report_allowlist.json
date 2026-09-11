@@ -1,0 +1,8 @@
+{
+  "description": "Root-level *_report.md files allowed outside _tmp/reports/. All future reports must go under _tmp/reports/.",
+  "allowed_root_reports": [
+    "identity_write_boundary_report.md",
+    "identity_repair_architecture_report.md",
+    "detail_cleanup_report.md"
+  ]
+}

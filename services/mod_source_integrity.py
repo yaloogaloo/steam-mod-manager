@@ -640,8 +640,20 @@ def enrich_manifest_source_hashes(manifest: Any) -> None:
 
     Memoize by resolved source path — Anno archives share one zip across thousands
     of members; hashing that zip once per entry is a confirmed multi-minute stall.
+
+    Prefer hashes already computed during Core Apply copy so large payloads
+    (WARHAMMER III ``.pack``) are not read a second time.
     """
     cache: dict[str, str] = {}
+    try:
+        from services.deploy_apply import current_apply_source_hashes
+
+        cache.update(current_apply_source_hashes())
+    except Exception:  # noqa: BLE001
+        pass
+    hashed_from_disk = 0
+    hashed_bytes = 0
+    reused = 0
     for entry in list(getattr(manifest, "files", None) or []):
         raw = str(getattr(entry, "source", "") or "").strip()
         if not raw:
@@ -656,12 +668,29 @@ def enrich_manifest_source_hashes(manifest: Any) -> None:
         digest = cache.get(key)
         if digest is None:
             try:
+                hashed_bytes += int(path.stat().st_size)
+            except OSError:
+                hashed_bytes += 0
+            try:
                 digest = _sha256_file(path)
             except OSError:
                 continue
             cache[key] = digest
+            hashed_from_disk += 1
+        else:
+            reused += 1
         if hasattr(entry, "source_hash"):
             entry.source_hash = digest
+    try:
+        from services.deploy_stage_log import current_deploy_timing
+
+        sess = current_deploy_timing()
+        if sess is not None:
+            sess.diagnostics["hash_from_disk_files"] = hashed_from_disk
+            sess.diagnostics["hash_from_disk_bytes"] = hashed_bytes
+            sess.diagnostics["hash_reused_from_copy"] = reused
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # Backward-compatible aliases

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
@@ -70,7 +71,8 @@ def test_deployment_refresh_keeps_deployment_records_visible(
     folder = lib / "Game" / f"Mod_{mid}"
     _write_mod(folder, mid, title="RecordVisible")
     db.upsert_game(GameInfo(app_id=99, name="Game", folder_name="Game"))
-    db.upsert_mod(ModMetadata(published_file_id=mid, title="RecordVisible", app_id=99))
+    create_steam_test_mod(db, external_id=mid, title="RecordVisible", app_id=99)
+
     db.update_mod_identity_fields(
         mid, folder_present=True, last_known_path=str(folder), app_id=99
     )
@@ -198,7 +200,10 @@ def test_deploy_large_mod_reports_copy_progress_no_rescan(
     assert result.copied_files == 12
     assert result.total_bytes > 0
     assert result.group_timings_ms
-    assert extract_calls["n"] == 1  # one extract, no repeated archive rescan
+    assert extract_calls["n"] == 0  # member stream; no full-archive apply_* extract
+    assert not list((tmp_path / "stage").glob("apply_*"))
+    for i in range(12):
+        assert (dest / f"files/f{i:02d}.dat").is_file()
 
     # Source-hash memoization: one zip hashed once across N members.
     hash_calls: list[str] = []

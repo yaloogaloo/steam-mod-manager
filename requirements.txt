@@ -14,3 +14,4 @@ psutil>=5.9.0
 
 # Optional dev/test:
 # pytest>=9.0
+# pytest-timeout>=2.3.0

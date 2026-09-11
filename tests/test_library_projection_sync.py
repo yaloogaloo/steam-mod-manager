@@ -32,6 +32,7 @@ from services.mod_projection_events import (
     notify_mod_changed,
     reset_mod_changed_listeners,
 )
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -62,6 +63,7 @@ def _seed(
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": mid,
                 "published_file_id": mid,
                 "title": title,
                 "app_id": app_id,
@@ -71,21 +73,10 @@ def _seed(
         encoding="utf-8",
     )
     (folder / "mod.pak").write_bytes(b"payload")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=title,
-            app_id=app_id,
-            game_name=game,
-            managed_path=str(folder),
-        )
+    create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name=game
     )
-    db.update_mod_identity_fields(
-        mid,
-        folder_present=True,
-        last_known_path=str(folder),
-        app_id=app_id,
-    )
+    bind_managed_path(db, mid, folder, game_name=game, title=title)
     return folder
 
 

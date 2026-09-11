@@ -57,3 +57,41 @@ def test_zip_slip_blocked(tmp_path: Path) -> None:
 def test_archive_error_code_timeout() -> None:
     assert archive_error_code("RAR 部署失败: 解压超时（>600s）") == "ARCHIVE_TIMEOUT"
     assert archive_error_code("不安全的压缩包路径") == "ARCHIVE_SECURITY_VIOLATION"
+    assert archive_error_code("压缩包缺少成员：a.txt (archive=x.zip)") == "ARCHIVE_MEMBER_MISSING"
+
+
+def test_extract_members_writes_only_planned_targets(tmp_path: Path) -> None:
+    z = tmp_path / "m.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("keep/a.txt", "A")
+        zf.writestr("skip/b.txt", "B")
+    dest = tmp_path / "out" / "nested" / "a.txt"
+    result = ArchiveExtractor.extract_members(z, [("keep/a.txt", dest)])
+    assert result.success is True
+    assert result.extracted_files == 1
+    assert dest.read_text(encoding="utf-8") == "A"
+    assert not (tmp_path / "out" / "skip").exists()
+    assert not (tmp_path / "skip").exists()
+
+
+def test_extract_members_missing_member_fails(tmp_path: Path) -> None:
+    z = tmp_path / "m.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("keep/a.txt", "A")
+    dest = tmp_path / "out" / "missing.txt"
+    result = ArchiveExtractor.extract_members(z, [("nope/missing.txt", dest)])
+    assert result.success is False
+    assert result.error_code == "ARCHIVE_MEMBER_MISSING"
+    assert not dest.exists()
+
+
+def test_extract_members_rejects_traversal_member(tmp_path: Path) -> None:
+    z = tmp_path / "m.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("ok.txt", "ok")
+    dest = tmp_path / "safe.txt"
+    result = ArchiveExtractor.extract_members(z, [("../outside.txt", dest)])
+    assert result.success is False
+    assert result.error_code == "ARCHIVE_SECURITY_VIOLATION"
+    assert not dest.exists()
+    assert not (tmp_path / "outside.txt").exists()

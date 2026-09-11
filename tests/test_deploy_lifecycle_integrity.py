@@ -15,7 +15,7 @@ from core.db_manager import (
     DEPLOY_TYPE_FOLDER_COPY,
     DatabaseManager,
 )
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services.backup_manager import (
     BACKUPS_DIRNAME,
     TRANSACTION_FILENAME,
@@ -35,6 +35,7 @@ from services.deploy_rules.manifest import (
     MANIFEST_FILENAME,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.identity_service import create_mod_identity, identity_create_scope
 
 
 @pytest.fixture()
@@ -89,8 +90,28 @@ def _add_mod(
         path = mod / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mid),
+            workshop_id=str(mid),
+            title=title,
+            app_id=app_id,
+            game_name="SomeGame",
+        )
+    entity_id = str(created.mod_id)
     _meta(mod, mid=mid, title=title, app_id=app_id)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=app_id))
+    # Keep sidecar internal_id aligned with entity PK for deploy resolution.
+    info = mod / INFO_DIR_NAME / METADATA_FILENAME
+    raw = json.loads(info.read_text(encoding="utf-8"))
+    raw["internal_id"] = entity_id
+    info.write_text(json.dumps(raw), encoding="utf-8")
+    db.update_mod_identity_fields(
+        entity_id,
+        last_known_path=str(mod),
+        folder_present=True,
+    )
     return mod
 
 
@@ -137,16 +158,13 @@ def test_case2_manifest_absent_after_failed_deploy(
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME", encoding="utf-8")
 
-    def boom(self, ctx):  # noqa: ANN001
-        prior.write_text("PARTIAL", encoding="utf-8")
-        return StrategyResult(
-            success=False, error="copy failed", deploy_type=DEPLOY_TYPE_FOLDER_COPY
-        )
+    from services.deploy_apply import ApplyResult
 
-    with patch(
-        "services.deploy_rules.generic.FolderCopyStrategy.deploy",
-        boom,
-    ):
+    def boom(file_plan: object, **kwargs: object) -> ApplyResult:
+        prior.write_text("PARTIAL", encoding="utf-8")
+        return ApplyResult(success=False, error="copy failed")
+
+    with patch("services.deploy_apply.apply_file_plan", boom):
         out = ModDeployer(library_root=library, db=db).deploy_mod("94002")
 
     assert out["success"] is False
@@ -201,9 +219,9 @@ def test_case3_repeat_deploy_reuses_backup(
     assert man2.files[0].backup.path == path1
     assert man2.files[0].backup.hash == hash1
     # Only one referenced backup file remains (orphans pruned)
-    bak_dir = source / INFO_DIR_NAME / BACKUPS_DIRNAME
-    assert bak_dir.is_dir()
-    assert len(list(bak_dir.iterdir())) == 1
+    listed = BackupManager(source, internal_id="94004").listed_backup_files()
+    assert len(listed) == 1
+    assert not (source / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -228,21 +246,17 @@ def test_case4_partial_deploy_failure_restores(
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
 
-    real_deploy = None
-    from services.deploy_rules.generic import FolderCopyStrategy
+    from services.deploy_apply import ApplyResult, apply_file_plan as real_apply
 
-    real_deploy = FolderCopyStrategy.deploy
-
-    def flaky(self, ctx):  # noqa: ANN001
+    def flaky(file_plan: object, **kwargs: object) -> ApplyResult:
         # Copy only a.txt then fail (simulate mid-deploy crash)
-        src = ctx.content_root() / "a.txt"
+        src = source / "a.txt"
         dst = mods_root / "Partial" / "a.txt"
+        dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        return StrategyResult(
-            success=False, error="B failed", deploy_type=DEPLOY_TYPE_FOLDER_COPY
-        )
+        return ApplyResult(success=False, error="B failed")
 
-    with patch.object(FolderCopyStrategy, "deploy", flaky):
+    with patch("services.deploy_apply.apply_file_plan", flaky):
         out = ModDeployer(library_root=library, db=db).deploy_mod("94005")
 
     assert out["success"] is False
@@ -293,7 +307,9 @@ def test_case5_undeploy_missing_backup_errors(
     assert dep.deploy_mod("94007")["success"] is True
     man = load_manifest(source)
     assert man and man.files[0].backup
-    bak = source / man.files[0].backup.path
+    bak = BackupManager(source, internal_id="94007").resolve_backup_file(
+        man.files[0].backup
+    )
     bak.unlink()
 
     out = dep.undeploy_mod("94007")
@@ -332,10 +348,27 @@ def test_case6_backup_chain_a_then_b(
         folder = library / "SomeGame" / title
         folder.mkdir(parents=True)
         (folder / "original.ini").write_text(body, encoding="utf-8")
+        with identity_create_scope():
+            created = create_mod_identity(
+                db,
+                platform=PLATFORM_STEAM,
+                external_id=str(mid),
+                workshop_id=str(mid),
+                title=title,
+                app_id=4242,
+                game_name="SomeGame",
+            )
+        entity_id = str(created.mod_id)
         _meta(folder, mid=mid, title=title)
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=4242))
+        info = folder / INFO_DIR_NAME / METADATA_FILENAME
+        raw = json.loads(info.read_text(encoding="utf-8"))
+        raw["internal_id"] = entity_id
+        info.write_text(json.dumps(raw), encoding="utf-8")
+        db.update_mod_identity_fields(
+            entity_id, last_known_path=str(folder), folder_present=True
+        )
         db.update_mod_user_metadata(
-            mid,
+            entity_id,
             {
                 "display_name": title,
                 "custom_description": "",

@@ -22,6 +22,7 @@ from services.importers.archive import (
     resolve_bundled_unrar_tool,
 )
 from ui.mod_detail_panel import ModDetailPanel
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +62,7 @@ def test_status_banner_hidden_by_default(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     folder = _mod_folder(tmp_path, pub_id="95001", title="OkMod")
-    db.upsert_mod(ModMetadata(published_file_id="95001", title="OkMod"))
+    create_steam_test_mod(db, external_id="95001", title="OkMod")
     panel = ModDetailPanel()
     panel.show()
     panel.show_mod(folder, mod_id="95001")
@@ -73,7 +74,7 @@ def test_status_banner_shows_concrete_deploy_failure(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     folder = _mod_folder(tmp_path, pub_id="95002", title="FailMod")
-    db.upsert_mod(ModMetadata(published_file_id="95002", title="FailMod"))
+    create_steam_test_mod(db, external_id="95002", title="FailMod")
     panel = ModDetailPanel()
     panel.show()
     panel.show_mod(folder, mod_id="95002")
@@ -163,7 +164,7 @@ def test_failed_db_status_rehydrates_banner(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     folder = _mod_folder(tmp_path, pub_id="95003", title="PersistFail")
-    db.upsert_mod(ModMetadata(published_file_id="95003", title="PersistFail"))
+    create_steam_test_mod(db, external_id="95003", title="PersistFail")
     db.update_mod_deploy_status(
         "95003",
         deploy_status=DEPLOY_STATUS_FAILED,

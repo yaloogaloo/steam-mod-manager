@@ -20,24 +20,34 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
-from core.models import ModMetadata
+from core.game_info import GameInfo
+from core.mod_platform import PLATFORM_STEAM
+from core.mod_status import CONFLICT_STATUS_CONFLICT
 from services.content_status_eval import persist_evaluated_content_status
+from services.identity_service import create_mod_identity, identity_create_scope
 from services.library_status import CONTENT_CONTENT_MISSING, CONTENT_HEALTHY
 from services.status_authority import (
     CONTENT_STATUS_WRITERS,
     CONFLICT_STATUS_WRITERS,
     DELETED_CONTENT_STATUS_TOKENS,
     DEPLOY_STATUS_WRITERS,
+    FORBIDDEN_RECORD_STATUS_COLUMNS,
     IDENTITY_STATUS_CONFLICT,
     IDENTITY_STATUS_WRITERS,
+    RECORD_OVERLAY_EXTRA_LABEL,
+    RECORD_OVERLAY_MISSING_LABEL,
     STATUS_MODEL_CLEANUP_V2_FLAG,
     SUPPORTED_CONTENT_STATUSES,
 )
 from services.status_recovery import run_status_model_cleanup_v2
 from services.user_annotation import set_conflict_annotation
-from ui.library_query import FILTER_CONFLICT, ModFilterIndex, matches_status_filter
-
+from ui.library_query import (
+    FILTER_CONFLICT,
+    ModFilterIndex,
+    RECORD_STATUS_LABEL_EXTRA,
+    RECORD_STATUS_LABEL_MISSING,
+    matches_status_filter,
+)
 ROOT = Path(__file__).resolve().parents[1]
 SERVICES = ROOT / "services"
 UI = ROOT / "ui"
@@ -130,7 +140,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _index(**kwargs) -> ModFilterIndex:
     base = dict(
-        internal_id="1",
+        mod_id="1",
         display_name="X",
         steam_name="",
         notes="",
@@ -148,6 +158,36 @@ def _index(**kwargs) -> ModFilterIndex:
     )
     base.update(kwargs)
     return ModFilterIndex(**base)
+
+
+def _register(
+    db: DatabaseManager,
+    *,
+    mid: str,
+    title: str,
+    app_id: int,
+    game: str,
+    folder: Path | None = None,
+) -> str:
+    db.upsert_game(GameInfo(app_id=app_id, name=game, folder_name=game))
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mid),
+            workshop_id=str(mid),
+            title=title,
+            app_id=app_id,
+            game_name=game,
+        )
+    entity_id = str(created.mod_id)
+    if folder is not None:
+        db.update_mod_identity_fields(
+            entity_id,
+            folder_present=True,
+            last_known_path=str(folder),
+        )
+    return entity_id
 
 
 def test_unauthorized_modules_cannot_call_conflict_writers() -> None:
@@ -175,8 +215,7 @@ def test_writer_allowlists_match_architecture() -> None:
 
 
 def test_content_writer_rejects_deleted_tokens(db: DatabaseManager) -> None:
-    db.update_game_deploy_config(1, name="G")
-    db.upsert_mod(ModMetadata(published_file_id="401", title="T", app_id=1))
+    _register(db, mid="401", title="T", app_id=1, game="G")
     for token in sorted(DELETED_CONTENT_STATUS_TOKENS & {"folder_missing", "backup_invalid", "metadata_missing", "file_missing"}):
         with pytest.raises(ValueError, match="illegal content_status"):
             db.update_mod_content_status("401", content_status=token)
@@ -208,15 +247,13 @@ def test_deploy_and_recovery_preserve_user_conflict(
     folder = library / "Game" / "M"
     folder.mkdir(parents=True)
     (folder / "a.bin").write_bytes(b"x")
-    db.update_game_deploy_config(1, name="Game")
-    db.upsert_mod(ModMetadata(published_file_id="402", title="M", app_id=1))
-    db.update_mod_identity_fields(
-        "402", folder_present=True, last_known_path=str(folder)
+    entity_id = _register(
+        db, mid="402", title="M", app_id=1, game="Game", folder=folder
     )
-    set_conflict_annotation("402", note="user", db=db)
-    db.update_mod_deploy_status("402", deploy_status="deployed")
-    before_conflict = db.get_mod_status(402).conflict_status
-    before_deploy = db.get_mod_deploy_info("402")
+    set_conflict_annotation(entity_id, note="user", db=db)
+    db.update_mod_deploy_status(entity_id, deploy_status="deployed")
+    before_conflict = db.get_mod_status(entity_id).conflict_status
+    before_deploy = db.get_mod_deploy_info(entity_id)
     assert before_conflict == CONFLICT_STATUS_CONFLICT
     assert before_deploy is not None
     assert before_deploy.deploy_status == "deployed"
@@ -230,12 +267,12 @@ def test_deploy_and_recovery_preserve_user_conflict(
 
     run_status_model_cleanup_v2(db, library, force=True)
 
-    assert db.get_mod_status(402).conflict_status == CONFLICT_STATUS_CONFLICT
-    assert db.get_mod_status(402).conflict_note == "user"
-    after = db.get_mod_deploy_info("402")
+    assert db.get_mod_status(entity_id).conflict_status == CONFLICT_STATUS_CONFLICT
+    assert db.get_mod_status(entity_id).conflict_note == "user"
+    after = db.get_mod_deploy_info(entity_id)
     assert after is not None
     assert after.deploy_status == "deployed"
-    assert str((db.get_mod_backup_row("402") or {}).get("content_status") or "") in (
+    assert str((db.get_mod_backup_row(entity_id) or {}).get("content_status") or "") in (
         SUPPORTED_CONTENT_STATUSES
     )
 
@@ -271,12 +308,11 @@ def test_only_supported_content_statuses_persist(
     folder = tmp_path / "mod" / "G" / "A"
     folder.mkdir(parents=True)
     (folder / "p.bin").write_bytes(b"1")
-    db.update_game_deploy_config(1, name="G")
-    db.upsert_mod(ModMetadata(published_file_id="403", title="A", app_id=1))
+    entity_id = _register(db, mid="403", title="A", app_id=1, game="G", folder=folder)
     persist_evaluated_content_status(
-        "403", folder, db=db, folder_present=True, sync_sticky_marker=True
+        entity_id, folder, db=db, folder_present=True, sync_sticky_marker=True
     )
-    cs = str((db.get_mod_backup_row("403") or {}).get("content_status") or "")
+    cs = str((db.get_mod_backup_row(entity_id) or {}).get("content_status") or "")
     assert cs in SUPPORTED_CONTENT_STATUSES
     assert cs not in DELETED_CONTENT_STATUS_TOKENS
 
@@ -285,3 +321,31 @@ def test_update_mod_status_cannot_write_conflict() -> None:
     sig = inspect.signature(DatabaseManager.update_mod_status)
     assert "conflict_status" not in sig.parameters
     assert "conflict_note" not in sig.parameters
+
+
+def test_non_deploy_modules_cannot_call_update_mod_deploy_status() -> None:
+    """Absorbed from duplicate status-authority suites — deploy writer only."""
+    non_deploy = (
+        SERVICES / "library_reconcile.py",
+        SERVICES / "mod_refresh.py",
+        SERVICES / "sync.py",
+        SERVICES / "status_recovery.py",
+        SERVICES / "content_status_eval.py",
+        SERVICES / "identity_repair.py",
+        SERVICES / "conflict.py",
+    )
+    for path in non_deploy:
+        src = path.read_text(encoding="utf-8")
+        assert "update_mod_deploy_status(" not in src, path.name
+
+
+def test_record_overlays_are_memory_only_labels(db: DatabaseManager) -> None:
+    """Absorbed from duplicate status-authority suites — overlays not DB columns."""
+    assert RECORD_OVERLAY_MISSING_LABEL == RECORD_STATUS_LABEL_MISSING == "记录缺失"
+    assert RECORD_OVERLAY_EXTRA_LABEL == RECORD_STATUS_LABEL_EXTRA == "额外部署"
+    for table in ("mods", "deployment_records", "deployment_record_items"):
+        cols = {
+            str(row[1])
+            for row in db._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        assert not cols & FORBIDDEN_RECORD_STATUS_COLUMNS, table

@@ -11,6 +11,7 @@ from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import DEPLOY_TYPE_ANNO_1800, resolve_deploy_type
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 ANNO_APP = 916440
 
@@ -44,6 +45,7 @@ def test_anno_deploy_creates_mods_and_copies(tmp_path: Path, db: DatabaseManager
     info.mkdir()
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        '  "internal_id": "91601",\n'
         '  "published_file_id": "91601",\n'
         '  "title": "BiggerHarbour",\n'
         f'  "app_id": {ANNO_APP},\n'
@@ -58,13 +60,8 @@ def test_anno_deploy_creates_mods_and_copies(tmp_path: Path, db: DatabaseManager
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91601",
-            title="BiggerHarbour",
-            app_id=ANNO_APP,
-        )
-    )
+    create_steam_test_mod(db, external_id="91601", title="BiggerHarbour", app_id=ANNO_APP)
+    bind_managed_path(db, "91601", mod, title="BiggerHarbour")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("91601")
     assert result["success"] is True, result
@@ -92,6 +89,7 @@ def test_anno_deploy_directory_mod_with_stale_unselected_files(
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": "91602",
                 "published_file_id": "91602",
                 "title": "LooseMod",
                 "app_id": ANNO_APP,
@@ -107,13 +105,8 @@ def test_anno_deploy_directory_mod_with_stale_unselected_files(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91602",
-            title="LooseMod",
-            app_id=ANNO_APP,
-        )
-    )
+    create_steam_test_mod(db, external_id="91602", title="LooseMod", app_id=ANNO_APP)
+    bind_managed_path(db, "91602", mod, title="LooseMod")
     # Stale entries from old scanner — none selected for deploy.
     from core.mod_platform import ModFileEntry, ModFilesBundle
 
@@ -174,6 +167,7 @@ def test_anno_deploy_extracts_zip_preserves_inner_folder(
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": "91603",
                 "published_file_id": "91603",
                 "title": managed_name,
                 "app_id": ANNO_APP,
@@ -189,13 +183,8 @@ def test_anno_deploy_extracts_zip_preserves_inner_folder(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91603",
-            title=managed_name,
-            app_id=ANNO_APP,
-        )
-    )
+    create_steam_test_mod(db, external_id="91603", title=managed_name, app_id=ANNO_APP)
+    bind_managed_path(db, "91603", mod, title=managed_name)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("91603")
     assert result["success"] is True, result
@@ -241,6 +230,7 @@ def test_anno_stamps_zip_merges_into_documents(
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": "91610",
                 "published_file_id": "91610",
                 "title": "LayoutStamp",
                 "app_id": ANNO_APP,
@@ -257,13 +247,8 @@ def test_anno_stamps_zip_merges_into_documents(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91610",
-            title="LayoutStamp",
-            app_id=ANNO_APP,
-        )
-    )
+    create_steam_test_mod(db, external_id="91610", title="LayoutStamp", app_id=ANNO_APP)
+    bind_managed_path(db, "91610", mod, title="LayoutStamp")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("91610")
     assert result["success"] is True, result
@@ -303,6 +288,7 @@ def test_anno_stamps_loose_folder_by_structure(
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": "91611",
                 "published_file_id": "91611",
                 "title": "LooseStamp",
                 "app_id": ANNO_APP,
@@ -318,13 +304,8 @@ def test_anno_stamps_loose_folder_by_structure(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91611",
-            title="LooseStamp",
-            app_id=ANNO_APP,
-        )
-    )
+    create_steam_test_mod(db, external_id="91611", title="LooseStamp", app_id=ANNO_APP)
+    bind_managed_path(db, "91611", mod, title="LooseStamp")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("91611")
     assert result["success"] is True, result

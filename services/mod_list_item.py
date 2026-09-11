@@ -32,6 +32,7 @@ MOD_LIST_ITEM_ALLOWED_FIELDS: frozenset[str] = frozenset(
         "conflict",
         "conflict_status",
         "invalid",
+        "abandoned",
         "enabled",
         "has_offline",
         "mtime",
@@ -46,6 +47,9 @@ MOD_LIST_ITEM_ALLOWED_FIELDS: frozenset[str] = frozenset(
         "relation_deps",
         "relation_conflicts",
         "notes_preview",
+        "local_size_bytes",
+        "local_size_status",
+        "type_id",
     }
 )
 
@@ -87,6 +91,7 @@ class ModListItem:
     conflict: bool = False
     conflict_status: str = "none"
     invalid: bool = False
+    abandoned: bool = False
     enabled: bool = True
     has_offline: bool = False
     mtime: float = 0.0
@@ -102,6 +107,11 @@ class ModListItem:
     relation_conflicts: int = 0
     # Short notes for search only — not full metadata body.
     notes_preview: str = ""
+    # Local managed-dir size observation (None = unknown; 0 + ok = empty).
+    local_size_bytes: int | None = None
+    local_size_status: str = "unknown"
+    # Game-scoped Type Definition id. None = unbound. Not a type name.
+    type_id: int | None = None
 
 
 def assert_mod_list_item_layer1(item: ModListItem) -> None:

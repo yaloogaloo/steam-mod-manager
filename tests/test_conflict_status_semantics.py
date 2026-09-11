@@ -17,6 +17,7 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -60,8 +61,8 @@ def test_case1_identical_dll_persists_conflict(
     b = _seed(library, "802")
     _write(a, "801", shared)
     _write(b, "802", shared)
-    db.upsert_mod(ModMetadata(published_file_id="801", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="802", title="B"))
+    create_steam_test_mod(db, external_id="801", title="A")
+    create_steam_test_mod(db, external_id="802", title="B")
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert reports["801"].status == CONFLICT_STATUS_NONE
@@ -78,7 +79,7 @@ def test_case2_preview_reports_overwrite_not_relationship(
     shared = str((tmp_path / "BG3" / "Mods" / "a.pak").resolve())
     a = _seed(library, "811")
     _write(a, "811", shared)
-    db.upsert_mod(ModMetadata(published_file_id="811", title="A"))
+    create_steam_test_mod(db, external_id="811", title="A")
 
     det = ConflictDetector(library, db=db)
     preview = det.preview_targets("812", [shared])
@@ -106,8 +107,8 @@ def test_case3_distinct_targets_no_conflict(
     b = _seed(library, "822")
     _write(a, "821", t_a)
     _write(b, "822", t_b)
-    db.upsert_mod(ModMetadata(published_file_id="821", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="822", title="B"))
+    create_steam_test_mod(db, external_id="821", title="A")
+    create_steam_test_mod(db, external_id="822", title="B")
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
@@ -131,8 +132,8 @@ def test_case4_same_dir_distinct_paks_no_pak_overlap(
     b = _seed(library, "832")
     _write(a, "831", t_a)
     _write(b, "832", t_b)
-    db.upsert_mod(ModMetadata(published_file_id="831", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="832", title="B"))
+    create_steam_test_mod(db, external_id="831", title="A")
+    create_steam_test_mod(db, external_id="832", title="B")
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert not any(

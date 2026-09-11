@@ -25,6 +25,7 @@ from services.deploy_rules import (
 )
 from services.deploy_rules.base import DeployContext
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod, bind_managed_path
 
 CIV6 = CIVILIZATION_VI_APP_ID
 assert CIV6 == 289070
@@ -106,13 +107,12 @@ def _prove_managed_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
 def _register(
     db: DatabaseManager, *, mod_id: str, title: str, folder: Path
 ) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mod_id,
-            title=title,
-            app_id=CIV6,
-            game_name="文明Ⅵ",
-        )
+    create_steam_test_mod(
+        db,
+        external_id=str(mod_id),
+        title=title,
+        app_id=CIV6,
+        game_name="文明Ⅵ",
     )
     _prove_managed_folder(db, mod_id, folder)
 
@@ -572,8 +572,8 @@ def test_non_civ6_chinese_folder_keeps_name(
         encoding="utf-8",
     )
     (mod_dir / "a.txt").write_text("a", encoding="utf-8")
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title=folder, app_id=app_id)
+    create_steam_test_mod(
+        db, external_id=mid, title=folder, app_id=app_id, game_name="SomeGame"
     )
     _prove_managed_folder(db, mid, mod_dir)
 

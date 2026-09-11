@@ -20,6 +20,7 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -87,7 +88,7 @@ def test_check_conflict_preview_reports_conflict(
             files=[ManifestFileEntry(source="payload.txt", target=shared)],
         ),
     )
-    db.upsert_mod(ModMetadata(published_file_id="501", title="M501"))
+    create_steam_test_mod(db, external_id="501", title="M501")
     deployer = ModDeployer(library_root=library, db=db)
     preview = deployer.check_conflict_preview("502", [shared])
     assert preview is not None
@@ -136,8 +137,8 @@ def test_post_deploy_runs_check_all(
         mod_path=str(dest),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(ModMetadata(published_file_id="601", title="A", app_id=1))
-    db.upsert_mod(ModMetadata(published_file_id="602", title="B", app_id=1))
+    create_steam_test_mod(db, external_id="601", title="A", app_id=1)
+    create_steam_test_mod(db, external_id="602", title="B", app_id=1)
     _prove_managed_folder(db, "601", a)
     _prove_managed_folder(db, "602", b)
 

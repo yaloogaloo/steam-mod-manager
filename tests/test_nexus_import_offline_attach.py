@@ -68,7 +68,9 @@ def test_nexus_batch_mhtml_cleaner_runs_once(
     (other / "other.pak").write_bytes(b"pak2")
 
     # Toolbar junk inside an ads shell — removed by a single NexusCleaner pass.
+    # Include a legal Nexus URL so identity gate accepts PLATFORM_NEXUS.
     junk_html = """<!DOCTYPE html><html><body>
+<a href="https://www.nexusmods.com/palworld/mods/88001">Zoom Mod</a>
 <h1 class="mod-title">Zoom Mod</h1>
 <div class="mod-description">Good page</div>
 <div class="ads-container">
@@ -97,12 +99,37 @@ Content-Transfer-Encoding: quoted-printable
             "utf-8"
         )
     )
+    # OtherMod also needs official Nexus identity via folder MHTML sidecar
+    # (extract_directory_sidecars only picks .mhtml/.mht, not .html).
+    other_html = """<!DOCTYPE html><html><body>
+<a href="https://www.nexusmods.com/palworld/mods/88002">Other Mod</a>
+<h1>Other Mod</h1>
+</body></html>"""
+    other_mhtml = other / "page.mhtml"
+    other_boundary = "----OtherCleanOnce"
+    other_qp = other_html.replace("=", "=3D")
+    other_mhtml.write_bytes(
+        f"""From: <saved>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="{other_boundary}"
 
-    calls = {"n": 0}
+--{other_boundary}
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+{other_qp}
+
+--{other_boundary}--
+""".encode(
+            "utf-8"
+        )
+    )
+
+    calls: list[str] = []
     real_process = NexusCleaner.process_file
 
     def counting_process(self, mhtml_path, output_dir):
-        calls["n"] += 1
+        calls.append(str(mhtml_path))
         return real_process(self, mhtml_path, output_dir)
 
     monkeypatch.setattr(NexusCleaner, "process_file", counting_process)
@@ -130,9 +157,13 @@ Content-Transfer-Encoding: quoted-printable
     result = worker._do_import()
     assert result.success, result.error
     assert result.imported_count == 2
-    assert calls["n"] == 1  # only ZoomMod has MHTML; OtherMod has none
+    # Each folder MHTML cleaned once — never materialize + attach double-clean.
+    zoom_cleans = [p for p in calls if "ZoomMod" in p.replace("\\", "/")]
+    other_cleans = [p for p in calls if "OtherMod" in p.replace("\\", "/")]
+    assert len(zoom_cleans) == 1
+    assert len(other_cleans) == 1
 
-    zoom_dirs = list(lib.rglob("ZoomMod"))
+    zoom_dirs = [p for p in lib.rglob("*") if p.is_dir() and "Zoom" in p.name]
     assert zoom_dirs
     index = zoom_dirs[0] / INFO_DIR_NAME / "offline" / "index.html"
     assert index.is_file()
@@ -291,10 +322,13 @@ def test_github_import_unchanged(tmp_path: Path, db: DatabaseManager) -> None:
 
 
 def test_dialog_shows_offline_html_only_for_nexus(qapp, tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QWidget
     from ui.mod_import_dialog import ModImportDialog
 
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_steam.setChecked(True)

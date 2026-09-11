@@ -38,7 +38,8 @@ class OfflineArchiveWorker(QThread):
         managed_path: str | Path,
         *,
         platform: str = PLATFORM_STEAM,
-        published_file_id: str | int = "",
+        internal_id: str | int = "",
+        published_file_id: str | int = "",  # deprecated alias of internal_id
         metadata: ModMetadata | None = None,
         library_root: str | Path | None = None,
         force_refresh: bool = True,
@@ -47,7 +48,9 @@ class OfflineArchiveWorker(QThread):
         super().__init__(parent)
         self.managed_path = Path(managed_path)
         self.platform = normalize_platform(platform)
-        self.published_file_id = str(published_file_id or "").strip()
+        # Entity PK only — never Steam Workshop published_file_id.
+        self.internal_id = str(internal_id or published_file_id or "").strip()
+        self.published_file_id = self.internal_id  # back-compat attribute name
         self.metadata = metadata
         self.library_root = Path(library_root) if library_root else self.managed_path.parents[1]
         self.force_refresh = bool(force_refresh)
@@ -55,8 +58,8 @@ class OfflineArchiveWorker(QThread):
     def run(self) -> None:
         self.archive_started.emit()
         try:
-            mid = self.published_file_id or (
-                self.metadata.published_file_id if self.metadata else ""
+            mid = self.internal_id or (
+                self.metadata.entity_internal_id() if self.metadata else ""
             )
             if not mid:
                 mid = self.managed_path.name
@@ -112,7 +115,8 @@ class OfflineHtmlImportWorker(QThread):
         html_path: str | Path,
         *,
         platform: str,
-        published_file_id: str | int = "",
+        internal_id: str | int = "",
+        published_file_id: str | int = "",  # deprecated alias of internal_id
         library_root: str | Path | None = None,
         clean: bool = True,
         parent=None,
@@ -121,14 +125,15 @@ class OfflineHtmlImportWorker(QThread):
         self.managed_path = Path(managed_path)
         self.html_path = Path(html_path)
         self.platform = normalize_platform(platform)
-        self.published_file_id = str(published_file_id or "").strip()
+        self.internal_id = str(internal_id or published_file_id or "").strip()
+        self.published_file_id = self.internal_id  # back-compat attribute name
         self.library_root = Path(library_root) if library_root else self.managed_path.parents[1]
         self.clean = bool(clean)
 
     def run(self) -> None:
         self.archive_started.emit()
         try:
-            mid = self.published_file_id or self.managed_path.name
+            mid = self.internal_id or self.managed_path.name
             result = attach_nexus_offline_page(
                 mid,
                 self.html_path,

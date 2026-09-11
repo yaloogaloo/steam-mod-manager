@@ -44,31 +44,18 @@ def _safe_resolve(path: Path | str) -> Path:
 
 
 def resolve_deploy_identity(internal_id: int | str, *, db: Any) -> str:
-    """Accept Internal ID only — never resolve via workspace_id / path / folder.
+    """Canonical deploy entry: Frozen ``internal_id`` → ``mods.mod_id``.
 
-    Digit tokens are the SQLite ``mods.mod_id`` PK used by deploy status writers.
-    UUID tokens (``.info.internal_id`` proof) map to that PK via
-    ``find_mod_by_internal_id`` — they are not a second user-facing Mod ID.
+    Business callers pass TEXT ``internal_id``. This function is the resolve
+    boundary; subsequent deploy DB/runtime operations use the PK.
+
+    PK-digit compatibility is implemented inside ``resolve_mod_pk`` (in-process
+    handle only) and is not a second Frozen identity. Never resolves via
+    ``workspace_id`` / path / folder name.
     """
-    token = str(internal_id or "").strip()
-    if not token:
-        return token
-    try:
-        if token.isdigit() and db.get_mod(token) is not None:
-            return token
-    except Exception:  # noqa: BLE001
-        logger.debug("get_mod failed for deploy identity token=%s", token, exc_info=True)
-    if not token.isdigit():
-        try:
-            found = db.find_mod_by_internal_id(token)
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "find_mod_by_internal_id failed token=%s", token, exc_info=True
-            )
-            found = None
-        if found and str(found).strip().isdigit():
-            return str(found).strip()
-    return token
+    from services.identity_service import resolve_mod_pk
+
+    return resolve_mod_pk(internal_id, db=db)
 
 
 def resolve_deploy_managed_path(

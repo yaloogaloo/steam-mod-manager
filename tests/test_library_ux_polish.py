@@ -10,11 +10,18 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QContextMenuEvent
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
+from core.game_info import GameInfo
+from services.file_ops import ModFileManager
+from services.mod_library_cache import ModCardData
+from tests.helpers.identity import (
+    flush_library_search,
+    patch_library_get_db,
+    seed_steam_managed_mod,
+)
+from ui.library_query import SORT_NAME
 from ui.library_view import (
     EMPTY_LIBRARY,
     EMPTY_SEARCH,
@@ -37,40 +44,55 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "ux_polish.db")
+    manager = DatabaseManager.instance(tmp_path / "ux_polish.db")
+    manager.upsert_game(GameInfo(app_id=42, name="GameX", folder_name="GameX"))
     yield manager
-    manager.close()
     DatabaseManager.reset_instance()
 
 
-def _mod(library: Path, mid: str = "7001", title: str = "UX Mod") -> Path:
-    mod = library / "GameX" / title
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (mod / "a.txt").write_text("x", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{title}",\n'
-        '  "app_id": 42,\n'
-        '  "game_name": "GameX"\n'
-        "}\n",
-        encoding="utf-8",
+def _seed_mod(
+    library: Path,
+    db: DatabaseManager,
+    *,
+    external_id: str = "7001",
+    title: str = "UX Mod",
+) -> tuple[Path, str]:
+    seeded = seed_steam_managed_mod(
+        db,
+        library,
+        external_id=external_id,
+        title=title,
+        game_folder="GameX",
+        app_id=42,
+        game_name="GameX",
+        files={"a.txt": "x"},
     )
-    return mod
+    return seeded.folder, seeded.internal_id
 
 
-def _three_mod_library(
-    library: Path, db: DatabaseManager
-) -> list[Path]:
+def _three_mod_library(library: Path, db: DatabaseManager) -> list[tuple[Path, str]]:
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    paths: list[Path] = []
+    out: list[tuple[Path, str]] = []
     for mid, title in (("7001", "Mod A"), ("7002", "Mod B"), ("7003", "Mod C")):
-        paths.append(_mod(library, mid=mid, title=title))
-        db.upsert_mod(
-            ModMetadata(published_file_id=mid, title=title, app_id=42)
-        )
-    return paths
+        out.append(_seed_mod(library, db, external_id=mid, title=title))
+    return out
+
+
+def _card_data(path: Path, internal_id: str, title: str = "UX Mod") -> ModCardData:
+    return ModCardData(
+        id=str(internal_id),
+        title=title,
+        platform="steam",
+        cover="",
+        description="",
+        tags="",
+        size=None,
+        updated_time=0.0,
+        managed_path=str(path),
+        game_folder="GameX",
+        workspace_id=str(internal_id),
+        external_id=str(internal_id),
+    )
 
 
 def test_empty_library_state(
@@ -78,8 +100,7 @@ def test_empty_library_state(
 ) -> None:
     library = tmp_path / "mod"
     library.mkdir()
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -97,12 +118,9 @@ def test_empty_search_state(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    path = _mod(library)
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    db.upsert_mod(ModMetadata(published_file_id="7001", title="UX Mod", app_id=42))
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    path, _mid = _seed_mod(library, db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -111,6 +129,7 @@ def test_empty_search_state(
     assert len(view._cards) == 1
 
     view.search_box.setText("zzz-no-such-mod")
+    flush_library_search(view)
     assert view._empty_kind == EMPTY_SEARCH
     assert not view.empty_overlay.isHidden()
     assert "No matching mods" in view.empty_title.text()
@@ -125,12 +144,10 @@ def test_context_menu_actions_emit_signals(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    path = _mod(library)
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    db.upsert_mod(ModMetadata(published_file_id="7001", title="UX Mod", app_id=42))
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    path, mid = _seed_mod(library, db)
 
-    card = ModCardWidget(path)
+    card = ModCardWidget(path, card_data=_card_data(path, mid))
     seen: dict[str, object] = {}
     card.edit_requested.connect(lambda p: seen.setdefault("edit", p))
     card.deploy_requested.connect(lambda m: seen.setdefault("deploy", m))
@@ -141,45 +158,37 @@ def test_context_menu_actions_emit_signals(
 
     # Drive menu actions directly (avoid platform-dependent popup)
     card._emit_view_detail()
-    card.edit_requested.emit(card.managed_path)
+    card.edit_requested.emit(card._mod_id())
     card._emit_deploy()
-    card.open_folder_requested.emit(card.managed_path)
-    card.open_steam_requested.emit(card.managed_path)
+    card.open_folder_requested.emit(card._mod_id())
+    card.open_steam_requested.emit(card._mod_id())
     card._emit_favorite_toggle()
 
-    assert seen["detail"] == path
-    assert seen["edit"] == path
-    assert seen["deploy"] == "7001"
-    assert seen["folder"] == path
-    assert seen["steam"] == path
-    assert seen["fav"] == "7001"
+    assert seen["detail"] == mid
+    assert seen["edit"] == mid
+    assert seen["deploy"] == mid
+    assert seen["folder"] == mid
+    assert seen["steam"] == mid
+    assert seen["fav"] == mid
 
     # contextMenuEvent builds a QMenu without crashing
     event = QContextMenuEvent(
         QContextMenuEvent.Reason.Mouse, QPoint(10, 10), QPoint(10, 10)
     )
-    # Patch exec to avoid blocking
-    original_exec = QMenu.exec
-
-    def fake_exec(self, *a, **k):  # noqa: ANN001
-        return None
-
-    monkeypatch.setattr(QMenu, "exec", fake_exec)
+    monkeypatch.setattr(
+        card, "_exec_context_menu", lambda *_a, **_k: None
+    )
     card.contextMenuEvent(event)
-    monkeypatch.setattr(QMenu, "exec", original_exec)
 
 
 def test_detail_panel_singleton_across_filter(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    _mod(library)
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    db.upsert_mod(ModMetadata(published_file_id="7001", title="UX Mod", app_id=42))
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    _seed_mod(library, db)
+    patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -189,7 +198,9 @@ def test_detail_panel_singleton_across_filter(
     assert isinstance(panel, ModDetailPanel)
 
     view.search_box.setText("nope")
+    flush_library_search(view)
     view.search_box.clear()
+    flush_library_search(view)
     view.refresh()
     assert id(view.detail_panel) == panel_id
 
@@ -198,12 +209,9 @@ def test_ux_filter_no_network_or_archive(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    _mod(library)
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    db.upsert_mod(ModMetadata(published_file_id="7001", title="UX Mod", app_id=42))
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    _seed_mod(library, db)
+    patch_library_get_db(monkeypatch, db)
 
     calls: list[str] = []
 
@@ -225,23 +233,23 @@ def test_ux_filter_no_network_or_archive(
     view.refresh()
     assert view._loading is False
     view.search_box.setText("UX")
+    flush_library_search(view)
     view.search_box.clear()
+    flush_library_search(view)
     assert calls == []
 
 
 def test_empty_game_state(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
-    from ui.library_view import EMPTY_GAME, GAME_ROLE
+    from ui.library_view import EMPTY_GAME
 
     library = tmp_path / "mod"
-    _mod(library)
-    (library / "EmptyGame").mkdir(parents=True)
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    db.upsert_mod(ModMetadata(published_file_id="7001", title="UX Mod", app_id=42))
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    _seed_mod(library, db)
+    # Sidebar is DB games projection — register an empty game row.
+    db.upsert_game(GameInfo(app_id=43, name="EmptyGame", folder_name="EmptyGame"))
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -266,12 +274,16 @@ def test_detail_panel_hierarchy_labels(qapp: QApplication) -> None:
 
     panel = ModDetailPanel()
     texts = [lab.text() for lab in panel._view_page.findChildren(QLabel)]
-    tool_texts = [btn.text() for btn in panel._view_page.findChildren(QToolButton)]
-    # Header is cover+title (no section caption). Status + 文件 + Actions + collapsibles.
-    assert "Status" in texts
+    # Visible composition: Chinese section captions (Status/Version moved offscreen).
+    assert "元数据" in texts
     assert "文件" in texts
     assert "操作" in texts
-    assert "元数据" in texts
+    assert "标记" in texts
+    off_texts = [lab.text() for lab in panel._offscreen_host.findChildren(QLabel)]
+    assert "Status" in off_texts
+    tool_texts = [
+        btn.text() for btn in panel._offscreen_host.findChildren(QToolButton)
+    ]
     assert "Version" in tool_texts
     assert "Tags & Relations" in tool_texts
 
@@ -281,8 +293,7 @@ def test_loading_flag_clears_after_refresh(
 ) -> None:
     library = tmp_path / "mod"
     library.mkdir()
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -305,9 +316,7 @@ def test_shift_range_selection(
 ) -> None:
     library = tmp_path / "mod"
     _three_mod_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -323,7 +332,7 @@ def test_shift_range_selection(
     ]
     assert visible == layout_order
 
-    view.on_mod_selected(visible[0].managed_path)
+    view.on_mod_selected(visible[0]._mod_id())
     assert view._selected_cards == [visible[0]]
     assert view._last_clicked_index == 0
 
@@ -332,48 +341,41 @@ def test_shift_range_selection(
         "keyboardModifiers",
         staticmethod(lambda: Qt.KeyboardModifier.ShiftModifier),
     )
-    view.on_mod_selected(visible[2].managed_path)
+    view.on_mod_selected(visible[2]._mod_id())
 
     assert view._selected_cards == visible[:3]
-    assert view._last_clicked_index == 0
+    assert view._last_clicked_index == 2
 
     monkeypatch.setattr(
         QApplication,
         "keyboardModifiers",
         staticmethod(lambda: Qt.KeyboardModifier.ShiftModifier),
     )
-    view.on_mod_selected(visible[1].managed_path)
+    view.on_mod_selected(visible[1]._mod_id())
 
     assert view._selected_cards == visible[:2]
-    assert view._last_clicked_index == 0
+    assert view._last_clicked_index == 1
 
 
 def test_shift_range_uses_sorted_layout_order(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     """Shift slice follows on-screen sort order, not _cards insertion order."""
-    import os
-    import time
-
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    # Create in Z→A folder order; mtime desc puts Alpha first on screen.
-    for mid, title, bump in (
-        ("7003", "Zulu", 1),
-        ("7002", "Bravo", 5),
-        ("7001", "Alpha", 10),
+    # Seed Z→A; name sort puts Alpha first on screen.
+    for mid, title in (
+        ("7003", "Zulu"),
+        ("7002", "Bravo"),
+        ("7001", "Alpha"),
     ):
-        path = _mod(library, mid=mid, title=title)
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=42))
-        t = time.time() + bump
-        os.utime(path, (t, t))
+        _seed_mod(library, db, external_id=mid, title=title)
 
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
+    view._sort_mode = SORT_NAME
     view.refresh()
     visible = view._visible_cards()
     assert [c._mod_id() for c in visible] == ["7001", "7002", "7003"]
@@ -381,13 +383,13 @@ def test_shift_range_uses_sorted_layout_order(
     view._cards = list(reversed(view._cards))
     assert [c._mod_id() for c in view._cards] == ["7003", "7002", "7001"]
 
-    view.on_mod_selected(visible[1].managed_path)  # Bravo
+    view.on_mod_selected(visible[1]._mod_id())  # Bravo
     monkeypatch.setattr(
         QApplication,
         "keyboardModifiers",
         staticmethod(lambda: Qt.KeyboardModifier.ShiftModifier),
     )
-    view.on_mod_selected(visible[2].managed_path)  # Zulu
+    view.on_mod_selected(visible[2]._mod_id())  # Zulu
 
     assert {c._mod_id() for c in view._selected_cards} == {"7002", "7003"}
 
@@ -397,9 +399,7 @@ def test_select_all_mods_shortcut(
 ) -> None:
     library = tmp_path / "mod"
     _three_mod_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -413,41 +413,34 @@ def test_select_all_mods_shortcut(
     assert len(view.detail_panel._batch_mod_ids or []) == 3
 
 
-def test_batch_set_category_syncs_db_and_sidecar(
+def test_batch_set_category_binds_type_id(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
-    from services.info_sidecar import load_info_sidecar
+    from services.mod_type_catalog import get_mod_type_catalog
 
     library = tmp_path / "mod"
     _three_mod_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
+    created = get_mod_type_catalog().add_type(42, "Gameplay")
 
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
     visible = view._visible_cards()
 
-    view.on_mod_selected(visible[0].managed_path)
+    view.on_mod_selected(visible[0]._mod_id())
     monkeypatch.setattr(
         QApplication,
         "keyboardModifiers",
         staticmethod(lambda: Qt.KeyboardModifier.ControlModifier),
     )
-    view.on_mod_selected(visible[2].managed_path)
+    view.on_mod_selected(visible[2]._mod_id())
 
-    view._on_batch_set_category("Gameplay")
+    view._on_batch_set_category(str(created.type_id))
 
-    assert db.get_category_tags("7001") == ["Gameplay"]
-    assert db.get_category_tags("7003") == ["Gameplay"]
-    assert db.get_category_tags("7002") == []
-
-    for mid in ("7001", "7003"):
-        card = next(c for c in visible if c._mod_id() == mid)
-        side = load_info_sidecar(card.managed_path)
-        assert side is not None
-        assert side.category == "Gameplay"
+    assert db.get_mod_type_id("7001") == created.type_id
+    assert db.get_mod_type_id("7003") == created.type_id
+    assert db.get_mod_type_id("7002") is None
 
 
 def test_add_game_category_renders_sidebar_node(
@@ -455,8 +448,7 @@ def test_add_game_category_renders_sidebar_node(
 ) -> None:
     library = tmp_path / "mod"
     _three_mod_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -487,12 +479,12 @@ def test_sidebar_category_filters_mod_list(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from services.mod_type_catalog import get_mod_type_catalog
+
     library = tmp_path / "mod"
     _three_mod_library(library, db)
-    db.add_game_category(42, "Gameplay")
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    created = get_mod_type_catalog().add_type(42, "Gameplay")
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -510,22 +502,22 @@ def test_sidebar_category_filters_mod_list(
     qapp.processEvents()
 
     visible = view._visible_cards()
-    view.on_mod_selected(visible[0].managed_path)
+    view.on_mod_selected(visible[0]._mod_id())
     monkeypatch.setattr(
         QApplication,
         "keyboardModifiers",
         staticmethod(lambda: Qt.KeyboardModifier.ControlModifier),
     )
-    view.on_mod_selected(visible[2].managed_path)
+    view.on_mod_selected(visible[2]._mod_id())
     monkeypatch.setattr(
         QApplication,
         "keyboardModifiers",
         staticmethod(lambda: Qt.KeyboardModifier.NoModifier),
     )
-    view._on_batch_set_category("Gameplay")
+    view._on_batch_set_category(str(created.type_id))
     assert len(view._visible_cards()) == 3
 
-    idx = view.category_combo.findData("Gameplay")
+    idx = view.category_combo.findData(str(created.type_id))
     assert idx >= 0
     view.category_combo.setCurrentIndex(idx)
     qapp.processEvents()

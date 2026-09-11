@@ -26,6 +26,7 @@ from services.path_lifecycle import (
     resolve_managed_folder,
 )
 from ui.metadata_refresh_thread import ModRefreshWorker
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -222,7 +223,7 @@ def test_steam_refresh_rename_then_stale_path_succeeds(
     mid = "3413524002"
     lib = tmp_path / "mod"
     folder = _steam_folder(lib, mid)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}"))
+    create_steam_test_mod(db, external_id=mid, title=f"Unknown_Mod_{mid}")
     db.update_mod_identity_fields(mid, last_known_path=str(folder.resolve()))
 
     fresh = ModMetadata(
@@ -259,7 +260,7 @@ def test_worker_heals_stale_path_after_rename(
         json.dumps({"published_file_id": mid, "title": "before"}),
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id=mid, title="before"))
+    create_steam_test_mod(db, external_id=mid, title="before")
     db.update_mod_identity_fields(mid, last_known_path=str(old.resolve()))
 
     new = lib / "Game" / "after"
@@ -403,7 +404,7 @@ def test_commit_path_change_reports_stage_on_db_failure(
     (folder / INFO_DIR_NAME).mkdir()
     (folder / INFO_DIR_NAME / "metadata.json").write_text("{}", encoding="utf-8")
     mid = "9000000000004005"
-    db.upsert_mod(ModMetadata(published_file_id=mid, title="ModA"))
+    create_steam_test_mod(db, external_id=mid, title="ModA")
 
     def _fail(**kwargs):
         raise OSError("db locked")

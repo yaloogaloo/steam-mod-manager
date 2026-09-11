@@ -10,6 +10,7 @@ from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
 from core.models import ModMetadata
 from services.deploy import ModDeployer, _normalize_deploy_error
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.deploy_path_lifecycle import (
     CUSTOM_DEPLOY_PATH_MISSING,
     DEPLOY_ERR_CUSTOM_PATH_MISSING_PREFIX,
@@ -75,15 +76,9 @@ def _seed_mod(
             f'{{"internal_id": "{mid}", "app_id": {app_id}, "title": "{title}"}}',
             encoding="utf-8",
         )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=title,
-            app_id=app_id,
-            game_name=game_name,
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id=mid, title=title, app_id=app_id, game_name=game_name)
+    bind_managed_path(db, mid, folder, title=title)
+
     db.update_mod_identity_fields(
         mid,
         internal_id=mid,
@@ -226,15 +221,9 @@ def test_case3_source_mod_missing_returns_source_code(
         mod_path=str(mods),
         deploy_type="folder_copy",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="7100",
-            title="GhostMod",
-            app_id=BG3,
-            game_name="Baldurs Gate 3",
-            managed_path=str(ghost),
-        )
-    )
+    create_steam_test_mod(db, external_id="7100", title="GhostMod", app_id=BG3, game_name="Baldurs Gate 3")
+    bind_managed_path(db, "7100", ghost, title="GhostMod")
+
     db.update_mod_identity_fields(
         "7100",
         internal_id="7100",

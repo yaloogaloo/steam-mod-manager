@@ -5,16 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
     DEPLOY_TYPE_FOLDER_COPY,
     DatabaseManager,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import load_manifest
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 
 
 @pytest.fixture()
@@ -26,6 +29,36 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
+def _seed(
+    db: DatabaseManager,
+    library: Path,
+    *,
+    mid: str,
+    title: str,
+    files: dict[str, str],
+    game: str = "G",
+    app_id: int = 42,
+) -> Path:
+    mod = library / game / title
+    mod.mkdir(parents=True)
+    for name, text in files.items():
+        (mod / name).write_text(text, encoding="utf-8")
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name=game
+    )
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title=title,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=app_id,
+        game_name=game,
+    )
+    bind_managed_path(db, created.mod_id, mod, title=title, game_name=game)
+    return mod
+
+
 def test_redeploy_removes_stale_files_and_rewrites_manifest(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
@@ -33,22 +66,16 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     mods_root = tmp_path / "GameMods"
     mods_root.mkdir()
 
-    mod = library / "G" / "ShrinkMod"
-    mod.mkdir(parents=True)
-    (mod / "A.txt").write_text("A", encoding="utf-8")
-    (mod / "B.txt").write_text("B", encoding="utf-8")
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        '{\n  "published_file_id": "96001",\n  "title": "ShrinkMod",\n'
-        '  "app_id": 42,\n  "game_name": "G"\n}\n',
-        encoding="utf-8",
-    )
-
     db.update_game_deploy_config(
         42, name="G", mod_path=str(mods_root), deploy_type=DEPLOY_TYPE_FOLDER_COPY
     )
-    db.upsert_mod(ModMetadata(published_file_id="96001", title="ShrinkMod", app_id=42))
+    mod = _seed(
+        db,
+        library,
+        mid="96001",
+        title="ShrinkMod",
+        files={"A.txt": "A", "B.txt": "B"},
+    )
 
     deployer = ModDeployer(library_root=library, db=db)
     first = deployer.deploy_mod("96001")
@@ -85,17 +112,8 @@ def test_redeploy_aborts_when_undeploy_fails(
     library = tmp_path / "mod"
     mods_root = tmp_path / "GameMods"
     mods_root.mkdir()
-    mod = library / "G" / "M"
-    mod.mkdir(parents=True)
-    (mod / "x.txt").write_text("x", encoding="utf-8")
-    (mod / INFO_DIR_NAME).mkdir()
-    (mod / INFO_DIR_NAME / METADATA_FILENAME).write_text(
-        '{\n  "published_file_id": "96002",\n  "title": "M",\n'
-        '  "app_id": 42,\n  "game_name": "G"\n}\n',
-        encoding="utf-8",
-    )
     db.update_game_deploy_config(42, name="G", mod_path=str(mods_root))
-    db.upsert_mod(ModMetadata(published_file_id="96002", title="M", app_id=42))
+    _seed(db, library, mid="96002", title="M", files={"x.txt": "x"})
 
     deployer = ModDeployer(library_root=library, db=db)
     assert deployer.deploy_mod("96002")["success"]

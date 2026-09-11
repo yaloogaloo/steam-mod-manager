@@ -11,8 +11,9 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services import deployment_record as dr
+from services.identity_service import create_mod_identity, identity_create_scope
 from ui.library_query import ModFilterIndex
 
 
@@ -62,24 +63,28 @@ def _index(
 
 
 def _seed_deployed(db: DatabaseManager, mod_id: int, *, workspace_id: str | None = None) -> None:
-    ws = workspace_id if workspace_id is not None else str(mod_id)
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=str(mod_id),
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mod_id),
+            workshop_id=str(mod_id),
             title=f"Mod {mod_id}",
             app_id=CIV6,
+            game_name=GAME_FOLDER,
         )
-    )
+    entity_id = int(created.mod_id)
+    ws = workspace_id if workspace_id is not None else str(entity_id)
     db.update_mod_identity_fields(
-        mod_id,
-        internal_id=str(mod_id),
+        entity_id,
+        internal_id=str(entity_id),
         workspace_id=ws,
         folder_present=True,
     )
     db.update_mod_deploy_status(
-        mod_id,
+        entity_id,
         deploy_status=DEPLOY_STATUS_DEPLOYED,
-        deploy_path=f"/fake/{mod_id}",
+        deploy_path=f"/fake/{entity_id}",
     )
 
 

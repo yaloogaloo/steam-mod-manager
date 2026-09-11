@@ -30,6 +30,7 @@ from services.updated_at_authority import (
     UpdatedAtAuthorityError,
     validate_updated_at_reason,
 )
+from tests.helpers.identity import create_steam_test_mod
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -38,7 +39,7 @@ FORBIDDEN_UPDATED_AT_MODULES: tuple[str, ...] = (
     "services/content_status_eval.py",
     "services/status_recovery.py",
     "services/identity_repair.py",
-    "services/mod_identity_repair.py",
+    "services/identity_repair_service.py",
     "services/library_reconcile.py",
     "services/backup_manager.py",
     "services/offline/nexus_html_parser.py",
@@ -64,7 +65,9 @@ def _iso(offset_seconds: int = 0) -> str:
 
 def _seed(db: DatabaseManager, mid: int = 91001, *, updated_at: str | None = None) -> str:
     stamp = updated_at or _iso(1)
-    db.upsert_mod(ModMetadata(published_file_id=str(mid), title="AuthMod", app_id=42))
+    create_steam_test_mod(
+        db, external_id=str(mid), title="AuthMod", app_id=42, game_name="AuthGame"
+    )
     db._conn.execute(
         "UPDATE mods SET updated_at = ?, folder_present = 1, "
         "last_known_path = ?, content_status = ?, identity_status = ? "

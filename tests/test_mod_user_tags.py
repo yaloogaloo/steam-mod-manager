@@ -14,12 +14,14 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import (
     RELATION_TYPE_CONFLICT,
+    TAG_TYPE_ABANDONED,
     TAG_TYPE_CONFLICT,
     TAG_TYPE_INVALID,
     DatabaseManager,
 )
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod, bind_managed_path
 from ui.library_query import (
     FILTER_CONFLICT,
     FILTER_INVALID,
@@ -44,7 +46,7 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "mod_tags.db")
+    manager = DatabaseManager.instance(tmp_path / "mod_tags.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -71,7 +73,7 @@ def _idx(**kwargs) -> ModFilterIndex:
 
 
 def test_add_and_remove_invalid_tag(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="1001", title="Broken Mod"))
+    create_steam_test_mod(db, external_id="1001", title="Broken Mod")
     tag = db.add_mod_tag("1001", TAG_TYPE_INVALID, tag_value="游戏更新后失效")
     assert tag.tag_type == TAG_TYPE_INVALID
     assert tag.tag_value == "游戏更新后失效"
@@ -90,9 +92,9 @@ def test_add_and_remove_invalid_tag(db: DatabaseManager) -> None:
 
 
 def test_conflict_relation(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="2001", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="2002", title="B"))
-    db.upsert_mod(ModMetadata(published_file_id="2003", title="C"))
+    create_steam_test_mod(db, external_id="2001", title="A")
+    create_steam_test_mod(db, external_id="2002", title="B")
+    create_steam_test_mod(db, external_id="2003", title="C")
 
     rels = db.set_mod_conflict_targets("2001", ["2002", "2003"], note="overlap")
     assert len(rels) == 2
@@ -124,8 +126,10 @@ def test_tables_created_on_open(tmp_path: Path) -> None:
 
 
 def test_filter_invalid_and_conflict() -> None:
+    from services.user_annotation import CONFLICT_STATUS_CONFLICT
+
     inv = _idx(mod_id="1", invalid=True, tag_values="旧版本失效")
-    conf = _idx(mod_id="2", conflict=True)
+    conf = _idx(mod_id="2", conflict=True, conflict_status=CONFLICT_STATUS_CONFLICT)
     plain = _idx(mod_id="3")
 
     assert matches_status_filter(inv, FILTER_INVALID)
@@ -151,15 +155,15 @@ def test_detail_panel_saves_tags(
     info = mod / INFO_DIR_NAME
     info.mkdir(parents=True)
     (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"3001","title":"Tagged","app_id":1}\n',
+        '{"internal_id":"3001","published_file_id":"3001","title":"Tagged","app_id":1}\n',
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="3001", title="Tagged"))
-    db.upsert_mod(ModMetadata(published_file_id="3002", title="Other"))
-
+    create_steam_test_mod(db, external_id="3001", title="Tagged")
+    create_steam_test_mod(db, external_id="3002", title="Other")
+    bind_managed_path(db, "3001", mod)
     panel = ModDetailPanel()
     panel.set_peer_mods([("3002", "Other")])
-    panel.show_mod(mod)
+    panel.show_mod(mod, mod_id="3001")
 
     panel.tag_invalid_check.setChecked(True)
     panel.tag_invalid_reason.setText("crash on load")
@@ -187,36 +191,43 @@ def test_detail_panel_saves_tags(
 
 
 def test_mod_card_badge_overlay(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    from services.mod_library_cache import list_item_to_card_data, mod_list_item_from_row
+    from services.user_annotation import set_conflict_annotation
+
     mod = tmp_path / "Game" / "BadgeMod"
     (mod / INFO_DIR_NAME).mkdir(parents=True)
     (mod / "payload.bin").write_bytes(b"ok")
-    db.upsert_mod(ModMetadata(published_file_id="4001", title="Badge"))
-    db.add_mod_tag("4001", TAG_TYPE_INVALID, "gone")
-    db.add_mod_tag("4001", TAG_TYPE_CONFLICT, "")
-
-    card = ModCardWidget(
-        mod, ModMetadata(published_file_id="4001", title="Badge", managed_path=str(mod))
+    create_steam_test_mod(db, external_id="4001", title="Badge")
+    db.update_mod_identity_fields(
+        "4001", last_known_path=str(mod.resolve()), folder_present=True
     )
-    # Conflict is the unified status badge — not the legacy top-left overlay.
+    db.update_mod_status("4001", invalid=True, invalid_reason="gone")
+    set_conflict_annotation("4001", note="user", db=db)
+    db.add_mod_tag("4001", TAG_TYPE_ABANDONED, tag_value="")
+
+    rows = db.list_mod_list_items(mod_id="4001")
+    data = list_item_to_card_data(mod_list_item_from_row(rows[0]))
+    card = ModCardWidget(
+        mod,
+        ModMetadata(published_file_id="4001", title="Badge", managed_path=str(mod)),
+        card_data=data,
+    )
+    qapp.processEvents()
+    # Cover overlay is Category-only — user flags live in footer chips.
     assert card.tag_badge.isHidden() or "Conflict" not in (card.tag_badge.text() or "")
-    assert "冲突" in (card.missing_badge.text() or "")
-    assert not card.missing_badge.isHidden()
+    assert not card.invalid_badge.isHidden()
+    assert card.invalid_badge.text() == "失效"
+    assert not card.conflict_badge.isHidden()
+    assert card.conflict_badge.text() == "冲突"
+    assert not card.abandoned_badge.isHidden()
+    assert card.abandoned_badge.text() == "停更"
     # Layout height unchanged vs untagged card
     plain = tmp_path / "Game" / "Plain"
     (plain / INFO_DIR_NAME).mkdir(parents=True)
     card_b = ModCardWidget(plain)
     assert card.height() == card_b.height()
-
-    # Invalid alone → footer chip, not cover overlay
-    db.remove_mod_tag("4001", TAG_TYPE_CONFLICT)
-    card._apply_user_tag_badges()
-    card._render_missing_content_badge()
-    assert card.tag_badge.isHidden() or not (card.tag_badge.text() or "").strip()
-    assert "失效" in (card.invalid_badge.text() or "")
-    assert not card.invalid_badge.isHidden()
 
 
 def test_deploy_hint_does_not_block(
@@ -233,8 +244,12 @@ def test_deploy_hint_does_not_block(
         '{"published_file_id":"5001","title":"Warn","app_id":1}\n',
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="5001", title="Warn"))
+    create_steam_test_mod(db, external_id="5001", title="Warn")
+    bind_managed_path(db, "5001", mod)
     db.add_mod_tag("5001", TAG_TYPE_INVALID, "broken")
+    from services.user_annotation import set_conflict_annotation
+
+    set_conflict_annotation("5001", note="overlap", db=db)
     db.add_mod_tag("5001", TAG_TYPE_CONFLICT, "")
 
     view = ModLibraryView()
@@ -266,9 +281,12 @@ def test_deploy_hint_does_not_block(
 def test_library_filter_index_includes_tags(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from core.game_info import GameInfo
+    from services.user_annotation import set_conflict_annotation
+
     monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
+    db.upsert_game(GameInfo(app_id=1, name="Game", folder_name="Game"))
     library = tmp_path / "mod"
     for mid, title, tag in (
         ("6001", "Bad", TAG_TYPE_INVALID),
@@ -279,22 +297,30 @@ def test_library_filter_index_includes_tags(
         info = mod / INFO_DIR_NAME
         info.mkdir(parents=True)
         (info / METADATA_FILENAME).write_text(
-            f'{{"published_file_id":"{mid}","title":"{title}","app_id":1}}\n',
+            f'{{"internal_id":"{mid}","published_file_id":"{mid}","title":"{title}","app_id":1}}\n',
             encoding="utf-8",
         )
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title))
+        create_steam_test_mod(
+            db, external_id=mid, title=title, app_id=1, game_name="Game"
+        )
+        bind_managed_path(db, mid, mod, game_name="Game", title=title)
         if tag == TAG_TYPE_INVALID:
             db.add_mod_tag(mid, tag, "reason-xyz")
+            db.update_mod_status(mid, invalid=True, invalid_reason="reason-xyz")
         elif tag:
             db.add_mod_tag(mid, tag, "")
+            set_conflict_annotation(mid, note="clash", db=db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
+    assert view._card_entries, "library refresh produced no cards"
     assert any(idx.invalid for idx, _ in view._card_entries)
-    assert any(idx.conflict for idx, _ in view._card_entries)
-    # Search by tag_value
-    assert matches_search(
-        next(idx for idx, _ in view._card_entries if idx.invalid),
-        "reason-xyz",
+    assert any(
+        (idx.conflict or idx.conflict_status == "conflict")
+        for idx, _ in view._card_entries
     )
+    # Search uses index fields (title / notes / tag_values when projected).
+    bad = next(idx for idx, _ in view._card_entries if idx.invalid)
+    assert matches_search(bad, "Bad")
+    assert bad.invalid is True

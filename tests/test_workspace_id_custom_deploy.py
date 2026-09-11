@@ -18,6 +18,7 @@ from core.mod_platform import (
 from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.file_ops import INFO_DIR_NAME
+from tests.helpers.identity import create_steam_test_mod, bind_managed_path
 
 
 @pytest.fixture()
@@ -52,7 +53,10 @@ def test_resolve_workspace_id_rules() -> None:
 
 
 def test_steam_upsert_sets_workspace_id(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="4242", title="Steam Mod", app_id=100))
+    # Workspace ID is assigned on IdentityService create (not catalog upsert mint).
+    create_steam_test_mod(
+        db, external_id="4242", title="Steam Mod", app_id=100, game_name="SomeGame"
+    )
     info = db.get_mod_display_info(4242)
     assert info is not None
     assert info.workspace_id == "4242"
@@ -202,20 +206,10 @@ def test_custom_deploy_path_copies_contents_not_shell(
         encoding="utf-8",
     )
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="88001",
-            title="SpecialMod",
-            app_id=100,
-            managed_path=str(managed),
-        )
+    create_steam_test_mod(
+        db, external_id="88001", title="SpecialMod", app_id=100, game_name="SomeGame"
     )
-    db.update_mod_identity_fields(
-        "88001",
-        internal_id="88001",
-        last_known_path=str(managed.resolve()),
-        folder_present=True,
-    )
+    bind_managed_path(db, "88001", managed.resolve())
     custom = tmp_path / "game_root" / "custom_target"
     custom.mkdir(parents=True)
     db.update_mod_user_metadata(

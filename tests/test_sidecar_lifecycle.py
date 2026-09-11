@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 
 pytest.importorskip("PySide6")
 
@@ -38,7 +39,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def test_import_materialize_still_writes_sidecar() -> None:
     src = inspect.getsource(materialize_mod)
-    assert "write_sidecar_for_mod" in src
+    assert "ensure_registration_info_proof" in src
 
 
 def test_write_sidecar_for_mod_updates_json(
@@ -51,9 +52,9 @@ def test_write_sidecar_for_mod_updates_json(
         json.dumps({"published_file_id": "92001", "title": "Old"}),
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="92001", title="Old", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="92001", title="Old")
+    bind_managed_path(db, "92001", folder, title="Old")
+
     db.update_mod_user_metadata(
         "92001",
         {
@@ -76,24 +77,24 @@ def test_write_sidecar_for_mod_updates_json(
 def test_detail_show_mod_is_readonly_no_sidecar_apply(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
+    created = create_steam_test_mod(db, external_id="92002", title="T")
+    mid = str(created.mod_id)
     folder = tmp_path / "Game" / "Mod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": "92002",
-                "title": "T",
-                "display_name": "Sidecar Title",
-                "url": "https://example.com/m",
-                "source_type": "nexus",
-            }
-        ),
-        encoding="utf-8",
+    folder.mkdir(parents=True)
+    write_info_sidecar(
+        folder,
+        internal_id=mid,
+        title="T",
+        external_id="92002",
+        workspace_id=str(created.workspace_id or "92002"),
+        platform="nexus",
+        extra={
+            "display_name": "Sidecar Title",
+            "url": "https://example.com/m",
+            "source_type": "nexus",
+        },
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="92002", title="T", managed_path=str(folder))
-    )
+    bind_managed_path(db, mid, folder, title="T")
 
     calls: list[str] = []
     import services.info_sidecar as side_mod
@@ -112,7 +113,7 @@ def test_detail_show_mod_is_readonly_no_sidecar_apply(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
     # Phase 3-B: Detail open is pure-read — no sidecar→DB write, no backup sync.
     assert calls == [], "detail show_mod must not apply sidecar (read-only)"

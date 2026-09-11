@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,22 +9,31 @@ import pytest
 
 from core.db_manager import DatabaseManager, DEPLOY_STATUS_FAILED, DEPLOY_STATUS_NOT_DEPLOYED
 from core.game_info import GameInfo
-from core.mod_platform import FILE_TYPE_MAIN, PLATFORM_MODIO, ModFileEntry, ModFilesBundle
-from core.models import ModMetadata
+from core.mod_platform import (
+    FILE_TYPE_MAIN,
+    PLATFORM_MODIO,
+    PLATFORM_STEAM,
+    ModFileEntry,
+    ModFilesBundle,
+)
 from services.deploy import ModDeployer
 from services.deploy_errors import DeploySourceError
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_status import CONTENT_CONTENT_MISSING, CONTENT_HEALTHY
 from services.local_file_index import has_local_mod_payload
 from services.metadata_refresh import MetadataRefreshResult
 from services.mod_refresh import refresh_mod, reconcile_local_state
 from services.mod_source_integrity import has_deployable_source, validate_source
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "refresh_deploy_isolation.db")
+    manager = DatabaseManager.instance(tmp_path / "refresh_deploy_isolation.db")
     manager.upsert_game(GameInfo(app_id=100, name="Game", folder_name="Game"))
     manager.upsert_game(
         GameInfo(app_id=1086940, name="Baldur's Gate 3", folder_name="BG3")
@@ -44,36 +52,26 @@ def _modio_folder(
 ) -> Path:
     library = tmp_path / "library"
     mod = library / "BG3" / folder
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": folder,
-                "app_id": 1086940,
-                "platform": PLATFORM_MODIO,
-                "url": "https://mod.io/g/baldursgate3/m/example-mod",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    mod.mkdir(parents=True)
+    created = create_steam_test_mod(
+        db, external_id=mid, title=folder, app_id=1086940, game_name="BG3"
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=folder,
-            app_id=1086940,
-            game_name="BG3",
-            source_type=PLATFORM_MODIO,
-        )
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title=folder,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=1086940,
+        game_name="BG3",
+        platform=PLATFORM_STEAM,
+        extra={
+            "platform": PLATFORM_MODIO,
+            "url": "https://mod.io/g/baldursgate3/m/example-mod",
+        },
     )
-    db.update_mod_identity_fields(
-        mid,
-        folder_present=True,
-        last_known_path=str(mod),
-        platform=PLATFORM_MODIO,
-    )
+    bind_managed_path(db, created.mod_id, mod, title=folder, game_name="BG3")
+    db.update_mod_identity_fields(mid, platform=PLATFORM_MODIO)
     return mod
 
 

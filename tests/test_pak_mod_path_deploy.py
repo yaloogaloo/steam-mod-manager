@@ -11,14 +11,13 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from core.mod_platform import PLATFORM_NEXUS
 from services.deploy import ModDeployer
 from services.deploy_rules import DEPLOY_TYPE_FOLDER_COPY, DEPLOY_TYPE_PAK_MOD_PATH
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.importers.archive import ArchiveImporter
 from services.importers.importer_base import ImportContext
 from ui.edit_mod_dialog import EditModDialog
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 
 BG3_APP_ID = 1086940
 
@@ -43,20 +42,6 @@ def db(tmp_path: Path) -> DatabaseManager:
     )
     yield manager
     DatabaseManager.reset_instance()
-
-
-def _write_meta(mod_dir: Path, *, mid: str, title: str, app_id: int) -> None:
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "internal_id": "{mid}",\n'
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{title}",\n'
-        f'  "app_id": {app_id}\n'
-        "}\n",
-        encoding="utf-8",
-    )
 
 
 def _make_zip(path: Path, mapping: dict[str, bytes]) -> Path:
@@ -87,7 +72,7 @@ def test_bg3_zip_pak_deploys_flat_to_mod_path(
     result = ArchiveImporter(db=db).import_mod(
         archive_path=zpath,
         platform=PLATFORM_NEXUS,
-        nexus_id="bg3-1",
+        nexus_id="910001",
         title="CoolPakMod",
         library_root=library,
         context=ImportContext(game_id=BG3_APP_ID, game_name="Baldur's Gate 3"),
@@ -111,7 +96,6 @@ def test_generic_game_without_pak_keeps_folder_copy(
     mod = library / "SomeGame" / "PlainMod"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("A", encoding="utf-8")
-    _write_meta(mod, mid="81001", title="PlainMod", app_id=100)
 
     db.update_game_deploy_config(
         100,
@@ -119,7 +103,17 @@ def test_generic_game_without_pak_keeps_folder_copy(
         mod_path=str(mods_root),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(ModMetadata(published_file_id="81001", title="PlainMod", app_id=100))
+    created = create_steam_test_mod(db, external_id="81001", title="PlainMod", app_id=100)
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title="PlainMod",
+        external_id="81001",
+        workspace_id=str(created.workspace_id or "81001"),
+        app_id=100,
+        game_name="SomeGame",
+    )
+    bind_managed_path(db, created.mod_id, mod, title="PlainMod", game_name="SomeGame")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("81001")
     assert result["success"] is True
@@ -135,24 +129,23 @@ def test_custom_deploy_path_overrides_pak_mod_path(
     managed = library / "BG3" / "CustomPak"
     managed.mkdir(parents=True)
     (managed / "Override.pak").write_bytes(b"OVERRIDE")
-    _write_meta(managed, mid="82001", title="CustomPak", app_id=BG3_APP_ID)
 
     custom = tmp_path / "custom_target"
     custom.mkdir()
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="82001",
-            title="CustomPak",
-            app_id=BG3_APP_ID,
-            managed_path=str(managed),
-        )
+    created = create_steam_test_mod(
+        db, external_id="82001", title="CustomPak", app_id=BG3_APP_ID
     )
-    db.update_mod_identity_fields(
-        "82001",
-        internal_id="82001",
-        last_known_path=str(managed.resolve()),
-        folder_present=True,
+    write_info_sidecar(
+        managed,
+        internal_id=str(created.mod_id),
+        title="CustomPak",
+        external_id="82001",
+        workspace_id=str(created.workspace_id or "82001"),
+        app_id=BG3_APP_ID,
+        game_name="Baldur's Gate 3",
     )
+    bind_managed_path(db, created.mod_id, managed, title="CustomPak")
+
     db.update_mod_user_metadata(
         82001,
         {

@@ -46,7 +46,9 @@ _MAIN_ROLES = frozenset(
         FILE_ROLE_STEAM_CONTENT,
     }
 )
-# Roles that map to Detail panel Main / Source badges (exclusive assignment).
+# Roles that map to Detail panel Main / Source badges.
+# GitHub allows multiple Main and multiple Source; Steam/Nexus mapping
+# callers that still use exclusive ``set_file_role_mapping`` keep one-of-each.
 _BADGE_MAIN_ROLES = frozenset(
     {
         FILE_ROLE_NEXUS_MAIN,
@@ -224,6 +226,50 @@ class ModFileManager:
         self._database().set_mod_files(mod_id, bundle)
         return target
 
+    def set_file_badge_role(
+        self,
+        mod_id: int | str,
+        file_id: str,
+        kind: str | None,
+        *,
+        platform: str | None = None,
+    ) -> ModFilesBundle:
+        """
+        Set Main / Source / Other on **one** FileEntry.
+
+        Other files are left unchanged. GitHub may therefore have many Main
+        and many Source files. Source is never selected for deploy.
+        """
+        fid = str(file_id or "").strip()
+        plat = self._resolve_badge_platform(mod_id, platform)
+        bundle = self._database().get_mod_files(mod_id)
+        target = bundle.find(fid)
+        if target is None:
+            return bundle
+        label = str(kind or "").strip().casefold()
+        if label == "main":
+            target.file_role = main_role_for_platform(plat)
+            target.set_selection(True)
+        elif label == "source":
+            target.file_role = source_role_for_platform(plat)
+            # Source is never deployed.
+            target.set_selection(False)
+        else:
+            target.file_role = FILE_ROLE_UNKNOWN
+            target.set_selection(False)
+        return self._database().set_mod_files(mod_id, bundle)
+
+    def _resolve_badge_platform(
+        self, mod_id: int | str, platform: str | None
+    ) -> str:
+        plat = platform
+        if not plat:
+            meta = self._database().get_mod(mod_id)
+            plat = getattr(meta, "platform", None) if meta is not None else None
+        plat = normalize_platform(plat) if plat else ""
+        # Prefer GitHub release/source roles when platform unknown.
+        return plat or PLATFORM_GITHUB
+
     def set_file_role_mapping(
         self,
         mod_id: int | str,
@@ -233,28 +279,22 @@ class ModFileManager:
         platform: str | None = None,
     ) -> ModFilesBundle:
         """
-        Assign exclusive Main / Source badge roles.
+        Apply Main / Source roles to the given file ids.
 
-        At most one file is Main and one is Source. Replaced former Main/Source
-        files are reset to ``FILE_ROLE_UNKNOWN``. If both ids point at the same
-        file, Main wins and Source is cleared.
+        GitHub: only those files change; other Main/Source entries stay.
+        Steam / Nexus: former exclusive one-Main + one-Source behaviour
+        (other badge roles reset to unknown) so those platforms stay unchanged.
+        If both ids point at the same file, Main wins and Source is skipped.
         """
         main_id = str(main_file_id or "").strip()
         source_id = str(source_file_id or "").strip()
         if main_id and source_id and main_id == source_id:
             source_id = ""
 
-        plat = platform
-        if not plat:
-            meta = self._database().get_mod(mod_id)
-            plat = getattr(meta, "platform", None) if meta is not None else None
-        plat = normalize_platform(plat) if plat else ""
-        # Prefer GitHub release/source roles when platform unknown but entries look GitHub.
-        if not plat:
-            plat = PLATFORM_GITHUB
-
+        plat = self._resolve_badge_platform(mod_id, platform)
         main_role = main_role_for_platform(plat)
         source_role = source_role_for_platform(plat)
+        exclusive = plat not in ("", PLATFORM_GITHUB)
 
         bundle = self._database().get_mod_files(mod_id)
         known_ids = {f.id for f in bundle.files}
@@ -274,7 +314,9 @@ class ModFileManager:
                 # Source is never deployed.
                 entry.set_selection(False)
                 continue
-            if role in _BADGE_MAIN_ROLES or role in _BADGE_SOURCE_ROLES:
+            if exclusive and (
+                role in _BADGE_MAIN_ROLES or role in _BADGE_SOURCE_ROLES
+            ):
                 entry.file_role = FILE_ROLE_UNKNOWN
                 entry.set_selection(False)
         return self._database().set_mod_files(mod_id, bundle)

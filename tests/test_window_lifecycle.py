@@ -112,7 +112,11 @@ def test_import_dialog_construct_spawns_no_orphan_radios(
     dlg.exec()
     qapp.processEvents()
     assert _visible_control_toplevels() == []
+    dlg.close()
+    dlg.deleteLater()
     host.close()
+    host.deleteLater()
+    qapp.processEvents()
 
 
 def test_import_single_mod_exec_spawns_no_orphan_floats(
@@ -147,6 +151,8 @@ def test_import_single_mod_exec_spawns_no_orphan_floats(
     assert after == []
     assert _visible_control_toplevels() == []
     view.close()
+    view.deleteLater()
+    qapp.processEvents()
 
 
 def test_ownership_guard_refuses_parentless_control_show(qapp: QApplication) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
+from services.mod_library_cache import ModCardData
 from ui.mod_card import OFFLINE_MISSING_LABEL, ModCardWidget, _elide_to_lines
 
 
@@ -34,63 +34,65 @@ def _mod_dir(tmp_path: Path, name: str, *, offline: bool = True) -> Path:
     return mod
 
 
+def _card_data(
+    *,
+    mid: str,
+    path: Path,
+    title: str,
+    has_offline: bool,
+    offline_status: str = "none",
+    json_display_name: str = "",
+) -> ModCardData:
+    return ModCardData(
+        id=mid,
+        title=title,
+        platform="steam",
+        cover="",
+        description="",
+        tags="",
+        size=0,
+        updated_time=0.0,
+        managed_path=str(path),
+        game_folder="Game",
+        steam_name=title,
+        json_display_name=json_display_name,
+        has_offline=has_offline,
+        offline_status=offline_status,
+    )
+
+
 def test_cards_same_height_short_vs_long_display_name(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: QApplication, tmp_path: Path
 ) -> None:
     short = _mod_dir(tmp_path, "ShortMod")
     long = _mod_dir(tmp_path, "LongMod")
 
-    short_info = MagicMock(
-        steam_name="Short",
-        display_name="Short",
-        user_display_name="",
-        favorite=False,
-        platform="steam",
-        source_url="",
-        external_id="1",
-        mod_version="",
-        installed_version="",
-        offline_status="archived",
+    long_display = (
+        "用户自定义超长显示名称用于验证两行截断与卡片高度一致"
+        "再追加更多文字确保超出两行"
     )
-    long_info = MagicMock(
-        steam_name="Original Steam Workshop Title That Is Quite Long",
-        display_name=(
-            "用户自定义超长显示名称用于验证两行截断与卡片高度一致"
-            "再追加更多文字确保超出两行"
-        ),
-        user_display_name="用户自定义超长显示名称用于验证两行截断与卡片高度一致再追加更多文字确保超出两行",
-        favorite=True,
-        platform="steam",
-        source_url="",
-        external_id="2",
-        mod_version="",
-        installed_version="",
-        offline_status="archived",
-    )
-
-    def fake_get_info(mod_id: str):
-        return {"1": short_info, "2": long_info}.get(str(mod_id))
-
-    db = MagicMock()
-    db.get_mod_display_info.side_effect = fake_get_info
-    db.get_mod_deploy_info.return_value = None
-    db.get_mod_status.return_value = None
-    db.is_mod_enabled.return_value = True
-    db.get_mods_tag_flags.return_value = {}
-    db.get_relationship_counts.return_value = {}
-    db.get_mod_tags.return_value = []
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
 
     card_a = ModCardWidget(
         short,
-        ModMetadata(published_file_id="1", title="Short", managed_path=str(short)),
+        ModMetadata(published_file_id="1", internal_id="1", title="Short", managed_path=str(short)),
+        card_data=_card_data(mid="1", path=short, title="Short", has_offline=True, offline_status="archived"),
     )
     card_b = ModCardWidget(
         long,
         ModMetadata(
             published_file_id="2",
+            internal_id="2",
             title="Original Steam Workshop Title That Is Quite Long",
             managed_path=str(long),
+            json_display_name=long_display,
+        ),
+        card_data=_card_data(
+            mid="2",
+            path=long,
+            title=long_display,
+            has_offline=True,
+            offline_status="archived",
+            json_display_name=long_display,
         ),
     )
 
@@ -101,10 +103,10 @@ def test_cards_same_height_short_vs_long_display_name(
     assert not hasattr(card_a, "steam_label")
     assert not hasattr(card_a, "meta_label")
     # Hover panel removed — title tooltip only.
-    assert card_b.toolTip() == long_info.display_name
+    assert card_b.toolTip() == long_display
     assert "…" in card_b.title_label.text() or "..." in card_b.title_label.text() or len(
         card_b.title_label.text()
-    ) < len(long_info.display_name)
+    ) < len(long_display)
 
 
 def test_elide_to_lines_caps_at_two() -> None:
@@ -120,8 +122,26 @@ def test_offline_missing_keeps_same_height(
 ) -> None:
     with_page = _mod_dir(tmp_path, "WithPage", offline=True)
     without = _mod_dir(tmp_path, "NoPage", offline=False)
-    a = ModCardWidget(with_page)
-    b = ModCardWidget(without)
+    a = ModCardWidget(
+        with_page,
+        card_data=_card_data(
+            mid="10",
+            path=with_page,
+            title="WithPage",
+            has_offline=True,
+            offline_status="archived",
+        ),
+    )
+    b = ModCardWidget(
+        without,
+        card_data=_card_data(
+            mid="11",
+            path=without,
+            title="NoPage",
+            has_offline=False,
+            offline_status="none",
+        ),
+    )
     assert a.height() == b.height()
     assert a.status_strip.height() == b.status_strip.height()
     assert a.offline_badge.isHidden()

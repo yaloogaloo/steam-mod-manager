@@ -388,16 +388,8 @@ def build_sidecar_from_db(
         except Exception:  # noqa: BLE001
             row = None
         proof_internal = str((row or {}).get("internal_id") or "").strip()
-        if not proof_internal:
-            proof_internal = str(info.mod_id or mod_id).strip()
-        if not str((row or {}).get("internal_id") or "").strip() and proof_internal:
-            try:
-                database.update_mod_identity_fields(
-                    str(info.mod_id or mod_id),
-                    internal_id=proof_internal,
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        # Never collapse empty TEXT onto str(mod_id). Create mints a durable
+        # UUID before sidecar write. Existing collapsed rows keep their value.
 
     sidecar = InfoSidecar(
         display_name=display_name,
@@ -454,9 +446,6 @@ def write_sidecar_for_mod(
         patch: dict[str, Any] = {}
         if sidecar.internal_id:
             patch["internal_id"] = sidecar.internal_id
-        elif mid:
-            # Historical rows may store entity key only as PK until UUID backfill.
-            patch["internal_id"] = mid
         if info is not None:
             if int(getattr(info, "app_id", 0) or 0) > 0:
                 patch["app_id"] = int(info.app_id)
@@ -552,29 +541,22 @@ def ensure_registration_info_proof(
 def _apply_roles_to_bundle(
     bundle: ModFilesBundle, roles: Mapping[str, str], *, platform: str
 ) -> ModFilesBundle:
-    """Apply Main/Source labels from sidecar onto scanned/existing entries."""
-    from services.mod_files import main_role_for_platform, source_role_for_platform
+    """Apply Main/Source labels from sidecar onto scanned/existing entries.
 
-    main_id = ""
-    source_id = ""
-    for entry in bundle.files:
-        name = str(entry.filename or Path(entry.path or "").name or "").strip()
-        label = roles.get(name, "")
-        if label == ROLE_MAIN and not main_id:
-            main_id = str(entry.id or "")
-        elif label == ROLE_SOURCE and not source_id:
-            source_id = str(entry.id or "")
+    Each filename keeps its own label. Multiple Main / Source keys are all
+    applied — first-wins is not used.
+    """
+    from services.mod_files import main_role_for_platform, source_role_for_platform
 
     main_role = main_role_for_platform(platform)
     source_role = source_role_for_platform(platform)
     for entry in bundle.files:
-        eid = str(entry.id or "")
         name = str(entry.filename or Path(entry.path or "").name or "").strip()
         label = roles.get(name, ROLE_OTHER)
-        if eid == main_id or label == ROLE_MAIN:
+        if label == ROLE_MAIN:
             entry.file_role = main_role
             # Role only — never force Main checked (user may uncheck for deploy).
-        elif eid == source_id or label == ROLE_SOURCE:
+        elif label == ROLE_SOURCE:
             entry.file_role = source_role
             # Source is never deployed.
             entry.set_selection(False)
@@ -612,7 +594,8 @@ def apply_sidecar_to_db(
     pub = str(sidecar.published_file_id or "").strip()
     if is_internal_mod_id(pub):
         pub = ""
-    mid = str(mod_id or pub or "").strip()
+    # Entity PK only — never fall back to Workshop published_file_id.
+    mid = str(mod_id or getattr(sidecar, "internal_id", "") or "").strip()
     if not mid or not mid.isdigit():
         return False
 
@@ -815,12 +798,13 @@ def rescan_mod_folder(
     mid = str(mod_id or "").strip()
     if not mid:
         sidecar = load_info_sidecar(root)
-        if sidecar and sidecar.published_file_id:
-            mid = sidecar.published_file_id
+        if sidecar is not None:
+            mid = str(getattr(sidecar, "internal_id", "") or "").strip()
+            # Never treat Workshop published_file_id as entity PK.
     if not mid:
         data = read_info_metadata_dict(root)
         if data:
-            mid = str(data.get("published_file_id") or "").strip()
+            mid = str(data.get("internal_id") or "").strip()
 
     existing = database.get_mod_files(mid) if mid and mid.isdigit() else ModFilesBundle()
     # Prefer sidecar roles when present (portable copy).

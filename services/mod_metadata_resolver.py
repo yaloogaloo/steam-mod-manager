@@ -89,9 +89,12 @@ def _pick_canonical_visible_folder(mod_id: str, folders: list[Path]) -> Path:
 
 @dataclass
 class ResolvedModMetadata:
-    """Display payload after applying .info / backup / SQLite priority."""
+    """Display payload after applying .info / backup / SQLite priority.
 
-    published_file_id: str
+    ``internal_id`` is ``mods.mod_id``. Never store Workshop ID here.
+    """
+
+    internal_id: str
     display_name: str = ""
     description: str = ""
     platform: str = PLATFORM_STEAM
@@ -110,10 +113,27 @@ class ResolvedModMetadata:
     app_id: int = 0
     favorite: bool = False
     user_notes: str = ""
+    external_id: str = ""
+
+    @property
+    def published_file_id(self) -> str:
+        """Deprecated alias of ``internal_id`` — do not use for Steam Workshop."""
+        return self.internal_id
 
     def to_mod_metadata(self) -> ModMetadata:
+        from services.identity_service import sidecar_published_file_id
+
+        mid = str(self.internal_id or "").strip()
+        ext = str(self.external_id or "").strip()
+        if not ext and self.platform == PLATFORM_STEAM:
+            # Steam workspace_id is often the Workshop ID (display/registration).
+            ext = str(self.workspace_id or "").strip()
+        pub = sidecar_published_file_id(
+            mod_id=mid, platform=self.platform, external_id=ext
+        )
         meta = ModMetadata(
-            published_file_id=self.published_file_id,
+            published_file_id=pub,
+            internal_id=mid,
             title=self.title or self.display_name,
             description=self.description,
             app_id=int(self.app_id or 0),
@@ -227,6 +247,11 @@ class ModMetadataResolver:
             backup_meta.get("workspace_id"),
             getattr(display, "workspace_id", "") if display else "",
         )
+        external_id = _first_text(
+            info_owned.get("external_id"),
+            backup_meta.get("external_id"),
+            getattr(display, "external_id", "") if display else "",
+        )
         cover_backup = None if backup_foreign else backup
         cover = self._cover_existing(root, info_owned, cover_backup, sqlite)
         offline_backup = None if backup_foreign else backup
@@ -251,12 +276,13 @@ class ModMetadataResolver:
             or 0
         )
         return ResolvedModMetadata(
-            published_file_id=str(mid),
+            internal_id=str(mid),
             display_name=display_name,
             description=description,
             platform=normalize_platform(platform),
             source_url=source_url,
             workspace_id=workspace_id,
+            external_id=external_id,
             cover_path=str(cover) if cover else "",
             offline_path=str(offline) if offline else "",
             tags=tags,
@@ -336,6 +362,10 @@ class ModMetadataResolver:
             bmeta.get("workspace_id"),
             getattr(display, "workspace_id", "") if display else "",
         )
+        external_id = _first_text(
+            bmeta.get("external_id"),
+            getattr(display, "external_id", "") if display else "",
+        )
         cover = self._cover_missing(mid, backup, sqlite, display)
         offline = self._offline_missing(backup, sqlite)
         deps = _dependencies_from_mapping(bmeta)
@@ -347,12 +377,13 @@ class ModMetadataResolver:
         )
         app_id = entity_app or int(bmeta.get("app_id") or 0)
         return ResolvedModMetadata(
-            published_file_id=str(mid),
+            internal_id=str(mid),
             display_name=display_name,
             description=description,
             platform=normalize_platform(platform),
             source_url=source_url,
             workspace_id=workspace_id,
+            external_id=external_id,
             cover_path=str(cover) if cover else "",
             offline_path=str(offline) if offline else "",
             tags=tags,

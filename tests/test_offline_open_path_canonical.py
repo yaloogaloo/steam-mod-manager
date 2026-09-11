@@ -6,6 +6,11 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -38,26 +43,29 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(lib: Path, *, mid: str, title: str) -> Path:
+def _seed(db: DatabaseManager, lib: Path, *, mid: str, title: str) -> tuple[str, Path]:
+    created = create_steam_test_mod(db, external_id=mid, title=title)
+    internal_id = str(created.mod_id)
     folder = lib / "Anno 1800" / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": title,
-                "workspace_id": "17863499569189047",
-                "offline_page_path": str(info / "index.html"),
-            }
-        ),
-        encoding="utf-8",
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=internal_id,
+        title=title,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        game_name="Anno 1800",
+        extra={"offline_page_path": str(folder / INFO_DIR_NAME / "index.html")},
     )
-    return folder
+    bind_managed_path(db, internal_id, folder, title=title)
+    return internal_id, folder
 
 
 def test_resolver_prefers_offline_when_both_exist(tmp_path: Path) -> None:
-    folder = _seed(tmp_path / "lib", mid="17801", title="BothLayouts")
+    folder = tmp_path / "lib" / "Anno 1800" / "BothLayouts"
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True)
+    (info / "mod.json").write_text("{}", encoding="utf-8")
     steam = folder / INFO_DIR_NAME / "index.html"
     steam.write_text("<html>steam legacy</html>", encoding="utf-8")
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
@@ -75,14 +83,16 @@ def test_resolver_prefers_offline_when_both_exist(tmp_path: Path) -> None:
 
 
 def test_resolver_falls_back_to_steam_index(tmp_path: Path) -> None:
-    folder = _seed(tmp_path / "lib", mid="17802", title="SteamOnly")
+    folder = tmp_path / "lib" / "Anno 1800" / "SteamOnly"
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True)
     steam = folder / INFO_DIR_NAME / "index.html"
     steam.write_text("<html>steam only</html>", encoding="utf-8")
     assert resolve_offline_page(folder) == steam.resolve()
 
 
 def test_resolver_offline_only(tmp_path: Path) -> None:
-    folder = _seed(tmp_path / "lib", mid="17803", title="OfflineOnly")
+    folder = tmp_path / "lib" / "Anno 1800" / "OfflineOnly"
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>offline only</html>", encoding="utf-8")
@@ -90,13 +100,17 @@ def test_resolver_offline_only(tmp_path: Path) -> None:
 
 
 def test_resolver_neither_exists(tmp_path: Path) -> None:
-    folder = _seed(tmp_path / "lib", mid="17804", title="NoOffline")
+    folder = tmp_path / "lib" / "Anno 1800" / "NoOffline"
+    folder.mkdir(parents=True)
+    (folder / INFO_DIR_NAME).mkdir(parents=True)
     assert resolve_offline_page(folder) is None
 
 
 def test_workspace_equivalent_fixture_prefers_offline(tmp_path: Path) -> None:
     """Workspace 17863499569189047 equivalent: both layouts + stale Steam path."""
-    folder = _seed(tmp_path / "lib", mid="9000000000000358", title="更大的油泵半径")
+    folder = tmp_path / "lib" / "Anno 1800" / "更大的油泵半径"
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True)
     steam = folder / INFO_DIR_NAME / "index.html"
     steam.write_text(
         "<!DOCTYPE html><html><head><title>Steam 社区 :: 错误</title></head>"
@@ -114,7 +128,7 @@ def test_workspace_equivalent_fixture_prefers_offline(tmp_path: Path) -> None:
     (folder / INFO_DIR_NAME / "metadata.json").write_text(
         json.dumps(
             {
-                "published_file_id": "9000000000000358",
+                "published_file_id": "17808",
                 "title": "更大的油泵半径",
                 "workspace_id": "17863499569189047",
                 "offline_page_path": str(steam),
@@ -133,23 +147,15 @@ def test_workspace_equivalent_fixture_prefers_offline(tmp_path: Path) -> None:
 def test_detail_panel_open_uses_canonical_resolver(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
-    folder = _seed(tmp_path / "lib", mid="17805", title="DetailOpen")
+    mid, folder = _seed(db, tmp_path / "lib", mid="17805", title="DetailOpen")
     steam = folder / INFO_DIR_NAME / "index.html"
     steam.write_text("<html>wrong steam</html>", encoding="utf-8")
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>correct offline</html>", encoding="utf-8")
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="17805",
-            title="DetailOpen",
-            offline_page_path=str(steam),
-            managed_path=str(folder),
-        )
-    )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     panel._metadata.offline_page_path = str(steam)
 
     opened: list[str] = []
@@ -164,26 +170,16 @@ def test_detail_panel_open_uses_canonical_resolver(
 
 
 def test_detail_dialog_open_uses_canonical_resolver(
-    qapp: QApplication, tmp_path: Path, monkeypatch
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
-    folder = _seed(tmp_path / "lib", mid="17806", title="DialogOpen")
+    mid, folder = _seed(db, tmp_path / "lib", mid="17806", title="DialogOpen")
     steam = folder / INFO_DIR_NAME / "index.html"
     steam.write_text("<html>wrong</html>", encoding="utf-8")
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>ok</html>", encoding="utf-8")
 
-    meta = ModMetadata(
-        published_file_id="17806",
-        title="DialogOpen",
-        offline_page_path=str(steam),
-        managed_path=str(folder),
-    )
-    # Persist stale metadata then open via dialog constructor (loads from disk).
-    from services.file_ops import ModFileManager
-
-    ModFileManager(tmp_path / "lib").save_metadata(meta, folder)
-    dialog = ModDetailDialog(folder)
+    dialog = ModDetailDialog(folder, mod_id=mid)
     dialog.metadata.offline_page_path = str(steam)
     opened: list[str] = []
     monkeypatch.setattr(
@@ -198,10 +194,10 @@ def test_detail_dialog_open_uses_canonical_resolver(
 def test_detail_panel_missing_shows_tooltip(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
-    folder = _seed(tmp_path / "lib", mid="17807", title="Missing")
-    db.upsert_mod(ModMetadata(published_file_id="17807", title="Missing"))
+    mid, folder = _seed(db, tmp_path / "lib", mid="17807", title="Missing")
+
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
 
     opened: list[str] = []
     tips: list[str] = []

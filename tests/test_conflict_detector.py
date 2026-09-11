@@ -16,6 +16,7 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -60,8 +61,8 @@ def test_same_target_is_conflict(tmp_path: Path, db: DatabaseManager) -> None:
     b = _seed_mod(library, "1002", title="B")
     _write_manifest(a, "1001", [shared])
     _write_manifest(b, "1002", [shared])
-    db.upsert_mod(ModMetadata(published_file_id="1001", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="1002", title="B"))
+    create_steam_test_mod(db, external_id="1001", title="A")
+    create_steam_test_mod(db, external_id="1002", title="B")
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert reports["1001"].status == CONFLICT_STATUS_NONE
@@ -80,8 +81,8 @@ def test_different_targets_none(tmp_path: Path, db: DatabaseManager) -> None:
     # Different directories — not FILE_OVERWRITE and not same-dir PAK_OVERLAP
     _write_manifest(a, "2001", [str((tmp_path / "game_a" / "a.pak").resolve())])
     _write_manifest(b, "2002", [str((tmp_path / "game_b" / "b.pak").resolve())])
-    db.upsert_mod(ModMetadata(published_file_id="2001", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="2002", title="B"))
+    create_steam_test_mod(db, external_id="2001", title="A")
+    create_steam_test_mod(db, external_id="2002", title="B")
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert reports["2001"].status == CONFLICT_STATUS_NONE
@@ -96,8 +97,8 @@ def test_check_mod_subset(tmp_path: Path, db: DatabaseManager) -> None:
     b = _seed_mod(library, "3002")
     _write_manifest(a, "3001", [shared])
     _write_manifest(b, "3002", [shared])
-    db.upsert_mod(ModMetadata(published_file_id="3001", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="3002", title="B"))
+    create_steam_test_mod(db, external_id="3001", title="A")
+    create_steam_test_mod(db, external_id="3002", title="B")
     report = ConflictDetector(library, db=db).check_mod(3001, persist=False)
     assert report.status == CONFLICT_STATUS_NONE
     assert report.conflicts

@@ -65,8 +65,9 @@ def resolve_materialize_game_name(
 def materialize_imported_mod(
     *,
     library_root: str | Path,
-    mod_id: str | int,
     title: str,
+    internal_id: str | int | None = None,
+    mod_id: str | int | None = None,  # deprecated alias of internal_id
     game_name: str = "",
     source_folder: str | Path | None = None,
     cover_source: str | Path | None = None,
@@ -80,6 +81,8 @@ def materialize_imported_mod(
     """
     Ensure a filesystem folder exists under the managed library.
 
+    *internal_id* is ``mods.mod_id`` (entity PK). Never pass Steam Workshop ID.
+
     - If *source_folder* is a directory → copy into ``<game>/<title>/``
     - Else → create an empty stub folder with ``.info/mod.json`` only
     - Cover images / ``.mhtml`` discovered under the source (or passed via
@@ -89,8 +92,11 @@ def materialize_imported_mod(
     Does not change ``.info`` schema — writes the existing ``mod.json`` shape.
     """
     del cover_flat_roots, cover_search_roots
-    mid = str(mod_id).strip()
+    mid = str(internal_id if internal_id is not None else mod_id or "").strip()
+    if not mid:
+        raise ValueError("internal_id is required")
     from core.models import is_unknown_mod_title, library_mod_folder_fallback
+    from services.identity_service import sidecar_published_file_id
 
     raw_title = (title or "").strip()
     # Persist a display title when provided; never invent ``Unknown_Mod_*`` for
@@ -110,9 +116,21 @@ def materialize_imported_mod(
     if is_invalid_game_name(game) and not allow_invalid_game_name:
         raise ValueError(MISSING_GAME_CONTEXT)
 
+    plat = ""
+    ext = ""
+    if context is not None:
+        plat = str(getattr(context, "platform", None) or "")
+        if not plat and isinstance(context, dict):
+            plat = str(context.get("platform") or "")
+        ext = str(getattr(context, "external_id", None) or "")
+        if not ext and isinstance(context, dict):
+            ext = str(context.get("external_id") or "")
+    pub = sidecar_published_file_id(mod_id=mid, platform=plat, external_id=ext)
+
     mgr = ModFileManager(library_root)
     meta = ModMetadata(
-        published_file_id=mid,
+        published_file_id=pub,
+        internal_id=mid,
         title=name,
         game_name=game,
         source_path=str(source_folder) if source_folder else None,
@@ -196,6 +214,13 @@ def materialize_imported_mod(
             folder_present=True,
             sync_sticky_marker=True,
         )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from services.size_observation import note_mod_size_ready
+
+        note_mod_size_ready(mid, dest)
     except Exception:  # noqa: BLE001
         pass
 

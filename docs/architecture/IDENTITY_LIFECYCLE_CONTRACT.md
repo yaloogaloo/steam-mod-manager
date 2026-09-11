@@ -39,6 +39,19 @@ Registration:  platform + app_id + workspace_id
 
 There is **no** third Mod identity.
 
+### SQLite implementation mapping
+
+Frozen `internal_id` is **not** INTEGER `mods.mod_id`.
+
+| Frozen concept | SQLite |
+|----------------|--------|
+| Entity Identity (`internal_id`) | `mods.internal_id` TEXT |
+| Platform / display (`workspace_id`) | `mods.workspace_id` |
+| Implementation PK / FK target | `mods.mod_id` INTEGER |
+
+Business callers resolve `internal_id → find_mod_by_internal_id / resolve_mod_pk → mods.mod_id → DB/FK`.
+`.info.internal_id` is filesystem registration proof of the same TEXT identity.
+
 ---
 
 ## ID Boundary

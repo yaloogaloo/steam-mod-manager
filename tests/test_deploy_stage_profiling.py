@@ -8,9 +8,12 @@ import pytest
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from services.deploy import ModDeployer
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -22,18 +25,30 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _mod_folder(library: Path, mid: str, *, files: dict[str, bytes]) -> Path:
+def _mod_folder(
+    db: DatabaseManager, library: Path, mid: str, *, files: dict[str, bytes]
+) -> Path:
     folder = library / "Palworld" / f"Mod{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"published_file_id": "{mid}", "title": "Mod{mid}", "app_id": 1623730}}',
-        encoding="utf-8",
-    )
+    folder.mkdir(parents=True)
     for name, payload in files.items():
         path = folder / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
+    created = create_steam_test_mod(
+        db, external_id=mid, title=f"Mod{mid}", app_id=1623730, game_name="Palworld"
+    )
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
+        title=f"Mod{mid}",
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=1623730,
+        game_name="Palworld",
+    )
+    bind_managed_path(
+        db, created.mod_id, folder, title=f"Mod{mid}", game_name="Palworld"
+    )
     return folder
 
 
@@ -41,7 +56,7 @@ def _deploy(tmp_path: Path, db: DatabaseManager, mid: str, files: dict[str, byte
     library = tmp_path / "mod"
     target = tmp_path / "Mods"
     target.mkdir(exist_ok=True)
-    _mod_folder(library, mid, files=files)
+    _mod_folder(db, library, mid, files=files)
     db.update_game_deploy_config(
         1623730,
         name="Palworld",
@@ -49,7 +64,7 @@ def _deploy(tmp_path: Path, db: DatabaseManager, mid: str, files: dict[str, byte
         mod_path=str(target),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Mod{mid}", app_id=1623730))
+
     out = ModDeployer(library_root=library, db=db).deploy_mod(mid)
     return out
 

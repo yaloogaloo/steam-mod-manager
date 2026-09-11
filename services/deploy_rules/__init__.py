@@ -35,6 +35,10 @@ from services.deploy_rules.duckov import (
     DuckovStrategy,
     find_duckov_mod_root,
 )
+from services.deploy_rules.warhammer3 import (
+    WARHAMMER3_APP_ID,
+    Warhammer3Strategy,
+)
 
 # Steam AppID — Civilization VI always uses generic folder_copy.
 CIVILIZATION_VI_APP_ID = next(iter(CIVILIZATION_VI_APP_IDS))
@@ -46,6 +50,7 @@ DEPLOY_TYPE_SLAY_THE_SPIRE = SlayTheSpireStrategy.deploy_type
 DEPLOY_TYPE_STARDEW_VALLEY = StardewValleyStrategy.deploy_type
 DEPLOY_TYPE_DUCKOV = DuckovStrategy.deploy_type
 DEPLOY_TYPE_PAK_MOD_PATH = PakModPathStrategy.deploy_type
+DEPLOY_TYPE_WARHAMMER3 = Warhammer3Strategy.deploy_type
 
 # Steam AppID — always use enhanced PalworldStrategy (pak rules + folder_copy fallback).
 PALWORLD_APP_ID = 1623730
@@ -58,6 +63,7 @@ _STRATEGIES: dict[str, DeployStrategy] = {
     DEPLOY_TYPE_SLAY_THE_SPIRE: SlayTheSpireStrategy(),
     DEPLOY_TYPE_STARDEW_VALLEY: StardewValleyStrategy(),
     DEPLOY_TYPE_DUCKOV: DuckovStrategy(),
+    DEPLOY_TYPE_WARHAMMER3: Warhammer3Strategy(),
     DEPLOY_TYPE_CUSTOM_PATH: CustomPathStrategy(),
 }
 
@@ -72,6 +78,9 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
     Slay the Spire (646570) always uses jar → mods/ (+ ModTheSpire root).
     Stardew Valley (413150) always uses SMAPI ``manifest.json`` → Mods/.
     Civilization VI (289070) always uses generic ``folder_copy``.
+    Total War: WARHAMMER III (1142710) always uses library activation
+    (``warhammer3_pack``): confirm local ``.pack`` files, never flatten-copy
+    into ``game.mod_path``.
     Other games keep configured type.
     """
     try:
@@ -90,6 +99,8 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
         return DEPLOY_TYPE_DUCKOV
     if aid == CIVILIZATION_VI_APP_ID:
         return DEPLOY_TYPE_FOLDER_COPY
+    if aid == WARHAMMER3_APP_ID:
+        return DEPLOY_TYPE_WARHAMMER3
     key = (deploy_type or DEPLOY_TYPE_FOLDER_COPY).strip() or DEPLOY_TYPE_FOLDER_COPY
     return key
 
@@ -135,12 +146,14 @@ __all__ = [
     "DEPLOY_TYPE_SLAY_THE_SPIRE",
     "DEPLOY_TYPE_DUCKOV",
     "DEPLOY_TYPE_STARDEW_VALLEY",
+    "DEPLOY_TYPE_WARHAMMER3",
     "DUCKOV_APP_ID",
     "DuckovStrategy",
     "PALWORLD_APP_ID",
     "PakModPathStrategy",
     "SLAY_THE_SPIRE_APP_ID",
     "STARDEW_VALLEY_APP_ID",
+    "WARHAMMER3_APP_ID",
     "Anno1800Strategy",
     "CustomPathStrategy",
     "DeployContext",
@@ -152,6 +165,7 @@ __all__ = [
     "PalworldStrategy",
     "SlayTheSpireStrategy",
     "StardewValleyStrategy",
+    "Warhammer3Strategy",
     "StrategyResult",
     "delete_manifest",
     "content_has_pak_files",

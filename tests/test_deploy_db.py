@@ -15,6 +15,7 @@ from core.db_manager import (
 )
 from core.game_info import GameInfo
 from core.models import ModMetadata
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -163,9 +164,7 @@ def test_steam_upsert_game_preserves_deploy_paths(db: DatabaseManager) -> None:
 
 def test_update_and_get_mod_deploy_status(db: DatabaseManager) -> None:
     db.update_game_deploy_config(50, name="Game", install_path="/g", mod_path="/g/m")
-    db.upsert_mod(
-        ModMetadata(published_file_id="5001", title="Mod A", app_id=50)
-    )
+    create_steam_test_mod(db, external_id="5001", title="Mod A", app_id=50)
 
     before = db.get_mod_deploy_info(5001)
     assert before is not None
@@ -186,7 +185,7 @@ def test_update_and_get_mod_deploy_status(db: DatabaseManager) -> None:
 
 def test_steam_upsert_mod_preserves_deploy_status(db: DatabaseManager) -> None:
     db.update_game_deploy_config(77, name="G")
-    db.upsert_mod(ModMetadata(published_file_id="7001", title="T1", app_id=77))
+    create_steam_test_mod(db, external_id="7001", title="T1", app_id=77)
     db.update_mod_deploy_status(
         7001,
         deploy_status=DEPLOY_STATUS_DEPLOYED,

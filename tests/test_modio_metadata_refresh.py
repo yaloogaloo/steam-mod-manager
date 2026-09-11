@@ -13,6 +13,7 @@ from core.db_manager import DatabaseManager
 from core.mod_platform import PLATFORM_MODIO, PLATFORM_STEAM
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
+from tests.helpers.identity import create_steam_test_mod
 from services.modio_api import (
     ModioClient,
     ModioModDetails,
@@ -471,9 +472,8 @@ def test_steam_routing_unchanged(
         ),
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title=f"Unknown_Mod_{mid}")
-    )
+    create_steam_test_mod(db, external_id=mid, title=f"Unknown_Mod_{mid}")
+
 
     panel = ModDetailPanel()
     panel.show_mod(folder)

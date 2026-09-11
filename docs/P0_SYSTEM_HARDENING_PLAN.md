@@ -1,7 +1,7 @@
 # P0 SYSTEM HARDENING PLAN
 
 **Status:** PLAN ONLY. Not implemented in the forensic session.  
-**Depends on:** `docs/P0_SYSTEM_FORENSICS.md`  
+**Depends on:** `_tmp/reports/P0_SYSTEM_FORENSICS.md` (local archive; regenerable / disposable)  
 **Forbidden in this plan’s first implementation slice:** UI redesign, schema rewrite, Deploy/Archive architecture rewrite, deleting tests, mocking away environment failures, applying further production repair without the verification protocol.
 
 ---

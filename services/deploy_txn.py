@@ -1,8 +1,8 @@
 """Deploy transaction lifecycle helpers — active guard + phase logging.
 
-Phases (log-only / optional txn.phase field):
-  BEGIN → BACKUP_DONE → COPY_DONE → MANIFEST_DONE → COMMITTED
-  or → ROLLBACK
+Phases (log-only / optional txn.phase field) are owned by
+``services.deployment_lifecycle``. This module keeps the in-memory active-txn
+guard and structured phase logging.
 
 Active deploy transactions must not be recovered by startup reconcile.
 """
@@ -13,14 +13,16 @@ import logging
 import threading
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from services.deployment_lifecycle import (
+    PHASE_BACKUP_DONE,
+    PHASE_BEGIN,
+    PHASE_COMMITTED,
+    PHASE_COPY_DONE,
+    PHASE_MANIFEST_DONE,
+    PHASE_ROLLBACK,
+)
 
-PHASE_BEGIN = "BEGIN"
-PHASE_BACKUP_DONE = "BACKUP_DONE"
-PHASE_COPY_DONE = "COPY_DONE"
-PHASE_MANIFEST_DONE = "MANIFEST_DONE"
-PHASE_COMMITTED = "COMMITTED"
-PHASE_ROLLBACK = "ROLLBACK"
+logger = logging.getLogger(__name__)
 
 _ROLLBACK_NOTE = "rollback completed"
 _INTERRUPTED_MSG = "interrupted deploy rolled back from transaction"
@@ -60,11 +62,6 @@ def is_active_deploy_transaction(managed: str | Path) -> bool:
     key = _norm_managed(managed)
     with _lock:
         return key in _active_managed
-
-
-def active_deploy_transaction_ids() -> frozenset[str]:
-    with _lock:
-        return frozenset(_active_managed.values())
 
 
 def log_txn_phase(
@@ -108,7 +105,6 @@ __all__ = [
     "PHASE_COPY_DONE",
     "PHASE_MANIFEST_DONE",
     "PHASE_ROLLBACK",
-    "active_deploy_transaction_ids",
     "compose_recover_deploy_error",
     "is_active_deploy_transaction",
     "log_txn_phase",

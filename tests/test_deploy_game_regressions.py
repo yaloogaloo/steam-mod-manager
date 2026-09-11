@@ -7,14 +7,17 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 from services.deploy_rules import (
     DEPLOY_TYPE_DUCKOV,
     DEPLOY_TYPE_PALWORLD_PAK,
     DEPLOY_TYPE_STARDEW_VALLEY,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 
 
 @pytest.fixture()
@@ -26,18 +29,28 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _meta(mod_dir: Path, *, mid: str, app_id: int, game: str) -> None:
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "T{mid}",\n'
-        f'  "app_id": {app_id},\n'
-        f'  "game_name": "{game}"\n'
-        "}\n",
-        encoding="utf-8",
+def _register(
+    db: DatabaseManager,
+    mod_dir: Path,
+    *,
+    mid: str,
+    title: str,
+    app_id: int,
+    game: str,
+) -> None:
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name=game
     )
+    write_info_sidecar(
+        mod_dir,
+        internal_id=str(created.mod_id),
+        title=title,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=app_id,
+        game_name=game,
+    )
+    bind_managed_path(db, created.mod_id, mod_dir, title=title, game_name=game)
 
 
 def test_palworld_18mb_fixture_pipeline(tmp_path: Path, db: DatabaseManager) -> None:
@@ -47,7 +60,6 @@ def test_palworld_18mb_fixture_pipeline(tmp_path: Path, db: DatabaseManager) -> 
     (mod / "LogicMods").mkdir(parents=True)
     payload = b"x" * (18 * 1024 * 1024)
     (mod / "LogicMods" / "big.pak").write_bytes(payload)
-    _meta(mod, mid="3780000001", app_id=1623730, game="Palworld")
 
     install = tmp_path / "game"
     (install / "Pal" / "Content" / "Paks").mkdir(parents=True)
@@ -60,8 +72,8 @@ def test_palworld_18mb_fixture_pipeline(tmp_path: Path, db: DatabaseManager) -> 
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="3780000001", title="Big", app_id=1623730)
+    _register(
+        db, mod, mid="3780000001", title="Big", app_id=1623730, game="Palworld"
     )
 
     out = ModDeployer(library_root=library, db=db).deploy_mod("3780000001")
@@ -81,7 +93,6 @@ def test_duckov_info_ini_regression(tmp_path: Path, db: DatabaseManager) -> None
     mod.mkdir(parents=True)
     (mod / "info.ini").write_text("[Mod]\nName=Good\n", encoding="utf-8")
     (mod / "payload.bin").write_bytes(b"data")
-    _meta(mod, mid="3167000001", app_id=3167020, game="Duckov")
 
     mods = tmp_path / "Mods"
     mods.mkdir()
@@ -91,8 +102,8 @@ def test_duckov_info_ini_regression(tmp_path: Path, db: DatabaseManager) -> None
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_DUCKOV,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="3167000001", title="Good", app_id=3167020)
+    _register(
+        db, mod, mid="3167000001", title="Good", app_id=3167020, game="Duckov"
     )
 
     out = ModDeployer(library_root=library, db=db).deploy_mod("3167000001")
@@ -109,7 +120,6 @@ def test_stardew_nested_manifest(tmp_path: Path, db: DatabaseManager) -> None:
     nested.mkdir(parents=True)
     (nested / "manifest.json").write_text('{"Name":"Cool"}', encoding="utf-8")
     (nested / "Cool.dll").write_bytes(b"dll")
-    _meta(mod, mid="4131500001", app_id=413150, game="StardewValley")
 
     mods = tmp_path / "Mods"
     mods.mkdir()
@@ -119,8 +129,8 @@ def test_stardew_nested_manifest(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_STARDEW_VALLEY,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="4131500001", title="Nested", app_id=413150)
+    _register(
+        db, mod, mid="4131500001", title="Nested", app_id=413150, game="StardewValley"
     )
 
     out = ModDeployer(library_root=library, db=db).deploy_mod("4131500001")

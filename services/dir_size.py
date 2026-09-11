@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 # Skip these directory names anywhere in the walk.
@@ -15,6 +16,10 @@ _INFO_DIRS = frozenset({".info", "info"})
 _LOCK = threading.Lock()
 # resolved root -> (root_mtime, total_bytes)
 _CACHE: dict[str, tuple[float, int]] = {}
+
+
+class DirectorySizeCancelled(Exception):
+    """Walk aborted because a newer observation superseded this job."""
 
 
 def _root_key(path: Path) -> str:
@@ -32,10 +37,19 @@ def _should_skip_dir(name: str, parent_name: str) -> bool:
     return False
 
 
-def directory_size(path: str | Path) -> int:
+def directory_size(
+    path: str | Path,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+    use_cache: bool = True,
+) -> int:
     """
     Sum file sizes under *path*, skipping ``.info/offline``, ``.info/assets``,
     and ``.cache`` trees. Cached until the root folder mtime changes.
+
+    A missing directory returns 0 here (legacy). Observation callers must
+    distinguish missing vs empty **before** using this value as ``ok`` bytes.
+    ``os.walk`` does not follow directory symlinks/junctions (``followlinks=False``).
     """
     root = Path(path)
     if not root.is_dir():
@@ -45,14 +59,17 @@ def directory_size(path: str | Path) -> int:
     except OSError:
         return 0
     key = _root_key(root)
-    with _LOCK:
-        hit = _CACHE.get(key)
-        if hit is not None and hit[0] == root_mtime:
-            return int(hit[1])
+    if use_cache:
+        with _LOCK:
+            hit = _CACHE.get(key)
+            if hit is not None and hit[0] == root_mtime:
+                return int(hit[1])
 
     total = 0
     try:
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+            if cancel_check is not None and cancel_check():
+                raise DirectorySizeCancelled()
             parent_name = os.path.basename(dirpath)
             dirnames[:] = [
                 name
@@ -65,6 +82,8 @@ def directory_size(path: str | Path) -> int:
                     total += os.path.getsize(file_path)
                 except OSError:
                     continue
+    except DirectorySizeCancelled:
+        raise
     except OSError:
         pass
 

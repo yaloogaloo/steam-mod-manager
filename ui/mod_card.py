@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QMimeData, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QDrag,
+    QDropEvent,
     QFont,
     QFontMetrics,
     QImage,
@@ -39,6 +41,7 @@ from core.mod_platform import (
     OFFLINE_STATUS_NONE,
     normalize_offline_status,
 )
+from services.crash_trace import log_exception, traced
 from core.models import ModMetadata
 from services.file_ops import (
     INFO_DIR_NAME,
@@ -155,6 +158,8 @@ class ModCardWidget(QFrame):
     favorite_toggle_requested = Signal(str)  # mod_id
     context_menu_opening = Signal()
     set_category_requested = Signal(str)  # category label; "" = clear
+    set_collections_requested = Signal()  # uses Library ``_selected_mod_ids``
+    sort_drop_requested = Signal(str, str)  # source internal_id, target internal_id
 
     def __init__(
         self,
@@ -170,7 +175,10 @@ class ModCardWidget(QFrame):
         self._card_data = card_data
         self._record_relative = None
         self._selected = False
-        self._category_options: list[str] = []
+        self._category_options: list[tuple[int, str]] = []
+        self._wh3_sort_mode = False
+        self._wh3_load_order = 0
+        self._wh3_drag_start = None
         self.setFixedWidth(CARD_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -245,6 +253,12 @@ class ModCardWidget(QFrame):
         self.deploy_dot.hide()
         self.deploy_dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
+        self.load_order_badge = QLabel(self.cover_label)
+        self.load_order_badge.setObjectName("modLoadOrderBadge")
+        self.load_order_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.load_order_badge.hide()
+        self.load_order_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
         self.title_label = QLabel()
         title_font = self.title_label.font()
         title_font.setBold(True)
@@ -304,6 +318,7 @@ class ModCardWidget(QFrame):
         self.missing_badge.setText("内容缺失")
         self.record_badge = _make_footer_chip("modRecordStatusChip")
         self.invalid_badge = _make_footer_chip("modFooterStatusChip")
+        self.conflict_badge = _make_footer_chip("modFooterStatusChip")
         self.disabled_badge = _make_footer_chip("modFooterStatusChip")
         self.abandoned_badge = _make_footer_chip("modFooterStatusChip")
         self.favorite_badge = _make_footer_chip("modFooterFavoriteChip")
@@ -346,6 +361,16 @@ class ModCardWidget(QFrame):
 
     def _on_cover_path_release_requested(self, path_key: str) -> None:
         """Cancel cover token and clear pixmap when this card's folder renames."""
+        from services.crash_trace import log_exception
+
+        try:
+            self._on_cover_path_release_requested_body(path_key)
+        except Exception:
+            log_exception("ModCardWidget._on_cover_path_release_requested")
+            raise
+
+    def _on_cover_path_release_requested_body(self, path_key: str) -> None:
+        """Cancel cover token and clear pixmap when this card's folder renames."""
         try:
             current = str(
                 self.managed_path.expanduser().resolve()
@@ -383,8 +408,9 @@ class ModCardWidget(QFrame):
             except (RuntimeError, TypeError):
                 pass
         except Exception:  # noqa: BLE001
-            pass
+            log_exception("ModCardWidget._on_card_destroyed")
 
+    @traced("ModCardWidget.rebind")
     def rebind(
         self,
         managed_path: Path,
@@ -433,13 +459,98 @@ class ModCardWidget(QFrame):
             )
             self.selection_requested.emit(self._mod_id())
             self.detail_requested.emit(self._mod_id())
+            if self._wh3_sort_mode:
+                self._wh3_drag_start = event.position().toPoint()
         super().mousePressEvent(event)
 
-    def set_category_options(self, options: list[str]) -> None:
-        """Game-scoped category labels for the context-menu submenu."""
-        self._category_options = [
-            str(o).strip() for o in (options or []) if str(o).strip()
-        ]
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if (
+            self._wh3_sort_mode
+            and self._wh3_drag_start is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            from PySide6.QtWidgets import QApplication
+
+            dist = (event.position().toPoint() - self._wh3_drag_start).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                self._start_wh3_sort_drag()
+                self._wh3_drag_start = None
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._wh3_drag_start = None
+        super().mouseReleaseEvent(event)
+
+    def _start_wh3_sort_drag(self) -> None:
+        mid = self._mod_id()
+        if not mid:
+            return
+        mime = QMimeData()
+        mime.setData("application/x-smm-wh3-internal-id", mid.encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        if self._accept_wh3_sort_drop(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        if self._accept_wh3_sort_drop(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        source = self._wh3_drop_source_id(event)
+        target = self._mod_id()
+        if source and target and source != target:
+            self.sort_drop_requested.emit(source, target)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def _accept_wh3_sort_drop(self, event: QDropEvent) -> bool:
+        return self._wh3_sort_mode and bool(self._wh3_drop_source_id(event))
+
+    @staticmethod
+    def _wh3_drop_source_id(event: QDropEvent) -> str:
+        mime = event.mimeData()
+        if mime is None or not mime.hasFormat("application/x-smm-wh3-internal-id"):
+            return ""
+        raw = bytes(mime.data("application/x-smm-wh3-internal-id"))
+        return raw.decode("utf-8", errors="replace").strip()
+
+    def set_wh3_sort_mode(self, enabled: bool, *, number: int = 0) -> None:
+        self._wh3_sort_mode = bool(enabled)
+        self._wh3_load_order = int(number or 0)
+        self.setAcceptDrops(self._wh3_sort_mode)
+        if self._wh3_sort_mode:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._render_load_order_badge()
+        self._render_relation_badge()
+
+    def set_category_options(self, options: list) -> None:
+        """Game-scoped Type Definitions for the context-menu submenu (id, name)."""
+        parsed: list[tuple[int, str]] = []
+        seen: set[int] = set()
+        for raw in options or []:
+            if isinstance(raw, tuple) and len(raw) >= 2:
+                try:
+                    tid = int(raw[0])
+                except (TypeError, ValueError):
+                    continue
+                name = str(raw[1] or "").strip()
+                if tid <= 0 or not name or tid in seen:
+                    continue
+                seen.add(tid)
+                parsed.append((tid, name))
+        self._category_options = parsed
 
     def _build_context_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -485,21 +596,26 @@ class ModCardWidget(QFrame):
         menu.addSeparator()
 
         cat_menu = menu.addMenu("设置分类")
-        # Virtual fallback so the submenu is never empty when no categories exist.
+        # Virtual fallback so the submenu is never empty when no types exist.
         if not self._category_options:
             act_clear = cat_menu.addAction("（未分类）")
             act_clear.triggered.connect(
                 lambda: self.set_category_requested.emit("")
             )
-        seen: set[str] = set()
-        for label in self._category_options:
-            if not label or label in seen:
+        seen: set[int] = set()
+        for tid, name in self._category_options:
+            if tid <= 0 or not name or tid in seen:
                 continue
-            seen.add(label)
-            act = cat_menu.addAction(label)
+            seen.add(tid)
+            act = cat_menu.addAction(name)
             act.triggered.connect(
-                lambda _=False, t=label: self.set_category_requested.emit(t)
+                lambda _=False, t=tid: self.set_category_requested.emit(str(t))
             )
+        act_collections = QAction("设置合集", menu)
+        act_collections.triggered.connect(
+            lambda _=False: self.set_collections_requested.emit()
+        )
+        menu.addAction(act_collections)
         return menu
 
     def _exec_context_menu(self, menu: QMenu, global_pos) -> None:
@@ -552,6 +668,7 @@ class ModCardWidget(QFrame):
     def remove_selected_style(self) -> None:
         self.set_selected(False)
 
+    @traced("ModCardWidget.refresh_display")
     def refresh_display(self) -> None:
         """Reload title / badges / tooltip from local metadata + SQLite."""
         # Never inherit another mod's relative overlay across refreshes.
@@ -564,6 +681,7 @@ class ModCardWidget(QFrame):
         self._render_deploy_indicator()
         self._render_offline_badge()
         self._render_relation_badge()
+        self._render_load_order_badge()
         self._render_missing_content_badge()
         self._render_record_badge()
         self._render_footer_status_chips()
@@ -770,11 +888,14 @@ class ModCardWidget(QFrame):
         return bool(getattr(data, "abandoned", False))
 
     def _render_footer_status_chips(self) -> None:
-        """Bottom status row, right side: invalid / disabled / abandoned / favorite."""
-        _conflict, invalid, disabled, tip_parts = self._overlay_user_flags()
+        """Bottom status row, right side: invalid / conflict / abandoned / disabled / favorite."""
+        conflict, invalid, disabled, tip_parts = self._overlay_user_flags()
         invalid_tip = "\n".join(
             p for p in tip_parts if "失效" in p
         ) or "已失效"
+        conflict_tip = "\n".join(
+            p for p in tip_parts if "冲突" in p
+        ) or "已标记冲突"
         disabled_tip = "已禁用"
         if invalid:
             self.invalid_badge.setText("失效")
@@ -791,6 +912,22 @@ class ModCardWidget(QFrame):
             self.invalid_badge.hide()
             self.invalid_badge.clear()
             self.invalid_badge.setToolTip("")
+
+        if conflict:
+            self.conflict_badge.setText("冲突")
+            self.conflict_badge.setToolTip(conflict_tip)
+            self._style_footer_chip(
+                self.conflict_badge,
+                bg=ACCENT_ERROR_BG,
+                fg=STATE_CONFLICT_FG,
+                border=STATE_CONFLICT_BORDER,
+                object_name="modFooterConflictChip",
+            )
+            self.conflict_badge.show()
+        else:
+            self.conflict_badge.hide()
+            self.conflict_badge.clear()
+            self.conflict_badge.setToolTip("")
 
         if disabled:
             self.disabled_badge.setText("停用")
@@ -846,6 +983,7 @@ class ModCardWidget(QFrame):
                 self.missing_badge,
                 self.record_badge,
                 self.invalid_badge,
+                self.conflict_badge,
                 self.disabled_badge,
                 self.abandoned_badge,
                 self.favorite_badge,
@@ -863,6 +1001,7 @@ class ModCardWidget(QFrame):
                 self.missing_badge,
                 self.record_badge,
                 self.invalid_badge,
+                self.conflict_badge,
                 self.disabled_badge,
                 self.abandoned_badge,
                 self.favorite_badge,
@@ -1024,6 +1163,8 @@ class ModCardWidget(QFrame):
             self.relation_badge.raise_()
         if self.deploy_dot.isVisible():
             self.deploy_dot.raise_()
+        if self.load_order_badge.isVisible():
+            self.load_order_badge.raise_()
 
     def _render_deploy_indicator(self) -> None:
         """Cover bottom-right: green/red dot; hide when not deployed."""
@@ -1072,6 +1213,43 @@ class ModCardWidget(QFrame):
         self.deploy_dot.move(x, y)
         self.deploy_dot.show()
         self.deploy_dot.raise_()
+        if self.load_order_badge.isVisible():
+            self.load_order_badge.raise_()
+
+    def _render_load_order_badge(self) -> None:
+        """Cover center: 1-based load order. Does not use the bottom-left slot."""
+        if not self._wh3_sort_mode or int(self._wh3_load_order or 0) <= 0:
+            self.load_order_badge.hide()
+            self.load_order_badge.clear()
+            self.load_order_badge.setToolTip("")
+            return
+        number = int(self._wh3_load_order)
+        font = QFont(self.load_order_badge.font())
+        font.setBold(True)
+        font.setPixelSize(22)
+        self.load_order_badge.setFont(font)
+        self.load_order_badge.setText(str(number))
+        self.load_order_badge.setToolTip(f"Load Order {number}")
+        self.load_order_badge.setStyleSheet(
+            "QLabel#modLoadOrderBadge {"
+            "background-color: rgba(12, 16, 24, 230);"
+            "color: #ffffff;"
+            "border: 1px solid rgba(255, 255, 255, 0.45);"
+            "border-radius: 8px;"
+            "font-size: 22px;"
+            "font-weight: 800;"
+            "padding: 4px 10px;"
+            "min-width: 28px;"
+            "}"
+        )
+        self.load_order_badge.adjustSize()
+        cover_w = self.cover_label.width() or COVER_WIDTH
+        cover_h = self.cover_label.height() or COVER_HEIGHT
+        x = max(0, (cover_w - self.load_order_badge.width()) // 2)
+        y = max(0, (cover_h - self.load_order_badge.height()) // 2)
+        self.load_order_badge.move(x, y)
+        self.load_order_badge.show()
+        self.load_order_badge.raise_()
 
     def _render_relation_badge(self) -> None:
         """Cover bottom-left counts — overlay only, no layout height."""
@@ -1213,6 +1391,15 @@ class ModCardWidget(QFrame):
         )
 
     def _on_cover_image_ready(self, token: str, image: object) -> None:
+        from services.crash_trace import log_exception
+
+        try:
+            self._on_cover_image_ready_body(token, image)
+        except Exception:
+            log_exception("ModCardWidget._on_cover_image_ready")
+            raise
+
+    def _on_cover_image_ready_body(self, token: str, image: object) -> None:
         if str(token) != getattr(self, "_cover_token", ""):
             return
         if str(token) != self._cover_token_for_current():
@@ -1233,6 +1420,9 @@ class ModCardWidget(QFrame):
             label = getattr(self, "cover_label", None)
             return label is not None and isValid(label)
         except Exception:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("ModCardWidget._cover_widget_alive")
             return False
 
     def _apply_cover_image(self, qimage: QImage) -> None:
@@ -1247,6 +1437,9 @@ class ModCardWidget(QFrame):
             pixmap = QPixmap.fromImage(qimage).copy(x, y, target_w, target_h)
             self.cover_label.setPixmap(pixmap)
         except RuntimeError:
+            from services.crash_trace import log_exception
+
+            log_exception("ModCardWidget._apply_cover_image")
             return
 
     def _resolve_cover(self) -> Path | None:

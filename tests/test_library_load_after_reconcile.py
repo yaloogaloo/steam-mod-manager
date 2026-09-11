@@ -1,10 +1,16 @@
-"""LibraryLoadWorker must start only after library-reconcile is idle."""
+"""LibraryLoadWorker scheduling vs reconcile idle (architecture contract).
+
+Library is a read projection: refresh must start snapshot load without waiting
+for reconcile. Reconcile remains a background consistency worker. These tests
+pin that boundary and ensure blocked reconcile stubs cannot leak threads.
+"""
 
 from __future__ import annotations
 
 import inspect
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,9 +39,23 @@ def qapp() -> QApplication:
 
 
 @pytest.fixture(autouse=True)
-def _reset_scheduler() -> None:
+def _reset_scheduler() -> list[dict]:
+    """Release blocked reconcile gates and join the daemon worker every test."""
+    gates: list[dict] = []
     reset_reconcile_async_state()
-    yield
+    yield gates
+    for gate in gates:
+        gate["release"] = True
+    try:
+        from services.library_reconcile import (
+            join_reconcile_thread,
+            request_reconcile_shutdown,
+        )
+
+        request_reconcile_shutdown()
+        join_reconcile_thread(2.0)
+    except Exception:  # noqa: BLE001
+        pass
     reset_reconcile_async_state()
 
 
@@ -47,8 +67,14 @@ def _track_worker(view: ModLibraryView, monkeypatch: pytest.MonkeyPatch) -> list
     starts: list[float] = []
 
     def _start(self: ModLibraryView, root: Path, *, force: bool = True) -> None:
-        del self, root, force
+        del root, force
         starts.append(time.perf_counter())
+        # Pretend a worker is live so duplicate flush cannot spawn extras.
+        self._load_worker = SimpleNamespace(
+            isRunning=lambda: True,
+            requestInterruption=lambda: None,
+            wait=lambda *_a, **_k: True,
+        )
 
     monkeypatch.setattr(ModLibraryView, "_start_library_worker", _start)
     return starts
@@ -71,11 +97,16 @@ def _wait_idle(timeout: float = 2.0) -> None:
         time.sleep(0.01)
 
 
-def _blocked_reconcile(monkeypatch: pytest.MonkeyPatch, gate: dict) -> list[float]:
+def _blocked_reconcile(
+    monkeypatch: pytest.MonkeyPatch, gate: dict, gates: list[dict]
+) -> list[float]:
+    """Patch reconcile to wait on *gate*; always bound by a hard deadline."""
     ended: list[float] = []
+    gates.append(gate)
 
     def _slow(_root=None):
-        while not gate["release"]:
+        deadline = time.monotonic() + 8.0
+        while not gate["release"] and time.monotonic() < deadline:
             time.sleep(0.01)
         ended.append(time.perf_counter())
         return ReconcileResult()
@@ -84,44 +115,44 @@ def _blocked_reconcile(monkeypatch: pytest.MonkeyPatch, gate: dict) -> list[floa
     return ended
 
 
-def test_a_library_load_starts_after_reconcile(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_library_load_does_not_wait_for_reconcile(
+    qapp: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_scheduler: list[dict],
 ) -> None:
+    """Refresh starts LibraryLoadWorker even while reconcile is held/running."""
     _async_refresh(monkeypatch)
     gate = {"release": False}
-    rec_ended = _blocked_reconcile(monkeypatch, gate)
+    _blocked_reconcile(monkeypatch, gate, _reset_scheduler)
     view = ModLibraryView()
     starts = _track_worker(view, monkeypatch)
     view.set_target_root(str(tmp_path / "lib"))
     hold_library_load_until_reconcile_idle()
+    assert library_load_must_wait() is True
     view.refresh(force=False)
     qapp.processEvents()
-    assert starts == []
-    assert view._library_load_pending is True
+    assert len(starts) == 1
 
     assert start_reconcile_library_async(tmp_path / "lib") is True
-    qapp.processEvents()
-    assert starts == []
-
     gate["release"] = True
-    _wait_n(qapp, starts, 1)
     _wait_idle()
     assert len(starts) == 1
-    assert rec_ended
-    assert starts[0] >= rec_ended[0]
 
 
 def test_b_library_not_visible_does_not_start_worker(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_scheduler: list[dict],
 ) -> None:
     _async_refresh(monkeypatch)
     gate = {"release": False}
-    _blocked_reconcile(monkeypatch, gate)
+    _blocked_reconcile(monkeypatch, gate, _reset_scheduler)
     view = ModLibraryView()
     starts = _track_worker(view, monkeypatch)
     view.set_target_root(str(tmp_path / "lib"))
     hold_library_load_until_reconcile_idle()
-    # Deploy/Sync restore: no library refresh
     assert start_reconcile_library_async(tmp_path / "lib") is True
     gate["release"] = True
     _wait_idle()
@@ -132,12 +163,15 @@ def test_b_library_not_visible_does_not_start_worker(
     assert view._library_load_pending is False
 
 
-def test_c_switch_to_library_during_reconcile_starts_once(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_c_refresh_during_reconcile_starts_once(
+    qapp: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_scheduler: list[dict],
 ) -> None:
     _async_refresh(monkeypatch)
     gate = {"release": False}
-    rec_ended = _blocked_reconcile(monkeypatch, gate)
+    _blocked_reconcile(monkeypatch, gate, _reset_scheduler)
     view = ModLibraryView()
     starts = _track_worker(view, monkeypatch)
     view.set_target_root(str(tmp_path / "lib"))
@@ -146,40 +180,28 @@ def test_c_switch_to_library_during_reconcile_starts_once(
     view.refresh(force=False)
     view.refresh(force=False)
     qapp.processEvents()
-    assert starts == []
-    assert view._library_load_pending is True
+    assert len(starts) == 1
 
     gate["release"] = True
-    _wait_n(qapp, starts, 1)
     _wait_idle()
     for _ in range(8):
         qapp.processEvents()
         time.sleep(0.01)
     assert len(starts) == 1
-    assert starts[0] >= rec_ended[0]
 
 
-def test_d_switch_away_before_reconcile_completes(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_d_cancel_pending_library_load(
+    qapp: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _async_refresh(monkeypatch)
-    gate = {"release": False}
-    _blocked_reconcile(monkeypatch, gate)
     view = ModLibraryView()
     starts = _track_worker(view, monkeypatch)
     view.set_target_root(str(tmp_path / "lib"))
-
-    assert start_reconcile_library_async(tmp_path / "lib") is True
-    view.refresh(force=False)
-    assert view._library_load_pending is True
+    view._library_load_pending = True
     view.cancel_pending_library_load()
     assert view._library_load_pending is False
-
-    gate["release"] = True
-    _wait_idle()
-    for _ in range(10):
-        qapp.processEvents()
-        time.sleep(0.01)
     assert starts == []
 
 
@@ -197,42 +219,45 @@ def test_e_idle_reconcile_opens_library_immediately(
 
 
 def test_f_duplicate_idle_does_not_start_two_workers(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: QApplication,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_scheduler: list[dict],
 ) -> None:
     _async_refresh(monkeypatch)
     gate = {"release": False}
-    _blocked_reconcile(monkeypatch, gate)
+    _blocked_reconcile(monkeypatch, gate, _reset_scheduler)
     view = ModLibraryView()
     starts = _track_worker(view, monkeypatch)
     view.set_target_root(str(tmp_path / "lib"))
-    hold_library_load_until_reconcile_idle()
     view.refresh(force=False)
-    rec._notify_reconcile_idle()
-    rec._notify_reconcile_idle()
     qapp.processEvents()
-    assert starts == []
+    assert len(starts) == 1
 
-    assert start_reconcile_library_async(tmp_path / "lib") is True
-    rec._notify_reconcile_idle()
-    qapp.processEvents()
-    assert starts == []
-
-    gate["release"] = True
-    _wait_n(qapp, starts, 1)
     rec._notify_reconcile_idle()
     rec._notify_reconcile_idle()
     for _ in range(8):
         qapp.processEvents()
         time.sleep(0.01)
+    assert len(starts) == 1
+
+    assert start_reconcile_library_async(tmp_path / "lib") is True
+    gate["release"] = True
     _wait_idle()
+    for _ in range(8):
+        qapp.processEvents()
+        time.sleep(0.01)
     assert len(starts) == 1
 
 
-def test_restore_settings_holds_before_page_restore() -> None:
+def test_restore_settings_scheduling_contract() -> None:
+    """Startup may hold library load; must not nest reconcile inside Library refresh."""
     src = inspect.getsource(MainWindow._restore_settings)
+    assert "reconcile_library(" not in src
     hold_at = src.find("hold_library_load_until_reconcile_idle")
     row_at = src.find("setCurrentRow")
-    assert 0 <= hold_at < row_at
+    if hold_at >= 0 and row_at >= 0:
+        assert hold_at < row_at
 
 
 def test_nav_away_cancels_pending_library_load() -> None:

@@ -9,16 +9,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import MANIFEST_FILENAME, load_manifest
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
 
 APP_ID = 1623730
 MOD_ID = "992001"
@@ -60,18 +64,6 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     logic.mkdir()
     (logic / "test_logic.pak").write_bytes(b"LOGIC-PAK")
 
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{MOD_ID}",\n'
-        '  "title": "Palworld_Test_Mod",\n'
-        f'  "app_id": {APP_ID},\n'
-        '  "game_name": "Palworld"\n'
-        "}\n",
-        encoding="utf-8",
-    )
-
     db.update_game_deploy_config(
         APP_ID,
         name="Palworld",
@@ -79,12 +71,20 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
         # No mod_path: non-pak leftovers (readme) are not folder_copied
         deploy_type="palworld_pak",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=MOD_ID,
-            title="Palworld_Test_Mod",
-            app_id=APP_ID,
-        )
+    created = create_steam_test_mod(
+        db, external_id=MOD_ID, title="Palworld_Test_Mod", app_id=APP_ID, game_name="Palworld"
+    )
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title="Palworld_Test_Mod",
+        external_id=MOD_ID,
+        workspace_id=str(created.workspace_id or MOD_ID),
+        app_id=APP_ID,
+        game_name="Palworld",
+    )
+    bind_managed_path(
+        db, created.mod_id, mod, title="Palworld_Test_Mod", game_name="Palworld"
     )
 
     # Foreign file that must survive undeploy

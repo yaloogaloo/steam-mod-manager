@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from services import archive as archive_mod
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.archive import (
     ARCHIVE_OUTCOME_FAILED,
     ARCHIVE_OUTCOME_SKIPPED,
@@ -339,13 +340,9 @@ def test_case12_provider_force_refresh_passed(
     info = folder / ".info"
     info.mkdir(parents=True)
     (info / "index.html").write_text(VALID_HTML, encoding="utf-8")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="3596053192",
-            title="Mod",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="3596053192", title="Mod")
+    bind_managed_path(db, "3596053192", folder, title="Mod")
+
     seen: dict[str, Any] = {}
 
     def tracking(self, info_dir, published_file_id, **kwargs):

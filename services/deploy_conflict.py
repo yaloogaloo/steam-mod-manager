@@ -59,7 +59,7 @@ def index_manifest_targets(
         if not mid:
             # Fall back to metadata folder id if present
             meta = files.load_metadata(folder)
-            mid = str(meta.published_file_id or "") if meta else ""
+            mid = str(meta.entity_internal_id() or "") if meta else ""
         if not mid:
             continue
         if exclude_mod_id and mid == str(exclude_mod_id):

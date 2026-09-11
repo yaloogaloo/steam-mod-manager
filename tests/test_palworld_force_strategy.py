@@ -17,6 +17,7 @@ from services.deploy_rules import (
 )
 from services.deploy_rules.palworld import PalworldStrategy
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 APP_ID = 1623730
 
@@ -35,6 +36,7 @@ def _meta(mod: Path, mid: str) -> None:
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mid}",\n'
         f'  "published_file_id": "{mid}",\n'
         f'  "title": "{mod.name}",\n'
         f'  "app_id": {APP_ID},\n'
@@ -74,13 +76,8 @@ def test_case_a_folder_mod_fallback(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="3704000001",
-            title="FolderOnly",
-            app_id=APP_ID,
-        )
-    )
+    create_steam_test_mod(db, external_id="3704000001", title="FolderOnly", app_id=APP_ID)
+    bind_managed_path(db, "3704000001", mod, title="FolderOnly")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("3704000001")
     assert result["success"] is True, result
@@ -119,9 +116,8 @@ def test_case_b_ordinary_pak(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="3704000002", title="PakOnly", app_id=APP_ID)
-    )
+    create_steam_test_mod(db, external_id="3704000002", title="PakOnly", app_id=APP_ID)
+    bind_managed_path(db, "3704000002", mod, title="PakOnly")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("3704000002")
     assert result["success"] is True, result
@@ -155,9 +151,8 @@ def test_case_c_logicmods(tmp_path: Path, db: DatabaseManager) -> None:
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="3704000003", title="LogicOnly", app_id=APP_ID)
-    )
+    create_steam_test_mod(db, external_id="3704000003", title="LogicOnly", app_id=APP_ID)
+    bind_managed_path(db, "3704000003", mod, title="LogicOnly")
 
     assert ModDeployer(library_root=library, db=db).deploy_mod("3704000003")["success"]
     target = install / "Pal" / "Content" / "Paks" / "LogicMods" / "test.pak"
@@ -193,9 +188,8 @@ def test_case_d_mixed_pak_and_folder(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="3704000004", title="Mixed", app_id=APP_ID)
-    )
+    create_steam_test_mod(db, external_id="3704000004", title="Mixed", app_id=APP_ID)
+    bind_managed_path(db, "3704000004", mod, title="Mixed")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("3704000004")
     assert result["success"] is True, result
@@ -250,11 +244,8 @@ def test_case_e_undeploy_only_manifest_targets(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="3704000005", title="MixedUndeploy", app_id=APP_ID
-        )
-    )
+    create_steam_test_mod(db, external_id="3704000005", title="MixedUndeploy", app_id=APP_ID)
+    bind_managed_path(db, "3704000005", mod, title="MixedUndeploy")
 
     dep = ModDeployer(library_root=library, db=db)
     assert dep.deploy_mod("3704000005")["success"]
@@ -302,13 +293,8 @@ def test_auto_pick_up_style_paks_subdir(
         mod_path=str(ue4ss_mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="3703542467",
-            title="Auto PickUp",
-            app_id=APP_ID,
-        )
-    )
+    create_steam_test_mod(db, external_id="3703542467", title="Auto PickUp", app_id=APP_ID)
+    bind_managed_path(db, "3703542467", mod, title="Auto PickUp")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("3703542467")
     assert result["success"] is True

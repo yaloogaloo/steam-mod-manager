@@ -8,6 +8,7 @@ import pytest
 
 from core.db_manager import DatabaseManager, ModVersionInfo
 from core.models import ModMetadata
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -70,7 +71,8 @@ def test_version_migration(tmp_path: Path) -> None:
 
 
 def test_version_storage_and_update_flag(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="101", title="Auto Pickup"))
+    create_steam_test_mod(db, external_id="101", title="Auto Pickup")
+
     st = db.update_mod_version(
         101,
         mod_version="1.2.0",
@@ -95,7 +97,8 @@ def test_version_storage_and_update_flag(db: DatabaseManager) -> None:
 
 
 def test_get_mod_version_dict(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="102", title="X"))
+    create_steam_test_mod(db, external_id="102", title="X")
+
     db.update_mod_version(102, mod_version="2.0", installed_version="2.0")
     d = db.get_mod_version(102).to_dict()
     assert d["mod_id"] == "102"

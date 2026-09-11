@@ -191,6 +191,8 @@ def test_game_switch_model_is_sql_viewmodel_ui() -> None:
     assert "list_mod_list_items" in body
     assert "list_visible_mods" not in body
     assert "load_backup" not in body
+    assert "directory_size" not in body
+    assert "os.walk" not in body
     lv = (ROOT / "ui" / "library_view.py").read_text(encoding="utf-8")
     assert "_sync_viewport_cards" in lv
     assert "compute_viewport_window" in lv
@@ -291,7 +293,7 @@ def test_viewport_never_creates_all_cards_for_10k() -> None:
 
 
 def test_ui_viewport_pool_under_10k(
-    db: DatabaseManager, tmp_path: Path, qapp
+    db: DatabaseManager, tmp_path: Path, qapp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("PySide6")
     from services.file_ops import ModFileManager
@@ -302,25 +304,45 @@ def test_ui_viewport_pool_under_10k(
     reset_library_cache()
     reset_library_perf_metrics()
 
+    monkeypatch.setattr("ui.library_view._library_load_sync", lambda: True)
+    monkeypatch.setattr(
+        "services.mod_fs_observer.schedule_observe_mods_fs_batch",
+        lambda *a, **k: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "services.size_observation.schedule_library_size_refresh",
+        lambda *a, **k: None,
+        raising=False,
+    )
+
     view = ModLibraryView()
-    view.resize(1200, 900)
-    view.set_target_root(str(lib))
-    view.refresh(force=True, reconcile=False)
-    qapp.processEvents()
+    try:
+        view.resize(1200, 900)
+        view.set_target_root(str(lib))
+        view.refresh(force=True, reconcile=False)
+        qapp.processEvents()
 
-    # Select the 10k game via filter + render.
-    view._current_game_filter = FULL_GAME[0]
-    view._render_mod_cards(ModFileManager(lib), force_reload=False)
-    qapp.processEvents()
-    view._sync_viewport_cards()
-    qapp.processEvents()
+        view._current_game_filter = FULL_GAME[0]
+        view._render_mod_cards(ModFileManager(lib), force_reload=False)
+        qapp.processEvents()
+        view._sync_viewport_cards()
+        qapp.processEvents()
 
-    assert len(view._game_row_entries) == 10000
-    assert view._card_create_count < 200
-    assert len(view._cards) < 200
-    perf = get_library_perf_metrics().snapshot()
-    assert perf.visible_cards < 200
-    assert perf.cards_created < 200
+        assert len(view._game_row_entries) == 10000
+        assert view._card_create_count < 200
+        assert len(view._cards) < 200
+        perf = get_library_perf_metrics().snapshot()
+        assert perf.visible_cards < 200
+        assert perf.cards_created < 200
+    finally:
+        try:
+            view.cancel_pending_library_load()
+        except Exception:  # noqa: BLE001
+            pass
+        view.close()
+        view.deleteLater()
+        qapp.processEvents()
 
 
 def test_cover_loader_is_viewport_only() -> None:
@@ -342,12 +364,14 @@ def test_backup_default_is_enqueue_not_inline() -> None:
 
 
 def test_reconcile_must_not_inline_backup_for_bulk() -> None:
-    """Reconcile may mark dirty; import/restore reasons must not force inline."""
+    """Reconcile must not force inline backup for bulk consistency scans."""
     from services import metadata_backup_sync as mbs
 
     src = (ROOT / "services" / "library_reconcile.py").read_text(encoding="utf-8")
-    # Calls go through sync_after_metadata_change — which enqueues by default.
-    assert "sync_after_metadata_change" in src
+    # Current contract: reconcile dirties via mark_backup_dirty only; it must not
+    # call sync_after_metadata_change (that path is for real metadata mutations).
+    assert "sync_after_metadata_change" not in src
+    assert "mark_backup_dirty" in src
     assert "import" not in mbs._INLINE_REASONS
     assert "restore" not in mbs._INLINE_REASONS
 

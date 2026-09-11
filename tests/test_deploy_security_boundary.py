@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
-from core.models import ModMetadata
 from services.backup_manager import BACKUPS_DIRNAME, BackupIntegrityError, BackupManager
 from services.deploy import ModDeployer
 from services.deploy_rules import load_manifest, save_manifest
 from services.deploy_rules.base import DeployContext
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestBackupInfo,
@@ -28,7 +31,7 @@ from services.deploy_security import (
     validate_manifest_targets,
     validate_planned_sources,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
 
 
 @pytest.fixture()
@@ -38,43 +41,6 @@ def db(tmp_path: Path) -> DatabaseManager:
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
-
-
-def _meta(mod: Path, *, mid: str, title: str, app_id: int = 4242) -> None:
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": mid,
-                "published_file_id": mid,
-                "title": title,
-                "app_id": app_id,
-                "game_name": "SomeGame",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def _prove_managed_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
-    """Stamp ``.info.internal_id`` so Deploy path resolve accepts the folder."""
-    proof = str(mid)
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    payload = json.loads((info / METADATA_FILENAME).read_text(encoding="utf-8"))
-    payload["internal_id"] = proof
-    payload.setdefault("published_file_id", mid)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(payload, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=proof,
-        last_known_path=str(folder),
-        folder_present=True,
-    )
 
 
 def _setup(db: DatabaseManager, tmp_path: Path, *, app_id: int = 4242) -> Path:
@@ -106,9 +72,17 @@ def _add_mod(
         path = mod / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    _meta(mod, mid=mid, title=title, app_id=app_id)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=app_id))
-    _prove_managed_folder(db, mid, mod)
+    created = create_steam_test_mod(db, external_id=mid, title=title, app_id=app_id)
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title=title,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=app_id,
+        game_name="SomeGame",
+    )
+    bind_managed_path(db, created.mod_id, mod, title=title, game_name="SomeGame")
     return mod
 
 
@@ -132,7 +106,7 @@ def _ctx(
 
 
 # ---------------------------------------------------------------------------
-# Case1 �?malicious manifest target traversal
+# Case1 鈥?malicious manifest target traversal
 # ---------------------------------------------------------------------------
 
 
@@ -169,13 +143,16 @@ def test_case1_malicious_manifest_target_traversal(tmp_path: Path, db: DatabaseM
     out = deployer.undeploy_mod("91001")
     assert out["success"] is False
     assert outside.read_text(encoding="utf-8") == "KEEP"
-    assert "安全校验" in str(out.get("error") or "") or "mismatch" in str(
-        out.get("error") or ""
-    ).lower() or "清坕" in str(out.get("error") or "")
+    err = str(out.get("error") or "")
+    assert (
+        "安全校验" in err
+        or "mismatch" in err.lower()
+        or "outside allowed" in err.lower()
+    )
 
 
 # ---------------------------------------------------------------------------
-# Case2 �?illegal backup path restore
+# Case2 鈥?illegal backup path restore
 # ---------------------------------------------------------------------------
 
 
@@ -199,7 +176,7 @@ def test_case2_illegal_backup_path(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Case3 �?Mod A must not use Mod B manifest
+# Case3 鈥?Mod A must not use Mod B manifest
 # ---------------------------------------------------------------------------
 
 
@@ -236,7 +213,7 @@ def test_case3_mod_a_cannot_read_mod_b_manifest(tmp_path: Path, db: DatabaseMana
 
 
 # ---------------------------------------------------------------------------
-# Case4 �?remove_empty_parents never deletes protected roots
+# Case4 鈥?remove_empty_parents never deletes protected roots
 # ---------------------------------------------------------------------------
 
 
@@ -269,7 +246,7 @@ def test_case4_remove_empty_parent_protection(tmp_path: Path, db: DatabaseManage
 
 
 # ---------------------------------------------------------------------------
-# Case5 �?source outside workspace rejected
+# Case5 鈥?source outside workspace rejected
 # ---------------------------------------------------------------------------
 
 
@@ -308,11 +285,12 @@ def test_case5_source_outside_workspace(tmp_path: Path, db: DatabaseManager) -> 
     ):
         out = deployer.deploy_mod("91006")
     assert out["success"] is False
-    assert "安全校验" in str(out.get("error") or "")
+    err = str(out.get("error") or "")
+    assert "安全校验" in err or "outside mod workspace" in err.lower()
 
 
 # ---------------------------------------------------------------------------
-# Case6 �?shared / referenced backup prune protection
+# Case6 鈥?shared / referenced backup prune protection
 # ---------------------------------------------------------------------------
 
 
@@ -338,8 +316,12 @@ def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseMa
     man_b = load_manifest(mod_b)
     assert man_a and man_a.files and man_a.files[0].backup
     assert man_b and man_b.files and man_b.files[0].backup
-    bak_a = mod_a / man_a.files[0].backup.path
-    bak_b = mod_b / man_b.files[0].backup.path
+    bak_a = BackupManager(mod_a, internal_id="91007").resolve_backup_file(
+        man_a.files[0].backup
+    )
+    bak_b = BackupManager(mod_b, internal_id="91008").resolve_backup_file(
+        man_b.files[0].backup
+    )
     assert bak_a.is_file()
     assert bak_b.is_file()
 
@@ -367,7 +349,7 @@ def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseMa
 
 
 # ---------------------------------------------------------------------------
-# Case7 �?illegal manifest refuses undeploy (no deletes)
+# Case7 鈥?illegal manifest refuses undeploy (no deletes)
 # ---------------------------------------------------------------------------
 
 

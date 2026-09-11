@@ -131,6 +131,7 @@ class SteamImporter(ModImporter):
             return ImportResult(
                 success=False, error="Steam identity create failed", platform=self.platform
             )
+        internal_mod_id = str(created.mod_id).strip()
         # Single Workshop Content semantics: empty bundle → deploy whole Mod.
         # Optional file_entries (tests / advanced) are annotated as steam_content.
         raw_entries = _kwargs.get("file_entries")
@@ -144,13 +145,13 @@ class SteamImporter(ModImporter):
             bundle = apply_steam_file_semantics(ModFilesBundle(files=files))
         else:
             bundle = ModFilesBundle()
-        db.set_mod_files(mid, bundle)
+        db.set_mod_files(internal_mod_id, bundle)
 
         managed = ""
         if library_root:
             dest = materialize_imported_mod(
                 library_root=library_root,
-                mod_id=mid,
+                internal_id=internal_mod_id,
                 title=folder_title,
                 game_name=resolved_game,
                 source_folder=folder if folder and folder.is_dir() else None,
@@ -162,7 +163,7 @@ class SteamImporter(ModImporter):
 
         return ImportResult(
             success=True,
-            mod_id=mid,
+            mod_id=internal_mod_id,
             platform=PLATFORM_STEAM,
             external_id=mid,
             source_url=url,

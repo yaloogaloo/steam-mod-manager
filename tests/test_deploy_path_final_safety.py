@@ -23,6 +23,7 @@ from services.deploy_security import ManifestSecurityError, collect_allowed_targ
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
 from services.importers.archive import extract_archive
+from tests.helpers.identity import create_steam_test_mod
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
@@ -162,7 +163,7 @@ def test_audit2_ambiguous_or_failed_remap_does_not_delete(db: DatabaseManager, t
     (folder / 'a.xml').write_text('A', encoding='utf-8')
     _write_meta(folder, {'published_file_id': '92001', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(new_mods), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='92001', title='FailRemap', app_id=4242))
+    create_steam_test_mod(db, external_id='92001', title='FailRemap', app_id=4242)
     db.update_mod_identity_fields('92001', last_known_path=str(folder), folder_present=True)
     save_manifest(folder, DeployManifest(mod_id='92001', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(secret.resolve()))]))
     out = ModDeployer(library_root=library, db=db).undeploy_mod('92001')
@@ -211,7 +212,7 @@ def test_audit3_validation_failure_preserves_manifest_and_files(db: DatabaseMana
     (folder / 'a.xml').write_text('A', encoding='utf-8')
     _write_meta(folder, {'published_file_id': '92002', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(mods), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='92002', title='Trav', app_id=4242))
+    create_steam_test_mod(db, external_id='92002', title='Trav', app_id=4242)
     db.update_mod_identity_fields('92002', last_known_path=str(folder), folder_present=True)
     save_manifest(folder, DeployManifest(mod_id='92002', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(live), root_kind=ROOT_KIND_GAME_MODS, relative='../outside.txt')]))
     cfg = db.get_game_deploy_config(4242)
@@ -264,7 +265,7 @@ def test_audit5_normal_lifecycle_deploy_undeploy_redeploy(db: DatabaseManager, t
     (folder / 'data').mkdir()
     (folder / 'data' / 'a.xml').write_text('<A/>', encoding='utf-8')
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(install), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='92101', title='LifeCycle', app_id=ANNO_1800_APP_ID))
+    create_steam_test_mod(db, external_id='92101', title='LifeCycle', app_id=ANNO_1800_APP_ID)
     _prove_folder(
         db,
         '92101',
@@ -305,7 +306,7 @@ def test_audit5_drive_migration_style_remap_and_redeploy(db: DatabaseManager, tm
     folder.mkdir(parents=True)
     (folder / 'a.xml').write_text('SRC', encoding='utf-8')
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(new_mods.parent), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='92102', title='Migrate', app_id=ANNO_1800_APP_ID))
+    create_steam_test_mod(db, external_id='92102', title='Migrate', app_id=ANNO_1800_APP_ID)
     _prove_folder(
         db,
         '92102',
@@ -345,7 +346,7 @@ def test_audit5_failed_remap_blocks_redeploy_without_deletion(db: DatabaseManage
     folder.mkdir(parents=True)
     (folder / 'a.xml').write_text('A', encoding='utf-8')
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(new_mods.parent), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='92103', title='BadLegacy', app_id=ANNO_1800_APP_ID))
+    create_steam_test_mod(db, external_id='92103', title='BadLegacy', app_id=ANNO_1800_APP_ID)
     _prove_folder(
         db,
         '92103',
@@ -369,7 +370,7 @@ def test_audit6_archive_uses_zip_root_not_library_folder_name(db: DatabaseManage
     with zipfile.ZipFile(folder / 'm.zip', 'w') as zf:
         zf.writestr(f'{zip_root}/data/x.xml', '<X/>')
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(install), deploy_type='folder_copy')
-    db.upsert_mod(ModMetadata(published_file_id='92201', title=lib_name, app_id=ANNO_1800_APP_ID))
+    create_steam_test_mod(db, external_id='92201', title=lib_name, app_id=ANNO_1800_APP_ID)
     _prove_folder(
         db,
         '92201',

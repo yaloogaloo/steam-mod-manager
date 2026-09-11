@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
@@ -12,8 +13,12 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
+from services.size_observation import (
+    reset_size_observation,
+    wait_for_size_idle,
+)
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from ui.mod_detail_panel import ModDetailPanel
 
 
@@ -30,26 +35,55 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     manager = DatabaseManager.instance(tmp_path / "size_badge.db")
     manager.upsert_game(GameInfo(app_id=1, name="Game", folder_name="Game"))
+    reset_size_observation()
     yield manager
+    reset_size_observation()
     DatabaseManager.reset_instance()
+
+
+def _seed_sized(
+    db: DatabaseManager,
+    tmp_path: Path,
+    *,
+    mid: str,
+    title: str,
+    payload: bytes | None = b"x" * 4096,
+) -> Path:
+    folder = tmp_path / "Game" / title
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True)
+    (info / "metadata.json").write_text(
+        (
+            f'{{"internal_id":"{mid}","published_file_id":"{mid}",'
+            f'"title":"{title}","app_id":1}}'
+        ),
+        encoding="utf-8",
+    )
+    if payload is not None:
+        (folder / "payload.pak").write_bytes(payload)
+    create_steam_test_mod(db, external_id=mid, title=title, app_id=1, game_name="Game")
+    bind_managed_path(db, mid, folder)
+    return folder
+
+
+def _wait_size_badge(qapp: QApplication, panel: ModDetailPanel) -> None:
+    wait_for_size_idle(3.0)
+    for _ in range(40):
+        qapp.processEvents()
+        text = panel.size_badge.text() or ""
+        if text and text != "计算中…" and ("B" in text or "KB" in text or "MB" in text):
+            return
+        time.sleep(0.02)
 
 
 def test_size_badge_next_to_platform_and_not_in_rich_html(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "SizedMod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"88","title":"SizedMod","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 4096)
-    db.upsert_mod(ModMetadata(published_file_id="88", title="SizedMod", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="88", title="SizedMod")
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
-    qapp.processEvents()
+    panel.show_mod(folder, mod_id="88")
+    _wait_size_badge(qapp, panel)
 
     assert hasattr(panel, "size_badge")
     assert not panel.size_badge.isHidden()
@@ -108,18 +142,10 @@ def _metadata_row_visible_texts(panel: ModDetailPanel) -> list[str]:
 def test_detail_header_metadata_row_contains_source_and_size_only(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "SizedMod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"88","title":"SizedMod","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 4096)
-    db.upsert_mod(ModMetadata(published_file_id="88", title="SizedMod", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="88", title="SizedMod")
     panel = ModDetailPanel()
-    panel.show_mod(folder)
-    qapp.processEvents()
+    panel.show_mod(folder, mod_id="88")
+    _wait_size_badge(qapp, panel)
     assert not hasattr(panel, "content_status_badge")
     assert not panel.header_platform_badge.isHidden()
     assert not panel.size_badge.isHidden()
@@ -133,18 +159,10 @@ def test_detail_header_metadata_row_contains_source_and_size_only(
 def test_detail_header_healthy_has_no_content_status_badge(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "HealthyMod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"89","title":"HealthyMod","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 2048)
-    db.upsert_mod(ModMetadata(published_file_id="89", title="HealthyMod", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="89", title="HealthyMod", payload=b"x" * 2048)
     panel = ModDetailPanel()
-    panel.show_mod(folder)
-    qapp.processEvents()
+    panel.show_mod(folder, mod_id="89")
+    _wait_size_badge(qapp, panel)
     assert not hasattr(panel, "content_status_badge")
     joined = " ".join(_metadata_row_visible_texts(panel))
     assert "✓" not in joined
@@ -161,16 +179,9 @@ def test_detail_header_missing_does_not_add_content_status_badge(
     from services.file_ops import apply_missing_content_marker
     from services.library_status import CONTENT_CONTENT_MISSING
 
-    folder = tmp_path / "Game" / "MissingMod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"90","title":"MissingMod","app_id":1}',
-        encoding="utf-8",
-    )
+    folder = _seed_sized(db, tmp_path, mid="90", title="MissingMod", payload=None)
     apply_missing_content_marker(folder)
-    db.upsert_mod(ModMetadata(published_file_id="90", title="MissingMod", app_id=1))
-    db.update_mod_identity_fields(
+    db.update_mod_content_status(
         "90",
         content_status=CONTENT_CONTENT_MISSING,
         library_status="content_missing",
@@ -179,7 +190,7 @@ def test_detail_header_missing_does_not_add_content_status_badge(
     )
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="90")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
     assert not hasattr(panel, "content_status_badge")
     joined = " ".join(_metadata_row_visible_texts(panel))
     assert "文件缺失" not in joined
@@ -190,24 +201,16 @@ def test_detail_header_missing_does_not_add_content_status_badge(
 def test_detail_backup_badge_is_exception_only(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "BackupMod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"91","title":"BackupMod","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 1024)
-    db.upsert_mod(ModMetadata(published_file_id="91", title="BackupMod", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="91", title="BackupMod", payload=b"x" * 1024)
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="91")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
     assert hasattr(panel, "backup_status_badge")
     assert panel.backup_status_badge.isHidden()
 
     db.update_mod_backup_status("91", status="invalid")
     panel.show_mod(folder, mod_id="91")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
     assert panel.backup_status_badge.isHidden()
     joined = " ".join(_metadata_row_visible_texts(panel))
     assert "Backup" not in joined
@@ -226,21 +229,13 @@ def test_detail_header_no_content_status_badge_when_healthy(
 def test_detail_header_favorite_is_below_metadata_row(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "FavMod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"92","title":"FavMod","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 1024)
-    db.upsert_mod(ModMetadata(published_file_id="92", title="FavMod", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="92", title="FavMod", payload=b"x" * 1024)
     db.update_mod_user_metadata("92", {"favorite": True})
     panel = ModDetailPanel()
     panel.resize(480, 720)
     panel.show()
     panel.show_mod(folder, mod_id="92")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
 
     assert panel.view_favorite.objectName() == "detailFavoriteLabel"
     assert "收藏" in (panel.view_favorite.text() or "")
@@ -272,60 +267,36 @@ def _assert_header_source_size_only(panel: ModDetailPanel) -> None:
 def test_detail_header_backup_invalid_stays_out_of_metadata_row(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "BakInvalid"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"93","title":"BakInvalid","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 1024)
-    db.upsert_mod(ModMetadata(published_file_id="93", title="BakInvalid", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="93", title="BakInvalid", payload=b"x" * 1024)
     db.update_mod_backup_status("93", status="invalid")
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="93")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
     _assert_header_source_size_only(panel)
 
 
 def test_detail_header_backup_partial_missing_complete_stay_out_of_row(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "BakOther"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"94","title":"BakOther","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 1024)
-    db.upsert_mod(ModMetadata(published_file_id="94", title="BakOther", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="94", title="BakOther", payload=b"x" * 1024)
     panel = ModDetailPanel()
     for status in ("partial", "missing", "complete", "invalid"):
         db.update_mod_backup_status("94", status=status)
         panel.show_mod(folder, mod_id="94")
-        qapp.processEvents()
+        _wait_size_badge(qapp, panel)
         _assert_header_source_size_only(panel)
 
 
 def test_detail_header_backup_layout_stable_across_refresh(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = tmp_path / "Game" / "BakRefresh"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"95","title":"BakRefresh","app_id":1}',
-        encoding="utf-8",
-    )
-    (folder / "payload.pak").write_bytes(b"x" * 1024)
-    db.upsert_mod(ModMetadata(published_file_id="95", title="BakRefresh", app_id=1))
+    folder = _seed_sized(db, tmp_path, mid="95", title="BakRefresh", payload=b"x" * 1024)
     db.update_mod_backup_status("95", status="invalid")
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="95")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
     _assert_header_source_size_only(panel)
     db.update_mod_backup_status("95", status="complete")
     panel.show_mod(folder, mod_id="95")
-    qapp.processEvents()
+    _wait_size_badge(qapp, panel)
     _assert_header_source_size_only(panel)

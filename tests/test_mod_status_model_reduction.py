@@ -24,6 +24,7 @@ from services.status_authority import (
 )
 from services.status_recovery import run_status_model_cleanup_v2
 from services.user_annotation import set_conflict_annotation
+from tests.helpers.identity import create_steam_test_mod
 from ui.library_query import (
     FILTER_CONFLICT,
     FILTER_CONTENT_MISSING,
@@ -95,7 +96,7 @@ def test_content_status_only_healthy_or_content_missing() -> None:
 
 def test_writer_rejects_deleted_tokens(db: DatabaseManager) -> None:
     db.update_game_deploy_config(1, name="G")
-    db.upsert_mod(ModMetadata(published_file_id="501", title="T", app_id=1))
+    create_steam_test_mod(db, external_id="501", title="T", app_id=1)
     with pytest.raises(ValueError, match="illegal content_status"):
         db.update_mod_content_status("501", content_status="folder_missing")
     with pytest.raises(ValueError, match="illegal content_status"):
@@ -144,11 +145,11 @@ def test_cleanup_v2_reevaluates_without_mapping(
     folder.mkdir(parents=True)
     (folder / "payload.bin").write_bytes(b"x")
     db.update_game_deploy_config(1, name="Game")
-    db.upsert_mod(ModMetadata(published_file_id="601", title="Alive", app_id=1))
+    create_steam_test_mod(db, external_id="601", title="Alive", app_id=1)
     db.update_mod_identity_fields(
         "601", folder_present=True, last_known_path=str(folder)
     )
-    db.upsert_mod(ModMetadata(published_file_id="602", title="Gone", app_id=1))
+    create_steam_test_mod(db, external_id="602", title="Gone", app_id=1)
     db.update_mod_identity_fields(
         "602",
         folder_present=False,

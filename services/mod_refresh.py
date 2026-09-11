@@ -21,6 +21,7 @@ from services.metadata_ownership import (
     FIELD_DISPLAY_NAME,
     should_apply_official_field,
 )
+from services.crash_trace import log_exception, traced
 from services.metadata_refresh import MetadataRefreshResult
 
 logger = logging.getLogger(__name__)
@@ -251,6 +252,7 @@ def _resolve_refresh_folder(
     return resolve_refresh_folder(mid, managed_path, db=db)
 
 
+@traced("refresh_mod")
 def refresh_mod(
     mod_id: int | str,
     managed_path: str | Path,
@@ -340,6 +342,11 @@ def refresh_mod(
                     message="已刷新本地状态",
                 )
         except Exception as exc:  # noqa: BLE001
+            log_exception(
+                "refresh_mod.provider_sync_callback",
+                mod_id=mid,
+                platform=plat,
+            )
             logger.exception(
                 "[refresh] mod_id=%s official metadata sync failed; remains unsynced",
                 mid,

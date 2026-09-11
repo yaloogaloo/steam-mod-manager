@@ -88,17 +88,18 @@ def test_case5_game_name_not_squeezed_by_status_slot() -> None:
 
 
 def test_case8_library_content_filters_still_work() -> None:
+    """Current whitelist filters match; deleted status tokens fail closed."""
     from ui.library_query import (
-        FILTER_BACKUP_INVALID,
+        FILTER_CONFLICT,
         FILTER_CONTENT_MISSING,
-        FILTER_FOLDER_MISSING,
-        FILTER_IDENTITY_CONFLICT,
+        FILTER_INVALID,
         ModFilterIndex,
+        _DELETED_STATUS_FILTERS,
         matches_status_filter,
     )
 
-    def idx(status: str) -> ModFilterIndex:
-        return ModFilterIndex(
+    def idx(**kwargs: object) -> ModFilterIndex:
+        base = dict(
             mod_id="1",
             display_name="X",
             steam_name="",
@@ -109,13 +110,21 @@ def test_case8_library_content_filters_still_work() -> None:
             has_offline=False,
             mtime=0.0,
             sort_name="X",
-            content_status=status,
         )
+        base.update(kwargs)
+        return ModFilterIndex(**base)  # type: ignore[arg-type]
 
-    assert matches_status_filter(idx(FILTER_CONTENT_MISSING), FILTER_CONTENT_MISSING)
-    assert matches_status_filter(idx(FILTER_FOLDER_MISSING), FILTER_FOLDER_MISSING)
-    assert matches_status_filter(idx(FILTER_IDENTITY_CONFLICT), FILTER_IDENTITY_CONFLICT)
-    assert matches_status_filter(idx(FILTER_BACKUP_INVALID), FILTER_BACKUP_INVALID)
+    assert matches_status_filter(
+        idx(content_status=FILTER_CONTENT_MISSING), FILTER_CONTENT_MISSING
+    )
+    assert matches_status_filter(
+        idx(conflict_status="conflict"), FILTER_CONFLICT
+    )
+    assert matches_status_filter(idx(is_invalid=True), FILTER_INVALID)
+
+    # Removed deploy-audit era filters must never match.
+    for dead in sorted(_DELETED_STATUS_FILTERS):
+        assert matches_status_filter(idx(content_status=dead), dead) is False
 
 
 def test_case9_dynamic_sources_unchanged() -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -78,14 +79,9 @@ def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> Path:
     folder.mkdir(parents=True)
     (folder / "file1.txt").write_text("NEW", encoding="utf-8")
     _prove_folder(db, mid, folder)
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=folder.name,
-            app_id=100,
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id=mid, title=folder.name, app_id=100)
+    bind_managed_path(db, mid, folder, title=folder.name)
+
     return folder
 
 

@@ -13,17 +13,17 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_library_cache import (
     build_library_snapshot,
     get_library_cache,
     reset_library_cache,
 )
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from ui.library_query import (
     FILTER_ALL,
+    FILTER_CONTENT_MISSING,
     FILTER_FAVORITE,
-    FILTER_FOLDER_MISSING,
     FILTER_PLATFORM_ALL,
     SORT_NAME,
     ModFilterIndex,
@@ -57,6 +57,7 @@ def _seed(root: Path, db: DatabaseManager, count: int) -> None:
         (info / METADATA_FILENAME).write_text(
             json.dumps(
                 {
+                    "internal_id": mid,
                     "published_file_id": mid,
                     "title": f"Perf Mod {i}",
                     "game_name": "PerfGame",
@@ -69,22 +70,11 @@ def _seed(root: Path, db: DatabaseManager, count: int) -> None:
         (folder / "payload.bin").write_bytes(b"x" * 32)
         if i % 17 == 0:
             (info / "cover.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 64)
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=f"Perf Mod {i}",
-                managed_path=str(folder),
-                game_name="PerfGame",
-            )
+        create_steam_test_mod(
+            db, external_id=mid, title=f"Perf Mod {i}", game_name="PerfGame"
         )
-        db.update_mod_identity_fields(
-            mid,
-            source_type="steam",
-            content_status="healthy",
-            folder_present=True,
-            last_known_path=str(folder),
-            sticky_source=False,
-        )
+        bind_managed_path(db, mid, folder, game_name="PerfGame", title=f"Perf Mod {i}")
+        db.update_mod_content_status(mid, content_status="healthy", folder_present=True)
         if i % 11 == 0:
             db.update_mod_user_metadata(mid, {"favorite": True})
 
@@ -185,7 +175,7 @@ def test_baseline_filter_search_memory(tmp_path: Path, n: int) -> None:
     status = filter_and_sort(
         entries,
         query="",
-        filter_key=FILTER_FOLDER_MISSING,
+        filter_key=FILTER_CONTENT_MISSING,
         platform_key=FILTER_PLATFORM_ALL,
         sort_mode=SORT_NAME,
     )

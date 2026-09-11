@@ -1,15 +1,28 @@
-"""Sync lifecycle: materialize implies Mod entity registration.
+"""Sync lifecycle: FS-first materialize, then Identity Service bind.
 
-ARCHITECTURE RULE
------------------
-Full Sync success requires:
+CONTRACT (intentional, not an Import clone)
+-------------------------------------------
+Sync discovers Steam Workshop folders that already exist on disk, copies them
+into the managed library, then binds/creates Internal entities::
 
-  source → materialize → Workspace ID → Identity Service → Internal entity
-  → Database → Library
+    scan source FS
+        → copy / skip_existing (managed folder)
+        → sidecar may hold Steam workspace / external ids (not Internal PK)
+        → Identity Service create/bind
+        → Database + ``.info.internal_id`` proof
+        → Library
 
-File copy alone is not “sync complete”. Do not rely on reconcile / UI folder
-scans to invent missing entities. ``Unknown_Mod_<digits>`` embeds Workspace ID
-— parse it; do not treat Unknown titles as no identity.
+Import is Identity-first because the user is creating a new entity, then
+materializing under that PK. Sync must not mint a Library row for a Workshop
+folder that never landed on disk.
+
+Allowed without Internal identity: discovered source, copied/skipped managed
+folder, Steam platform sidecar fields. Forbidden: forging ``mods.mod_id``
+from a folder name or Workshop ID inside Sync itself.
+
+Failure / retry: copy failure → no entity. Identity failure → folder may
+remain; next Sync rematches ``(platform, app_id, workspace_id)`` and must
+not create a second row. Reconcile does not create.
 """
 
 from __future__ import annotations
@@ -168,16 +181,13 @@ def test_unknown_mod_folder_registers_via_workspace_id(
     assert result.library_count == 1
     assert not result.registration_failed
 
-    payload = {
-        "workspace_id": wid,
-        "external_id": wid,
-        "published_file_id": wid,
-        "source_type": "steam",
-        "platform": "steam",
-        "app_id": 289070,
-        "title": folder.name,
+    hit = db.find_mod_for_registration("steam", 289070, wid)
+    assert hit is not None
+    assert str(hit.workspace_id) == wid
+    sidecar = {
+        "internal_id": str(hit.mod_id),
     }
-    assert resolve_existing_mod_id(payload, db=db) != ""
+    assert resolve_existing_mod_id(sidecar, db=db) == str(hit.mod_id)
     assert len(list_visible_mods(library, game)) == 1
 
 
@@ -234,3 +244,109 @@ def test_create_mod_identity_unknown_title_with_embedded_workspace(
     info = db.get_mod_display_info(out.mod_id)
     assert info is not None
     assert str(info.workspace_id) == "9876543210"
+
+
+def _count_mods(db: DatabaseManager) -> int:
+    return int(db._conn.execute("SELECT COUNT(*) AS n FROM mods").fetchone()["n"])
+
+
+def test_copy_failure_does_not_mint_entity(
+    db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copy never landed → no Internal entity (FS-first: do not mint first)."""
+    from core.game_info import GameInfo
+    from services.file_ops import ModFileManager
+
+    workshop = tmp_path / "workshop" / "289070"
+    library = tmp_path / "mod"
+    db.upsert_game(GameInfo(app_id=289070, name="Civ6", folder_name="Civ6"))
+    wid = "310001"
+    src = _workshop_mod(workshop, wid)
+    meta = ModMetadata(
+        published_file_id=wid,
+        title="CopyFail",
+        app_id=289070,
+        game_name="Civ6",
+        source_path=str(src),
+    )
+    client = _client()
+    client.get_details_batch.return_value = [meta]
+    client.resolve_game_names.return_value = None
+
+    def _boom(self, metadata, **_kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(ModFileManager, "copy_mod", _boom)
+    svc = ModSyncService(workshop, library, client=client, archiver=MagicMock())
+    result = svc.sync(
+        SyncOptions(skip_existing=True, download_covers=False, recursive_scan=False)
+    )
+    assert result.failed
+    assert _count_mods(db) == 0
+    assert result.library_count == 0
+    assert db.get_mod_display_info(wid) is None
+
+
+def test_identity_failure_leaves_folder_retry_binds_once(
+    db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identity fail keeps managed FS; retry rematches one entity, no duplicate."""
+    import json
+
+    from core.game_info import GameInfo
+    from services.identity_service import create_mod_identity as real_create
+    from services.mod_identity import read_internal_id
+
+    workshop = tmp_path / "workshop" / "289070"
+    library = tmp_path / "mod"
+    game = "Civilization VI"
+    db.upsert_game(GameInfo(app_id=289070, name=game, folder_name=game))
+    wid = "310002"
+    _workshop_mod(workshop, wid)
+    folder = _managed_without_entity(library, game, wid)
+
+    boom = {"n": 0}
+
+    def _once(*args, **kwargs):
+        boom["n"] += 1
+        if boom["n"] == 1:
+            raise RuntimeError("identity create failed")
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr("services.identity_service.create_mod_identity", _once)
+    svc = ModSyncService(
+        workshop, library, client=_client(), archiver=MagicMock()
+    )
+    first = svc.sync(
+        SyncOptions(skip_existing=True, download_covers=False, recursive_scan=False)
+    )
+    assert folder.is_dir()
+    assert _count_mods(db) == 0
+    assert first.library_count == 0
+    assert first.registration_failed
+    raw = json.loads(
+        (folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8")
+    )
+    assert str(raw.get("workspace_id") or raw.get("published_file_id") or "") == wid
+    assert not read_internal_id(raw)
+
+    monkeypatch.setattr(
+        "services.identity_service.create_mod_identity", real_create
+    )
+    second = svc.sync(
+        SyncOptions(skip_existing=True, download_covers=False, recursive_scan=False)
+    )
+    assert second.library_count == 1
+    assert second.entity_created_count == 1
+    assert not second.registration_failed
+    assert _count_mods(db) == 1
+    info = db.get_mod_display_info(
+        db.find_mod_for_registration("steam", 289070, wid).mod_id
+    )
+    assert info is not None
+    assert str(info.workspace_id) == wid
+    assert str(info.mod_id).isdigit()
+    proof = json.loads(
+        (folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8")
+    )
+    assert read_internal_id(proof) == str(info.mod_id)

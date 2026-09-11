@@ -2,7 +2,8 @@
 
 Extraction remains exclusively in ``services/deploy_apply.py`` via
 ``ArchiveExtractor``. Strategies may call this module only to enumerate
-members for path mapping.
+members for path mapping. Apply streams planned members to FilePlan
+targets; it does not extract the whole archive into ``apply_*``.
 """
 
 from __future__ import annotations

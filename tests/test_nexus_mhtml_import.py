@@ -200,10 +200,13 @@ def test_rewrite_cid_helpers() -> None:
 
 
 def test_dialog_filter_includes_mhtml(qapp, tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QWidget
     from ui.mod_import_dialog import ModImportDialog
 
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_steam.setChecked(True)

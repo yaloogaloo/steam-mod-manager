@@ -1,8 +1,12 @@
 """Canonical Mod Identity Authority — single write entry for identity fields.
 
-ID contract: Internal ID (``ResolvedIdentity.mod_id``) is database-only.
-Workspace ID is derived from platform ``external_id`` (Steam/Nexus) or
-generated uniquely (GitHub/mod.io/其它). Never ``workspace_id = internal_id``.
+ID contract (Frozen Minimal Model):
+
+* ``ResolvedIdentity.internal_id`` — durable business Entity Identity (TEXT).
+* ``ResolvedIdentity.mod_id`` — SQLite PK / FK handle, not business identity.
+* Workspace ID is derived from platform ``external_id`` (Steam/Nexus) or
+  generated uniquely (GitHub/mod.io/其它). Never ``workspace_id = internal_id``.
+  Never ``workspace_id = mod_id``.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ResolvedIdentity:
-    mod_id: str = ""
+    mod_id: str = ""  # SQLite PK (FK handle) — not Frozen entity identity
     platform: str = ""
     external_id: str = ""
     source_url: str = ""
@@ -42,6 +46,7 @@ class ResolvedIdentity:
     created: bool = False
     reused: bool = False
     notes: list[str] = field(default_factory=list)
+    internal_id: str = ""  # durable business Entity Identity (TEXT)
 
 
 def sanitize_platform_external_id(
@@ -311,6 +316,8 @@ def create_mod_identity(
         steam_id = wid if wid.isdigit() else ext
         from core.models import ModMetadata
 
+        # IdentityService create path — allow_insert only here.
+        # Catalog refresh must never reach this branch.
         db.upsert_mod(
             ModMetadata(
                 published_file_id=steam_id,
@@ -320,24 +327,31 @@ def create_mod_identity(
             ),
             allow_insert=True,
         )
+        # Historical Steam scheme: Internal PK digits may equal Workshop ID.
+        created_mid = (
+            db.resolve_steam_entity_mod_id(
+                steam_id, app_id=int(app_id or 0)
+            )
+            or steam_id
+        )
         if url:
             db.update_mod_platform_info(
-                steam_id,
+                created_mid,
                 platform=PLATFORM_STEAM,
                 source_url=url,
                 external_id=steam_id,
             )
         log_identity_mutation(
             db,
-            mod_id=steam_id,
+            mod_id=created_mid,
             field_name="mod_id",
             old_value="",
-            new_value=steam_id,
+            new_value=created_mid,
             source="identity_authority",
             reason="create_steam",
         )
         return ResolvedIdentity(
-            mod_id=steam_id,
+            mod_id=created_mid,
             platform=PLATFORM_STEAM,
             external_id=steam_id,
             source_url=url,

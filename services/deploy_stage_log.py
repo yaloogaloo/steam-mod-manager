@@ -47,6 +47,7 @@ class DeployTimingSession:
     t0: float = 0.0
     files: int = 0
     bytes: int = 0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def add(self, stage: str, elapsed_ms: float, files: int = 0, bytes_count: int = 0) -> None:
         rec = StageTiming(
@@ -79,6 +80,7 @@ class DeployTimingSession:
                 }
                 for r in self.records
             ],
+            "diagnostics": dict(self.diagnostics),
         }
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from tests.helpers.identity import create_steam_test_mod
 from core.mod_status import (
     CONFLICT_STATUS_CONFLICT,
     CONFLICT_STATUS_NONE,
@@ -71,7 +72,8 @@ def test_migration_adds_status_columns(tmp_path: Path) -> None:
 
 
 def test_mark_invalid_and_restore(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="100", title="X"))
+    create_steam_test_mod(db, external_id="100", title="X")
+
     st = db.update_mod_status(
         100, invalid=True, invalid_reason="作者已删除", touch_check_time=True
     )
@@ -86,7 +88,8 @@ def test_mark_invalid_and_restore(db: DatabaseManager) -> None:
 
 
 def test_conflict_status_persist(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="200", title="Y"))
+    create_steam_test_mod(db, external_id="200", title="Y")
+
     st = db.update_mod_status(
         200,
         conflict_status=CONFLICT_STATUS_CONFLICT,

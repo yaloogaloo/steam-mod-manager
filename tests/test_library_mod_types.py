@@ -12,6 +12,7 @@ from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.library_query import merge_category_labels
 from ui.library_view import GAME_CATEGORY_ROLE, GAME_ROLE, ModLibraryView
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture(scope="module")
@@ -43,7 +44,8 @@ def _seed(library: Path, db: DatabaseManager) -> None:
         '{"published_file_id":"7101","title":"ModA","app_id":42,"game_name":"GameX"}',
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="7101", title="ModA", app_id=42))
+    create_steam_test_mod(db, external_id="7101", title="ModA", app_id=42)
+
 
 
 def _select_game(view: ModLibraryView, folder: str) -> None:
@@ -64,6 +66,8 @@ def test_merge_category_labels_unions_defined_and_used() -> None:
 def test_defined_type_appears_in_combo_not_game_tree(
     qapp, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
+    from services.mod_type_catalog import get_mod_type_catalog
+
     library = tmp_path / "mod"
     _seed(library, db)
     monkeypatch.setattr("ui.library_view.get_db", lambda: db)
@@ -75,7 +79,7 @@ def test_defined_type_appears_in_combo_not_game_tree(
     _select_game(view, "GameX")
     qapp.processEvents()
 
-    assert db.add_game_category(42, "角色")
+    created = get_mod_type_catalog().add_type(42, "角色")
     view._refresh_category_combo()
     view._apply_category_options_to_cards()
 
@@ -83,7 +87,7 @@ def test_defined_type_appears_in_combo_not_game_tree(
         view.category_combo.itemText(i) for i in range(view.category_combo.count())
     ]
     assert "角色" in labels
-    assert view.category_combo.findData("角色") >= 0
+    assert view.category_combo.findData(str(created.type_id)) >= 0
 
     for i in range(view.game_list.count()):
         item = view.game_list.item(i)
@@ -94,13 +98,14 @@ def test_defined_type_appears_in_combo_not_game_tree(
         assert widget.name_label.text() != "角色"
 
     assert view._cards
-    assert "角色" in view._cards[0]._category_options
+    assert (created.type_id, "角色") in view._cards[0]._category_options
 
 
-def test_delete_type_removes_catalog_keeps_mod_tag(
+def test_delete_type_removes_definition_and_unbinds_mod(
     qapp, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     from PySide6.QtWidgets import QMessageBox
+    from services.mod_type_catalog import get_mod_type_catalog
 
     library = tmp_path / "mod"
     _seed(library, db)
@@ -118,20 +123,21 @@ def test_delete_type_removes_catalog_keeps_mod_tag(
     _select_game(view, "GameX")
     qapp.processEvents()
 
-    db.add_game_category(42, "美化")
-    db.set_mod_category("7101", "美化")
+    created = get_mod_type_catalog().add_type(42, "美化")
+    db.set_mod_type_id("7101", created.type_id)
     from dataclasses import replace
 
     index, card = view._card_entries[0]
-    view._card_entries[0] = (replace(index, category_tags="美化"), card)
+    view._card_entries[0] = (replace(index, type_id=created.type_id), card)
     view._refresh_category_combo()
-    idx = view.category_combo.findData("美化")
+    idx = view.category_combo.findData(str(created.type_id))
     assert idx >= 0
     view.category_combo.setCurrentIndex(idx)
     assert view.btn_delete_game_type.isEnabled()
     view._on_delete_game_type()
-    assert "美化" not in db.list_game_categories(42)
-    assert db.get_category_tags("7101") == ["美化"]
+    assert get_mod_type_catalog().get(42, created.type_id) is None
+    assert db.get_mod_type_id("7101") is None
+    assert view.category_combo.findData(str(created.type_id)) < 0
 
 
 def test_type_helpers_do_not_scan_disk() -> None:

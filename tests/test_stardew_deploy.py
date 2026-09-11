@@ -9,8 +9,12 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 from services.deploy_rules import (
     DEPLOY_TYPE_STARDEW_VALLEY,
     load_manifest,
@@ -20,7 +24,6 @@ from services.deploy_rules.stardew_valley import (
     STARDEW_VALLEY_APP_ID,
     find_smapi_mod_roots,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 
 SV_APP = STARDEW_VALLEY_APP_ID
 
@@ -54,6 +57,7 @@ def _write_smapi_manifest(folder: Path, *, unique_id: str = "Test.Mod") -> None:
 
 
 def _seed_managed_with_zip(
+    db: DatabaseManager,
     library: Path,
     *,
     mid: str,
@@ -67,17 +71,19 @@ def _seed_managed_with_zip(
     with zipfile.ZipFile(archive, "w") as zf:
         for name, data in zip_members.items():
             zf.writestr(name, data)
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{title}",\n'
-        f'  "app_id": {SV_APP},\n'
-        '  "game_name": "星露谷物语"\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=SV_APP, game_name="星露谷物语"
     )
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title=title,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=SV_APP,
+        game_name="星露谷物语",
+    )
+    bind_managed_path(db, created.mod_id, mod, title=title, game_name="星露谷物语")
     return mod
 
 
@@ -100,10 +106,18 @@ def test_stardew_flat_archive_uses_zip_stem(
 ) -> None:
     """Case 1: zip root has manifest.json → Mods/<zip_stem>/."""
     library = tmp_path / "library"
-    mods_dir = tmp_path / "StardewMods"  # intentionally missing until deploy
+    mods_dir = tmp_path / "StardewMods"
+    mods_dir.mkdir()
 
     mid = "41315001"
+    db.update_game_deploy_config(
+        SV_APP,
+        name="星露谷物语",
+        mod_path=str(mods_dir),
+        deploy_type="folder_copy",
+    )
     mod = _seed_managed_with_zip(
+        db,
         library,
         mid=mid,
         title="FlatMod",
@@ -113,16 +127,6 @@ def test_stardew_flat_archive_uses_zip_stem(
             "config.json": b"{}",
             "assets/icon.png": b"PNG",
         },
-    )
-
-    db.update_game_deploy_config(
-        SV_APP,
-        name="星露谷物语",
-        mod_path=str(mods_dir),
-        deploy_type="folder_copy",
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="FlatMod", app_id=SV_APP)
     )
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
@@ -150,7 +154,11 @@ def test_stardew_single_folder_archive(
     mods_dir.mkdir()
 
     mid = "41315002"
+    db.update_game_deploy_config(
+        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
+    )
     _seed_managed_with_zip(
+        db,
         library,
         mid=mid,
         title="WrappedMod",
@@ -160,13 +168,6 @@ def test_stardew_single_folder_archive(
             "ContentPatcher/ContentPatcher.dll": b"MZ",
             "ContentPatcher/config.json": b"{}",
         },
-    )
-
-    db.update_game_deploy_config(
-        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="WrappedMod", app_id=SV_APP)
     )
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
@@ -185,7 +186,11 @@ def test_stardew_multi_mod_pack(tmp_path: Path, db: DatabaseManager) -> None:
     mods_dir.mkdir()
 
     mid = "41315003"
+    db.update_game_deploy_config(
+        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
+    )
     _seed_managed_with_zip(
+        db,
         library,
         mid=mid,
         title="MultiPack",
@@ -196,13 +201,6 @@ def test_stardew_multi_mod_pack(tmp_path: Path, db: DatabaseManager) -> None:
             "aaa/ccc/manifest.json": b'{"Name":"C","UniqueID":"C"}',
             "aaa/ccc/ModC.dll": b"C",
         },
-    )
-
-    db.update_game_deploy_config(
-        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="MultiPack", app_id=SV_APP)
     )
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(mid)

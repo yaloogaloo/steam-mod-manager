@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -50,9 +51,8 @@ def test_refresh_button_is_labeled_push_button(
 ) -> None:
     lib = tmp_path / "lib"
     folder = _seed(lib)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
+    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="3413520661")
     qapp.processEvents()
@@ -67,9 +67,8 @@ def test_refresh_button_state_machine(
 ) -> None:
     lib = tmp_path / "lib"
     folder = _seed(lib)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
+    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="3413520661")
     qapp.processEvents()
@@ -103,9 +102,8 @@ def test_click_sets_running_immediately_and_blocks_duplicate(
 ) -> None:
     lib = tmp_path / "lib"
     folder = _seed(lib)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
+    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="3413520661")
     qapp.processEvents()
@@ -152,9 +150,8 @@ def test_success_handler_sets_updated_label(
 ) -> None:
     lib = tmp_path / "lib"
     folder = _seed(lib)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
+    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="3413520661")
     monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
@@ -177,9 +174,8 @@ def test_refresh_success_never_shows_status_banner(
     """Refresh soft feedback is op_status only — never detailStatusBanner."""
     lib = tmp_path / "lib"
     folder = _seed(lib)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
+    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+
     panel = ModDetailPanel()
     panel.show()
     panel.show_mod(folder, mod_id="3413520661")
@@ -227,9 +223,8 @@ def test_refresh_clears_missing_content_when_files_exist(
     folder = _seed(lib)
     apply_missing_content_marker(folder)
     (folder / "payload.pak").write_bytes(b"pak")
-    db.upsert_mod(
-        ModMetadata(published_file_id="3413520661", title="Unknown_Mod_3413520661")
-    )
+    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id="3413520661")
     panel._current_platform = PLATFORM_OTHER

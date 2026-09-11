@@ -14,8 +14,9 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
+from services.identity_service import create_mod_identity, identity_create_scope
 from services.mod_library_cache import reset_library_cache
 from ui.library_view import ModLibraryView
 from ui.library_viewport import estimate_total_height
@@ -44,15 +45,27 @@ def _seed(lib: Path, db: DatabaseManager, *, n: int = 24, app_id: int = 880) -> 
     db.upsert_game(GameInfo(app_id=app_id, name=game, folder_name=game))
     ids: list[str] = []
     for i in range(n):
-        mid = str(app_id * 1000 + i)
-        ids.append(mid)
+        workshop = str(app_id * 1000 + i)
         folder = lib / game / f"Mod{i:03d}"
         info = folder / INFO_DIR_NAME
         info.mkdir(parents=True)
+        with identity_create_scope():
+            created = create_mod_identity(
+                db,
+                platform=PLATFORM_STEAM,
+                external_id=workshop,
+                workshop_id=workshop,
+                title=f"Mod{i:03d}",
+                app_id=app_id,
+                game_name=game,
+            )
+        entity_id = str(created.mod_id)
+        ids.append(entity_id)
         (info / METADATA_FILENAME).write_text(
             json.dumps(
                 {
-                    "published_file_id": mid,
+                    "internal_id": entity_id,
+                    "published_file_id": workshop,
                     "title": f"Mod{i:03d}",
                     "game_name": game,
                     "app_id": app_id,
@@ -60,17 +73,8 @@ def _seed(lib: Path, db: DatabaseManager, *, n: int = 24, app_id: int = 880) -> 
             ),
             encoding="utf-8",
         )
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=f"Mod{i:03d}",
-                app_id=app_id,
-                game_name=game,
-                managed_path=str(folder),
-            )
-        )
         db.update_mod_identity_fields(
-            mid,
+            entity_id,
             folder_present=True,
             last_known_path=str(folder),
             app_id=app_id,

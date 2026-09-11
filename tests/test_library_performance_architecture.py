@@ -23,6 +23,7 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.models import ModMetadata
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.mod_library_cache import (
     build_library_snapshot,
     list_item_to_card_data,
@@ -73,6 +74,8 @@ def test_build_library_snapshot_source_forbids_filesystem_resolve() -> None:
     assert "list_managed_mods" not in body
     assert "rglob" not in body
     assert "list_mod_list_items" in body
+    assert "directory_size" not in body
+    assert "os.walk" not in body
 
 
 def test_mod_library_cache_ast_forbids_list_visible_mods() -> None:
@@ -103,15 +106,9 @@ def test_db_list_mod_list_items_by_game_folder(
         mid = str(200100 + i)
         folder = lib / game / f"M{i}"
         folder.mkdir(parents=True)
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=f"M{i}",
-                app_id=289070,
-                game_name=game,
-                managed_path=str(folder),
-            )
-        )
+        create_steam_test_mod(db, external_id=mid, title=f"M{i}", app_id=289070, game_name=game)
+        bind_managed_path(db, mid, folder, title=f"M{i}")
+
         db.update_mod_identity_fields(
             mid,
             folder_present=True,
@@ -135,15 +132,9 @@ def test_snapshot_is_db_first(db: DatabaseManager, tmp_path: Path) -> None:
     db.upsert_game(GameInfo(app_id=11, name=game, folder_name=game))
     folder = lib / game / "Only"
     folder.mkdir(parents=True)
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="300001",
-            title="Only",
-            app_id=11,
-            description="HEAVY SHOULD NOT APPEAR",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="300001", title="Only", app_id=11)
+    bind_managed_path(db, "300001", folder, title="Only")
+
     db.update_mod_identity_fields(
         "300001",
         folder_present=True,

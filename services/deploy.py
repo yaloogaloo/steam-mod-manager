@@ -20,10 +20,16 @@ from core.db_manager import (
 )
 from core.paths import default_mod_library
 from services.backup_manager import (
-    TXN_BACKUP_DONE,
     BackupIntegrityError,
     BackupManager,
     BackupRestoreError,
+)
+from services.deployment_lifecycle import (
+    DeploymentLifecycleState,
+    PHASE_COPY_DONE,
+    PHASE_MANIFEST_DONE,
+    persist_lifecycle_transaction,
+    resolve_from_transaction,
 )
 from services.conflict import ConflictDetector
 from services.deploy_errors import DeploySourceError, DeployValidationError
@@ -51,6 +57,7 @@ from services.deploy_rules import (
     DEPLOY_TYPE_PALWORLD_PAK,
     DEPLOY_TYPE_SLAY_THE_SPIRE,
     DEPLOY_TYPE_STARDEW_VALLEY,
+    DEPLOY_TYPE_WARHAMMER3,
     PALWORLD_APP_ID,
     STARDEW_VALLEY_APP_ID,
     DeployContext,
@@ -228,6 +235,29 @@ def _merge_tree(src: Path, dest: Path) -> None:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
+
+
+def _payload_from_extracts(
+    stage: Path,
+    extracted_roots: list[Path],
+    extra_files: list[tuple[Path, Path]],
+) -> Path:
+    """Use a single extract tree in place when nothing else needs merging.
+
+    Avoids copying the full extracted payload into ``stage/content`` before
+    Apply copies planned files to the game directory (duplicate I/O).
+    """
+    if len(extracted_roots) == 1 and not extra_files:
+        return extracted_roots[0]
+    content = stage / "content"
+    content.mkdir(parents=True, exist_ok=True)
+    for root in extracted_roots:
+        _merge_tree(root, content)
+    for src, rel in extra_files:
+        dest = content / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+    return content
 
 
 def _sniff_managed_archives(managed: Path) -> list[Path]:
@@ -501,9 +531,9 @@ def _build_extracted_deploy_content(
     )
 
     stage = import_cache_root() / f"deploy_{uuid.uuid4().hex}"
-    content = stage / "content"
-    content.mkdir(parents=True, exist_ok=False)
+    stage.mkdir(parents=True, exist_ok=False)
     try:
+        extracted_roots: list[Path] = []
         for archive in archive_paths:
             extract_dest = stage / f"ex_{uuid.uuid4().hex[:8]}"
             result, ArchiveExtractStatus = extract_archive_via_core(
@@ -520,13 +550,14 @@ def _build_extracted_deploy_content(
                 custom_deploy_path=custom_deploy_path,
                 find_mod_root_fn=find_mod_root,
             )
-            _merge_tree(root, content)
+            extracted_roots.append(root)
+        extra_files: list[tuple[Path, Path]] = []
         if include_other_plain:
             for path in _iter_plain_managed_files(managed, skip_archives=True):
-                rel = path.relative_to(managed)
-                dest = content / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, dest)
+                extra_files.append((path, path.relative_to(managed)))
+        content = _payload_from_extracts(
+            stage, extracted_roots, extra_files
+        )
         from services.deploy_fs import safe_iter_files
 
         if not any(safe_iter_files(content)):
@@ -661,9 +692,9 @@ def prepare_deploy_content(
         return managed, resolve_deploy_sources(internal_id, managed, db=database), None
 
     stage = import_cache_root() / f"deploy_{uuid.uuid4().hex}"
-    content = stage / "content"
-    content.mkdir(parents=True, exist_ok=False)
+    stage.mkdir(parents=True, exist_ok=False)
     try:
+        extracted_roots: list[Path] = []
         for entry in archive_entries:
             archive = _resolve_archive_file(managed, entry)
             if archive is None:
@@ -698,8 +729,9 @@ def prepare_deploy_content(
                 custom_deploy_path=custom_path,
                 find_mod_root_fn=find_mod_root,
             )
-            _merge_tree(root, content)
+            extracted_roots.append(root)
 
+        extra_files: list[tuple[Path, Path]] = []
         for entry in plain_entries:
             rel = (entry.path or entry.filename or "").replace("\\", "/").strip().lstrip("./")
             if not rel:
@@ -709,10 +741,9 @@ def prepare_deploy_content(
                 src = managed / Path(rel).name
             if not src.is_file():
                 continue
-            dest = content / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
+            extra_files.append((src, Path(rel)))
 
+        content = _payload_from_extracts(stage, extracted_roots, extra_files)
         from services.deploy_fs import safe_iter_files
 
         if not any(safe_iter_files(content)):
@@ -1254,6 +1285,9 @@ class ModDeployer:
             defer_archive_extract = bool(
                 collect_deploy_archives(mid, source, db=db)
             )
+        # WH3 activation never extracts archives: packs stay in the library.
+        if prepare_archives and deploy_type == DEPLOY_TYPE_WARHAMMER3:
+            defer_archive_extract = True
         if prepare_archives and not defer_archive_extract:
             from services.deploy_stage_log import deploy_stage
 
@@ -1592,7 +1626,23 @@ class ModDeployer:
 
         log_archive_runtime_identity(logger, prefix="[DEPLOY_RUNTIME]")
 
-        if mid.isdigit() and not self._database().is_mod_enabled(mid):
+        from services.wh3_activation import is_wh3_activation_app
+
+        app_id_hint = 0
+        if mid.isdigit():
+            try:
+                row = self._database().get_mod_backup_row(mid)
+                if row is not None:
+                    app_id_hint = int(row.get("app_id") or 0)
+            except Exception:  # noqa: BLE001
+                app_id_hint = 0
+        wh3_activation = is_wh3_activation_app(app_id_hint)
+
+        if (
+            mid.isdigit()
+            and not self._database().is_mod_enabled(mid)
+            and not wh3_activation
+        ):
             error = "Mod disabled"
             logger.warning(
                 "%s result=fail stage=early_gate reason=mod_disabled error=%s",
@@ -1679,13 +1729,14 @@ class ModDeployer:
                 )
 
         try:
-            from services.mod_source_integrity import validate_source
+            if not wh3_activation:
+                from services.mod_source_integrity import validate_source
 
-            validate_source(
-                mid,
-                managed_path=source_for_gate,
-                db=self._database(),
-            )
+                validate_source(
+                    mid,
+                    managed_path=source_for_gate,
+                    db=self._database(),
+                )
         except DeploySourceError as exc:
             if exc.code == "no_deployable_source":
                 error = MISSING_CONTENT_DEPLOY_ERROR
@@ -1735,6 +1786,24 @@ class ModDeployer:
                         dep_mid,
                     )
                     continue
+                if dep_mid.isdigit():
+                    try:
+                        dep_info = db.get_mod_deploy_info(dep_mid)
+                    except Exception:  # noqa: BLE001
+                        dep_info = None
+                    dep_status = (
+                        str(dep_info.deploy_status or "").strip().lower()
+                        if dep_info is not None
+                        else ""
+                    )
+                    if dep_status == DEPLOY_STATUS_DEPLOYED:
+                        logger.info(
+                            "%s skip already-deployed dependency "
+                            "dep_internal_id=%s",
+                            log_prefix,
+                            dep_mid,
+                        )
+                        continue
                 logger.info(
                     "%s deploy dependency first dep_internal_id=%s",
                     log_prefix,
@@ -1776,12 +1845,15 @@ class ModDeployer:
             for w in relationship_warnings:
                 logger.warning("%s relation_warn=%s", log_prefix, w.get("message"))
 
-        from services.deploy_stage_log import deploy_stage
+        from services.deploy_stage_log import current_deploy_timing, deploy_stage
 
         with deploy_stage("resolve", internal_id=mid):
             ctx, early, cleanup = self._resolve_context(
                 internal_id, require_target_exists=True, prepare_archives=True
             )
+        sess = current_deploy_timing()
+        if sess is not None:
+            sess.diagnostics["extracted"] = cleanup is not None
         try:
             return self._deploy_with_context(
                 mid=mid,
@@ -2006,6 +2078,9 @@ class ModDeployer:
                             "压缩包源缺失："
                             + ", ".join(str(p) for p in missing_zips[:3])
                         )
+                elif ctx.deploy_type == DEPLOY_TYPE_WARHAMMER3:
+                    # Archives are prepared into the Workshop tree later.
+                    pass
                 else:
                     verify_deploy_source(
                         ctx.content_root(),
@@ -2047,6 +2122,35 @@ class ModDeployer:
         conflicts_payload: dict[str, Any] | None = None
         with deploy_stage("plan", internal_id=mid, extra=f"strategy={type(strategy).__name__}"):
             planned = strategy.plan(ctx)
+        sess = current_deploy_timing()
+        if sess is not None and planned.success and planned.files:
+            pack_n = 0
+            pack_bytes = 0
+            for entry in planned.files:
+                src = Path(str(getattr(entry, "source", "") or ""))
+                try:
+                    if src.is_file() and src.suffix.lower() == ".pack":
+                        pack_n += 1
+                        pack_bytes += int(src.stat().st_size)
+                except OSError:
+                    continue
+            sess.diagnostics["planned_files"] = len(planned.files)
+            sess.diagnostics["pack_count"] = pack_n
+            sess.diagnostics["pack_bytes"] = pack_bytes
+        if (
+            planned.success
+            and not str(ctx.custom_deploy_path or "").strip()
+            and ctx.deploy_type == DEPLOY_TYPE_WARHAMMER3
+        ):
+            from services.wh3_activation import is_wh3_activation_app
+
+            if is_wh3_activation_app(ctx.app_id):
+                return self._finish_wh3_activation_deploy(
+                    ctx,
+                    planned,
+                    relationship_warnings,
+                    log_prefix,
+                )
         if planned.success and planned.files:
             try:
                 workspace_roots = [
@@ -2134,7 +2238,9 @@ class ModDeployer:
             return out
 
         manifest_root = ctx.library_folder()
-        backup_mgr = BackupManager(manifest_root)
+        backup_mgr = BackupManager(
+            manifest_root, internal_id=str(ctx.internal_id or "").strip()
+        )
         prep = None
 
         from services.deploy_apply import apply_file_plan
@@ -2188,6 +2294,13 @@ class ModDeployer:
                 prep = backup_mgr.prepare_overwrite(
                     planned_targets, mod_id=ctx.internal_id
                 )
+            sess = current_deploy_timing()
+            if sess is not None:
+                backed = 0
+                if prep is not None:
+                    backed = sum(1 for b in prep.by_target.values() if b is not None)
+                sess.diagnostics["backup_happened"] = backed > 0
+                sess.diagnostics["backup_files"] = backed
             if file_plan is not None:
                 file_plan.diagnostics.backed_up_files = _count_backed_up(prep)
         except (OSError, BackupIntegrityError, BackupRestoreError) as exc:
@@ -2248,6 +2361,17 @@ class ModDeployer:
                         apply_out = apply_file_plan(file_plan)
                 else:
                     apply_out = apply_file_plan(file_plan)
+            sess = current_deploy_timing()
+            if sess is not None:
+                sess.files = int(getattr(apply_out, "copied_files", 0) or 0)
+                sess.bytes = int(getattr(apply_out, "total_bytes", 0) or 0)
+                sess.diagnostics["copied_bytes"] = sess.bytes
+                sess.diagnostics["copied_files"] = sess.files
+                from services.deploy_apply import current_apply_source_hashes
+
+                sess.diagnostics["hashed_during_copy"] = len(
+                    current_apply_source_hashes()
+                )
             logger.info(
                 "%s [DEPLOY_APPLY_DIAG] planned=%s copied=%s bytes=%s groups=%s",
                 log_prefix,
@@ -2290,7 +2414,7 @@ class ModDeployer:
                     out["relationship_warnings"] = relationship_warnings
                 return out
 
-            from services.deploy_txn import PHASE_COPY_DONE, log_txn_phase
+            from services.deploy_txn import log_txn_phase
 
             log_txn_phase(
                 PHASE_COPY_DONE,
@@ -2299,8 +2423,13 @@ class ModDeployer:
             )
             if prep is not None:
                 try:
-                    backup_mgr.write_transaction(
-                        status=TXN_BACKUP_DONE,
+                    cur = resolve_from_transaction(backup_mgr.load_transaction())
+                    persist_lifecycle_transaction(
+                        backup_mgr,
+                        DeploymentLifecycleState.COPYING,
+                        current=None
+                        if cur is DeploymentLifecycleState.CREATED
+                        else cur,
                         targets=list(prep.by_target.keys()),
                         backups=[
                             {
@@ -2313,7 +2442,6 @@ class ModDeployer:
                             if b is not None
                         ],
                         mod_id=ctx.internal_id,
-                        phase=PHASE_COPY_DONE,
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug(
@@ -2443,7 +2571,7 @@ class ModDeployer:
                     planned_targets=planned_abs,
                 )
                 save_manifest(manifest_root, result.manifest)
-                from services.deploy_txn import PHASE_MANIFEST_DONE, log_txn_phase
+                from services.deploy_txn import log_txn_phase
 
                 log_txn_phase(
                     PHASE_MANIFEST_DONE,
@@ -2452,8 +2580,13 @@ class ModDeployer:
                 )
                 if prep is not None:
                     try:
-                        backup_mgr.write_transaction(
-                            status=TXN_BACKUP_DONE,
+                        cur = resolve_from_transaction(backup_mgr.load_transaction())
+                        persist_lifecycle_transaction(
+                            backup_mgr,
+                            DeploymentLifecycleState.VERIFYING,
+                            current=None
+                            if cur is DeploymentLifecycleState.CREATED
+                            else cur,
                             targets=list(prep.by_target.keys()),
                             backups=[
                                 {
@@ -2466,7 +2599,6 @@ class ModDeployer:
                                 if b is not None
                             ],
                             mod_id=ctx.internal_id,
-                            phase=PHASE_MANIFEST_DONE,
                         )
                     except Exception:  # noqa: BLE001
                         logger.debug(
@@ -2623,6 +2755,234 @@ class ModDeployer:
             out["relationship_warnings"] = relationship_warnings
         return out
 
+    def _finish_wh3_activation_deploy(
+        self,
+        ctx: DeployContext,
+        planned: Any,
+        relationship_warnings: list[dict[str, Any]],
+        log_prefix: str,
+    ) -> dict[str, Any]:
+        """WH3 deploy: record status + used_mods.txt. Never copy packs to data."""
+        from services.wh3_activation import (
+            Wh3ModRef,
+            complete_wh3_deploy_activation,
+            load_wh3_game_paths,
+            prepare_wh3_workshop_packs,
+            _row_to_ref,
+        )
+        from services.deploy_rules.warhammer3 import Warhammer3Strategy
+
+        library = ctx.library_folder()
+        paths = load_wh3_game_paths(self._database())
+        ref = None
+        try:
+            rows = self._database().list_mod_list_items(mod_id=ctx.internal_id)
+            if rows:
+                ref = _row_to_ref(rows[0])
+        except Exception:  # noqa: BLE001
+            ref = None
+        if ref is None:
+            ref = Wh3ModRef(
+                internal_id=str(ctx.internal_id),
+                workspace_id=str(ctx.workspace_id or ""),
+                enabled=True,
+                last_known_path=str(library),
+                deploy_status="",
+                title="",
+            )
+        pack_lines, prepare_error = prepare_wh3_workshop_packs(
+            ref,
+            workshop_path=paths.workshop_path,
+            data_folder=paths.data_folder,
+            extract=True,
+            db=self._database(),
+        )
+        if prepare_error or not pack_lines:
+            error = prepare_error or "战锤 III Mod 部署失败：未找到 .pack 文件"
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            self._mark_failed(ctx.internal_id, app_id=ctx.app_id, error=error)
+            return {
+                "success": False,
+                "error": error,
+                "mod_id": ctx.internal_id,
+                "deploy_type": ctx.deploy_type,
+                "copied_files": 0,
+            }
+
+        workshop_target = pack_lines[0].directory
+        old = load_manifest(library, expected_internal_id=ctx.internal_id)
+        if old is not None and getattr(old, "files", None):
+            try:
+                Warhammer3Strategy().undeploy(ctx, old)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "%s leftover WH3 data-copy cleanup failed",
+                    log_prefix,
+                    exc_info=True,
+                )
+        try:
+            delete_manifest(library)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "%s delete old WH3 copy manifest failed", log_prefix, exc_info=True
+            )
+
+        when = _utc_deploy_time()
+        db_warning: str | None = None
+        try:
+            self._database().update_mod_deploy_status(
+                ctx.internal_id,
+                deploy_status=DEPLOY_STATUS_DEPLOYED,
+                deploy_path=str(workshop_target),
+                deploy_time=when,
+                deploy_error="",
+                app_id=ctx.app_id,
+            )
+            try:
+                from services.mod_projection_events import notify_mod_changed
+
+                notify_mod_changed(ctx.internal_id)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "notify_mod_changed after WH3 deploy failed internal_id=%s",
+                    ctx.internal_id,
+                    exc_info=True,
+                )
+            try:
+                from services.mod_fs_observer import touch_observation_stamp
+
+                touch_observation_stamp(
+                    ctx.internal_id,
+                    managed_path=getattr(ctx, "managed_path", None) or library,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "fs observation stamp after WH3 deploy failed internal_id=%s",
+                    ctx.internal_id,
+                    exc_info=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            db_warning = "database_update_failed"
+            logger.warning(
+                "[DEPLOY] WH3 database status update failed internal_id=%s error=%s",
+                ctx.internal_id,
+                exc,
+            )
+        try:
+            complete_wh3_deploy_activation(
+                ctx.internal_id,
+                db=self._database(),
+                library_root=self.library_root,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "%s WH3 used_mods / load-order persist failed",
+                log_prefix,
+                exc_info=True,
+            )
+
+        pack_names = [line.pack_name for line in pack_lines]
+        logger.info(
+            "%s source=%s target=%s type=%s result=ok copied=0 packs=%s",
+            log_prefix,
+            library,
+            workshop_target,
+            ctx.deploy_type,
+            pack_names,
+        )
+        out: dict[str, Any] = {
+            "success": True,
+            "mod_id": ctx.internal_id,
+            "source": str(library),
+            "target": str(workshop_target),
+            "managed_path": str(library),
+            "copied_files": 0,
+            "validated": len(pack_lines),
+            "files": pack_names,
+            "deploy_type": ctx.deploy_type,
+            "deploy_time": when,
+            "deployment_status": "deployed",
+            "planned_files": len(planned.files or []),
+            "backed_up_files": 0,
+            "applied_files": 0,
+            "verified_files": 0,
+            "failed_files": 0,
+        }
+        if db_warning:
+            out["warning"] = db_warning
+        if relationship_warnings:
+            out["relationship_warnings"] = relationship_warnings
+        return out
+
+    def _undeploy_wh3_activation(
+        self,
+        ctx: DeployContext,
+        log_prefix: str,
+    ) -> dict[str, Any]:
+        """Clear WH3 deploy status without deleting library packs."""
+        from services.wh3_activation import complete_wh3_undeploy_activation
+        from services.deploy_rules.warhammer3 import Warhammer3Strategy
+
+        manifest_root = ctx.library_folder()
+        manifest = load_manifest(manifest_root, expected_internal_id=ctx.internal_id)
+        strategy = Warhammer3Strategy()
+        result = strategy.undeploy(ctx, manifest)
+        if not result.success:
+            logger.warning("%s result=fail error=%s", log_prefix, result.error)
+            return {
+                "success": False,
+                "error": result.error,
+                "mod_id": ctx.internal_id,
+            }
+        delete_manifest(manifest_root)
+        try:
+            self._database().update_mod_deploy_status(
+                ctx.internal_id,
+                deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
+                deploy_path="",
+                deploy_time="",
+                deploy_error="",
+                app_id=ctx.app_id,
+            )
+            try:
+                from services.mod_projection_events import notify_mod_changed
+
+                notify_mod_changed(ctx.internal_id)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "notify_mod_changed after WH3 undeploy failed internal_id=%s",
+                    ctx.internal_id,
+                    exc_info=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            error = f"更新部署状态失败：{exc}"
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            return {"success": False, "error": error, "mod_id": ctx.internal_id}
+        try:
+            complete_wh3_undeploy_activation(
+                ctx.internal_id,
+                db=self._database(),
+                library_root=self.library_root,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "%s WH3 used_mods persist after undeploy failed",
+                log_prefix,
+                exc_info=True,
+            )
+        logger.info(
+            "%s source=%s result=ok removed=%s",
+            log_prefix,
+            ctx.source,
+            result.copied_files,
+        )
+        return {
+            "success": True,
+            "mod_id": ctx.internal_id,
+            "removed_files": result.copied_files,
+            "deploy_type": result.deploy_type or ctx.deploy_type,
+        }
+
     def deployment_status(self, internal_id: int | str) -> str:
         """Phase 8 runtime deployment_status (not content_status)."""
         return resolve_deployment_status(
@@ -2714,6 +3074,15 @@ class ModDeployer:
             return out
         assert ctx is not None
 
+        if (
+            not str(ctx.custom_deploy_path or "").strip()
+            and ctx.deploy_type == DEPLOY_TYPE_WARHAMMER3
+        ):
+            from services.wh3_activation import is_wh3_activation_app
+
+            if is_wh3_activation_app(ctx.app_id):
+                return self._undeploy_wh3_activation(ctx, log_prefix)
+
         manifest_root = ctx.library_folder()
         manifest = load_manifest(manifest_root, expected_internal_id=mid)
 
@@ -2777,7 +3146,9 @@ class ModDeployer:
         ):
             strategy = CustomPathStrategy()
 
-        backup_mgr = BackupManager(manifest_root)
+        backup_mgr = BackupManager(
+            manifest_root, internal_id=str(ctx.internal_id or "").strip()
+        )
         # Preflight: refuse undeploy when a required backup is missing/corrupt
         # so we never silently delete targets that cannot be restored.
         if manifest is not None:

@@ -23,6 +23,7 @@ from services.library_status import CONTENT_CONTENT_MISSING, CONTENT_HEALTHY, ro
 from services.mod_library_cache import apply_content_status_to_card_data, build_library_snapshot, get_library_cache, list_item_to_card_data, reset_library_cache
 from services.mod_list_item import ModListItem
 from services.mod_refresh import reconcile_local_state
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 pytest.importorskip('PySide6')
 
 @pytest.fixture()
@@ -38,11 +39,11 @@ def _seed(library: Path, db: DatabaseManager, mid: str, *, with_payload: bool, g
     folder = library / game / f'Mod{mid}'
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(json.dumps({'published_file_id': mid, 'title': f'Mod{mid}', 'app_id': app_id, 'game_name': game}), encoding='utf-8')
+    (info / METADATA_FILENAME).write_text(json.dumps({'internal_id': mid, 'published_file_id': mid, 'title': f'Mod{mid}', 'app_id': app_id, 'game_name': game}), encoding='utf-8')
     if with_payload:
         (folder / 'mod.pak').write_bytes(b'payload')
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f'Mod{mid}', app_id=app_id, game_name=game, managed_path=str(folder)))
-    db.update_mod_identity_fields(mid, folder_present=True, last_known_path=str(folder), app_id=app_id)
+    create_steam_test_mod(db, external_id=mid, title=f'Mod{mid}', app_id=app_id, game_name=game)
+    bind_managed_path(db, mid, folder, game_name=game, title=f'Mod{mid}')
     db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
     return folder
 

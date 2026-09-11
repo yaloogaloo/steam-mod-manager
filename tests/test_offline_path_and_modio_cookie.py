@@ -7,6 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -87,23 +92,25 @@ def test_resolve_falls_back_to_steam_index(tmp_path: Path) -> None:
 def test_open_offline_opens_modio_offline_index(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
-    folder = _seed_folder(tmp_path / "lib", mid="91003", title="BiggerHarbour")
+    created = create_steam_test_mod(db, external_id="91003", title="BiggerHarbour")
+    mid = str(created.mod_id)
+    folder = _seed_folder(tmp_path / "lib", mid=mid, title="BiggerHarbour")
+    write_info_sidecar(
+        folder,
+        internal_id=mid,
+        title="BiggerHarbour",
+        external_id="91003",
+        workspace_id=str(created.workspace_id or "91003"),
+    )
+    bind_managed_path(db, mid, folder, title="BiggerHarbour")
     legacy = folder / INFO_DIR_NAME / "index.html"
     legacy.write_text("<html>wrong</html>", encoding="utf-8")
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>modio</html>", encoding="utf-8")
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91003",
-            title="BiggerHarbour",
-            offline_page_path=".info/index.html",
-            managed_path=str(folder),
-        )
-    )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     panel._metadata.offline_page_path = ".info/index.html"
 
     opened: list = []

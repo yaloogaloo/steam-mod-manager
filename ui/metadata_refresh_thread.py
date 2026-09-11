@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from services.crash_trace import log_exception, traced
 from services.metadata_refresh import refresh_selected_mods_metadata
 
 _log = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class ModRefreshWorker(QThread):
         self.platform = str(platform or "").strip()
         self.source_url = str(source_url or "").strip()
 
+    @traced("ModRefreshWorker.run")
     def run(self) -> None:
         from services.mod_refresh import refresh_mod
         from services.path_lifecycle import resolve_refresh_folder
@@ -106,6 +108,11 @@ class ModRefreshWorker(QThread):
                 return
             self.refresh_finished.emit(compat)
         except Exception as exc:  # noqa: BLE001
+            log_exception(
+                "ModRefreshWorker.run",
+                mod_id=mid,
+                path=str(self.managed_path),
+            )
             _log.exception(
                 "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 "
                 "title=%r stage=worker_crash reason=unhandled exception=%r",

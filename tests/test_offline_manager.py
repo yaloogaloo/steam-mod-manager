@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from core.mod_platform import (
     PLATFORM_GITHUB,
     PLATFORM_NEXUS,
@@ -54,7 +55,9 @@ def test_manager_selects_steam_nexus_github(
     lib.mkdir()
 
     steam_folder = _seed(lib, mid="111", title="S")
-    db.upsert_mod(ModMetadata(published_file_id="111", title="S", managed_path=str(steam_folder)))
+    create_steam_test_mod(db, external_id="111", title="S")
+    bind_managed_path(db, "111", steam_folder, title="S")
+
     db.update_mod_platform_info("111", platform=PLATFORM_STEAM, external_id="111")
 
     nexus = db.register_external_mod(

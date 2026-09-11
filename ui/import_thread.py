@@ -64,6 +64,9 @@ class ImportWorker(QThread):
             else:
                 self.import_failed.emit(result.error or "导入失败")
         except Exception as exc:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("ImportWorker.run")
             self.import_failed.emit(str(exc))
 
     def _emit_progress(self, message: str) -> None:
@@ -122,6 +125,9 @@ class ImportWorker(QThread):
                 merge_mode="import_overwrite",
             )
         except Exception:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("ImportWorker._maybe_attach_nexus_offline")
             # Missing / invalid offline pages must never fail the Mod import.
             pass
         try:
@@ -478,6 +484,12 @@ class ImportWorker(QThread):
                     batch=False,
                 )
             except Exception as exc:  # noqa: BLE001
+                from services.crash_trace import log_exception
+
+                log_exception(
+                    "ImportWorker._do_batch_offline_html_import",
+                    html=str(html),
+                )
                 failures.append(f"{html.name}: {exc}")
                 continue
             if result.success:

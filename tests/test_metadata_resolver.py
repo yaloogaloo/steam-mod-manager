@@ -12,6 +12,7 @@ from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
 from services.metadata_backup import backup_root, reconcile_folder_presence, sync_metadata_backup
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.mod_metadata_resolver import (
     ModMetadataResolver,
     resolve_cover_path,
@@ -70,19 +71,22 @@ def test_existing_folder_prefers_info_over_backup_and_sqlite(
     _write_info(
         folder,
         {
+            "internal_id": "910101",
             "published_file_id": "910101",
             "title": "A",
             "display_name": "A",
             "description": "info-desc",
         },
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="910101", title="C", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="910101", title="C")
+    bind_managed_path(db, "910101", folder, title="C")
+
     db.update_mod_user_metadata("910101", {"display_name": "C"})
     _write_backup_files(
         "910101",
-        {"published_file_id": "910101", "title": "B", "display_name": "B"},
+        {
+            "internal_id": "910101",
+            "published_file_id": "910101", "title": "B", "display_name": "B"},
     )
 
     resolved = resolve_mod_metadata("910101", folder)
@@ -98,19 +102,21 @@ def test_missing_folder_prefers_backup_over_sqlite(
     _write_info(
         folder,
         {
+            "internal_id": "910102",
             "published_file_id": "910102",
             "title": "FromInfo",
             "display_name": "FromInfo",
         },
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="910102", title="C", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="910102", title="C")
+    bind_managed_path(db, "910102", folder, title="C")
+
     db.update_mod_user_metadata("910102", {"display_name": "C"})
     sync_metadata_backup(folder)
     _write_backup_files(
         "910102",
         {
+            "internal_id": "910102",
             "published_file_id": "910102",
             "title": "B",
             "display_name": "B",
@@ -134,15 +140,19 @@ def test_restored_folder_info_wins_without_resolver_write(
     folder = tmp_path / "mod" / "Game" / "ModC"
     _write_info(
         folder,
-        {"published_file_id": "910103", "title": "A", "display_name": "A"},
+        {
+            "internal_id": "910103",
+            "published_file_id": "910103", "title": "A", "display_name": "A"},
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="910103", title="A", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="910103", title="A")
+    bind_managed_path(db, "910103", folder, title="A")
+
     sync_metadata_backup(folder)
     _write_backup_files(
         "910103",
-        {"published_file_id": "910103", "title": "B", "display_name": "B"},
+        {
+            "internal_id": "910103",
+            "published_file_id": "910103", "title": "B", "display_name": "B"},
     )
 
     resolved = resolve_mod_metadata("910103", folder)
@@ -170,6 +180,7 @@ def test_missing_folder_uses_backup_cover_not_sqlite_path(
     _write_info(
         folder,
         {
+            "internal_id": "910104",
             "published_file_id": "910104",
             "title": "CoverMod",
             "display_name": "CoverMod",
@@ -177,11 +188,9 @@ def test_missing_folder_uses_backup_cover_not_sqlite_path(
         },
     )
     (folder / INFO_DIR_NAME / "cover.jpg").write_bytes(b"info-cover")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="910104", title="CoverMod", managed_path=str(folder)
-        )
-    )
+    create_steam_test_mod(db, external_id="910104", title="CoverMod")
+    bind_managed_path(db, "910104", folder, title="CoverMod")
+
     db.update_mod_cover_path("910104", str(folder / INFO_DIR_NAME / "cover.jpg"))
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
@@ -202,7 +211,8 @@ def test_missing_folder_opens_backup_offline(
     (folder / INFO_DIR_NAME / METADATA_FILENAME).write_text(
         json.dumps(
             {
-                "published_file_id": "910105",
+            "internal_id": "910105",
+            "published_file_id": "910105",
                 "title": "OffMod",
                 "display_name": "OffMod",
             }
@@ -210,9 +220,9 @@ def test_missing_folder_opens_backup_offline(
         encoding="utf-8",
     )
     (info / "index.html").write_text("<html>info</html>", encoding="utf-8")
-    db.upsert_mod(
-        ModMetadata(published_file_id="910105", title="OffMod", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="910105", title="OffMod")
+    bind_managed_path(db, "910105", folder, title="OffMod")
+
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
     db.set_mod_folder_present("910105", present=False)
@@ -228,13 +238,15 @@ def test_resolver_does_not_read_missing_info_path(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "Gone"
-    db.upsert_mod(
-        ModMetadata(published_file_id="910106", title="C", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="910106", title="C")
+    bind_managed_path(db, "910106", folder, title="C")
+
     db.update_mod_user_metadata("910106", {"display_name": "C"})
     _write_backup_files(
         "910106",
-        {"published_file_id": "910106", "title": "B", "display_name": "B"},
+        {
+            "internal_id": "910106",
+            "published_file_id": "910106", "title": "B", "display_name": "B"},
         cover=True,
         offline=True,
     )
@@ -243,7 +255,9 @@ def test_resolver_does_not_read_missing_info_path(
         last_known_path=str(folder),
         folder_present=False,
         backup_metadata_json=json.dumps(
-            {"published_file_id": "910106", "title": "B", "display_name": "B"}
+            {
+            "internal_id": "910106",
+            "published_file_id": "910106", "title": "B", "display_name": "B"}
         ),
         backup_cover_path=str(backup_root("910106") / "cover.jpg"),
         backup_offline_path=str(backup_root("910106") / "offline" / "index.html"),
@@ -264,11 +278,13 @@ def test_reconcile_marks_deleted_folder_missing(
     folder = tmp_path / "mod" / "Game" / "ModF"
     _write_info(
         folder,
-        {"published_file_id": "910107", "title": "F", "display_name": "F"},
+        {
+            "internal_id": "910107",
+            "published_file_id": "910107", "title": "F", "display_name": "F"},
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="910107", title="F", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="910107", title="F")
+    bind_managed_path(db, "910107", folder, title="F")
+
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
     reconcile_folder_presence(tmp_path / "mod")

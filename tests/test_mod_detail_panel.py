@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -59,7 +60,8 @@ def test_panel_created_once_and_reused(
 
     pub = "91001"
     folder = _mod_folder(tmp_path, pub_id=pub, title="Test Mod")
-    db.upsert_mod(ModMetadata(published_file_id=pub, title="Test Mod"))
+    create_steam_test_mod(db, external_id=pub, title="Test Mod")
+
 
     # Detail bind requires caller internal_id (Identity Contract — no path invent).
     panel.show_mod(folder, mod_id=pub)
@@ -96,7 +98,8 @@ def test_edit_does_not_rename_folder(
 ) -> None:
     pub = "91002"
     folder = _mod_folder(tmp_path, pub_id=pub, title="FolderStay")
-    db.upsert_mod(ModMetadata(published_file_id=pub, title="FolderStay"))
+    create_steam_test_mod(db, external_id=pub, title="FolderStay")
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=pub)
 

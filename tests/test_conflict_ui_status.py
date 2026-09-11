@@ -129,57 +129,43 @@ def test_card_conflict_badge_only_for_conflict_flag(
     )
     c, *_ = conflict_card._overlay_user_flags()
     assert c is True
+    assert not conflict_card.conflict_badge.isHidden()
+    assert conflict_card.conflict_badge.text() == "冲突"
 
     warn_card = _card(
         tmp_path, data=_data(conflict=False, conflict_status="warning", id="10")
     )
     c2, *_ = warn_card._overlay_user_flags()
     assert c2 is False
+    assert warn_card.conflict_badge.isHidden()
 
     none_card = _card(
         tmp_path, data=_data(conflict=False, conflict_status="none", id="11")
     )
     c3, *_ = none_card._overlay_user_flags()
     assert c3 is False
+    assert none_card.conflict_badge.isHidden()
 
 
-def test_card_db_fallback_warning_not_conflict(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_card_projection_warning_not_conflict(
+    qapp: QApplication, tmp_path: Path
 ) -> None:
-    folder = tmp_path / "G" / "M2"
-    folder.mkdir(parents=True)
-    meta = ModMetadata(
-        published_file_id="55",
-        title="Card",
-        managed_path=str(folder),
+    warn_card = _card(
+        tmp_path,
+        data=_data(conflict=False, conflict_status=CONFLICT_STATUS_WARNING, id="55"),
     )
-    card = ModCardWidget(folder, meta, card_data=None)
-
-    class _FakeDb:
-        def get_mod_status(self, mid):  # noqa: ANN001
-            return ModStatus(
-                conflict_status=CONFLICT_STATUS_WARNING,
-                conflict_note="legacy soft note",
-            )
-
-        def is_mod_enabled(self, mid):  # noqa: ANN001
-            return True
-
-        def get_mods_tag_flags(self, mids):  # noqa: ANN001
-            return {}
-
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: _FakeDb())
-    conflict, _invalid, _disabled, tips = card._overlay_user_flags()
+    conflict, _invalid, _disabled, _tips = warn_card._overlay_user_flags()
     assert conflict is False
-    assert any("警告" in t for t in tips)
+    assert warn_card.conflict_badge.isHidden()
 
-    class _FakeConflictDb(_FakeDb):
-        def get_mod_status(self, mid):  # noqa: ANN001
-            return ModStatus(conflict_status=CONFLICT_STATUS_CONFLICT)
-
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: _FakeConflictDb())
-    conflict2, *_ = card._overlay_user_flags()
+    conflict_card = _card(
+        tmp_path,
+        data=_data(conflict=True, conflict_status=CONFLICT_STATUS_CONFLICT, id="56"),
+    )
+    conflict2, *_ = conflict_card._overlay_user_flags()
     assert conflict2 is True
+    assert not conflict_card.conflict_badge.isHidden()
+    assert conflict_card.conflict_badge.text() == "冲突"
 
 
 def test_mod_status_run_label_semantics() -> None:

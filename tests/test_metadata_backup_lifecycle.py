@@ -9,21 +9,28 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
+from core.game_info import GameInfo
+from core.mod_platform import PLATFORM_STEAM
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
+from services.identity_service import create_mod_identity, identity_create_scope
 from services.metadata_backup import backup_root, load_backup
 from services.metadata_backup_sync import (
+    drain_backup_queue,
     rebuild_missing_metadata_backup,
     sync_after_metadata_change,
 )
 from services.mod_metadata_resolver import resolve_mod_metadata
+
+APP_ID = 4242
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     manager = DatabaseManager.instance(tmp_path / "lifecycle.db")
+    manager.upsert_game(GameInfo(app_id=APP_ID, name="GameA", folder_name="GameA"))
     yield manager
+    drain_backup_queue(timeout=5.0)
     DatabaseManager.reset_instance()
 
 
@@ -35,8 +42,29 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def _register(db: DatabaseManager, *, mid: str, title: str, folder: Path) -> str:
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mid),
+            workshop_id=str(mid),
+            title=title,
+            app_id=APP_ID,
+            game_name="GameA",
+        )
+    entity_id = str(created.mod_id)
+    db.update_mod_identity_fields(
+        entity_id,
+        last_known_path=str(folder),
+        folder_present=True,
+    )
+    return entity_id
+
+
 def _write_mod(
     library: Path,
+    db: DatabaseManager,
     *,
     game: str,
     title: str,
@@ -46,19 +74,22 @@ def _write_mod(
     folder = library / game / title
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
+    entity_id = _register(db, mid=mod_id, title=meta_title or title, folder=folder)
     payload = {
+        "internal_id": entity_id,
         "published_file_id": mod_id,
         "title": meta_title or title,
         "display_name": meta_title or title,
         "game_name": game,
         "description": f"desc-{mod_id}",
-        "source_type": "github",
-        "url": f"https://example.com/{mod_id}",
-        "source_url": f"https://example.com/{mod_id}",
-        "workspace_id": f"ws-{mod_id}",
+        "source_type": "steam",
+        "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}",
+        "source_url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}",
+        "workspace_id": str(mod_id),
         "external_id": mod_id,
     }
     persist_unified_metadata_dict(folder, payload)
+    drain_backup_queue(timeout=5.0)
     (folder / "content.txt").write_text("payload", encoding="utf-8")
     return folder
 
@@ -68,15 +99,7 @@ def test_case1_info_change_syncs_backup_title(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(
-        library, game="GameA", title="ModA", mod_id="930001", meta_title="A"
-    )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="930001",
-            title="A",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
+        library, db, game="GameA", title="ModA", mod_id="930001", meta_title="A"
     )
     snap = load_backup("930001")
     assert snap is not None
@@ -88,6 +111,7 @@ def test_case1_info_change_syncs_backup_title(
     data["title"] = "B"
     data["display_name"] = "B"
     persist_unified_metadata_dict(folder, data)
+    drain_backup_queue(timeout=5.0)
 
     snap2 = load_backup("930001")
     assert snap2 is not None
@@ -99,15 +123,7 @@ def test_case2_deleted_folder_ui_uses_backup(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(
-        library, game="GameA", title="ModGone", mod_id="930002", meta_title="KeepMe"
-    )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="930002",
-            title="KeepMe",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
+        library, db, game="GameA", title="ModGone", mod_id="930002", meta_title="KeepMe"
     )
     assert load_backup("930002") is not None
 
@@ -127,14 +143,16 @@ def test_case3_rebuild_creates_missing_backup(
     folder = library / "GameA" / "NeedsBackup"
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
+    entity_id = _register(db, mid="930003", title="NeedsBackup", folder=folder)
     payload = {
+        "internal_id": entity_id,
         "published_file_id": "930003",
         "title": "NeedsBackup",
         "display_name": "NeedsBackup",
         "source_type": "steam",
-        "url": "https://example.com/930003",
-        "source_url": "https://example.com/930003",
-        "workspace_id": "ws-930003",
+        "url": "https://steamcommunity.com/sharedfiles/filedetails/?id=930003",
+        "source_url": "https://steamcommunity.com/sharedfiles/filedetails/?id=930003",
+        "workspace_id": "930003",
         "external_id": "930003",
     }
     # Write .info without going through persist (which would auto-sync).
@@ -143,14 +161,6 @@ def test_case3_rebuild_creates_missing_backup(
         encoding="utf-8",
     )
     (folder / "content.txt").write_text("x", encoding="utf-8")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="930003",
-            title="NeedsBackup",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
 
     backup_meta = backup_root("930003") / "metadata.json"
     assert not backup_meta.is_file()
@@ -160,7 +170,6 @@ def test_case3_rebuild_creates_missing_backup(
         lambda: library,
         raising=False,
     )
-    # Patch via core.paths used inside rebuild
     monkeypatch.setattr("core.paths.default_mod_library", lambda: library)
 
     created = rebuild_missing_metadata_backup(library)
@@ -176,15 +185,7 @@ def test_case4_backup_never_writes_back_to_info(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(
-        library, game="GameA", title="ModPri", mod_id="930004", meta_title="FromInfo"
-    )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="930004",
-            title="FromInfo",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
+        library, db, game="GameA", title="ModPri", mod_id="930004", meta_title="FromInfo"
     )
 
     backup_meta = backup_root("930004") / "metadata.json"
@@ -213,15 +214,7 @@ def test_case5_offline_sync_copies_index(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(
-        library, game="GameA", title="ModOff", mod_id="930005", meta_title="OfflineMe"
-    )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="930005",
-            title="OfflineMe",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
+        library, db, game="GameA", title="ModOff", mod_id="930005", meta_title="OfflineMe"
     )
 
     offline_dir = folder / INFO_DIR_NAME / "offline"
@@ -235,7 +228,7 @@ def test_case5_offline_sync_copies_index(
     data["offline_page_path"] = ".info/offline/index.html"
     data["offline_status"] = "generated"
     persist_unified_metadata_dict(folder, data)
-    sync_after_metadata_change("930005", folder, "offline_change")
+    sync_after_metadata_change("930005", folder, "offline_change", wait=True)
 
     backup_index = backup_root("930005") / "offline" / "index.html"
     assert backup_index.is_file()
@@ -246,6 +239,16 @@ def test_sync_forbids_backup_write_when_folder_missing(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     missing = tmp_path / "mod" / "GameA" / "NoFolder"
+    with identity_create_scope():
+        create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id="930006",
+            workshop_id="930006",
+            title="Seed",
+            app_id=APP_ID,
+            game_name="GameA",
+        )
     # Seed an existing backup so we can detect mutation
     dest = backup_root("930006")
     dest.mkdir(parents=True)
@@ -254,6 +257,6 @@ def test_sync_forbids_backup_write_when_folder_missing(
     meta.write_text(json.dumps(original), encoding="utf-8")
     before = meta.read_text(encoding="utf-8")
 
-    ok = sync_after_metadata_change("930006", missing, "edit")
+    ok = sync_after_metadata_change("930006", missing, "edit", wait=True)
     assert ok is False
     assert meta.read_text(encoding="utf-8") == before

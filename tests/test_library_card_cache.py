@@ -6,6 +6,13 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    flush_library_search,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -29,73 +36,82 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
+    from services.mod_library_cache import reset_library_cache
+
+    reset_library_cache()
     manager = DatabaseManager.instance(tmp_path / "cache.db")
     yield manager
+    manager.close()
     DatabaseManager.reset_instance()
+    reset_library_cache()
 
 
-def _seed(lib: Path, game: str, title: str, mid: str) -> Path:
-    folder = lib / game / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": title,
-                "game_name": game,
-            }
-        ),
-        encoding="utf-8",
+def _seed(lib: Path, db: DatabaseManager, game: str, title: str, mid: str) -> Path:
+    app_id = abs(hash(game)) % 900000 + 100000
+    db.update_game_deploy_config(app_id, name=game)
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name=game
     )
+    internal_id = str(created.mod_id)
+    folder = lib / game / title
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "a.txt").write_text("x", encoding="utf-8")
+    write_info_sidecar(
+        folder,
+        internal_id=internal_id,
+        title=title,
+        external_id=mid,
+        workspace_id=mid,
+        app_id=app_id,
+        game_name=game,
+    )
+    bind_managed_path(db, internal_id, folder, title=title, game_name=game)
     return folder
 
 
 def test_refresh_reuses_cards(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
+    patch_library_get_db(monkeypatch, db)
+    monkeypatch.setattr("ui.library_view._library_load_sync", lambda: True)
     lib = tmp_path / "library"
     for i in range(5):
-        path = _seed(lib, "GameA", f"Mod{i}", str(81000 + i))
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=str(81000 + i),
-                title=f"Mod{i}",
-                managed_path=str(path),
-                game_name="GameA",
-            )
-        )
+        _seed(lib, db, "GameA", f"Mod{i}", str(81000 + i))
 
     view = ModLibraryView()
-    view.set_target_root(str(lib))
-    view.refresh()
-    qapp.processEvents()
+    try:
+        view.set_target_root(str(lib))
+        view.refresh()
+        qapp.processEvents()
+        flush_library_search(view)
 
-    assert view._card_create_count == 5
-    first_ids = {id(c) for c in view._cards}
-    assert len(first_ids) == 5
+        assert view._card_create_count == 5
+        first_ids = {id(c) for c in view._cards}
+        assert len(first_ids) == 5
 
-    view.refresh()
-    qapp.processEvents()
+        view.refresh()
+        qapp.processEvents()
+        flush_library_search(view)
 
-    assert view._card_create_count == 0
-    assert view._card_reuse_count == 5
-    assert {id(c) for c in view._cards} == first_ids
-    assert len(view._card_cache) == 5
+        assert view._card_create_count == 0
+        assert view._card_reuse_count == 5
+        assert {id(c) for c in view._cards} == first_ids
+        assert len(view._card_cache) == 5
+    finally:
+        view.cancel_pending_library_load()
+        view.close()
+        view.deleteLater()
+        qapp.processEvents()
 
 
 def test_game_switch_reuses_cached_cards(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
+    patch_library_get_db(monkeypatch, db)
     lib = tmp_path / "library"
-    a = _seed(lib, "GameA", "Alpha", "82001")
-    b = _seed(lib, "GameB", "Beta", "82002")
-    db.upsert_mod(
-        ModMetadata(published_file_id="82001", title="Alpha", managed_path=str(a))
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id="82002", title="Beta", managed_path=str(b))
-    )
+    _seed(lib, db, "GameA", "Alpha", "82001")
+    _seed(lib, db, "GameB", "Beta", "82002")
+
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -127,32 +143,26 @@ def test_game_switch_reuses_cached_cards(
 
 
 def test_filter_does_not_create_cards(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
+    patch_library_get_db(monkeypatch, db)
     lib = tmp_path / "library"
     for i in range(4):
-        path = _seed(lib, "GameA", f"Mod{i}", str(83000 + i))
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=str(83000 + i),
-                title=f"Mod{i}",
-                managed_path=str(path),
-            )
-        )
+        _seed(lib, db, "GameA", f"Mod{i}", str(83000 + i))
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
     view.refresh()
     qapp.processEvents()
-    before = view._card_create_count
     cache_n = len(view._card_cache)
 
     view.search_box.setText("Mod1")
-    view._apply_view_filter()
+    flush_library_search(view)
     qapp.processEvents()
 
-    assert view._card_create_count == before
+    # create_count is per-render (reset each bind); filter must reuse cache.
+    assert view._card_create_count == 0
     assert len(view._card_cache) == cache_n
-    visible = [c for c in view._cards if not c.isHidden()]
+    visible = view._visible_cards()
     assert len(visible) == 1
     assert "Mod1" in visible[0].managed_path.name

@@ -14,7 +14,7 @@ from core.db_manager import (
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services.backup_manager import (
     TXN_BACKUP_DONE,
     BackupManager,
@@ -29,6 +29,7 @@ from services.deploy_txn import (
     unregister_active_deploy_transaction,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.identity_service import create_mod_identity, identity_create_scope
 
 
 @pytest.fixture()
@@ -47,13 +48,27 @@ def _setup_game(db: DatabaseManager, tmp_path: Path) -> Path:
     return mods
 
 
-def _prove_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
+def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> Path:
+    folder = library / "SomeGame" / f"Mod{mid}"
+    folder.mkdir(parents=True)
+    (folder / "file1.txt").write_text("NEW", encoding="utf-8")
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True, exist_ok=True)
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mid),
+            workshop_id=str(mid),
+            title=folder.name,
+            app_id=100,
+            game_name="SomeGame",
+        )
+    entity_id = str(created.mod_id)
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
-                "internal_id": str(mid),
+                "internal_id": entity_id,
                 "published_file_id": str(mid),
                 "title": folder.name,
                 "app_id": 100,
@@ -64,25 +79,9 @@ def _prove_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
         encoding="utf-8",
     )
     db.update_mod_identity_fields(
-        mid,
-        internal_id=str(mid),
+        entity_id,
         last_known_path=str(folder),
         folder_present=True,
-    )
-
-
-def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> Path:
-    folder = library / "SomeGame" / f"Mod{mid}"
-    folder.mkdir(parents=True)
-    (folder / "file1.txt").write_text("NEW", encoding="utf-8")
-    _prove_folder(db, mid, folder)
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=folder.name,
-            app_id=100,
-            managed_path=str(folder),
-        )
     )
     return folder
 

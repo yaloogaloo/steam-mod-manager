@@ -77,7 +77,7 @@ LEGAL_REGISTRATION_MODULES = (
     "services/mod_identity_authority.py",
     "services/importers/duplicate_check.py",
     "services/identity_pollution.py",  # conflict gate → registration alias
-    "services/mod_identity_repair.py",  # conflict gate → registration alias
+    "services/identity_repair_service.py",  # repair entry; conflict gate → registration alias
     "core/db_manager.py",  # definition / deprecated alias only
 )
 

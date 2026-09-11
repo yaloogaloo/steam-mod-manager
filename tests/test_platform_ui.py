@@ -93,7 +93,7 @@ def test_platform_filters_and_search() -> None:
 def test_platform_badge_on_card(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     mod = tmp_path / "Game" / "NexusMod"
     mod.mkdir(parents=True)
     info = db.register_external_mod(
@@ -108,8 +108,10 @@ def test_platform_badge_on_card(
         mod,
         ModMetadata(
             published_file_id=info.mod_id,
+            internal_id=str(info.mod_id),
             title="Nexus Mod",
             managed_path=str(mod),
+            source_type=PLATFORM_NEXUS,
         ),
     )
     assert not card.platform_badge.isHidden()

@@ -26,6 +26,7 @@ from services.deploy_rules import pak_mod_path as pak_mod
 from services.deploy_rules import palworld as palworld_mod
 from services.deploy_rules import slay_the_spire as sts_mod
 from services.deploy_rules import stardew_valley as stardew_mod
+from services.deploy_rules import warhammer3 as warhammer3_mod
 
 _STRATEGY_MODULES = (
     anno_mod,
@@ -36,6 +37,7 @@ _STRATEGY_MODULES = (
     palworld_mod,
     sts_mod,
     stardew_mod,
+    warhammer3_mod,
 )
 
 _CORE_MODULES = (

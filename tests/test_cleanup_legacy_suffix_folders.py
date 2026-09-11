@@ -110,7 +110,7 @@ def test_suffix_folder_always_delete_candidate(tmp_path: Path) -> None:
     # Even with DB bind + .info ids present → still delete candidate.
     _insert(
         db,
-        internal_id=9000000000003117,
+        mod_id=9000000000003117,
         path=poll,
         workspace_id="4",
         internal_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -143,7 +143,7 @@ def test_db_pointing_suffix_folder_gets_rebound_if_normal_exists(
 
     _insert(
         db,
-        internal_id=9000000000003116,
+        mod_id=9000000000003116,
         path=poll,
         workspace_id="6304",
         internal_id=keep_iid,
@@ -198,7 +198,7 @@ def test_dry_run_no_mutation(tmp_path: Path) -> None:
     poll = game / "Bigger Backpack_9000000000003121"
     _insert(
         db,
-        internal_id=9000000000003121,
+        mod_id=9000000000003121,
         path=poll,
         workspace_id="1845",
         internal_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
@@ -228,7 +228,7 @@ def test_apply_requires_confirm(tmp_path: Path) -> None:
     poll = game / "Wear More Rings_9000000000003145"
     _insert(
         db,
-        internal_id=9000000000003145,
+        mod_id=9000000000003145,
         path=poll,
         workspace_id="3214",
         internal_id="dddddddd-dddd-dddd-dddd-dddddddddddd",

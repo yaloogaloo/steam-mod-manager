@@ -720,13 +720,20 @@ REAL_OFFLINE_HTML = Path("data/mod_backup/9000000000000406/offline/index.html")
 
 
 def _find_real_user_html() -> Path | None:
-    for path in Path("mod").rglob("Empty Mod f20722b2/.info/offline/index.html"):
+    """Lazy probe — never run at import/collection time against production ``mod/``."""
+    root = Path("mod")
+    if not root.is_dir():
+        return None
+    for path in root.rglob("Empty Mod f20722b2/.info/offline/index.html"):
         if path.is_file():
             return path
     return None
 
 
-REAL_USER_HTML = _find_real_user_html()
+def _real_user_html() -> Path | None:
+    return _find_real_user_html()
+
+
 REAL_USER_EXPECTED_URL = "https://www.nexusmods.com/stardewvalley/mods/10062"
 REAL_USER_EXPECTED_ID = "10062"
 REAL_USER_EXPECTED_TITLE = "Hugs and Kisses"
@@ -829,13 +836,14 @@ class TestImportDefaultMerge:
         assert row.source_url == "https://www.nexusmods.com/stardewvalley/mods/10455"
 
 
-@pytest.mark.skipif(
-    REAL_USER_HTML is None or not REAL_USER_HTML.is_file(),
-    reason="real user offline HTML missing",
-)
 class TestRealUserOfflineHtml:
+    """Uses production ``mod/`` sample when present; skips otherwise (no import-time rglob)."""
+
     def test_real_user_html_parser(self) -> None:
-        result = parse_nexus_offline_html(REAL_USER_HTML)
+        html = _real_user_html()
+        if html is None:
+            pytest.skip("real user offline HTML missing")
+        result = parse_nexus_offline_html(html)
         assert result.title == REAL_USER_EXPECTED_TITLE
         assert result.source_url == REAL_USER_EXPECTED_URL
         assert result.external_id == REAL_USER_EXPECTED_ID
@@ -844,6 +852,9 @@ class TestRealUserOfflineHtml:
         self, tmp_path: Path, db: DatabaseManager
     ) -> None:
         """Folder-name external_id + fake URL must be corrected by real HTML merge."""
+        html = _real_user_html()
+        if html is None:
+            pytest.skip("real user offline HTML missing")
         from services.offline.nexus_html_parser import (
             _patch_mod_db_identity,
             apply_nexus_offline_candidates,
@@ -873,7 +884,7 @@ class TestRealUserOfflineHtml:
             external_id="Empty Mod f20722b2",
         )
 
-        candidates = parse_nexus_offline_html(REAL_USER_HTML)
+        candidates = parse_nexus_offline_html(html)
         apply_nexus_offline_candidates(mid, dest, candidates, db=db)
 
         row = db.get_mod_display_info(mid)
@@ -886,6 +897,9 @@ class TestRealUserOfflineHtml:
         self, tmp_path: Path, db: DatabaseManager
     ) -> None:
         """Case B: existing mod with fake URL → attach real offline HTML."""
+        html = _real_user_html()
+        if html is None:
+            pytest.skip("real user offline HTML missing")
         from services.offline.nexus_html_parser import _patch_mod_db_identity
 
         folder = tmp_path / "Empty Mod f20722b2"
@@ -913,7 +927,7 @@ class TestRealUserOfflineHtml:
         )
 
         html_copy = tmp_path / "real_user.html"
-        html_copy.write_text(REAL_USER_HTML.read_text(encoding="utf-8"), encoding="utf-8")
+        html_copy.write_text(html.read_text(encoding="utf-8"), encoding="utf-8")
         attach_nexus_offline_page(
             mid,
             html_copy,
@@ -953,7 +967,8 @@ class TestNexusImporterNoFakeUrl:
 
     def test_import_plus_real_html_e2e(self, tmp_path: Path, db: DatabaseManager) -> None:
         """Case A: import mod without Nexus ID, then attach real offline HTML."""
-        if REAL_USER_HTML is None or not REAL_USER_HTML.is_file():
+        html = _real_user_html()
+        if html is None or not html.is_file():
             pytest.skip("real user offline HTML missing")
         folder = tmp_path / "Empty Mod f20722b2"
         folder.mkdir()
@@ -973,7 +988,7 @@ class TestNexusImporterNoFakeUrl:
         assert (result.source_url or "") == ""
 
         html_copy = tmp_path / "real_user.html"
-        html_copy.write_text(REAL_USER_HTML.read_text(encoding="utf-8"), encoding="utf-8")
+        html_copy.write_text(html.read_text(encoding="utf-8"), encoding="utf-8")
         attach_nexus_offline_page(mid, html_copy, managed_path=dest, library_root=lib)
 
         row = db.get_mod_display_info(mid)

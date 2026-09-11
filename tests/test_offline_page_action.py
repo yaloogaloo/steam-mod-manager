@@ -7,6 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -37,21 +42,30 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed_mod(lib: Path, *, mid: str, title: str) -> Path:
+def _seed_mod(
+    db: DatabaseManager,
+    lib: Path,
+    *,
+    external_id: str,
+    title: str,
+    platform: str = PLATFORM_STEAM,
+    workspace_id: str = "",
+    internal_id: str | None = None,
+) -> tuple[str, Path]:
     folder = lib / "Game" / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": title,
-                "game_name": "Game",
-            }
-        ),
-        encoding="utf-8",
+    folder.mkdir(parents=True, exist_ok=True)
+    mid = str(internal_id or external_id)
+    write_info_sidecar(
+        folder,
+        internal_id=mid,
+        title=title,
+        external_id=external_id,
+        workspace_id=str(workspace_id or external_id),
+        game_name="Game",
+        platform=platform,
     )
-    return folder
+    bind_managed_path(db, mid, folder, title=title)
+    return mid, folder
 
 
 def test_steam_button_starts_worker_and_calls_manager(
@@ -62,12 +76,18 @@ def test_steam_button_starts_worker_and_calls_manager(
 ) -> None:
     lib = tmp_path / "library"
     lib.mkdir()
-    folder = _seed_mod(lib, mid="3761838546", title="SteamMod")
-    db.upsert_mod(
-        ModMetadata(published_file_id="3761838546", title="SteamMod", managed_path=str(folder))
+    created = create_steam_test_mod(db, external_id="3761838546", title="SteamMod")
+    mid, folder = _seed_mod(
+        db,
+        lib,
+        external_id="3761838546",
+        title="SteamMod",
+        internal_id=str(created.mod_id),
+        workspace_id=str(created.workspace_id or "3761838546"),
     )
+
     db.update_mod_platform_info(
-        "3761838546",
+        mid,
         platform=PLATFORM_STEAM,
         source_url="https://steamcommunity.com/sharedfiles/filedetails/?id=3761838546",
         external_id="3761838546",
@@ -94,7 +114,7 @@ def test_steam_button_starts_worker_and_calls_manager(
     monkeypatch.setattr("ui.offline_archive_thread.OfflineManager", FakeManager)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
     assert "保存离线页面" in (panel.btn_download_offline.toolTip() or "")
     assert panel.btn_offline.text() == "打开离线页面"
@@ -116,7 +136,7 @@ def test_steam_button_starts_worker_and_calls_manager(
 
         time.sleep(0.02)
 
-    assert calls == ["3761838546"]
+    assert calls == [mid]
     assert panel._has_offline_page()
     assert updated
 
@@ -137,7 +157,15 @@ def test_non_steam_uses_manager_and_button_label(
         app_id=1623730,
         game_name="Palworld",
     )
-    folder = _seed_mod(lib, mid=str(info.mod_id), title="NexusMod")
+    mid, folder = _seed_mod(
+        db,
+        lib,
+        external_id="42",
+        title="NexusMod",
+        platform=PLATFORM_NEXUS,
+        workspace_id=str(info.workspace_id or "42"),
+        internal_id=str(info.mod_id),
+    )
 
     calls: list[str] = []
 
@@ -163,7 +191,7 @@ def test_non_steam_uses_manager_and_button_label(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
     assert "导入离线页面" in (panel.btn_download_offline.toolTip() or "")
 
@@ -188,21 +216,26 @@ def test_other_platform_uses_manual_html_import(
 ) -> None:
     lib = tmp_path / "library"
     lib.mkdir()
-    mid = "99001"
-    folder = _seed_mod(lib, mid=mid, title="LocalMod")
     from core.game_info import GameInfo
 
     db.upsert_game(
         GameInfo(app_id=1623730, name="Palworld", header_image="", short_description="")
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title="LocalMod",
-            app_id=1623730,
-            managed_path=str(folder),
-        )
+    # PLATFORM_OTHER identity via steam workshop-looking id then platform rebind.
+    created = create_steam_test_mod(
+        db, external_id="99001", title="LocalMod", app_id=1623730
     )
+    mid = str(created.mod_id)
+    _, folder = _seed_mod(
+        db,
+        lib,
+        external_id="99001",
+        title="LocalMod",
+        platform=PLATFORM_OTHER,
+        workspace_id=str(created.workspace_id or "99001"),
+        internal_id=mid,
+    )
+
     db.batch_update_platform([mid], PLATFORM_OTHER)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
@@ -231,7 +264,7 @@ def test_other_platform_uses_manual_html_import(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
     assert panel.btn_download_offline.text() == "导入离线页面"
 

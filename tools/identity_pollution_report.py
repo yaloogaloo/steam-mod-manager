@@ -33,12 +33,12 @@ def main() -> int:
     args = parser.parse_args()
 
     from core.db_manager import DatabaseManager
-    from core.paths import database_path
+    from core.paths import database_path, default_mod_library
     from services.identity_pollution import (
-        apply_identity_pollution_repair,
         scan_identity_pollution,
         write_pollution_report,
     )
+    from services.identity_repair_service import get_identity_repair_service
 
     DatabaseManager.reset_instance()
     db_path = Path(args.db) if args.db else database_path()
@@ -50,8 +50,18 @@ def main() -> int:
     print(f"report={out}")
     print(f"counts={report.to_dict()['counts']}")
     if args.apply:
-        result = apply_identity_pollution_repair(db, report, apply=True)
-        print(f"applied={len(result['applied'])} skipped={len(result['skipped'])}")
+        library = Path(default_mod_library())
+        result = get_identity_repair_service().repair(
+            db,
+            library,
+            apply=True,
+            include_entity=False,
+            include_field_scrubs=False,
+            include_pollution=True,
+        )
+        applied = result.pollution_apply.get("applied") or []
+        skipped = result.pollution_apply.get("skipped") or []
+        print(f"applied={len(applied)} skipped={len(skipped)}")
         again = scan_identity_pollution(db)
         print(f"after_counts={again.to_dict()['counts']}")
         write_pollution_report(again, path=out.with_name(out.stem + "_after.json"))

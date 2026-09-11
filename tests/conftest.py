@@ -13,18 +13,52 @@ import pytest
 
 from core.db_manager import DatabaseManager
 
+# Cache Playwright probe — filesystem only (never start the driver at collection).
+_PLAYWRIGHT_OK: bool | None = None
+
 
 def _playwright_chromium_available() -> bool:
+    """True when Playwright package + Chromium browser files are present.
+
+    Avoids ``sync_playwright()`` at collection time — starting the driver
+    leaks asyncio tasks (``TargetClosedError``) and slows every pytest run.
+    """
+    global _PLAYWRIGHT_OK
+    if _PLAYWRIGHT_OK is not None:
+        return _PLAYWRIGHT_OK
     try:
-        from playwright.sync_api import sync_playwright
+        import playwright  # noqa: F401
     except ImportError:
+        _PLAYWRIGHT_OK = False
         return False
-    try:
-        with sync_playwright() as pw:
-            path = str(pw.chromium.executable_path or "")
-            return bool(path and Path(path).is_file())
-    except Exception:  # noqa: BLE001
-        return False
+
+    import os
+
+    roots: list[Path] = []
+    env_root = str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if env_root:
+        roots.append(Path(env_root))
+    local_app = str(os.environ.get("LOCALAPPDATA") or "").strip()
+    if local_app:
+        roots.append(Path(local_app) / "ms-playwright")
+    roots.append(Path.home() / "AppData" / "Local" / "ms-playwright")
+    roots.append(Path.home() / ".cache" / "ms-playwright")
+
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for chromium_dir in root.glob("chromium-*"):
+            for rel in (
+                Path("chrome-win") / "chrome.exe",
+                Path("chrome-win64") / "chrome.exe",
+                Path("chrome-linux") / "chrome",
+                Path("chrome-mac") / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
+            ):
+                if (chromium_dir / rel).is_file():
+                    _PLAYWRIGHT_OK = True
+                    return True
+    _PLAYWRIGHT_OK = False
+    return False
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -47,6 +81,86 @@ def pytest_collection_modifyitems(
     for item in items:
         if "playwright" in item.keywords or "network" in item.keywords:
             item.add_marker(skip)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Breadcrumb for native crashes — last nodeid before an AV."""
+    try:
+        path = Path(__file__).resolve().parents[1] / "_tmp" / "dumps" / "qt_crash" / "last_test.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(item.nodeid, encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _stub_blocking_qt_modals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Prevent indefinite hangs from modal Qt dialogs in headless pytest.
+
+    Production UI may call ``QMessageBox.warning`` / ``QFileDialog`` when a
+    precondition fails. In CI those dialogs block the main thread forever.
+    Tests that need dialog behaviour can re-monkeypatch locally.
+    """
+    try:
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+    except Exception:  # noqa: BLE001
+        return
+
+    def _msgbox_noop(*_a, **_k):  # noqa: ANN001
+        return QMessageBox.StandardButton.Ok
+
+    for name in ("warning", "information", "critical", "question", "about"):
+        if hasattr(QMessageBox, name):
+            monkeypatch.setattr(QMessageBox, name, staticmethod(_msgbox_noop))
+
+    def _dialog_reject(*_a, **_k):  # noqa: ANN001
+        return ("", "")
+
+    def _dialog_reject_dir(*_a, **_k):  # noqa: ANN001
+        return ""
+
+    def _dialog_reject_many(*_a, **_k):  # noqa: ANN001
+        return ([], "")
+
+    if hasattr(QFileDialog, "getOpenFileName"):
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileName", staticmethod(_dialog_reject)
+        )
+    if hasattr(QFileDialog, "getSaveFileName"):
+        monkeypatch.setattr(
+            QFileDialog, "getSaveFileName", staticmethod(_dialog_reject)
+        )
+    if hasattr(QFileDialog, "getOpenFileNames"):
+        monkeypatch.setattr(
+            QFileDialog, "getOpenFileNames", staticmethod(_dialog_reject_many)
+        )
+    if hasattr(QFileDialog, "getExistingDirectory"):
+        monkeypatch.setattr(
+            QFileDialog, "getExistingDirectory", staticmethod(_dialog_reject_dir)
+        )
+
+
+@pytest.fixture(autouse=True)
+def _qt_test_lifecycle(request: pytest.FixtureRequest) -> None:
+    """Snapshot → test → destroy top-level widgets / timers / cover pool."""
+    before = None
+    try:
+        from tests.qt_test_lifecycle import snapshot_qt_resources, qt_teardown_pass
+
+        before = snapshot_qt_resources()
+    except Exception:  # noqa: BLE001
+        before = None
+    yield
+    if before is None:
+        return
+    try:
+        from tests.qt_test_lifecycle import qt_teardown_pass
+
+        nodeid = getattr(request.node, "nodeid", "") or request.node.name
+        qt_teardown_pass(nodeid=nodeid, before=before, report_leaks=True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +220,12 @@ def _isolate_production_data(
     DatabaseManager.reset_instance()
     DatabaseManager.instance(db_file)
     try:
+        from services.mod_type_catalog import reset_mod_type_catalog
+
+        reset_mod_type_catalog()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from services.identity_service import _ALLOW_INTERNAL_CREATE, _LIFECYCLE
 
         _LIFECYCLE.set("")
@@ -119,6 +239,24 @@ def _isolate_production_data(
         from services.cover_loader import CoverLoaderManager
 
         CoverLoaderManager.reset_instance()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from services.library_reconcile import (
+            join_reconcile_thread,
+            request_reconcile_shutdown,
+            reset_reconcile_async_state,
+        )
+
+        request_reconcile_shutdown()
+        join_reconcile_thread(0.5)
+        reset_reconcile_async_state()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from services.metadata_backup_sync import drain_backup_queue
+
+        drain_backup_queue(timeout=0.5)
     except Exception:  # noqa: BLE001
         pass
     try:

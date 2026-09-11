@@ -8,6 +8,12 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -59,33 +65,29 @@ def _write_cover(folder: Path) -> Path:
     return path
 
 
-def _seed_mods(lib: Path, db: DatabaseManager, n: int, *, id_base: int = 810000) -> None:
+def _seed_mods(
+    lib: Path, db: DatabaseManager, n: int, *, id_base: int = 810000
+) -> None:
     game = lib / "Game"
     game.mkdir(parents=True, exist_ok=True)
     for i in range(n):
-        mid = str(id_base + i)
+        mid_ext = str(id_base + i)
+        created = create_steam_test_mod(
+            db, external_id=mid_ext, title=f"Mod {i}", game_name="Game"
+        )
+        mid = str(created.mod_id)
         folder = game / f"Mod{i:04d}"
         cover = _write_cover(folder)
-        (folder / INFO_DIR_NAME / METADATA_FILENAME).write_text(
-            json.dumps(
-                {
-                    "published_file_id": mid,
-                    "title": f"Mod {i}",
-                    "game_name": "Game",
-                    "cover_path": ".info/cover.png",
-                }
-            ),
-            encoding="utf-8",
+        write_info_sidecar(
+            folder,
+            internal_id=mid,
+            title=f"Mod {i}",
+            external_id=mid_ext,
+            workspace_id=str(created.workspace_id or mid_ext),
+            game_name="Game",
+            extra={"cover_path": ".info/cover.png"},
         )
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=f"Mod {i}",
-                managed_path=str(folder),
-                game_name="Game",
-                cover_path=".info/cover.png",
-            )
-        )
+        bind_managed_path(db, mid, folder, title=f"Mod {i}")
         db.update_mod_cover_path(mid, ".info/cover.png")
         del cover
 
@@ -97,7 +99,10 @@ def _pump(qapp: QApplication, seconds: float = 0.25) -> None:
         time.sleep(0.01)
 
 
-def _open_library(qapp: QApplication, lib: Path) -> ModLibraryView:
+def _open_library(
+    qapp: QApplication, lib: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> ModLibraryView:
+    patch_library_get_db(monkeypatch, db)
     view = ModLibraryView()
     view.set_target_root(str(lib))
     view.resize(1200, 560)
@@ -111,40 +116,47 @@ def _open_library(qapp: QApplication, lib: Path) -> ModLibraryView:
 
 
 def test_a_does_not_submit_all_covers(
-    qapp: QApplication, tmp_path: Path
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = DatabaseManager.instance()
+    DatabaseManager.reset_instance()
+    db = DatabaseManager.instance(tmp_path / "cover_a.db")
     lib = tmp_path / "mod"
     n = 80
     _seed_mods(lib, db, n)
-    view = _open_library(qapp, lib)
-    assert len(view._cards) == n
+    view = _open_library(qapp, lib, db, monkeypatch)
+    # Viewport virtualization: only visible cards are instantiated.
+    assert view._viewport_item_count() == n
+    assert 0 < len(view._cards) < n
     assert cl.COVER_LOAD_REQUESTS < n
     assert cl.COVER_LOAD_REQUESTS <= 24
     view.close()
+    DatabaseManager.reset_instance()
 
 
 def test_b_visible_cards_are_submitted(
-    qapp: QApplication, tmp_path: Path
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = DatabaseManager.instance()
+    DatabaseManager.reset_instance()
+    db = DatabaseManager.instance(tmp_path / "cover_b.db")
     lib = tmp_path / "mod"
     _seed_mods(lib, db, 40)
-    view = _open_library(qapp, lib)
+    view = _open_library(qapp, lib, db, monkeypatch)
     visible = view.iter_viewport_cover_cards()
     assert visible
     assert cl.COVER_LOAD_REQUESTS >= 1
     assert cl.COVER_LOAD_REQUESTS >= min(4, len(visible))
     view.close()
+    DatabaseManager.reset_instance()
 
 
 def test_c_scroll_loads_new_cards(
-    qapp: QApplication, tmp_path: Path
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = DatabaseManager.instance()
+    DatabaseManager.reset_instance()
+    db = DatabaseManager.instance(tmp_path / "cover_c.db")
     lib = tmp_path / "mod"
     _seed_mods(lib, db, 60)
-    view = _open_library(qapp, lib)
+    view = _open_library(qapp, lib, db, monkeypatch)
     first = int(cl.COVER_LOAD_REQUESTS)
     bar = view.scroll.verticalScrollBar()
     if bar.maximum() <= 0:
@@ -159,6 +171,7 @@ def test_c_scroll_loads_new_cards(
     assert cl.COVER_LOAD_REQUESTS >= first
     assert cl.COVER_LOAD_REQUESTS > first or bar.maximum() == 0
     view.close()
+    DatabaseManager.reset_instance()
 
 
 def test_d_cache_hit_does_not_resubmit(qapp: QApplication, tmp_path: Path) -> None:
@@ -269,12 +282,13 @@ def test_f_stale_token_ignored_after_rebind(
 
 
 def test_g_leave_library_cancels_pending(
-    qapp: QApplication, tmp_path: Path
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db = DatabaseManager.instance()
+    DatabaseManager.reset_instance()
+    db = DatabaseManager.instance(tmp_path / "cover_g.db")
     lib = tmp_path / "mod"
     _seed_mods(lib, db, 30)
-    view = _open_library(qapp, lib)
+    view = _open_library(qapp, lib, db, monkeypatch)
     view._cancel_all_pending_covers()
     qapp.processEvents()
     assert cl.COVER_LOAD_CANCELLED >= 0
@@ -283,6 +297,7 @@ def test_g_leave_library_cancels_pending(
     for tok in pending:
         assert tok not in mgr._active_tokens
     view.close()
+    DatabaseManager.reset_instance()
 
 
 def test_h_library_load_worker_lifecycle_unchanged() -> None:
@@ -293,10 +308,13 @@ def test_h_library_load_worker_lifecycle_unchanged() -> None:
 
 
 def test_i_reconcile_library_load_still_serialized() -> None:
+    # Library load must not wait on reconcile; refresh flushes immediately.
     src = inspect.getsource(ModLibraryView.refresh)
-    assert "library_load_must_wait" in src
-    src_mw = inspect.getsource(MainWindow._restore_settings)
-    assert "hold_library_load_until_reconcile_idle" in src_mw
+    assert "_flush_pending_library_load" in src
+    assert "do not defer Loading Mods" in src or "must not start Reconcile" in src
+    # Idle listener still resyncs projections after background reconcile.
+    src_init = inspect.getsource(ModLibraryView.__init__)
+    assert "add_reconcile_idle_listener" in src_init or "_on_reconcile_idle" in src_init
 
 
 def test_j_cover_loader_thread_cap_unchanged() -> None:

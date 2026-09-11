@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 
 pytest.importorskip("PySide6")
 
@@ -13,8 +14,6 @@ from PySide6.QtCore import QCoreApplication, QThread
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.db_manager import DEPLOY_STATUS_DEPLOYED, DatabaseManager
-from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.deploy_thread import DeployWorker
 from ui.library_view import ModLibraryView
 from ui.mod_detail_panel import ModDetailPanel, humanize_deploy_error
@@ -31,30 +30,34 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "deploy_ui.db")
+    manager = DatabaseManager.instance(tmp_path / "deploy_ui.db")
     yield manager
-    manager.close()
     DatabaseManager.reset_instance()
 
 
-def _ensure_game(db: DatabaseManager, app_id: int = 99) -> None:
-    db.update_game_deploy_config(app_id, name="TestGame", mod_path="")
+def _ensure_game(db: DatabaseManager, app_id: int = 99, *, mod_path: str = "") -> None:
+    db.update_game_deploy_config(app_id, name="TestGame", mod_path=mod_path)
 
 
-def _make_mod(library: Path, *, mod_id: str = "8001", app_id: int = 99) -> Path:
+def _make_mod(
+    db: DatabaseManager, library: Path, *, mod_id: str = "8001", app_id: int = 99
+) -> Path:
     mod_dir = library / "TestGame" / "DeployMe"
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True)
+    mod_dir.mkdir(parents=True)
     (mod_dir / "pak.txt").write_text("data", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mod_id}",\n'
-        '  "title": "DeployMe",\n'
-        f'  "app_id": {app_id},\n'
-        '  "game_name": "TestGame"\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mod_id, title="DeployMe", app_id=app_id, game_name="TestGame"
     )
+    write_info_sidecar(
+        mod_dir,
+        internal_id=str(created.mod_id),
+        title="DeployMe",
+        external_id=mod_id,
+        workspace_id=str(created.workspace_id or mod_id),
+        app_id=app_id,
+        game_name="TestGame",
+    )
+    bind_managed_path(db, created.mod_id, mod_dir, title="DeployMe", game_name="TestGame")
     return mod_dir
 
 
@@ -91,14 +94,13 @@ def test_click_deploy_starts_worker(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    mod_dir = _make_mod(library)
-    _ensure_game(db)
-    db.upsert_mod(
-        ModMetadata(published_file_id="8001", title="DeployMe", app_id=99)
-    )
+    _ensure_game(db, mod_path=str(tmp_path / "GameMods"))
+    mod_dir = _make_mod(db, library)
+
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    monkeypatch.setattr("services.mod_library_cache.get_db", lambda: db)
 
     started: list[str] = []
     constructed: list[DeployWorker] = []
@@ -121,7 +123,7 @@ def test_click_deploy_starts_worker(
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
-    view.detail_panel.show_mod(mod_dir)
+    view.detail_panel.show_mod(mod_dir, mod_id="8001")
 
     assert view.detail_panel.btn_deploy.isEnabled()
     assert view.detail_panel.btn_deploy.text() == "部署"
@@ -142,11 +144,9 @@ def test_success_result_refreshes_panel_status(
 ) -> None:
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     library = tmp_path / "mod"
-    mod_dir = _make_mod(library)
     _ensure_game(db)
-    db.upsert_mod(
-        ModMetadata(published_file_id="8001", title="DeployMe", app_id=99)
-    )
+    mod_dir = _make_mod(db, library)
+
     db.update_mod_deploy_status(
         8001,
         deploy_status=DEPLOY_STATUS_DEPLOYED,
@@ -182,11 +182,8 @@ def test_failure_shows_error(
 ) -> None:
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     library = tmp_path / "mod"
-    mod_dir = _make_mod(library)
     _ensure_game(db)
-    db.upsert_mod(
-        ModMetadata(published_file_id="8001", title="DeployMe", app_id=99)
-    )
+    mod_dir = _make_mod(db, library)
 
     panel = ModDetailPanel()
     panel.show_mod(mod_dir, mod_id="8001")
@@ -205,14 +202,13 @@ def test_deploy_mod_runs_off_ui_thread(
 ) -> None:
     """ModDeployer.deploy_mod must not execute on the Qt GUI thread."""
     library = tmp_path / "mod"
-    _make_mod(library)
     game_mods = tmp_path / "GameMods"
     game_mods.mkdir()
     db.update_game_deploy_config(99, name="TestGame", mod_path=str(game_mods))
-    db.upsert_mod(
-        ModMetadata(published_file_id="8001", title="DeployMe", app_id=99)
-    )
+    _make_mod(db, library)
+
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    monkeypatch.setattr("services.mod_library_cache.get_db", lambda: db)
     monkeypatch.setattr("services.deploy.get_db", lambda: db)
 
     ui_thread = threading.get_ident()
@@ -236,7 +232,9 @@ def test_deploy_mod_runs_off_ui_thread(
 
     worker = DeployWorker("8001", library_root=library)
     worker.deploy_finished.connect(lambda r: results.append(r))
-    worker.deploy_failed.connect(lambda r: results.append(r if isinstance(r, dict) else {"success": False, "error": r}))
+    worker.deploy_failed.connect(
+        lambda r: results.append(r if isinstance(r, dict) else {"success": False, "error": r})
+    )
     worker.start()
     assert worker.wait(10_000)
     _pump(20)
@@ -250,16 +248,15 @@ def test_library_deploy_finished_does_not_call_refresh(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    mod_dir = _make_mod(library)
     game_mods = tmp_path / "Mods"
     game_mods.mkdir()
     db.update_game_deploy_config(99, name="TestGame", mod_path=str(game_mods))
-    db.upsert_mod(
-        ModMetadata(published_file_id="8001", title="DeployMe", app_id=99)
-    )
+    mod_dir = _make_mod(db, library)
+
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    monkeypatch.setattr("services.mod_library_cache.get_db", lambda: db)
     monkeypatch.setattr(
         QMessageBox,
         "warning",
@@ -274,7 +271,7 @@ def test_library_deploy_finished_does_not_call_refresh(
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
-    view.detail_panel.show_mod(mod_dir)
+    view.detail_panel.show_mod(mod_dir, mod_id="8001")
 
     refresh_calls: list[int] = []
     original = view.refresh

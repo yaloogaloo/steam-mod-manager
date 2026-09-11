@@ -27,6 +27,7 @@ from core.mod_platform import (
     normalize_platform,
     platform_requires_source_url,
 )
+from core.models import MOD_TYPE_EXTENSION
 from core.witcher3_game_version import (
     WITCHER3_DEFAULT_VERSION,
     WITCHER3_GAME_VERSION_CHOICES,
@@ -69,6 +70,10 @@ class EditModDialog(QDialog):
         game_install_path: str = "",
         custom_deploy_path: str = "",
         game_version: str = "",
+        mod_type: str = "",
+        mod_type_id: int | None = None,
+        type_options: Sequence[tuple[int, str] | str] | None = None,
+        category: str = "",
     ) -> None:
         from ui.window_lifecycle import register_toplevel
 
@@ -142,6 +147,7 @@ class EditModDialog(QDialog):
 
         form = QFormLayout()
         form.setSpacing(10)
+        self._form = form
 
         self.display_name_edit = QLineEdit()
         self.display_name_edit.setText(str(display_name or ""))
@@ -149,6 +155,50 @@ class EditModDialog(QDialog):
             str(steam_name or "").strip() or "显示名称"
         )
         form.addRow("Mod 名称", self.display_name_edit)
+
+        self.type_combo = QComboBox()
+        self.type_combo.setObjectName("editModTypeCombo")
+        current_type_id = None
+        if mod_type_id is not None and str(mod_type_id).strip() != "":
+            try:
+                parsed = int(mod_type_id)
+            except (TypeError, ValueError):
+                parsed = 0
+            if parsed > 0:
+                current_type_id = parsed
+        self.type_combo.addItem("（未分类）", None)
+        seen_ids: set[int] = set()
+        for raw in list(type_options or ()):
+            tid = 0
+            label = ""
+            if isinstance(raw, tuple) and len(raw) >= 2:
+                try:
+                    tid = int(raw[0])
+                except (TypeError, ValueError):
+                    tid = 0
+                label = str(raw[1] or "").strip()
+            else:
+                continue
+            if tid <= 0 or not label or tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            self.type_combo.addItem(label, tid)
+        type_idx = 0
+        if current_type_id is not None:
+            found = self.type_combo.findData(current_type_id)
+            if found >= 0:
+                type_idx = found
+        self.type_combo.setCurrentIndex(type_idx)
+        self.type_combo.currentIndexChanged.connect(self._on_mod_type_changed)
+        form.addRow("类型", self.type_combo)
+
+        self.category_edit = QLineEdit()
+        self.category_edit.setObjectName("editModCategoryEdit")
+        self.category_edit.setText(str(category or "").strip())
+        self.category_edit.setPlaceholderText("可选，仅拓展类型显示")
+        form.addRow("分类", self.category_edit)
+        self._category_label = form.labelForField(self.category_edit)
+        self._on_mod_type_changed()
 
         self.description_edit = QTextEdit()
         self.description_edit.setAcceptRichText(False)
@@ -259,6 +309,35 @@ class EditModDialog(QDialog):
         self.source_url_edit.setPlaceholderText(_BATCH_PLACEHOLDER)
         self.custom_deploy_edit.setPlaceholderText(_BATCH_PLACEHOLDER)
         self.platform_combo.setEnabled(True)
+        self._set_form_row_visible(self.type_combo, False)
+        self._set_form_row_visible(self.category_edit, False)
+
+    def _set_form_row_visible(self, field: QWidget, visible: bool) -> None:
+        field.setVisible(visible)
+        label = self._form.labelForField(field)
+        if label is not None:
+            label.setVisible(visible)
+
+    def selected_type_id(self) -> int | None:
+        data = self.type_combo.currentData()
+        if data is None or data == "":
+            return None
+        try:
+            tid = int(data)
+        except (TypeError, ValueError):
+            return None
+        return tid if tid > 0 else None
+
+    def selected_mod_type(self) -> str:
+        if self.selected_type_id() is None:
+            return ""
+        return str(self.type_combo.currentText() or "").strip()
+
+    def _on_mod_type_changed(self, *_args) -> None:
+        if self._batch_mode:
+            return
+        show = self.selected_mod_type() == MOD_TYPE_EXTENSION
+        self._set_form_row_visible(self.category_edit, show)
 
     def selected_platform(self) -> str:
         data = self.platform_combo.currentData()
@@ -329,6 +408,9 @@ class EditModDialog(QDialog):
             "platform": plat,
             "source_url": url,
             "custom_deploy_path": self.custom_deploy_edit.text().strip(),
+            "type_id": self.selected_type_id(),
+            "mod_type": self.selected_mod_type(),
+            "category": self.category_edit.text().strip(),
         }
         if self._game_version_combo is not None:
             out["game_version"] = str(self._game_version_combo.currentData() or "")

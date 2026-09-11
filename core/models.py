@@ -6,6 +6,17 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+# User-facing Mod type label that unlocks the optional free-text「分类」field.
+MOD_TYPE_EXTENSION = "拓展"
+
+
+def visible_extension_category(mod_type: str | None, category: str | None) -> str:
+    """Category text shown in detail UI, or empty to hide the row entirely."""
+    if str(mod_type or "").strip() != MOD_TYPE_EXTENSION:
+        return ""
+    return str(category or "").strip()
+
+
 _UNKNOWN_TITLE_RE = re.compile(
     r"^Unknown[_\s]?Mod(?:[_\s]*(\d+))?\s*$",
     re.IGNORECASE,
@@ -76,7 +87,21 @@ def is_placeholder_library_folder_name(
 
 @dataclass
 class ModMetadata:
-    """Metadata for a single Steam Workshop item."""
+    """Metadata for a single Mod (Steam Workshop item or local entity).
+
+    Field semantics (Frozen Identity Contract)::
+
+        Frozen ``internal_id`` — TEXT ``mods.internal_id`` (business Entity Identity)
+        ``mods.mod_id``        — SQLite PK / FK handle (not Frozen identity)
+        published_file_id      — Steam Workshop ID only (API + source association)
+        workspace_id           — not stored here; platform display lives in DB
+
+    ``ModMetadata.internal_id`` on this DTO is a session/PK handle used by UI
+    adapters. Prefer :func:`services.identity_service.resolve_mod_pk` when a
+    Frozen TEXT identity must become a DB PK.
+
+    Never treat ``published_file_id`` as the internal entity key.
+    """
 
     published_file_id: str
     title: str = ""
@@ -104,6 +129,17 @@ class ModMetadata:
     source_type: str = ""
     # Portable UI label from JSON ``display_name`` (not the ``display_name`` property).
     json_display_name: str = ""
+    # Entity PK handle (``mods.mod_id``). Empty on pure Steam API stubs until bind.
+    # Frozen business identity is TEXT ``mods.internal_id``, not this field.
+    internal_id: str = ""
+
+    def entity_internal_id(self) -> str:
+        """DTO PK handle (``mods.mod_id``) — not Frozen TEXT ``internal_id``."""
+        mid = str(self.internal_id or "").strip()
+        if mid:
+            return mid
+        # Transitional: older adapters stuffed PK into published_file_id.
+        return str(self.published_file_id or "").strip()
 
     @property
     def game_display_name(self) -> str:
@@ -116,9 +152,15 @@ class ModMetadata:
 
     @property
     def workshop_url(self) -> str:
+        """Steam Workshop URL — only when ``published_file_id`` is a Workshop ID."""
+        from core.mod_platform import is_internal_mod_id
+
+        pub = str(self.published_file_id or "").strip()
+        if not pub.isdigit() or is_internal_mod_id(pub):
+            return ""
         return (
             "https://steamcommunity.com/sharedfiles/filedetails/"
-            f"?id={self.published_file_id}"
+            f"?id={pub}"
         )
 
     @property

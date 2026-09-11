@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +14,7 @@ from core.db_manager import (
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services.backup_manager import (
     BACKUPS_DIRNAME,
     TRANSACTION_FILENAME,
@@ -30,7 +31,7 @@ from services.deploy_rules.base import StrategyResult
 from services.deploy_rules.generic import FolderCopyStrategy
 from services.deploy_rules.manifest import load_manifest
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from services.library_status import CONTENT_HEALTHY
+from services.identity_service import create_mod_identity, identity_create_scope
 
 
 @pytest.fixture()
@@ -54,12 +55,17 @@ def _make_mod(
     info.mkdir(parents=True)
     (mod_dir / "file1.txt").write_text("NEW", encoding="utf-8")
     (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{folder}",\n'
-        f'  "app_id": {app_id},\n'
-        '  "game_name": "Game"\n'
-        "}\n",
+        json.dumps(
+            {
+                "internal_id": str(mid),
+                "published_file_id": str(mid),
+                "title": folder,
+                "app_id": app_id,
+                "game_name": "Game",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     return mod_dir
@@ -80,28 +86,35 @@ def _setup_game(db: DatabaseManager, tmp_path: Path, *, app_id: int = 424242) ->
 
 
 def _register(db: DatabaseManager, *, mid: str, path: str, app_id: int = 424242) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mid),
+            workshop_id=str(mid),
             title="TxnMod",
             app_id=app_id,
             game_name="Game",
         )
-    )
+    entity_id = str(created.mod_id)
+    assert entity_id == str(mid)
     db.update_mod_identity_fields(
-        mid,
-        content_status=CONTENT_HEALTHY,
+        entity_id,
         folder_present=True,
         last_known_path=path,
-        library_status=CONTENT_HEALTHY,
     )
+    # Keep sidecar aligned for path resolution.
+    meta_path = Path(path) / INFO_DIR_NAME / METADATA_FILENAME
+    if meta_path.is_file():
+        raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        raw["internal_id"] = entity_id
+        meta_path.write_text(
+            json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
 
 def _backup_files(managed: Path) -> list[Path]:
-    root = managed / INFO_DIR_NAME / BACKUPS_DIRNAME
-    if not root.is_dir():
-        return []
-    return [p for p in root.iterdir() if p.is_file()]
+    return BackupManager(managed).listed_backup_files()
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +134,12 @@ def test_case1_deploy_fail_rollback_ok_cleans_state(
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
 
-    def _fail_deploy(self: FolderCopyStrategy, ctx: object) -> StrategyResult:
-        return StrategyResult(
-            success=False,
-            error="simulated strategy failure",
-            deploy_type="folder_copy",
-        )
+    from services.deploy_apply import ApplyResult
 
-    with patch.object(FolderCopyStrategy, "deploy", _fail_deploy):
+    def _fail_apply(file_plan: object, **kwargs: object) -> ApplyResult:
+        return ApplyResult(success=False, error="simulated strategy failure")
+
+    with patch("services.deploy_apply.apply_file_plan", _fail_apply):
         out = ModDeployer(library_root=library, db=db).deploy_mod("95001")
 
     assert out["success"] is False
@@ -166,14 +177,12 @@ def test_case2_deploy_fail_rollback_fail_keeps_recovery(
     backups_after_first = _backup_files(mod_dir)
     assert backups_after_first
 
-    def _fail_deploy(self: FolderCopyStrategy, ctx: object) -> StrategyResult:
-        return StrategyResult(
-            success=False,
-            error="second deploy failed",
-            deploy_type="folder_copy",
-        )
+    from services.deploy_apply import ApplyResult
 
-    with patch.object(FolderCopyStrategy, "deploy", _fail_deploy), patch.object(
+    def _fail_apply(file_plan: object, **kwargs: object) -> ApplyResult:
+        return ApplyResult(success=False, error="second deploy failed")
+
+    with patch("services.deploy_apply.apply_file_plan", _fail_apply), patch.object(
         BackupManager,
         "restore_one",
         side_effect=BackupIntegrityError("simulated restore failure"),

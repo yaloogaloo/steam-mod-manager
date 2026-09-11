@@ -7,15 +7,20 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication
-from shiboken6 import isValid
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
+from core.game_info import GameInfo
 from services.cover_loader import CoverLoaderManager, reset_cover_loader_stats
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
 from ui.library_query import resolve_mod_library_title
@@ -37,6 +42,7 @@ def db(tmp_path: Path) -> DatabaseManager:
     CoverLoaderManager.reset_instance()
     reset_cover_loader_stats()
     manager = DatabaseManager.instance(tmp_path / "stability.db")
+    manager.upsert_game(GameInfo(app_id=970, name="Game", folder_name="Game"))
     yield manager
     DatabaseManager.reset_instance()
     CoverLoaderManager.reset_instance()
@@ -45,26 +51,35 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _seed(
     lib: Path,
+    db: DatabaseManager,
     *,
     game: str,
     title: str,
     mid: str,
     display_name: str = "",
-) -> Path:
-    folder = lib / game / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    payload = {
-        "published_file_id": mid,
-        "title": title,
-        "game_name": game,
-    }
-    if display_name:
-        payload["display_name"] = display_name
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(payload), encoding="utf-8"
+    app_id: int = 970,
+) -> tuple[Path, str]:
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, game_name=game, app_id=app_id
     )
-    return folder
+    internal_id = str(created.mod_id)
+    folder = lib / game / title
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=internal_id,
+        title=title,
+        external_id=mid,
+        workspace_id=mid,
+        app_id=app_id,
+        game_name=game,
+        extra={"display_name": display_name} if display_name else None,
+    )
+    bind_managed_path(db, internal_id, folder, game_name=game, title=title)
+    if display_name:
+        # Library is DB-first — surface sidecar display_name via user metadata.
+        db.update_mod_user_metadata(internal_id, {"display_name": display_name})
+    return folder, internal_id
 
 
 def test_resolve_mod_library_title_priority() -> None:
@@ -100,24 +115,18 @@ def test_resolve_mod_library_title_priority() -> None:
 
 
 def test_metadata_json_title_overrides_db_on_card(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "library"
-    folder = _seed(
+    folder, _mid = _seed(
         lib,
+        db,
         game="Game",
         title="SteamTitle",
         mid="97001",
         display_name="SidecarDisplay",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="97001",
-            title="SteamTitle",
-            managed_path=str(folder),
-            game_name="Game",
-        )
-    )
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -127,29 +136,22 @@ def test_metadata_json_title_overrides_db_on_card(
     assert len(view._cards) == 1
     card = view._cards[0]
     assert "SidecarDisplay" in card.title_label.text()
-    assert card.metadata is not None
-    assert card.metadata.json_display_name == "SidecarDisplay"
+    assert card.managed_path == folder or card.managed_path.resolve() == folder.resolve()
 
 
 def test_filter_index_uses_sidecar_title(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "library"
-    folder = _seed(
+    _seed(
         lib,
+        db,
         game="Game",
         title="SteamTitle",
         mid="97002",
         display_name="FilterSidecar",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="97002",
-            title="SteamTitle",
-            managed_path=str(folder),
-            game_name="Game",
-        )
-    )
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -162,17 +164,12 @@ def test_filter_index_uses_sidecar_title(
 
 
 def test_deleted_mod_removes_cache_under_game_filter(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "library"
-    a = _seed(lib, game="Game", title="Keep", mid="97003")
-    b = _seed(lib, game="Game", title="Gone", mid="97004")
-    db.upsert_mod(
-        ModMetadata(published_file_id="97003", title="Keep", managed_path=str(a))
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id="97004", title="Gone", managed_path=str(b))
-    )
+    a, _ = _seed(lib, db, game="Game", title="Keep", mid="97003")
+    b, _ = _seed(lib, db, game="Game", title="Gone", mid="97004")
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -182,29 +179,28 @@ def test_deleted_mod_removes_cache_under_game_filter(
     view._render_mod_cards(ModFileManager(lib))
     qapp.processEvents()
 
-    gone_key = view._card_cache_key(b)
+    gone_key = view._card_cache_key(b, mod_id="97004")
     assert gone_key in view._card_cache
 
     import shutil
 
     shutil.rmtree(b)
-    view._render_mod_cards(ModFileManager(lib))
+    # DB-first Library keeps absent rows; remove the entity so projection drops it.
+    db.delete_mod_record("97004")
+    view.refresh(force=True, reconcile=False)
     qapp.processEvents()
 
     assert gone_key not in view._card_cache
     assert len(view._cards) == 1
+    assert a.exists()
 
 
 def test_renamed_mod_does_not_keep_stale_cache(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "library"
-    old = _seed(lib, game="Game", title="OldName", mid="97005")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="97005", title="OldName", managed_path=str(old)
-        )
-    )
+    old, mid = _seed(lib, db, game="Game", title="OldName", mid="97005")
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -214,16 +210,18 @@ def test_renamed_mod_does_not_keep_stale_cache(
     view._render_mod_cards(ModFileManager(lib))
     qapp.processEvents()
 
-    old_key = view._card_cache_key(old)
+    # Cache key is entity id — path rename must not mint a second cache entry.
+    entity_key = view._card_cache_key(old, mod_id=mid)
+    assert entity_key in view._card_cache
     new = lib / "Game" / "NewName"
     old.rename(new)
-    view._render_mod_cards(ModFileManager(lib))
+    bind_managed_path(db, mid, new, game_name="Game", title="OldName")
+    view.refresh(force=True, reconcile=False)
     qapp.processEvents()
 
-    new_key = view._card_cache_key(new)
-    assert old_key not in view._card_cache
-    assert new_key in view._card_cache
+    assert entity_key in view._card_cache
     assert len(view._card_cache) == 1
+    assert view._cards[0].managed_path.resolve() == new.resolve()
 
 
 def test_cover_late_callback_safe_after_destroy(
@@ -238,11 +236,12 @@ def test_cover_late_callback_safe_after_destroy(
     pix.fill()
     pix.save(str(info / "cover.png"), "PNG")
     (info / METADATA_FILENAME).write_text(
-        json.dumps({"published_file_id": "97006", "title": "C"}),
+        json.dumps({
+                "internal_id": "97006",
+"published_file_id": "97006", "title": "C"}),
         encoding="utf-8",
     )
 
-    host = QApplication.activeWindow()
     card = ModCardWidget(folder, parent=None)
     card.ensure_cover()
     token = card._cover_token

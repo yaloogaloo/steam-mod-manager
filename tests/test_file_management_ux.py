@@ -32,6 +32,7 @@ from core.mod_platform import (
 )
 from services.deploy import resolve_deploy_sources
 from services.mod_files import ModFileManager
+from tests.helpers.identity import create_steam_test_mod
 from ui.mod_files_ux import (
     GROUP_FILES,
     GROUP_GITHUB_OTHER,
@@ -307,7 +308,7 @@ def test_summary_ready_and_empty() -> None:
 
 
 def test_enabled_save_via_manager(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9401", title="Nexus"))
+    create_steam_test_mod(db, external_id="9401", title="Nexus")
     mgr = ModFileManager(db)
     mgr.replace_all("9401", _nexus_pack())
     updated = mgr.set_file_selection("9401", "opt", False)
@@ -320,7 +321,7 @@ def test_enabled_save_via_manager(db: DatabaseManager) -> None:
 
 
 def test_batch_select_all_main_only_clear_reset(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9402", title="Nexus"))
+    create_steam_test_mod(db, external_id="9402", title="Nexus")
     mgr = ModFileManager(db)
     mgr.replace_all("9402", _nexus_pack())
 
@@ -353,7 +354,7 @@ def test_batch_select_all_main_only_clear_reset(db: DatabaseManager) -> None:
 
 
 def test_legacy_empty_bundle_deploy_whole_mod(db: DatabaseManager, tmp_path: Path) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9403", title="Steam"))
+    create_steam_test_mod(db, external_id="9403", title="Steam")
     source = tmp_path / "steam_mod"
     source.mkdir()
     (source / "content.pak").write_bytes(b"x")
@@ -362,7 +363,7 @@ def test_legacy_empty_bundle_deploy_whole_mod(db: DatabaseManager, tmp_path: Pat
 
 
 def test_github_main_only_keeps_type_main(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9404", title="GH"))
+    create_steam_test_mod(db, external_id="9404", title="GH")
     mgr = ModFileManager(db)
     mgr.replace_all(
         "9404",

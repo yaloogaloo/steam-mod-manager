@@ -19,6 +19,9 @@ def _configure_logging(verbose: bool = False) -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    from services.crash_trace import install_crash_hooks
+
+    install_crash_hooks()
     from services.runtime_identity import log_archive_runtime_identity
 
     log_archive_runtime_identity(logging.getLogger(__name__), prefix="[RUNTIME]")

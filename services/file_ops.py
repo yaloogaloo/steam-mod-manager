@@ -208,7 +208,9 @@ class ModFileManager:
             library_mod_folder_fallback,
         )
 
-        mid = str(metadata.published_file_id or "").strip()
+        mid = str(
+            metadata.entity_internal_id() or metadata.published_file_id or ""
+        ).strip()
         clean_fallback = library_mod_folder_fallback(mid)
 
         raw = ""
@@ -269,24 +271,26 @@ class ModFileManager:
 
             meta = self.load_metadata(folder)
             title = (meta.title if meta else "") or ""
-            pub_id = (
-                meta.published_file_id
-                if meta and meta.published_file_id
+            entity_id = (
+                meta.entity_internal_id()
+                if meta and meta.entity_internal_id()
                 else folder.name
             )
 
             if not title.strip() or title.strip().isdigit():
-                db_meta = db.get_mod(pub_id)
+                db_meta = db.get_mod(entity_id)
                 if db_meta and db_meta.title.strip() and not db_meta.title.strip().isdigit():
                     title = db_meta.title.strip()
                     if meta is None:
-                        meta = ModMetadata(published_file_id=str(pub_id), title=title)
+                        meta = ModMetadata(
+                            published_file_id="",
+                            internal_id=str(entity_id),
+                            title=title,
+                        )
                     else:
                         meta.title = title
-                        if db_meta.description and not meta.description:
-                            meta.description = db_meta.description
-                        if db_meta.preview_url and not meta.preview_url:
-                            meta.preview_url = db_meta.preview_url
+                        if not str(meta.internal_id or "").strip():
+                            meta.internal_id = str(entity_id)
                         if db_meta.app_id and not meta.app_id:
                             meta.app_id = db_meta.app_id
 
@@ -297,9 +301,15 @@ class ModFileManager:
                 continue
 
             if meta is None:
-                meta = ModMetadata(published_file_id=str(pub_id), title=title)
+                meta = ModMetadata(
+                    published_file_id="",
+                    internal_id=str(entity_id),
+                    title=title,
+                )
             else:
                 meta.title = title
+                if not str(meta.internal_id or "").strip():
+                    meta.internal_id = str(entity_id)
 
             # Keep game folder; only rename the Mod leaf
             desired_name = self.mod_folder_name(meta)
@@ -309,7 +319,7 @@ class ModFileManager:
             target = unique_destination(
                 folder.parent,
                 desired_name,
-                published_file_id=str(pub_id),
+                published_file_id=str(meta.published_file_id or entity_id),
             )
             # unique_destination skips existing paths — if it picked the
             # current numeric folder somehow, bail
@@ -341,7 +351,7 @@ class ModFileManager:
         try:
             from core.db_manager import get_db
 
-            cached = get_db().get_mod(metadata.published_file_id)
+            cached = get_db().get_mod(metadata.entity_internal_id())
         except Exception:  # noqa: BLE001
             return metadata
         if cached and cached.title.strip() and not cached.title.strip().isdigit():
@@ -371,7 +381,7 @@ class ModFileManager:
         """
         if not metadata.source_path:
             raise ValueError(
-                f"Mod {metadata.published_file_id} has no source_path"
+                f"Mod {metadata.entity_internal_id() or metadata.published_file_id} has no source_path"
             )
 
         source = Path(metadata.source_path)
@@ -454,7 +464,7 @@ class ModFileManager:
             try:
                 from services.metadata_backup_sync import sync_after_metadata_change
 
-                mid = str(metadata.published_file_id or "").strip() or None
+                mid = str(metadata.entity_internal_id() or "").strip() or None
                 sync_after_metadata_change(mid, path, sync_reason)
             except Exception:  # noqa: BLE001
                 pass
@@ -554,7 +564,11 @@ class ModFileManager:
         self._pub_index = None
 
     def index_by_published_id(self) -> dict[str, Path]:
-        """Deprecated alias of :meth:`index_by_internal_id` (never published_file_id)."""
+        """Deprecated alias of :meth:`index_by_internal_id`.
+
+        Despite the name, this indexes by ``mods.mod_id`` / ``.info.internal_id``
+        — never by Steam ``published_file_id``. Prefer :meth:`index_by_internal_id`.
+        """
         return self.index_by_internal_id()
 
     def find_by_internal_id(self, mod_id: str) -> Path | None:
@@ -577,7 +591,11 @@ class ModFileManager:
         return self.index_by_internal_id().get(needle)
 
     def find_by_published_id(self, published_file_id: str) -> Path | None:
-        """Deprecated name — Internal ID lookup only (ignores published_file_id axis)."""
+        """Deprecated name — Internal ID lookup only (ignores Workshop axis).
+
+        Parameter is ``mods.mod_id``, not Steam ``published_file_id``. Prefer
+        :meth:`find_by_internal_id`.
+        """
         return self.find_by_internal_id(str(published_file_id or "").strip())
 
     def game_name_for_path(self, managed_path: Path) -> str:
@@ -689,7 +707,7 @@ def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
     if offline:
         payload["offline_page_path"] = offline
         payload["offline_page"] = offline
-    mid = str(metadata.published_file_id or "").strip()
+    mid = str(metadata.entity_internal_id() or "").strip()
     if mid.isdigit():
         try:
             from core.db_manager import get_db
@@ -787,5 +805,6 @@ def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
         author=str(data.get("author") or "").strip(),
         source_type=parse_metadata_platform(data),
         json_display_name=display_name,
+        internal_id=str(data.get("internal_id") or "").strip(),
     )
     return meta

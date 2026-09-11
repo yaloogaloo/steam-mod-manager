@@ -19,10 +19,12 @@ from core.models import ModMetadata
 from core.mod_platform import FILE_TYPE_MAIN, ModFileEntry, ModFilesBundle
 from services.deploy import ModDeployer
 from services.deploy_rules.generic import FolderCopyStrategy
+from tests.helpers.deploy import patch_apply_then_unlink_targets
 from services.deploy_rules.manifest import DeployManifest, ManifestFileEntry, load_manifest
 from services.deploy_rules.stardew_valley import STARDEW_VALLEY_APP_ID
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_status import CONTENT_HEALTHY
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 BG3_APP_ID = 1086940
@@ -53,6 +55,7 @@ def _write_meta(mod_dir: Path, *, mid: str, title: str, app_id: int) -> None:
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mid}",\n'
         f'  "published_file_id": "{mid}",\n'
         f'  "title": "{title}",\n'
         f'  "app_id": {app_id}\n'
@@ -77,20 +80,12 @@ def _register(
     app_id: int = 100,
     title: str = "PipeMod",
 ) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=title,
-            app_id=app_id,
-            game_name="SomeGame",
-        )
+    create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name="SomeGame"
     )
-    db.update_mod_identity_fields(
-        mid,
-        content_status=CONTENT_HEALTHY,
-        folder_present=True,
-        last_known_path=path,
-        library_status=CONTENT_HEALTHY,
+    bind_managed_path(db, mid, Path(path), game_name="SomeGame", title=title)
+    db.update_mod_content_status(
+        mid, content_status=CONTENT_HEALTHY, folder_present=True
     )
 
 
@@ -227,7 +222,7 @@ def test_case4_copy_failure_not_success(
     _register(db, mid="94004", path=str(managed), title="CopyFail")
 
     with patch(
-        "services.deploy_rules.generic.shutil.copytree",
+        "services.deploy_apply.shutil.copy2",
         side_effect=OSError("simulated copy failure"),
     ):
         out = ModDeployer(library_root=library, db=db).deploy_mod("94004")
@@ -258,35 +253,7 @@ def test_case5_missing_manifest_target_not_success(
     _write_meta(managed, mid="94005", title="Ghost", app_id=100)
     _register(db, mid="94005", path=str(managed), title="Ghost")
 
-    ghost = mods / "Ghost" / "missing.txt"
-
-    def _lie(self: FolderCopyStrategy, ctx: object):
-        from services.deploy_rules.base import StrategyResult
-
-        entries = [
-            ManifestFileEntry(
-                source=str(managed / "a.txt"),
-                target=str(ghost),
-                type="folder_copy",
-            )
-        ]
-        manifest = DeployManifest(
-            mod_id="94005",
-            deploy_time="2026-01-01T00:00:00+00:00",
-            deploy_type="folder_copy",
-            files=entries,
-        )
-        return StrategyResult(
-            success=True,
-            target=str(mods / "Ghost"),
-            copied_files=1,
-            deploy_type="folder_copy",
-            deploy_time=manifest.deploy_time,
-            files=entries,
-            manifest=manifest,
-        )
-
-    with patch.object(FolderCopyStrategy, "deploy", _lie):
+    with patch_apply_then_unlink_targets():
         out = ModDeployer(library_root=library, db=db).deploy_mod("94005")
 
     assert out["success"] is False
@@ -357,6 +324,7 @@ def test_case7_stardew_zip_mod_not_regressed(
 ) -> None:
     library = tmp_path / "library"
     mods_dir = tmp_path / "StardewMods"
+    mods_dir.mkdir(parents=True, exist_ok=True)
     db.update_game_deploy_config(
         STARDEW_VALLEY_APP_ID,
         name="Stardew Valley",
@@ -416,16 +384,7 @@ def test_case8_failure_rolls_back_backup(
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
 
-    real_deploy = FolderCopyStrategy.deploy
-
-    def _deploy_then_delete(self: FolderCopyStrategy, ctx: object):
-        real = real_deploy(self, ctx)
-        assert real.success and real.manifest is not None
-        for entry in real.manifest.files:
-            Path(entry.target).unlink(missing_ok=True)
-        return real
-
-    with patch.object(FolderCopyStrategy, "deploy", _deploy_then_delete):
+    with patch_apply_then_unlink_targets():
         out = ModDeployer(library_root=library, db=db).deploy_mod("94008")
 
     assert out["success"] is False

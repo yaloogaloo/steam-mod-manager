@@ -11,6 +11,7 @@ import pytest
 from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.metadata_backup import (
     backup_root,
     load_backup,
@@ -69,14 +70,9 @@ def test_sync_creates_backup_when_mod_exists(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(library, "GameA", "ModB", "910001", meta_title="Title B")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="910001",
-            title="Title B",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="910001", title="Title B", game_name="GameA")
+    bind_managed_path(db, "910001", folder, title="Title B")
+
 
     sync_metadata_backup(folder)
 
@@ -104,14 +100,9 @@ def test_library_shows_missing_mod_after_folder_deleted(
         app = QApplication([])
     library = tmp_path / "mod"
     folder = _write_mod(library, "GameA", "ModB", "910002", meta_title="Gone Mod")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="910002",
-            title="Gone Mod",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="910002", title="Gone Mod", game_name="GameA")
+    bind_managed_path(db, "910002", folder, title="Gone Mod")
+
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
 
@@ -122,7 +113,7 @@ def test_library_shows_missing_mod_after_folder_deleted(
 
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
     monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     from services.file_ops import ModFileManager
 
     view = ModLibraryView()
@@ -147,14 +138,9 @@ def test_restore_folder_syncs_info_priority(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(library, "GameA", "ModB", "910003", meta_title="From Info")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="910003",
-            title="From Info",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="910003", title="From Info", game_name="GameA")
+    bind_managed_path(db, "910003", folder, title="From Info")
+
     sync_metadata_backup(folder)
 
     # Mutate backup title while folder still exists with different .info title.
@@ -203,14 +189,9 @@ def test_info_overrides_backup_on_display_conflict(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(library, "GameA", "ModB", "910004", meta_title="B")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="910004",
-            title="B",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="910004", title="B", game_name="GameA")
+    bind_managed_path(db, "910004", folder, title="B")
+
 
     persist_unified_metadata_dict(
         folder,
@@ -288,14 +269,9 @@ def test_unchanged_cover_still_hashed_on_second_sync(
     offline = info / "offline"
     offline.mkdir()
     (offline / "index.html").write_text("<html>offline</html>", encoding="utf-8")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="910009",
-            title="Hash Me",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="910009", title="Hash Me", game_name="GameA")
+    bind_managed_path(db, "910009", folder, title="Hash Me")
+
     assert sync_after_metadata_change("910009", folder, "import")
     caplog.clear()
     assert sync_after_metadata_change("910009", folder, "restore")

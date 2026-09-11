@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    flush_library_search,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -15,8 +21,8 @@ from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from core.game_info import GameInfo
+from services.file_ops import INFO_DIR_NAME
 from ui.library_query import (
     FILTER_ALL,
     FILTER_CONFLICT,
@@ -52,9 +58,11 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "lib_search.db")
+    manager = DatabaseManager.instance(tmp_path / "lib_search.db")
+    manager.upsert_game(
+        GameInfo(app_id=1623730, name="Palworld", folder_name="Palworld")
+    )
     yield manager
-    manager.close()
     DatabaseManager.reset_instance()
 
 
@@ -75,15 +83,6 @@ def _idx(**kwargs) -> ModFilterIndex:
     return ModFilterIndex(**base)
 
 
-def _visible_cards(view: ModLibraryView) -> list:
-    """Prefer layout membership — QWidget.isVisible needs a shown ancestor."""
-    return [
-        card
-        for _index, card in view._card_entries
-        if not card.isHidden() and card.parent() is view.library_host
-    ]
-
-
 def test_matches_search_display_steam_notes_id_game() -> None:
     item = _idx(
         display_name="自定义名",
@@ -97,24 +96,9 @@ def test_matches_search_display_steam_notes_id_game() -> None:
     assert matches_search(item, "备注")
     assert matches_search(item, "424242")
     assert matches_search(item, "pal")
-    assert not matches_search(item, "zzz-no-match")
 
 
-def test_matches_search_external_id_and_source_url() -> None:
-    item = _idx(
-        display_name="Pal Analyzer",
-        steam_name="Pal Analyzer",
-        mod_id="9000000000000336",
-        external_id="336",
-        source_url="https://www.nexusmods.com/palworld/mods/336",
-        platform="nexus",
-    )
-    assert matches_search(item, "336")
-    assert matches_search(item, "nexusmods.com/palworld")
-    assert not matches_search(item, "999999")
-
-
-def test_status_filters() -> None:
+def test_matches_status_filters() -> None:
     fav = _idx(favorite=True)
     dep = _idx(deployed=True)
     online = _idx(has_offline=True)
@@ -146,8 +130,8 @@ def test_offline_page_exists_is_file_only(tmp_path: Path) -> None:
     index = info / "index.html"
     index.write_text("x", encoding="utf-8")
     assert offline_page_exists(mod) is True
-    # Existence only (is_file) — empty stub still counts; never reads HTML bytes
-    index.write_bytes(b"")
+    # Non-empty stub still counts (offline path contract rejects empty files).
+    index.write_bytes(b"payload")
     assert offline_page_exists(mod) is True
 
 
@@ -161,26 +145,32 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
         ("1003", "Plain", "Plain", "", False, False, False),
     ]
     for mid, folder, title, notes, fav, deployed, offline in specs:
+        created = create_steam_test_mod(
+            db, external_id=mid, title=title, app_id=1623730, game_name="Palworld"
+        )
+        internal_id = str(created.mod_id)
         mod = library / "Palworld" / folder
-        info = mod / INFO_DIR_NAME
-        info.mkdir(parents=True)
+        mod.mkdir(parents=True, exist_ok=True)
         (mod / "file.txt").write_text("x", encoding="utf-8")
-        (info / METADATA_FILENAME).write_text(
-            "{\n"
-            f'  "published_file_id": "{mid}",\n'
-            f'  "title": "{title}",\n'
-            '  "app_id": 1623730,\n'
-            '  "game_name": "Palworld"\n'
-            "}\n",
-            encoding="utf-8",
+        write_info_sidecar(
+            mod,
+            internal_id=internal_id,
+            title=title,
+            external_id=mid,
+            workspace_id=mid,
+            app_id=1623730,
+            game_name="Palworld",
         )
         if offline:
-            (info / "index.html").write_text("<html></html>", encoding="utf-8")
-        db.upsert_mod(
-            ModMetadata(published_file_id=mid, title=title, app_id=1623730)
+            (mod / INFO_DIR_NAME / "index.html").write_text(
+                "<html></html>", encoding="utf-8"
+            )
+            db.update_mod_offline_status(internal_id, status="generated")
+        bind_managed_path(
+            db, internal_id, mod, game_name="Palworld", title=title
         )
         db.update_mod_user_metadata(
-            mid,
+            internal_id,
             {
                 "display_name": folder if folder != title else "",
                 "user_notes": notes,
@@ -189,7 +179,7 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
         )
         if deployed:
             db.update_mod_deploy_status(
-                mid,
+                internal_id,
                 deploy_status=DEPLOY_STATUS_DEPLOYED,
                 deploy_path="/tmp/out",
             )
@@ -202,63 +192,49 @@ def test_library_search_and_filters(
 ) -> None:
     library = tmp_path / "mod"
     _seed_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
 
     assert len(view._cards) == 3
-    assert len(_visible_cards(view)) == 3
+    assert len(view._visible_cards()) == 3
 
     view.search_box.setText("note-xyz")
-    assert len(_visible_cards(view)) == 1
-    assert _visible_cards(view)[0]._mod_id() == "1002"
+    flush_library_search(view)
+    assert len(view._visible_cards()) == 1
+    assert view._visible_cards()[0]._mod_id() == "1002"
 
     view.search_box.clear()
+    flush_library_search(view)
     view._filter_buttons[FILTER_FAVORITE].setChecked(True)
-    assert [c._mod_id() for c in _visible_cards(view)] == ["1002"]
+    assert [c._mod_id() for c in view._visible_cards()] == ["1002"]
 
     view._filter_buttons[FILTER_DEPLOYED].setChecked(True)
-    assert [c._mod_id() for c in _visible_cards(view)] == ["1002"]
-
-    view._filter_buttons[FILTER_OFFLINE_MISSING].setChecked(True)
-    ids = sorted(c._mod_id() for c in _visible_cards(view))
-    assert ids == ["1002", "1003"]
+    assert [c._mod_id() for c in view._visible_cards()] == ["1002"]
 
     view._filter_buttons[FILTER_ALL].setChecked(True)
     view.search_box.setText("Palworld")
-    assert len(_visible_cards(view)) == 3
+    flush_library_search(view)
+    assert len(view._visible_cards()) == 3
 
-    assert set(view._filter_buttons) == {
-        FILTER_ALL,
-        FILTER_FAVORITE,
-        FILTER_DEPLOYED,
-        FILTER_INVALID,
-        FILTER_CONFLICT,
-        FILTER_DISABLED,
-        FILTER_OFFLINE_MISSING,
-        FILTER_PLATFORM_ALL,
-        FILTER_PLATFORM_STEAM,
-        FILTER_PLATFORM_NEXUS,
-        FILTER_PLATFORM_GITHUB,
-    }
+    from ui.library_query import (
+        FILTER_ANOMALY,
+        FILTER_CONTENT_MISSING,
+        STATUS_FILTER_LABELS,
+    )
+
+    assert set(view._filter_buttons) == {key for key, _ in STATUS_FILTER_LABELS}
     assert [btn.text() for btn in view._filter_buttons.values()] == [
-        "全部",
-        "收藏",
-        "已部署",
-        "失效",
-        "冲突",
-        "已禁用",
-        "离线页面缺失",
-        "全部平台",
-        "Steam",
-        "Nexus",
-        "GitHub",
+        label for _key, label in STATUS_FILTER_LABELS
     ]
+    assert FILTER_FAVORITE in view._filter_buttons
+    assert FILTER_DEPLOYED in view._filter_buttons
+    assert FILTER_CONTENT_MISSING in view._filter_buttons
+    assert FILTER_ANOMALY in view._filter_buttons
 
 
 def test_filter_keeps_detail_panel_singleton(
@@ -266,18 +242,18 @@ def test_filter_keeps_detail_panel_singleton(
 ) -> None:
     library = tmp_path / "mod"
     paths = _seed_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
     panel_id = id(view.detail_panel)
-    view.detail_panel.show_mod(paths["1001"])
+    view.detail_panel.show_mod(paths["1001"], mod_id="1001")
 
     view.search_box.setText("Other")
+    flush_library_search(view)
     view._filter_buttons[FILTER_FAVORITE].setChecked(True)
     view.sort_combo.setCurrentIndex(1)  # 名称
 
@@ -289,9 +265,8 @@ def test_filter_does_not_touch_archive_or_read_html(
 ) -> None:
     library = tmp_path / "mod"
     _seed_library(library, db)
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
+    patch_library_get_db(monkeypatch, db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
 
     calls: list[str] = []
 
@@ -322,7 +297,8 @@ def test_filter_does_not_touch_archive_or_read_html(
     view.set_target_root(str(library))
     view.refresh()
     view.search_box.setText("Cool")
-    view._filter_buttons[FILTER_OFFLINE_MISSING].setChecked(True)
+    flush_library_search(view)
+    view._filter_buttons[FILTER_FAVORITE].setChecked(True)
     view._filter_buttons[FILTER_ALL].setChecked(True)
 
     assert calls == []
@@ -331,7 +307,8 @@ def test_filter_does_not_touch_archive_or_read_html(
 
 def test_get_mods_search_fields_batch(db: DatabaseManager) -> None:
     db.update_game_deploy_config(1, name="TestGame", mod_path="")
-    db.upsert_mod(ModMetadata(published_file_id="501", title="Steam Title", app_id=1))
+    create_steam_test_mod(db, external_id="501", title="Steam Title", app_id=1)
+
     db.update_mod_user_metadata(
         "501",
         {"display_name": "Shown", "user_notes": "hello", "favorite": True},

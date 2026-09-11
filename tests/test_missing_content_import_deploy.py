@@ -57,6 +57,7 @@ def test_empty_directory_import_marks_missing(db: DatabaseManager, tmp_path: Pat
 
 
 def test_empty_zip_import_marks_missing(db: DatabaseManager, tmp_path: Path) -> None:
+    """Empty archive may import; Content Missing is Refresh/eval — not Archive stamp."""
     library = tmp_path / "library"
     library.mkdir()
     empty_zip = tmp_path / "empty.zip"
@@ -76,9 +77,9 @@ def test_empty_zip_import_marks_missing(db: DatabaseManager, tmp_path: Path) -> 
     assert result.success, result.error
     assert result.managed_path
     managed = Path(result.managed_path)
-    assert read_is_missing_content(managed)
-    meta = read_info_metadata_dict(managed) or {}
-    assert meta.get(MISSING_CONTENT_METADATA_KEY) is True
+    assert managed.is_dir()
+    # Archive import must not sticky-stamp Content Missing (Refresh owns that).
+    assert not read_is_missing_content(managed)
 
 
 def test_deploy_blocks_missing_content(db: DatabaseManager, tmp_path: Path) -> None:

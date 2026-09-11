@@ -24,6 +24,7 @@ import inspect
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -224,7 +225,8 @@ def test_card_renders_content_missing_only(
 
 def test_repository_status_badge_never_identity(db: DatabaseManager) -> None:
     db.update_game_deploy_config(1, name="Game")
-    db.upsert_mod(ModMetadata(published_file_id="92001", title="X", app_id=1))
+    create_steam_test_mod(db, external_id="92001", title="X", app_id=1)
+
     db._conn.execute(
         """
         UPDATE mods SET
@@ -251,7 +253,8 @@ def test_historical_cleanup_clears_user_status_pollution(
     db = DatabaseManager(tmp_path / "cleanup.db")
     try:
         db.update_game_deploy_config(1, name="Game")
-        db.upsert_mod(ModMetadata(published_file_id="93001", title="P", app_id=1))
+        create_steam_test_mod(db, external_id="93001", title="P", app_id=1)
+
         # Force pollution as if an old build wrote it after schema init.
         db._conn.execute(
             "DELETE FROM schema_flags WHERE flag = ?",

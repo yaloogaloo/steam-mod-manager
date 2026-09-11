@@ -112,22 +112,27 @@ class ModDetailDialog(QDialog):
         if resolved is not None:
             self.metadata = resolved.to_mod_metadata()
         else:
+            mid_stub = str(mod_id or "").strip()
             self.metadata = ModMetadata(
-                published_file_id=(
-                    str(mod_id or "").strip()
-                    or (self.managed_path.name if self.managed_path.name.isdigit() else "")
-                ),
+                published_file_id="",
+                internal_id=mid_stub if mid_stub.isdigit() else "",
                 title=self.managed_path.name,
                 managed_path=str(self.managed_path),
             )
         self.metadata.managed_path = str(self.managed_path)
+        if str(mod_id or "").strip().isdigit() and not str(
+            self.metadata.internal_id or ""
+        ).strip():
+            self.metadata.internal_id = str(mod_id).strip()
         self._folder_absent = bool(resolved is None or not resolved.folder_present)
         self._offline_worker: OfflinePageWorker | None = None
         self._display_info = None
         try:
             from core.db_manager import get_db
 
-            mid = str(self.metadata.published_file_id or "").strip()
+            mid = str(
+                mod_id or self.metadata.entity_internal_id() or ""
+            ).strip()
             if mid.isdigit():
                 self._display_info = get_db().get_mod_display_info(mid)
         except Exception:  # noqa: BLE001
@@ -269,7 +274,9 @@ class ModDetailDialog(QDialog):
 
         from services.mod_metadata_resolver import resolve_cover_path
 
-        cover = resolve_cover_path(meta.published_file_id or None, self.managed_path)
+        cover = resolve_cover_path(
+            self.metadata.entity_internal_id() or None, self.managed_path
+        )
         self._set_cover(cover)
 
         custom_desc = (info.custom_description if info else "").strip()
@@ -309,7 +316,7 @@ class ModDetailDialog(QDialog):
     def _open_edit(self) -> None:
         from .mod_edit_dialog import ModEditDialog
 
-        mid = self.metadata.published_file_id
+        mid = self.metadata.entity_internal_id()
         if not str(mid).isdigit():
             QMessageBox.warning(self, "无法编辑", "缺少有效的 Mod ID。")
             return
@@ -323,9 +330,7 @@ class ModDetailDialog(QDialog):
             self._display_info = dialog.saved_info
             from services.mod_metadata_resolver import resolve_mod_metadata
 
-            resolved = resolve_mod_metadata(
-                self.metadata.published_file_id, self.managed_path
-            )
+            resolved = resolve_mod_metadata(mid, self.managed_path)
             self._resolved = resolved
             if resolved is not None:
                 self.metadata = resolved.to_mod_metadata()
@@ -339,9 +344,9 @@ class ModDetailDialog(QDialog):
     def _index_path(self) -> Path | None:
         from services.mod_metadata_resolver import resolve_offline_page
 
-        return resolve_offline_page(
-            self.metadata.published_file_id or None, self.managed_path
-        )
+        # Entity PK only — never Workshop / published_file_id as a stand-in.
+        mid = str(self.metadata.entity_internal_id() or "").strip() or None
+        return resolve_offline_page(mid, self.managed_path)
 
     def _show_cached_offline_state(self) -> None:
         index = self._index_path()
@@ -486,7 +491,7 @@ class ModDetailDialog(QDialog):
             webbrowser.open(url)
 
     def _save_notes(self) -> None:
-        mid = self.metadata.published_file_id
+        mid = self.metadata.entity_internal_id()
         if not str(mid).isdigit():
             QMessageBox.warning(self, "保存失败", "缺少有效的 Mod ID。")
             return

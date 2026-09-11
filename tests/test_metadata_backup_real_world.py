@@ -21,6 +21,7 @@ from services.mod_metadata_resolver import (
     resolve_mod_metadata,
     resolve_offline_page,
 )
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 ANNO_APP_ID = 916440
 
@@ -61,6 +62,7 @@ def _seed_mod(
     info.mkdir(parents=True)
     name = meta_title or title
     payload = {
+        "internal_id": mod_id,
         "published_file_id": mod_id,
         "title": name,
         "display_name": name,
@@ -89,18 +91,17 @@ def _seed_mod(
         payload["offline_status"] = "generated"
     persist_unified_metadata_dict(folder, payload)
     (folder / "content.pak").write_bytes(b"pak")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mod_id,
-            title=name,
-            description=f"SQLITE-OLD-{mod_id}",
-            game_name=game,
-            managed_path=str(folder),
-            app_id=ANNO_APP_ID,
-            source_type="nexus",
-            url=f"https://sqlite-old.example/{mod_id}",
-        )
+    # Canonical create (Steam PK scheme keeps digits for historical test IDs),
+    # then platform fields come from sidecar / sync — not upsert mint.
+    create_steam_test_mod(
+        db,
+        external_id=mod_id,
+        title=name,
+        app_id=ANNO_APP_ID,
+        game_name=game,
+        source_url=f"https://example.com/{mod_id}",
     )
+    bind_managed_path(db, mod_id, folder, game_name=game, title=name)
     if favorite:
         db.update_mod_user_metadata(mod_id, {"favorite": True})
     # Ensure backup snapshot + last_known_path are warm.
@@ -421,17 +422,14 @@ def test_game_derived_from_backup_without_games_table_row(
     }
     persist_unified_metadata_dict(folder, payload)
     (folder / "content.pak").write_bytes(b"x")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mod_id,
-            title=title,
-            game_name=game,
-            managed_path=str(folder),
-            app_id=0,
-            source_type="github",
-            url="https://example.com/950100",
-        )
+    create_steam_test_mod(
+        db,
+        external_id=mod_id,
+        title=title,
+        game_name=game,
+        source_url="https://example.com/950100",
     )
+    bind_managed_path(db, mod_id, folder, game_name=game, title=title)
     sync_after_metadata_change(mod_id, folder, "import")
     shutil.rmtree(library / game)
     reconcile_folder_presence(library)

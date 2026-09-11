@@ -16,6 +16,7 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -61,8 +62,8 @@ def test_case1_distinct_paks_same_mods_dir_no_conflict(
     b = _seed(library, "102", title="ModB")
     _manifest(a, "101", t_a)
     _manifest(b, "102", t_b)
-    db.upsert_mod(ModMetadata(published_file_id="101", title="ModA"))
-    db.upsert_mod(ModMetadata(published_file_id="102", title="ModB"))
+    create_steam_test_mod(db, external_id="101", title="ModA")
+    create_steam_test_mod(db, external_id="102", title="ModB")
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
@@ -93,8 +94,8 @@ def test_case2_identical_pak_target_is_file_overwrite(
     b = _seed(library, "202", title="ModB")
     _manifest(a, "201", shared)
     _manifest(b, "202", shared)
-    db.upsert_mod(ModMetadata(published_file_id="201", title="ModA"))
-    db.upsert_mod(ModMetadata(published_file_id="202", title="ModB"))
+    create_steam_test_mod(db, external_id="201", title="ModA")
+    create_steam_test_mod(db, external_id="202", title="ModB")
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
@@ -123,8 +124,8 @@ def test_case3_user_relationship_conflict_still_visible(
     b = _seed(library, "302", title="DeclaredRival")
     _manifest(a, "301", t_a)
     _manifest(b, "302", t_b)
-    db.upsert_mod(ModMetadata(published_file_id="301", title="Source"))
-    db.upsert_mod(ModMetadata(published_file_id="302", title="DeclaredRival"))
+    create_steam_test_mod(db, external_id="301", title="Source")
+    create_steam_test_mod(db, external_id="302", title="DeclaredRival")
     db.add_mod_relationship(301, 302, RELATIONSHIP_CONFLICT)
 
     # Relationship API still surfaces the declaration
@@ -161,8 +162,8 @@ def test_case4_disabled_mod_excluded_from_path_conflict(
     b = _seed(library, "402", title="Disabled")
     _manifest(a, "401", shared)
     _manifest(b, "402", shared)
-    db.upsert_mod(ModMetadata(published_file_id="401", title="Enabled"))
-    db.upsert_mod(ModMetadata(published_file_id="402", title="Disabled"))
+    create_steam_test_mod(db, external_id="401", title="Enabled")
+    create_steam_test_mod(db, external_id="402", title="Disabled")
     db.disable_mod(402)
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)

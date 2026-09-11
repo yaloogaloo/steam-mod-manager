@@ -36,6 +36,7 @@ from ui.library_query import (
     sort_key,
 )
 from ui.library_viewport import compute_viewport_window
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -43,6 +44,9 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     reset_library_cache()
     manager = DatabaseManager(tmp_path / "sort_lifecycle.db")
+    from core.game_info import GameInfo
+
+    manager.upsert_game(GameInfo(app_id=42, name="GameX", folder_name="GameX"))
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -69,6 +73,7 @@ def _seed_mod(
     (folder / "a.txt").write_text("x", encoding="utf-8")
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mid}",\n'
         f'  "published_file_id": "{mid}",\n'
         f'  "title": "{title}",\n'
         '  "app_id": 42,\n'
@@ -76,7 +81,7 @@ def _seed_mod(
         "}\n",
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=42))
+    create_steam_test_mod(db, external_id=mid, title=title, app_id=42)
     db._conn.execute(
         "UPDATE mods SET last_known_path = ?, folder_present = 1, "
         "display_name = ?, updated_at = ? WHERE mod_id = ?",
@@ -171,10 +176,21 @@ def test_sort_does_not_scan_filesystem_or_reconcile(
     _seed_mod(db, library, mid="8301", title="A", updated_at=_iso(1))
     _seed_mod(db, library, mid="8302", title="B", updated_at=_iso(2))
 
-    fs_probe = MagicMock(side_effect=AssertionError("filesystem scan forbidden"))
+    fs_calls: list[str] = []
+    real_stat = Path.stat
+    real_iterdir = Path.iterdir
+
+    def track_stat(self, *args, **kwargs):  # noqa: ANN001
+        fs_calls.append(f"stat:{self}")
+        return real_stat(self, *args, **kwargs)
+
+    def track_iterdir(self, *args, **kwargs):  # noqa: ANN001
+        fs_calls.append(f"iterdir:{self}")
+        return real_iterdir(self, *args, **kwargs)
+
     reconcile = MagicMock(side_effect=AssertionError("reconcile forbidden"))
-    monkeypatch.setattr("pathlib.Path.stat", fs_probe)
-    monkeypatch.setattr("pathlib.Path.iterdir", fs_probe)
+    monkeypatch.setattr(Path, "stat", track_stat)
+    monkeypatch.setattr(Path, "iterdir", track_iterdir)
     monkeypatch.setattr(
         "services.library_reconcile.reconcile_library", reconcile, raising=False
     )
@@ -183,7 +199,7 @@ def test_sort_does_not_scan_filesystem_or_reconcile(
     entries = [(_index_from_row(r), r) for r in rows]
     filter_sort_entries(entries, sort_mode=SORT_NAME)
     filter_sort_entries(entries, sort_mode=SORT_MTIME)
-    fs_probe.assert_not_called()
+    assert fs_calls == []
     reconcile.assert_not_called()
 
 

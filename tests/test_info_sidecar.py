@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import PLATFORM_GITHUB, DatabaseManager
-from core.models import ModMetadata
 from core.mod_platform import (
     FILE_ROLE_GITHUB_RELEASE_ASSET,
     FILE_ROLE_GITHUB_SOURCE_ARCHIVE,
+    FILE_ROLE_UNKNOWN,
     FILE_TYPE_MAIN,
     FILE_TYPE_OPTIONAL,
     ModFileEntry,
@@ -25,6 +25,7 @@ from services.file_ops import (
     METADATA_FILENAME,
     ModFileManager,
 )
+from services.identity_service import create_mod_identity
 from services.importers.local_scanner import ARCHIVE_SUFFIXES, scan_mod_directory
 from services.info_sidecar import (
     InfoSidecar,
@@ -64,28 +65,37 @@ def test_scan_archives_only_ignores_loose_files(tmp_path: Path) -> None:
 
 
 def test_info_sidecar_roundtrip(db: DatabaseManager, tmp_path: Path) -> None:
+    created = create_mod_identity(
+        db,
+        platform=PLATFORM_GITHUB,
+        external_id="a/b",
+        source_url="https://github.com/a/b",
+        title="Mod",
+        app_id=1623730,
+        game_name="Palworld",
+        operation="import",
+    )
+    mid = str(created.mod_id)
     folder = tmp_path / "library" / "Game" / "Mod"
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     legacy = info / LEGACY_METADATA_FILENAME
     legacy.write_text(
-        json.dumps({"published_file_id": "8801", "title": "Mod"}),
+        json.dumps({"published_file_id": mid, "internal_id": mid, "title": "Mod"}),
         encoding="utf-8",
     )
     assert not (info / METADATA_FILENAME).exists()
     (folder / "release.zip").write_bytes(b"PK")
     (folder / "source.zip").write_bytes(b"PK")
-
-    db.upsert_mod(
-        ModMetadata(published_file_id="8801", title="Mod", managed_path=str(folder))
-    )
-    db.update_mod_platform_info(
-        "8801",
+    db.update_mod_identity_fields(
+        mid,
+        folder_present=True,
+        last_known_path=str(folder.resolve()),
         platform=PLATFORM_GITHUB,
         source_url="https://github.com/a/b",
     )
     db.update_mod_user_metadata(
-        "8801",
+        mid,
         {
             "display_name": "Pretty Name",
             "custom_description": "Hello world",
@@ -95,7 +105,7 @@ def test_info_sidecar_roundtrip(db: DatabaseManager, tmp_path: Path) -> None:
         },
     )
     db.set_mod_files(
-        "8801",
+        mid,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -118,7 +128,7 @@ def test_info_sidecar_roundtrip(db: DatabaseManager, tmp_path: Path) -> None:
         ),
     )
 
-    path = write_sidecar_for_mod(folder, "8801", db=db)
+    path = write_sidecar_for_mod(folder, mid, db=db)
     assert path is not None and path.is_file()
     assert path.name == METADATA_FILENAME
     assert not legacy.exists()
@@ -133,7 +143,7 @@ def test_info_sidecar_roundtrip(db: DatabaseManager, tmp_path: Path) -> None:
     assert loaded.file_roles["source.zip"] == ROLE_SOURCE
 
     db.update_mod_user_metadata(
-        "8801",
+        mid,
         {
             "display_name": "Wiped",
             "custom_description": "",
@@ -144,14 +154,14 @@ def test_info_sidecar_roundtrip(db: DatabaseManager, tmp_path: Path) -> None:
             "platform": PLATFORM_GITHUB,
         },
     )
-    db.set_mod_files("8801", ModFilesBundle())
-    assert apply_sidecar_to_db(folder, mod_id="8801", db=db, rescan_archives=True)
-    info2 = db.get_mod_display_info("8801")
+    db.set_mod_files(mid, ModFilesBundle())
+    assert apply_sidecar_to_db(folder, mod_id=mid, db=db, rescan_archives=True)
+    info2 = db.get_mod_display_info(mid)
     assert info2 is not None
     assert info2.display_name == "Pretty Name"
     assert info2.custom_description == "Hello world"
     assert info2.custom_deploy_path == "D:/mods/out"
-    files = {f.filename: f for f in JsonModFiles(db).get_files("8801")}
+    files = {f.filename: f for f in JsonModFiles(db).get_files(mid)}
     assert "release.zip" in files
     assert files["release.zip"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
     assert files["source.zip"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
@@ -198,3 +208,95 @@ def test_info_sidecar_to_from_dict() -> None:
     side = InfoSidecar.from_dict(raw)
     assert side.to_dict()["file_roles"]["a.zip"] == "Main"
     assert InfoSidecar.from_dict(side.to_dict()).description == "B"
+
+
+def test_sidecar_file_roles_keeps_two_mains() -> None:
+    raw = {
+        "display_name": "A",
+        "file_roles": {"a.zip": "Main", "b.zip": "Main", "c.zip": "Source"},
+    }
+    side = InfoSidecar.from_dict(raw)
+    roles = side.to_dict()["file_roles"]
+    assert roles["a.zip"] == ROLE_MAIN
+    assert roles["b.zip"] == ROLE_MAIN
+    assert roles["c.zip"] == ROLE_SOURCE
+
+
+def test_sidecar_roundtrip_two_mains(db: DatabaseManager, tmp_path: Path) -> None:
+    created = create_mod_identity(
+        db,
+        platform=PLATFORM_GITHUB,
+        external_id="owner/twomain",
+        source_url="https://github.com/owner/twomain",
+        title="TwoMain",
+        app_id=1623730,
+        game_name="Palworld",
+        operation="import",
+    )
+    mid = str(created.mod_id)
+    folder = tmp_path / "library" / "Game" / "TwoMain"
+    info = folder / INFO_DIR_NAME
+    info.mkdir(parents=True)
+    (folder / "a.zip").write_bytes(b"PK")
+    (folder / "b.zip").write_bytes(b"PK")
+    db.update_mod_identity_fields(
+        mid,
+        folder_present=True,
+        last_known_path=str(folder.resolve()),
+        platform=PLATFORM_GITHUB,
+    )
+    db.set_mod_files(
+        mid,
+        ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="a",
+                    filename="a.zip",
+                    path="a.zip",
+                    file_role=FILE_ROLE_GITHUB_RELEASE_ASSET,
+                    source_type=SOURCE_TYPE_GITHUB,
+                    selected_for_deploy=True,
+                ),
+                ModFileEntry(
+                    id="b",
+                    filename="b.zip",
+                    path="b.zip",
+                    file_role=FILE_ROLE_GITHUB_RELEASE_ASSET,
+                    source_type=SOURCE_TYPE_GITHUB,
+                    selected_for_deploy=True,
+                ),
+            ]
+        ),
+    )
+    path = write_sidecar_for_mod(folder, mid, db=db)
+    assert path is not None
+    loaded = load_info_sidecar(folder)
+    assert loaded is not None
+    assert loaded.file_roles["a.zip"] == ROLE_MAIN
+    assert loaded.file_roles["b.zip"] == ROLE_MAIN
+
+    db.set_mod_files(
+        mid,
+        ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="a",
+                    filename="a.zip",
+                    path="a.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                ),
+                ModFileEntry(
+                    id="b",
+                    filename="b.zip",
+                    path="b.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                ),
+            ]
+        ),
+    )
+    assert apply_sidecar_to_db(folder, mod_id=mid, db=db) is True
+    files = {f.id: f for f in JsonModFiles(db).get_files(mid)}
+    assert files["a"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
+    assert files["b"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET

@@ -18,6 +18,12 @@ from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.library_view import ModLibraryView
 from ui.mod_detail_panel import ModDetailPanel
 from ui.styles import APP_STYLE
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture(scope="module")
@@ -32,10 +38,9 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "responsive.db")
+    manager = DatabaseManager.instance(tmp_path / "responsive.db")
     manager.upsert_game(GameInfo(app_id=99, name="TestGame", folder_name="TestGame"))
     yield manager
-    manager.close()
     DatabaseManager.reset_instance()
 
 
@@ -43,20 +48,24 @@ def _pump() -> None:
     QCoreApplication.processEvents()
 
 
-def _seed(library: Path, *, mod_id: str, title: str) -> Path:
-    mod_dir = library / "TestGame" / title
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (mod_dir / "pak.txt").write_text("data", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mod_id}",\n'
-        f'  "title": "{title}",\n'
-        '  "app_id": 99,\n'
-        '  "game_name": "TestGame"\n'
-        "}\n",
-        encoding="utf-8",
+def _seed(library: Path, db: DatabaseManager, *, mod_id: str, title: str) -> Path:
+    created = create_steam_test_mod(
+        db, external_id=mod_id, title=title, app_id=99, game_name="TestGame"
     )
+    internal_id = str(created.mod_id)
+    mod_dir = library / "TestGame" / title
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    (mod_dir / "pak.txt").write_text("data", encoding="utf-8")
+    write_info_sidecar(
+        mod_dir,
+        internal_id=internal_id,
+        title=title,
+        external_id=mod_id,
+        workspace_id=mod_id,
+        app_id=99,
+        game_name="TestGame",
+    )
+    bind_managed_path(db, internal_id, mod_dir, title=title)
     return mod_dir
 
 
@@ -81,9 +90,8 @@ def test_filter_toolbar_wraps_without_overlap(
     size: tuple[int, int],
 ) -> None:
     library = tmp_path / "mod"
-    _seed(library, mod_id="8001", title="A")
-    db.upsert_mod(ModMetadata(published_file_id="8001", title="A", app_id=99))
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
+    _seed(library, db, mod_id="8001", title="A")
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -97,22 +105,20 @@ def test_filter_toolbar_wraps_without_overlap(
     view.splitter.setSizes([160, 180, max(220, total - 340)])
     _pump()
     view._status_bar.adjustSize()
-    view._platform_bar.adjustSize()
     view._meta_bar.adjustSize()
     _pump()
 
     status_chips = [
         b
         for b in view._filter_buttons.values()
-        if b.parentWidget() is view._status_bar and b.isVisible()
+        if b.parentWidget() is view._status_chips and b.isVisible()
     ]
-    platform_chips = list(view._platform_buttons.values())
     assert status_chips
-    assert platform_chips
     _assert_no_overlap(status_chips)
-    _assert_no_overlap(platform_chips)
+    assert not hasattr(view, "_platform_bar")
+    assert not hasattr(view, "_platform_buttons")
 
-    for btn in status_chips + platform_chips:
+    for btn in status_chips:
         # Fixed chips keep readable text — no empty / ellipsis truncation.
         assert btn.text().strip()
         assert "…" not in btn.text()
@@ -127,18 +133,15 @@ def test_detail_actions_visible_with_long_title_narrow_panel(
 ) -> None:
     long_name = "Very_Long_Mod_Name_Test_Test_Test_Test"
     library = tmp_path / "mod"
-    folder = _seed(library, mod_id="8002", title=long_name)
-    db.upsert_mod(
-        ModMetadata(published_file_id="8002", title=long_name, app_id=99)
-    )
+    folder = _seed(library, db, mod_id="8002", title=long_name)
+    patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
 
     panel = ModDetailPanel()
     # Two-row footer needs ~panel min width; 260px was for an older FlowLayout wrap.
     panel.resize(400, 720)
     panel.show()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id="8002")
     _pump()
     panel.resize(360, 720)
     _pump()
@@ -179,12 +182,8 @@ def test_library_splitter_keeps_detail_actions(
 ) -> None:
     long_name = "Very_Long_Mod_Name_Test_Test_Test_Test"
     library = tmp_path / "mod"
-    folder = _seed(library, mod_id="8003", title=long_name)
-    db.upsert_mod(
-        ModMetadata(published_file_id="8003", title=long_name, app_id=99)
-    )
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    folder = _seed(library, db, mod_id="8003", title=long_name)
+    patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
     view = ModLibraryView()
@@ -196,7 +195,7 @@ def test_library_splitter_keeps_detail_actions(
 
     view.splitter.setSizes([160, 520, 260])
     _pump()
-    card = view._card_for_path(folder)
+    card = view._card_for_mod_id("8003")
     assert card is not None
     view._select_card(card, show_panel=True)
     _pump()

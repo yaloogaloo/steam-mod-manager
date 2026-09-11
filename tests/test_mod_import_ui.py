@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from core.db_manager import (
     PLATFORM_GITHUB,
@@ -289,8 +289,10 @@ def test_import_dialog_empty_path_creates_missing_content(
     del qapp
     lib = tmp_path / "library"
     lib.mkdir()
+    host = QWidget()
     dlg = ModImportDialog(
         lib,
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_other.setChecked(True)
@@ -323,8 +325,10 @@ def test_import_dialog_offline_html_filename_does_not_widen_dialog(
     del db
     lib = tmp_path / "library"
     lib.mkdir()
+    host = QWidget()
     dlg = ModImportDialog(
         lib,
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     assert dlg.radio_nexus is not None

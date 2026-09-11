@@ -10,6 +10,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MOD_DIR_NAME = "mod"
 DATA_DIR_NAME = "data"
 DATABASE_FILENAME = "mod_manager.db"
+MOD_TYPES_FILENAME = "mod_types.json"
 
 
 def project_root() -> Path:
@@ -36,6 +37,7 @@ def data_dir() -> Path:
 
 
 ASSET_CACHE_DIR_NAME = "asset_cache"
+COLLECTION_COVERS_DIR_NAME = "collection_covers"
 
 
 def asset_cache_dir() -> Path:
@@ -45,9 +47,21 @@ def asset_cache_dir() -> Path:
     return path
 
 
+def collection_covers_dir() -> Path:
+    """Collection-owned covers: ``<project_root>/data/collection_covers``."""
+    path = data_dir() / COLLECTION_COVERS_DIR_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def database_path() -> Path:
     """SQLite snapshot DB: ``<project_root>/data/mod_manager.db``."""
     return data_dir() / DATABASE_FILENAME
+
+
+def mod_types_path() -> Path:
+    """User-editable Type Definition file: ``<project_root>/data/mod_types.json``."""
+    return data_dir() / MOD_TYPES_FILENAME
 
 
 def extract_app_id_from_workshop_path(path: str | Path) -> int | None:

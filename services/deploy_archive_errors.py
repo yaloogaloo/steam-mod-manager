@@ -7,6 +7,8 @@ def archive_error_code(message: str) -> str:
     text = (message or "").strip().lower()
     if "超时" in message or "timeout" in text:
         return "ARCHIVE_TIMEOUT"
+    if "缺少成员" in message or ("member" in text and "missing" in text):
+        return "ARCHIVE_MEMBER_MISSING"
     if "不存在" in message or "not found" in text:
         return "ARCHIVE_NOT_FOUND"
     if "架构不兼容" in message or "executable invalid" in text or "winerror 216" in text:

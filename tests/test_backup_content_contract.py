@@ -17,6 +17,7 @@ from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.metadata_backup import BACKUP_METADATA_NAME, backup_root
 from services.metadata_backup_sync import drain_backup_queue, sync_after_metadata_change
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 FORBIDDEN_SUFFIXES = (
     ".pak",
@@ -101,14 +102,9 @@ def test_backup_content_contract_allows_only_metadata_cover_offline(
     (folder / "archive.zip").write_bytes(b"FAKEZIP")
     (folder / "payload.bin").write_bytes(b"x" * 64)
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="960001",
-            title="Contract Mod",
-            game_name="GameA",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="960001", title="Contract Mod", game_name="GameA")
+    bind_managed_path(db, "960001", folder, title="Contract Mod")
+
     assert sync_after_metadata_change("960001", folder, "import")
     drain_backup_queue(timeout=5.0)
 

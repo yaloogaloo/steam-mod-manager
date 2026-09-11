@@ -18,6 +18,7 @@ from core.mod_platform import (
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
 from services.info_sidecar import InfoSidecar, apply_sidecar_to_db, load_info_sidecar
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -46,7 +47,7 @@ def test_upsert_mod_preserves_non_steam_platform(db: DatabaseManager) -> None:
 
     mid = "4242"
     db.upsert_game(GameInfo(app_id=100, name="Game", folder_name="Game"))
-    db.upsert_mod(ModMetadata(published_file_id=mid, title="Workshop Mod", app_id=100))
+    create_steam_test_mod(db, external_id=mid, title="Workshop Mod", app_id=100)
     db.update_mod_user_metadata(
         mid,
         {
@@ -92,7 +93,7 @@ def test_apply_sidecar_without_source_type_keeps_db_platform(
         ),
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="8801", title="Mod"))
+    create_steam_test_mod(db, external_id="8801", title="Mod")
     db.update_mod_user_metadata(
         "8801",
         {
@@ -136,7 +137,7 @@ def test_write_sidecar_roundtrip_source_type(
 ) -> None:
     folder = tmp_path / "Mod"
     folder.mkdir()
-    db.upsert_mod(ModMetadata(published_file_id="8803", title="Mod"))
+    create_steam_test_mod(db, external_id="8803", title="Mod")
     db.update_mod_user_metadata(
         "8803",
         {

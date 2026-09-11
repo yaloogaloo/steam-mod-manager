@@ -10,6 +10,7 @@ from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
 from core.models import ModMetadata
 from services.deploy import ModDeployer
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.deploy_path_audit import (
     CUSTOM_DEPLOY_PATH_MISSING,
     GAME_CONFIG_PATH_MISSING,
@@ -72,15 +73,9 @@ def _seed_bg3_mod(
         f'{{"internal_id": "{mid}", "app_id": {BG3}, "title": "Mod_{mid}"}}',
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=f"Mod_{mid}",
-            app_id=BG3,
-            game_name="Baldurs Gate 3",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id=mid, title=f"Mod_{mid}", app_id=BG3, game_name="Baldurs Gate 3")
+    bind_managed_path(db, mid, folder, title=f"Mod_{mid}")
+
     db.update_mod_identity_fields(
         mid,
         internal_id=mid,

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -73,13 +74,8 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
     )
 
     # Seed DB the same way the bug appears in production.
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=f"Unknown_Mod_{mid}",
-            description="old desc",
-        )
-    )
+    create_steam_test_mod(db, external_id=mid, title=f"Unknown_Mod_{mid}")
+
     db.update_mod_user_metadata(mid, {"display_name": f"Unknown_Mod_{mid}"})
 
     # Raw column still holds the placeholder (UI must not prefer it).
@@ -157,9 +153,8 @@ def test_display_info_ignores_stale_unknown_override_without_refresh(
     db: DatabaseManager,
 ) -> None:
     mid = "99"
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="Already Fixed Title")
-    )
+    create_steam_test_mod(db, external_id=mid, title="Already Fixed Title")
+
     db.update_mod_user_metadata(mid, {"display_name": f"Unknown_Mod_{mid}"})
     info = db.get_mod_display_info(mid)
     assert info is not None

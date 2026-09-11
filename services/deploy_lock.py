@@ -32,7 +32,7 @@ def deploy_operation_lock(
     with _lock_guard:
         if key in _active:
             raise RuntimeError(
-                f"Mod {mod_id} 已有部署任务正在执行，请等待完成后再试"
+                f"Mod {internal_id} 已有部署任务正在执行，请等待完成后再试"
             )
         _active.add(key)
     try:

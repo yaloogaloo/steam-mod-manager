@@ -15,6 +15,11 @@ from services.deploy import ModDeployer
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.importers.archive import ArchiveImporter
 from services.importers.importer_base import ImportContext
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 PALWORLD = ImportContext(game_id=1623730, game_name="Palworld")
 
@@ -94,7 +99,18 @@ def test_steam_empty_bundle_deploy_unchanged(tmp_path: Path, db: DatabaseManager
         '{"published_file_id":"8802","title":"SteamMod","app_id":100}\n',
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="8802", title="SteamMod", app_id=100))
+    created = create_steam_test_mod(db, external_id="8802", title="SteamMod", app_id=100)
+    write_info_sidecar(
+        mod,
+        internal_id=str(created.mod_id),
+        title="SteamMod",
+        external_id="8802",
+        workspace_id=str(created.workspace_id or "8802"),
+        app_id=100,
+        game_name="SomeGame",
+    )
+    bind_managed_path(db, created.mod_id, mod, title="SteamMod", game_name="SomeGame")
+
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(install_mods))
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("8802")

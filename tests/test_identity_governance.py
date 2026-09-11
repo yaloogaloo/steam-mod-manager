@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -10,17 +9,14 @@ import pytest
 
 from core.db_manager import DatabaseManager, IdentityIntegrityError
 from core.mod_platform import PLATFORM_MODIO, PLATFORM_NEXUS, is_internal_mod_id
-from services.deploy import ModDeployer
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_identity_authority import (
     safe_workspace_id_for_deploy,
     sanitize_platform_external_id,
 )
-from services.mod_identity_repair import (
-    apply_repair_plan,
-    build_repair_plan,
+from services.identity_repair_service import (
     elect_canonical,
-    repair_mod_library_identity,
+    get_identity_repair_service,
+    plan_field_scrubs,
 )
 
 
@@ -80,7 +76,6 @@ def test_deploy_never_uses_internal_mod_id_as_workspace_id(
         app_id=1086940,
         last_known_path=str(tmp_path / "m"),
     )
-    # Pollute workspace in raw SQL to simulate old bug state, then deploy resolve.
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET workspace_id=? WHERE mod_id=?",
@@ -103,6 +98,7 @@ def test_same_source_url_never_creates_duplicate_entity_after_repair(
     monkeypatch.setattr("services.metadata_backup.data_dir", lambda: tmp_path / "data")
     (tmp_path / "data").mkdir()
     library = tmp_path / "mod"
+    library.mkdir()
     url = "https://www.nexusmods.com/stardewvalley/mods/44639"
     a = str(db.allocate_mod_id())
     b = str(db.allocate_mod_id())
@@ -120,10 +116,17 @@ def test_same_source_url_never_creates_duplicate_entity_after_repair(
         source_url=url,
         folder_present=True,
     )
-    plan = build_repair_plan(db, library)
-    retire = [x for x in plan.actions if x.action == "retire_duplicate_entity"]
+    actions = plan_field_scrubs(db, library)
+    retire = [x for x in actions if x.action == "retire_duplicate_entity"]
     assert retire
-    applied = apply_repair_plan(db, library, plan, apply=True)
+    applied = get_identity_repair_service().repair(
+        db,
+        library,
+        apply=True,
+        include_entity=False,
+        include_pollution=False,
+        include_field_scrubs=True,
+    )
     assert applied.success
     remaining = []
     with db._lock:
@@ -168,6 +171,7 @@ def test_repair_is_idempotent(db: DatabaseManager, tmp_path: Path, monkeypatch) 
     monkeypatch.setattr("services.metadata_backup.data_dir", lambda: tmp_path / "data")
     (tmp_path / "data").mkdir()
     library = tmp_path / "mod"
+    library.mkdir()
     mid = str(db.allocate_mod_id())
     db.update_mod_identity_fields(
         int(mid),
@@ -175,9 +179,24 @@ def test_repair_is_idempotent(db: DatabaseManager, tmp_path: Path, monkeypatch) 
         external_id=mid,
         source_url="https://mod.io/g/baldursgate3/m/super-skip-ship-sss",
     )
-    first = repair_mod_library_identity(library, db=db, apply=True)
+    svc = get_identity_repair_service()
+    first = svc.repair(
+        db,
+        library,
+        apply=True,
+        include_entity=False,
+        include_pollution=False,
+        include_field_scrubs=True,
+    )
     assert first.success
-    second = repair_mod_library_identity(library, db=db, apply=True)
+    second = svc.repair(
+        db,
+        library,
+        apply=True,
+        include_entity=False,
+        include_pollution=False,
+        include_field_scrubs=True,
+    )
     assert second.success
     info = db.get_mod_display_info(mid)
     assert info is not None
@@ -195,7 +214,6 @@ def test_unique_constraint_failure_is_not_silenced(tmp_path: Path) -> None:
     db.update_mod_platform_info(
         a, platform=PLATFORM_NEXUS, external_id="999", title="A", app_id=1
     )
-    # Force duplicate triple: drop UNIQUE, then copy identity onto second row.
     with db._lock:
         db._conn.execute("DROP INDEX IF EXISTS uq_mods_platform_app_external")
         db._conn.execute(

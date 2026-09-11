@@ -33,6 +33,7 @@ from services.mod_projection_events import (
     subscribe_mod_changed,
 )
 from services.mod_refresh import reconcile_local_state, refresh_mod
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -83,22 +84,10 @@ def _seed(
     )
     if with_payload:
         (folder / "mod.pak").write_bytes(b"payload")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=f"Mod{mid}",
-            app_id=app_id,
-            game_name=game,
-            managed_path=str(folder),
-        )
+    create_steam_test_mod(
+        db, external_id=mid, title=f"Mod{mid}", app_id=app_id, game_name=game
     )
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=mid,
-        folder_present=True,
-        last_known_path=str(folder.resolve()),
-        app_id=app_id,
-    )
+    bind_managed_path(db, mid, folder, game_name=game, title=f"Mod{mid}")
     db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
     return folder
 

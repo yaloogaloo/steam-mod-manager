@@ -2099,7 +2099,7 @@ def apply_identity_repair(
         working.notes.append(f"Identity allocations during repair: {working.allocations}")
         try:
             from services.mod_library_integrity_audit import audit_mod_library_integrity
-            from services.mod_identity_repair import audit_severity_counts
+            from services.identity_repair_service import audit_severity_counts
 
             report = audit_mod_library_integrity(root, db=db)
             working.after = audit_severity_counts(report)

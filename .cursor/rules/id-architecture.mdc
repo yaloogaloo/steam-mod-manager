@@ -7,22 +7,23 @@ alwaysApply: true
 
 Three identities. Never merge them.
 
-- **Internal ID** (`mods.mod_id`): database PK only. Never user-facing, never search, never Workspace ID, never `external_id`, never a platform URL, never a folder name.
-- **Workspace ID** (`mods.workspace_id`): the ONLY user-facing Mod identifier.
-- **external_id**: platform-native ID (Steam Workshop ID, Nexus Mod ID). Not a second user Mod ID.
+- **internal_id** (`mods.internal_id` TEXT): durable business Entity Identity. Answers “is this the same Mod?”. Minted at create; proven on disk as `.info.internal_id`. Never `internal_id = str(mod_id)`. Never `workspace_id`. Never `correlation_id`.
+- **mod_id** (`mods.mod_id`): SQLite row PK and FK target only. Not the business Entity Identity. Business callers resolve `internal_id → resolve_mod_pk() → mod_id → DB/FK`.
+- **Workspace ID** (`mods.workspace_id`): platform / display identity only (Steam Workshop ID, Nexus Mod ID, …). NEVER Library / Reconcile / Backup / Deploy / UI entity identity. `find_mod_by_workspace_id` is a permanent no-op.
+- **external_id**: platform-native metadata. Not a second user Mod ID.
 
 Derivation (never invert):
 
 ```
 Steam Workshop ID → external_id → workspace_id
 Nexus Mod ID     → external_id → workspace_id
-Other            → system-generated workspace_id (never from Internal ID)
+Other            → system-generated workspace_id (never from internal_id or mod_id)
 ```
 
-Forbidden: `workspace_id = internal_id`, Internal ID in platform URLs, ordinary UI showing Internal ID / Steam Workshop ID / Nexus ID beside Workspace ID.
+Forbidden: `workspace_id = internal_id`, `workspace_id = mod_id`, treating `mods.mod_id` as Frozen entity identity, Internal ID in platform URLs, ordinary UI showing Internal ID / Steam Workshop ID / Nexus ID beside Workspace ID.
 
 Steam PK may numerically equal Workshop ID (historical). Same digits ≠ same semantics.
 
-Use names `internal_id`, `workspace_id`, `external_id`. Do not use ambiguous `mod_id` for more than one of these.
+Use names `internal_id`, `mod_id`, `workspace_id`, `external_id`. Do not use ambiguous `mod_id` for more than one of these.
 
-Ordinary UI shows **Workspace ID** only. Debug UI may show **Internal Database ID**.
+Ordinary UI shows **Workspace ID** only. Debug UI may show **SQLite PK**. `.info.internal_id` is filesystem registration proof, not a folder-name identity.

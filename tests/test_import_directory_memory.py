@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from services.importers.import_settings import (
     get_last_import_directory,
@@ -69,8 +69,10 @@ def test_import_directory_memory(
         return ([str(imports / "Main.zip"), str(imports / "Optional.zip")], filt)
 
     monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(fake_open_names))
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     try:

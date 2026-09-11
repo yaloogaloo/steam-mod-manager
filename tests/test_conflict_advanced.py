@@ -8,7 +8,6 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
-from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy_rules.manifest import (
     DeployManifest,
@@ -16,6 +15,7 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -32,7 +32,7 @@ def _seed(library: Path, mid: str) -> Path:
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     (info / METADATA_FILENAME).write_text(
-        f'{{"published_file_id":"{mid}","title":"M{mid}"}}',
+        f'{{"internal_id":"{mid}","published_file_id":"{mid}","title":"M{mid}"}}',
         encoding="utf-8",
     )
     return folder
@@ -53,7 +53,7 @@ def test_same_target_file_overwrite(tmp_path: Path, db: DatabaseManager) -> None
                 files=[ManifestFileEntry(source="x", target=shared)],
             ),
         )
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=mid))
+        create_steam_test_mod(db, external_id=mid, title=mid)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert reports["1"].status == CONFLICT_STATUS_NONE
     assert reports["1"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
@@ -87,8 +87,8 @@ def test_same_dir_different_pak_is_not_conflict(
             files=[ManifestFileEntry(source="B.pak", target=t2)],
         ),
     )
-    db.upsert_mod(ModMetadata(published_file_id="11", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="12", title="B"))
+    create_steam_test_mod(db, external_id="11", title="A")
+    create_steam_test_mod(db, external_id="12", title="B")
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert reports["11"].status == CONFLICT_STATUS_NONE
     assert reports["12"].status == CONFLICT_STATUS_NONE
@@ -114,7 +114,7 @@ def test_disabled_skipped(tmp_path: Path, db: DatabaseManager) -> None:
                 files=[ManifestFileEntry(source="x", target=shared)],
             ),
         )
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=mid))
+        create_steam_test_mod(db, external_id=mid, title=mid)
     db.disable_mod(22)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     # Only one enabled owner → no conflict

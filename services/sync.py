@@ -168,6 +168,23 @@ class ModSyncService:
     Sync success means filesystem materialization **and** Mod entity
     registration. Do not rely on later reconcile / UI scans to invent
     missing entities. Do not skip registration for ``skip_existing`` folders.
+
+    FS-first is intentional (not an Import clone):
+      * Source of work is already-on-disk Steam Workshop folders.
+      * Destination may already exist from a prior incomplete run
+        (``skip_existing``); discovery of that folder is required before bind.
+      * Do not mint a Library entity until a managed folder is present.
+      * Copy / enrich may write Steam platform facts into ``.info``
+        (workspace / external / published_file_id). That is not an Internal
+        entity. ``internal_id`` is written only after Identity Service bind
+        (``ensure_registration_info_proof``).
+      * Identity create/bind still goes only through Identity Service.
+        Sync never copies Workshop ID or folder names into ``mods.mod_id``.
+      * Copy/identity failure does not delete the managed folder. The next
+        Sync run re-discovers it and registers (idempotent rematch).
+      * Reconcile must not create entities for leftover folders.
+      * UI refuses a second Sync while one is running; SQLite uniqueness is
+        the last line of defence for two processes.
     """
 
     def __init__(
@@ -710,38 +727,47 @@ class ModSyncService:
                 )
 
         library_ok = 0
+        from services.file_ops import read_info_metadata_dict
+        from services.mod_identity import extract_workspace_id, read_internal_id
+
         for item in scanned:
             wid = str(item.published_file_id or "").strip()
             managed = existing_index.get(wid)
             if managed is None or not Path(managed).is_dir():
                 continue
-            from services.mod_identity import extract_workspace_id
-
-            ws = extract_workspace_id(
-                folder_name=Path(managed).name,
-                legacy_token=wid,
-                source_url=steam_workshop_url(wid),
-            )
-            payload = {
-                "workspace_id": ws or wid,
-                "external_id": ws or wid,
-                "source_type": PLATFORM_STEAM,
-                "platform": PLATFORM_STEAM,
-                "url": steam_workshop_url(wid),
-                "_managed_path": str(Path(managed).resolve()),
-                "_folder_name": Path(managed).name,
-                "published_file_id": wid,
-            }
-            if resolve_existing_mod_id(payload, db=db):
+            # Visibility = sidecar internal_id that exists in DB.
+            # resolve_existing_mod_id is internal_id-only; do not pass
+            # workspace / folder name as if they were entity keys.
+            payload = dict(read_info_metadata_dict(managed) or {})
+            iid = read_internal_id(payload)
+            visible = bool(iid) and bool(resolve_existing_mod_id(payload, db=db))
+            if not visible:
+                loaded = self.files.load_metadata(managed)
+                app_id = int(getattr(loaded, "app_id", 0) or 0) if loaded else 0
+                ws = extract_workspace_id(
+                    workspace_id=str(getattr(loaded, "workspace_id", "") or "")
+                    if loaded
+                    else "",
+                    title=str(getattr(loaded, "title", "") or "") if loaded else "",
+                    source_url=steam_workshop_url(wid),
+                    legacy_token=wid,
+                )
+                hit = (
+                    db.find_mod_for_registration(PLATFORM_STEAM, app_id, ws or wid)
+                    if app_id > 0
+                    else None
+                )
+                visible = hit is not None
+            if visible:
                 library_ok += 1
             else:
                 logger.error(
                     "[SYNC_LIFECYCLE] library visibility miss workspace_id=%s folder=%s",
-                    ws or wid,
+                    wid,
                     managed,
                 )
                 result.registration_failed.append(
-                    (ws or wid, "library visibility miss after identity persist")
+                    (wid, "library visibility miss after identity persist")
                 )
         result.library_count = library_ok
         logger.info(
@@ -905,6 +931,12 @@ class ModSyncService:
             logger.debug(
                 "sync content status validate failed mid=%s", mid, exc_info=True
             )
+        try:
+            from services.size_observation import note_mod_size_ready
+
+            note_mod_size_ready(mid, managed)
+        except Exception:  # noqa: BLE001
+            logger.debug("sync size enqueue failed mid=%s", mid, exc_info=True)
         try:
             from services.metadata_backup_sync import sync_after_metadata_change
 

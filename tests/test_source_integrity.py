@@ -26,6 +26,7 @@ from services.mod_source_integrity import (
     validate_archive_content,
     validate_source,
 )
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 HISTORY = "历史版本"
 
@@ -65,6 +66,7 @@ def _setup_mod(
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": mid,
                 "published_file_id": mid,
                 "title": folder,
                 "app_id": app_id,
@@ -73,20 +75,11 @@ def _setup_mod(
         ),
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=folder,
-            app_id=app_id,
-            game_name="Game",
-        )
+    create_steam_test_mod(
+        db, external_id=mid, title=folder, app_id=app_id, game_name="Game"
     )
-    db.update_mod_identity_fields(
-        mid,
-        folder_present=True,
-        last_known_path=str(mod),
-        library_status="healthy",
-    )
+    bind_managed_path(db, mid, mod, game_name="Game", title=folder)
+    db.update_mod_content_status(mid, content_status="healthy", folder_present=True)
     db.update_game_deploy_config(
         app_id,
         mod_path=str(tmp_path / "game_mods"),

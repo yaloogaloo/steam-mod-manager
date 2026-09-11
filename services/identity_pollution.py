@@ -1,4 +1,4 @@
-"""Identity pollution scan + gated repair (no deletes).
+"""Identity pollution **detect** (scan + plan). Apply lives on IdentityRepairService.
 
 Workspace ID is display-only. Unique Mod identity is always::
 
@@ -7,11 +7,10 @@ Workspace ID is display-only. Unique Mod identity is always::
 This module:
   1. Scans for historical pollution (cross-game workspace collisions,
      cross-platform external_id collisions, app_id=0 identity rows).
-  2. Emits a Repair Report (JSON-serializable).
-  3. Optionally applies safe repairs: infer app_id from Nexus URL,
-     uniquify colliding workspace_ids, mark unresolved when ambiguous.
+  2. Emits a Repair Report (JSON-serializable) with planned actions.
 
-Never uses workspace_id to guess identity. Never deletes Mod rows.
+Mutating apply is owned by ``IdentityRepairService.repair()``. Never uses
+workspace_id to guess identity. Never deletes Mod rows.
 """
 
 from __future__ import annotations
@@ -28,11 +27,9 @@ from typing import Any
 from core.mod_platform import (
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
-    generate_unique_workspace_id,
     is_internal_mod_id,
     normalize_platform,
 )
-from core.paths import data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +231,7 @@ def scan_identity_pollution(db: Any) -> IdentityPollutionReport:
         "Workspace ID is display-only; identity is (platform, app_id, external_id)."
     )
     report.notes.append(
-        "No rows were deleted. Apply via apply_identity_pollution_repair."
+        "Detect-only. Apply via IdentityRepairService.repair()."
     )
     return report
 
@@ -323,92 +320,38 @@ def apply_identity_pollution_repair(
     report: IdentityPollutionReport | None = None,
     *,
     apply: bool = False,
+    library_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """
-    Apply safe pollution repairs.
+    """Compatibility shim → ``IdentityRepairService.repair`` (pollution only).
 
-    ``apply=False`` (default) returns the plan only.
-    Never deletes rows. Never guesses identity via workspace_id.
+    Prefer calling ``IdentityRepairService`` directly. Never deletes rows.
     """
+    from core.paths import default_mod_library
+    from services.identity_repair_service import (
+        IdentityRepairDetection,
+        get_identity_repair_service,
+    )
+
     scanned = report or scan_identity_pollution(db)
-    result: dict[str, Any] = {
-        "apply": apply,
-        "planned": len(scanned.actions),
-        "applied": [],
-        "skipped": [],
-    }
+    detection = IdentityRepairDetection(pollution=scanned)
+    root = Path(library_root) if library_root else Path(default_mod_library())
+    result = get_identity_repair_service().repair(
+        db,
+        root,
+        apply=apply,
+        detection=detection,
+        include_entity=False,
+        include_field_scrubs=False,
+        include_pollution=True,
+    )
+    payload = dict(result.pollution_apply or {})
+    payload.setdefault("apply", apply)
+    payload.setdefault("planned", len(scanned.actions))
+    payload.setdefault("applied", [])
+    payload.setdefault("skipped", [])
     if not apply:
-        result["actions"] = [a.to_dict() for a in scanned.actions]
-        return result
-
-    taken = {
-        str(r["workspace_id"] or "").strip()
-        for r in db._conn.execute(  # noqa: SLF001
-            "SELECT workspace_id FROM mods "
-            "WHERE workspace_id IS NOT NULL AND TRIM(workspace_id) != ''"
-        ).fetchall()
-    }
-    taken.discard("")
-
-    for action in scanned.actions:
-        mid = int(action.mod_id)
-        if action.action == "INFER_APP_ID":
-            new_app = int(action.details.get("new_app_id") or 0)
-            plat = str(action.details.get("platform") or "")
-            ext = str(action.details.get("external_id") or "")
-            if new_app <= 0 or not plat or not ext:
-                result["skipped"].append({"mod_id": mid, "reason": "incomplete"})
-                continue
-            conflict = db.find_mod_by_external(plat, ext, app_id=new_app)
-            if conflict is not None and str(conflict.mod_id) != str(mid):
-                result["skipped"].append(
-                    {
-                        "mod_id": mid,
-                        "reason": "identity_already_owned",
-                        "owner": str(conflict.mod_id),
-                    }
-                )
-                continue
-            with db._lock:  # noqa: SLF001
-                db._conn.execute(  # noqa: SLF001
-                    "UPDATE mods SET app_id = ? WHERE mod_id = ?",
-                    (new_app, mid),
-                )
-                db._conn.commit()  # noqa: SLF001
-            result["applied"].append(
-                {"mod_id": mid, "action": "INFER_APP_ID", "app_id": new_app}
-            )
-        elif action.action == "REASSIGN_WORKSPACE_UNIQUE":
-            new_ws = generate_unique_workspace_id(taken)
-            taken.add(new_ws)
-            with db._lock:  # noqa: SLF001
-                db._conn.execute(  # noqa: SLF001
-                    "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
-                    (new_ws, mid),
-                )
-                db._conn.commit()  # noqa: SLF001
-            result["applied"].append(
-                {
-                    "mod_id": mid,
-                    "action": "REASSIGN_WORKSPACE_UNIQUE",
-                    "workspace_id": new_ws,
-                }
-            )
-        elif action.action == "MARK_UNRESOLVED":
-            with db._lock:  # noqa: SLF001
-                db._conn.execute(  # noqa: SLF001
-                    "UPDATE mods SET identity_status = ? WHERE mod_id = ?",
-                    ("unresolved", mid),
-                )
-                db._conn.commit()  # noqa: SLF001
-            result["applied"].append(
-                {"mod_id": mid, "action": "MARK_UNRESOLVED"}
-            )
-        else:
-            result["skipped"].append(
-                {"mod_id": mid, "reason": f"no_op:{action.action}"}
-            )
-    return result
+        payload["actions"] = [a.to_dict() for a in scanned.actions]
+    return payload
 
 
 def write_pollution_report(
@@ -416,7 +359,15 @@ def write_pollution_report(
     *,
     path: str | Path | None = None,
 ) -> Path:
-    out = Path(path) if path else data_dir() / "identity_pollution_report.json"
+    # Prefer _tmp/audits when caller omits path (local disposable dump).
+    out = (
+        Path(path)
+        if path
+        else Path(__file__).resolve().parents[1]
+        / "_tmp"
+        / "audits"
+        / "identity_pollution_report.json"
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2),

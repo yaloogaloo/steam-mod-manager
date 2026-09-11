@@ -7,9 +7,12 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import RELATIONSHIP_DEPENDENCY, DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 APP = 100
 
@@ -24,6 +27,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 
 def _seed_mod(
+    db: DatabaseManager,
     library: Path,
     *,
     mid: str,
@@ -33,18 +37,19 @@ def _seed_mod(
     folder = library / "Game" / title
     folder.mkdir(parents=True)
     (folder / "payload.txt").write_text(title, encoding="utf-8")
-    info = folder / INFO_DIR_NAME
-    info.mkdir()
-    wid = workspace_id or mid
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        f'  "workspace_id": "{wid}",\n'
-        f'  "title": "{title}",\n'
-        f'  "app_id": {APP}\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(db, external_id=mid, title=title, app_id=APP)
+    wid = workspace_id or str(created.workspace_id or mid)
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
+        title=title,
+        external_id=mid,
+        workspace_id=wid,
+        app_id=APP,
+        game_name="Game",
+        extra={"workspace_id": wid},
     )
+    bind_managed_path(db, created.mod_id, folder, title=title, game_name="Game")
     return folder
 
 
@@ -54,14 +59,12 @@ def test_deploy_runs_dependency_before_main(
     library = tmp_path / "library"
     install = tmp_path / "game_mods"
     install.mkdir()
-    _seed_mod(library, mid="2001", title="DepMod", workspace_id="ws-dep")
-    _seed_mod(library, mid="2002", title="MainMod", workspace_id="ws-main")
-
     db.update_game_deploy_config(
         APP, name="Game", mod_path=str(install), deploy_type="folder_copy"
     )
-    db.upsert_mod(ModMetadata(published_file_id="2001", title="DepMod", app_id=APP))
-    db.upsert_mod(ModMetadata(published_file_id="2002", title="MainMod", app_id=APP))
+    _seed_mod(db, library, mid="2001", title="DepMod", workspace_id="ws-dep")
+    _seed_mod(db, library, mid="2002", title="MainMod", workspace_id="ws-main")
+
     db.add_mod_relationship("2002", "2001", RELATIONSHIP_DEPENDENCY)
 
     order: list[str] = []

@@ -26,6 +26,7 @@ from core.witcher3_game_version import (
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.info_sidecar import apply_sidecar_to_db, write_sidecar_for_mod
 from services.library_reconcile import reconcile_library
 from services.metadata_refresh import refresh_steam_mod_metadata
@@ -117,12 +118,9 @@ def test_new_witcher3_mod_defaults_to_next_gen(db: DatabaseManager) -> None:
     assert _raw_game_version(db, created.mod_id) == WITCHER3_DEFAULT_VERSION
 
 
-def test_new_steam_witcher3_upsert_defaults_to_next_gen(db: DatabaseManager) -> None:
+def test_new_steam_witcher3_create_defaults_to_next_gen(db: DatabaseManager) -> None:
     mid = "3591452801"
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="Steam W3", app_id=W3),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="Steam W3", app_id=W3)
     info = db.get_mod_display_info(mid)
     assert info is not None
     assert info.game_version == WITCHER3_VERSION_NEXT_GEN
@@ -245,10 +243,8 @@ def test_steam_refresh_preserves_game_version(
         encoding="utf-8",
     )
     (folder / "payload.zip").write_bytes(b"zip")
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="W3 Steam", app_id=W3),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="W3 Steam", app_id=W3)
+    bind_managed_path(db, mid, folder, title="W3 Steam", game_name="巫师3")
     db.set_mod_game_version(mid, WITCHER3_VERSION_ORIGINAL)
     db.set_official_metadata_synced(mid, False)
 
@@ -304,6 +300,7 @@ def test_modio_refresh_does_not_map_version_field(
         game_name="巫师3",
         operation="import",
     )
+    bind_managed_path(db, created.mod_id, folder, title="W3 Modio", game_name="巫师3")
     db.set_mod_game_version(created.mod_id, WITCHER3_VERSION_REMAKE)
     db.set_official_metadata_synced(created.mod_id, False)
 
@@ -419,12 +416,9 @@ def test_rename_move_preserves_game_version(db: DatabaseManager, tmp_path: Path)
         ),
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="before", app_id=W3),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="before", app_id=W3)
     db.set_mod_game_version(mid, WITCHER3_VERSION_REMAKE)
-    db.update_mod_identity_fields(mid, last_known_path=str(old.resolve()))
+    bind_managed_path(db, mid, old, title="before", game_name="巫师3")
     new = lib / "巫师3" / "after"
     old.rename(new)
     result = record_filesystem_rename(mid, old, new, reason="refresh", db=db)
@@ -671,10 +665,7 @@ def test_detail_panel_shows_witcher3_game_version_labels(
             "app_id": W3,
         },
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="YenneferLook", app_id=W3),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="YenneferLook", app_id=W3)
     ident_before = db.get_mod_display_info(mid)
     assert ident_before is not None
     snapshot = (
@@ -736,10 +727,7 @@ def test_detail_panel_hides_game_version_for_other_games(
         "PlayablePals",
         {"published_file_id": mid, "title": "PlayablePals", "app_id": PALWORLD},
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="PlayablePals", app_id=PALWORLD),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="PlayablePals", app_id=PALWORLD)
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=mid, game_id=PALWORLD, game_name="Palworld")
     html = _meta_text(panel)
@@ -772,10 +760,7 @@ def test_detail_panel_refresh_after_edit_dialog_save(
         "CiriHair",
         {"published_file_id": mid, "title": "CiriHair", "app_id": W3},
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="CiriHair", app_id=W3),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="CiriHair", app_id=W3)
     before = db.get_mod_display_info(mid)
     assert before is not None
     snapshot = (
@@ -830,10 +815,7 @@ def test_detail_panel_does_not_show_illegal_game_version(
         "IllegalVer",
         {"published_file_id": mid, "title": "IllegalVer", "app_id": W3},
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="IllegalVer", app_id=W3),
-        allow_insert=True,
-    )
+    create_steam_test_mod(db, external_id=mid, title="IllegalVer", app_id=W3)
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET game_version = ? WHERE mod_id = ?",

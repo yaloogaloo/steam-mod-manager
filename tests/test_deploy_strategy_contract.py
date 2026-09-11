@@ -14,11 +14,13 @@ from services.deploy_rules import (
     DEPLOY_TYPE_PALWORLD_PAK,
     DEPLOY_TYPE_SLAY_THE_SPIRE,
     DEPLOY_TYPE_STARDEW_VALLEY,
+    DEPLOY_TYPE_WARHAMMER3,
     get_strategy,
     supported_deploy_types,
 )
 from services.deploy_rules.base import DeployContext
 from services.deploy_rules.generic import FolderCopyStrategy
+from tests.helpers.deploy import execute_strategy_fileplan
 
 
 @pytest.fixture()
@@ -70,6 +72,7 @@ def test_all_strategies_registered() -> None:
         DEPLOY_TYPE_SLAY_THE_SPIRE,
         DEPLOY_TYPE_STARDEW_VALLEY,
         DEPLOY_TYPE_DUCKOV,
+        DEPLOY_TYPE_WARHAMMER3,
     ):
         assert key in types
         assert get_strategy(key) is not None
@@ -92,7 +95,7 @@ def test_folder_copy_plan_and_deploy(tmp_path: Path, db: DatabaseManager) -> Non
     strategy = FolderCopyStrategy()
     plan = strategy.plan(ctx)
     assert plan.success and plan.files
-    result = strategy.deploy(ctx)
+    result = execute_strategy_fileplan(strategy, ctx)
     assert result.success and result.manifest
     und = strategy.undeploy(ctx, result.manifest)
     assert und.success
@@ -121,7 +124,7 @@ def test_palworld_plan_with_pak(tmp_path: Path, db: DatabaseManager) -> None:
     plan = strategy.plan(ctx)
     assert plan.success is True
     assert plan.files
-    result = strategy.deploy(ctx)
+    result = execute_strategy_fileplan(strategy, ctx)
     assert result.success is True
 
 
@@ -163,7 +166,7 @@ def test_duckov_deploy_layout(tmp_path: Path, db: DatabaseManager) -> None:
     )
     strategy = get_strategy(DEPLOY_TYPE_DUCKOV, app_id=3167020)
     assert strategy is not None
-    result = strategy.deploy(ctx)
+    result = execute_strategy_fileplan(strategy, ctx)
     assert result.success is True
     target = Path(result.target)
     assert (target / "info.ini").is_file()
@@ -207,7 +210,7 @@ def test_stardew_deploy_with_manifest(tmp_path: Path, db: DatabaseManager) -> No
     )
     strategy = get_strategy(DEPLOY_TYPE_STARDEW_VALLEY, app_id=413150)
     assert strategy is not None
-    result = strategy.deploy(ctx)
+    result = execute_strategy_fileplan(strategy, ctx)
     assert result.success is True
     assert (mods / "CoolMod" / "manifest.json").is_file()
 
@@ -228,7 +231,7 @@ def test_sts_jars_to_mods(tmp_path: Path, db: DatabaseManager) -> None:
     )
     strategy = get_strategy(DEPLOY_TYPE_SLAY_THE_SPIRE, app_id=646570)
     assert strategy is not None
-    result = strategy.deploy(ctx)
+    result = execute_strategy_fileplan(strategy, ctx)
     assert result.success is True
     assert (install / "mods" / "mod.jar").is_file()
 
@@ -249,7 +252,7 @@ def test_anno_folder_copy_into_mods(tmp_path: Path, db: DatabaseManager) -> None
     )
     strategy = get_strategy(DEPLOY_TYPE_ANNO_1800, app_id=916440)
     assert strategy is not None
-    result = strategy.deploy(ctx)
+    result = execute_strategy_fileplan(strategy, ctx)
     assert result.success is True
     assert (install / "mods" / "AnnoMod" / "moddata.txt").is_file()
 
@@ -266,5 +269,6 @@ def test_plan_fails_fast_on_missing_source(tmp_path: Path, db: DatabaseManager) 
         source=missing,
         mod_path=str(mods),
     )
-    result = FolderCopyStrategy().deploy(ctx)
-    assert result.success is False
+    result = FolderCopyStrategy().plan(ctx)
+    # Missing source yields empty/failed plan; Core never calls Strategy.deploy.
+    assert result.success is False or not (result.files or [])

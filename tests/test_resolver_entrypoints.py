@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -87,18 +88,21 @@ def test_detail_dialog_existing_folder_prefers_info(
     _write_info(
         folder,
         {
+            "internal_id": "920201",
             "published_file_id": "920201",
             "title": "A",
             "display_name": "A",
         },
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="920201", title="C", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="920201", title="C")
+    bind_managed_path(db, "920201", folder, title="C")
+
     db.update_mod_user_metadata("920201", {"display_name": "C"})
     _write_backup(
         "920201",
-        {"published_file_id": "920201", "title": "B", "display_name": "B"},
+        {
+            "internal_id": "920201",
+            "published_file_id": "920201", "title": "B", "display_name": "B"},
     )
 
     dialog = ModDetailDialog(folder, mod_id="920201")
@@ -119,19 +123,21 @@ def test_detail_dialog_missing_folder_prefers_backup(
     _write_info(
         folder,
         {
+            "internal_id": "920202",
             "published_file_id": "920202",
             "title": "FromInfo",
             "display_name": "FromInfo",
         },
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="920202", title="C", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="920202", title="C")
+    bind_managed_path(db, "920202", folder, title="C")
+
     db.update_mod_user_metadata("920202", {"display_name": "C"})
     sync_metadata_backup(folder)
     _write_backup(
         "920202",
         {
+            "internal_id": "920202",
             "published_file_id": "920202",
             "title": "B",
             "display_name": "B",
@@ -165,12 +171,14 @@ def test_missing_folder_opens_backup_offline_from_dialog(
     info.mkdir(parents=True)
     persist_unified_metadata_dict(
         folder,
-        {"published_file_id": "920203", "title": "Off", "display_name": "Off"},
+        {
+            "internal_id": "920203",
+            "published_file_id": "920203", "title": "Off", "display_name": "Off"},
     )
     (info / "index.html").write_text("<html>info</html>", encoding="utf-8")
-    db.upsert_mod(
-        ModMetadata(published_file_id="920203", title="Off", managed_path=str(folder))
-    )
+    create_steam_test_mod(db, external_id="920203", title="Off")
+    bind_managed_path(db, "920203", folder, title="Off")
+
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
     db.set_mod_folder_present("920203", present=False)
@@ -204,6 +212,7 @@ def test_existing_folder_uses_backup_cover_when_info_cover_deleted(
     _write_info(
         folder,
         {
+            "internal_id": "920204",
             "published_file_id": "920204",
             "title": "CoverMod",
             "display_name": "CoverMod",
@@ -211,11 +220,9 @@ def test_existing_folder_uses_backup_cover_when_info_cover_deleted(
         },
     )
     (folder / INFO_DIR_NAME / "cover.jpg").write_bytes(b"info-cover")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="920204", title="CoverMod", managed_path=str(folder)
-        )
-    )
+    create_steam_test_mod(db, external_id="920204", title="CoverMod")
+    bind_managed_path(db, "920204", folder, title="CoverMod")
+
     sync_metadata_backup(folder)
     (folder / INFO_DIR_NAME / "cover.jpg").unlink()
 

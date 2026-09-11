@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 
@@ -10,7 +9,8 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from core.mod_platform import PLATFORM_GITHUB, PLATFORM_NEXUS
+from services.file_ops import INFO_DIR_NAME
 from services.game_library import (
     ORIGIN_BACKUP,
     ORIGIN_FILESYSTEM,
@@ -20,6 +20,12 @@ from services.library_maintenance import is_test_like_name, scan_library_issues
 from services.library_reconcile import reconcile_library
 from services.library_status import GAME_STATUS_HEALTHY, GAME_STATUS_MISSING_FOLDER
 from services.metadata_backup_sync import sync_after_metadata_change
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_other_test_mod,
+    create_test_mod_identity,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -39,30 +45,75 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _write_info(folder: Path, payload: dict) -> None:
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+def _seed_game_mod(
+    db: DatabaseManager,
+    library: Path,
+    *,
+    game_name: str,
+    title: str,
+    external_id: str,
+    platform: str = PLATFORM_NEXUS,
+    source_url: str = "",
+) -> tuple[str, Path]:
+    if platform == PLATFORM_NEXUS:
+        url = source_url or f"https://www.nexusmods.com/{game_name.lower()}/mods/{external_id}"
+        created = create_test_mod_identity(
+            db,
+            platform=platform,
+            external_id=external_id,
+            title=title,
+            app_id=1,
+            game_name=game_name,
+            source_url=url,
+        )
+    elif platform == PLATFORM_GITHUB:
+        created = create_test_mod_identity(
+            db,
+            platform=platform,
+            external_id=external_id,
+            title=title,
+            app_id=1,
+            game_name=game_name,
+            source_url=source_url or f"https://github.com/{external_id}",
+        )
+    else:
+        created = create_other_test_mod(
+            db,
+            title=title,
+            external_id=external_id,
+            app_id=1,
+            game_name=game_name,
+            source_url=source_url,
+        )
+    internal_id = str(created.mod_id)
+    folder = library / game_name / title
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=internal_id,
+        title=title,
+        external_id=external_id,
+        workspace_id=str(created.workspace_id or external_id),
+        app_id=1,
+        game_name=game_name,
+        platform=platform,
     )
     (folder / "content.pak").write_bytes(b"pak")
+    bind_managed_path(db, internal_id, folder, game_name=game_name, title=title)
+    return internal_id, folder
 
 
 def test_case1_healthy_game_on_disk(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = library / "GameA" / "mod1"
-    _write_info(
-        folder,
-        {
-            "published_file_id": "980001",
-            "title": "mod1",
-            "game_name": "GameA",
-            "source_type": "nexus",
-            "workspace_id": "ws-980001",
-        },
+    _seed_game_mod(
+        db,
+        library,
+        game_name="GameA",
+        title="mod1",
+        external_id="980001",
+        platform=PLATFORM_NEXUS,
     )
     reconcile_library(library)
     games = resolve_games(library)
@@ -76,16 +127,13 @@ def test_case2_deleted_game_folder_still_listed(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = library / "GameA" / "mod1"
-    _write_info(
-        folder,
-        {
-            "published_file_id": "980002",
-            "title": "mod1",
-            "game_name": "GameA",
-            "source_type": "nexus",
-            "workspace_id": "ws-980002",
-        },
+    _seed_game_mod(
+        db,
+        library,
+        game_name="GameA",
+        title="mod1",
+        external_id="980002",
+        platform=PLATFORM_NEXUS,
     )
     reconcile_library(library)
     shutil.rmtree(library / "GameA")
@@ -104,21 +152,16 @@ def test_case3_backup_last_known_path_restores_game(
 ) -> None:
     library = tmp_path / "mod"
     library.mkdir(parents=True, exist_ok=True)
-    ghost = library / "GhostGame" / "OnlyInBackup"
-    # Seed DB + backup without leaving the folder on disk
-    ghost.mkdir(parents=True)
-    _write_info(
-        ghost,
-        {
-            "published_file_id": "980003",
-            "title": "OnlyInBackup",
-            "game_name": "GhostGame",
-            "source_type": "github",
-            "workspace_id": "ws-980003",
-        },
+    mid, ghost = _seed_game_mod(
+        db,
+        library,
+        game_name="GhostGame",
+        title="OnlyInBackup",
+        external_id="owner/only-in-backup",
+        platform=PLATFORM_GITHUB,
     )
     reconcile_library(library)
-    assert sync_after_metadata_change("980003", ghost, "import") or True
+    assert sync_after_metadata_change(mid, ghost, "import") or True
     shutil.rmtree(library / "GhostGame")
     reconcile_library(library)
 
@@ -144,7 +187,7 @@ def test_case4_game_and_category_tree_styles_differ() -> None:
     assert game_row.name_label.objectName() == "gameTreeName"
     assert cat_row.name_label.objectName() == "categoryTreeName"
     assert game_row.icon_label.text() == "🎮"
-    assert cat_row.icon_label.text() == "📂"
+    assert cat_row.icon_label.text() == "📁"
     assert game_row.count_label.text() == "35"
     assert cat_row.count_label.text() == "5"
     del app
@@ -154,27 +197,21 @@ def test_case5_test_pollution_scan_does_not_delete(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = library / "test_xxx" / "m1"
-    _write_info(
-        folder,
-        {
-            "published_file_id": "980004",
-            "title": "m1",
-            "game_name": "test_xxx",
-            "source_type": "nexus",
-            "workspace_id": "ws-980004",
-        },
+    _seed_game_mod(
+        db,
+        library,
+        game_name="test_xxx",
+        title="m1",
+        external_id="980004",
+        platform=PLATFORM_NEXUS,
     )
-    game_a = library / "GameA" / "m2"
-    _write_info(
-        game_a,
-        {
-            "published_file_id": "980005",
-            "title": "m2",
-            "game_name": "GameA",
-            "source_type": "nexus",
-            "workspace_id": "ws-980005",
-        },
+    _seed_game_mod(
+        db,
+        library,
+        game_name="GameA",
+        title="m2",
+        external_id="980005",
+        platform=PLATFORM_NEXUS,
     )
     db.upsert_game(GameInfo(app_id=1, name="Game"))
     reconcile_library(library)

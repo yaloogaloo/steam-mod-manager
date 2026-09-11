@@ -837,10 +837,16 @@ class ModImportDialog(QDialog):
         self._maybe_offer_sibling_cover(chosen[0])
 
     def _set_busy(self, busy: bool) -> None:
-        self._ok_btn.setEnabled(not busy)
-        self.stack.setEnabled(not busy)
-        for radio in self._platform_radios.values():
-            radio.setEnabled(not busy)
+        from services.crash_trace import log_exception
+
+        try:
+            self._ok_btn.setEnabled(not busy)
+            self.stack.setEnabled(not busy)
+            for radio in self._platform_radios.values():
+                radio.setEnabled(not busy)
+        except Exception:
+            log_exception("ModImportDialog._set_busy", busy=busy)
+            raise
 
     def _on_cancel(self) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -1044,6 +1050,15 @@ class ModImportDialog(QDialog):
         self.status_label.setText(message)
 
     def _on_import_ok(self, result: object) -> None:
+        from services.crash_trace import log_exception
+
+        try:
+            self._on_import_ok_body(result)
+        except Exception:
+            log_exception("ModImportDialog._on_import_ok")
+            raise
+
+    def _on_import_ok_body(self, result: object) -> None:
         assert isinstance(result, ImportResult)
         self._result = result
         self.imported.emit(result)
@@ -1080,5 +1095,11 @@ class ModImportDialog(QDialog):
         QMessageBox.warning(self, "导入失败", error or "未知错误")
 
     def _on_worker_finished(self) -> None:
-        self._worker = None
-        self._set_busy(False)
+        from services.crash_trace import log_exception
+
+        try:
+            self._worker = None
+            self._set_busy(False)
+        except Exception:
+            log_exception("ModImportDialog._on_worker_finished")
+            raise

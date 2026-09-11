@@ -156,13 +156,6 @@ def is_identity_conflict_status(value: str | None) -> bool:
     return normalize_identity_status(value) == IDENTITY_STATUS_CONFLICT
 
 
-def normalize_deploy_status(value: str | None) -> str:
-    key = str(value or "").strip().lower()
-    if key in SUPPORTED_DEPLOY_STATUSES:
-        return key
-    return DEPLOY_STATUS_NOT_DEPLOYED
-
-
 def normalize_content_axis(value: str | None) -> str:
     """
     Read-path normalize onto the reduced content axis.

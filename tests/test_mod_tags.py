@@ -8,6 +8,7 @@ import pytest
 
 from core.db_manager import TAG_TYPE_CATEGORY, DatabaseManager
 from core.models import ModMetadata
+from tests.helpers.identity import create_steam_test_mod
 from ui.library_query import (
     FILTER_PLATFORM_NEXUS,
     ModFilterIndex,
@@ -26,7 +27,8 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 
 def test_add_remove_category_tags(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="901", title="T"))
+    create_steam_test_mod(db, external_id="901", title="T")
+
     db.add_category_tag(901, "Gameplay")
     db.add_category_tag(901, "Fix")
     db.add_category_tag(901, "Gameplay")  # duplicate ignored
@@ -52,7 +54,8 @@ def test_category_filter_combined() -> None:
         mtime=1,
         sort_name="A",
         platform="nexus",
-        category_tags="Gameplay Fix",
+        type_id=12,
+        category_tags="装备",
     )
     b = ModFilterIndex(
         mod_id="2",
@@ -66,7 +69,8 @@ def test_category_filter_combined() -> None:
         mtime=1,
         sort_name="B",
         platform="nexus",
-        category_tags="Graphics",
+        type_id=13,
+        category_tags="法术",
     )
     c = ModFilterIndex(
         mod_id="3",
@@ -80,13 +84,15 @@ def test_category_filter_combined() -> None:
         mtime=1,
         sort_name="C",
         platform="steam",
-        category_tags="Gameplay",
+        type_id=12,
+        category_tags="装备",
     )
-    assert matches_category_filter(a, "Gameplay")
-    assert not matches_category_filter(b, "Gameplay")
+    assert matches_category_filter(a, "12")
+    assert not matches_category_filter(b, "12")
+    assert not matches_category_filter(a, "装备")
     out = filter_and_sort(
         [(a, "a"), (b, "b"), (c, "c")],
         platform_key=FILTER_PLATFORM_NEXUS,
-        category_key="Gameplay",
+        category_key="12",
     )
     assert out == ["a"]

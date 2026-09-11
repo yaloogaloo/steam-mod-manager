@@ -342,6 +342,24 @@ CIVILIZATION_VI_NAME_ALIASES = frozenset(
     }
 )
 
+# Total War: WARHAMMER III / 全面战争：战锤 III — pack-only deploy into mod_path.
+WARHAMMER3_APP_IDS = frozenset({1142710})
+WARHAMMER3_NAME_ALIASES = frozenset(
+    {
+        "total war: warhammer iii",
+        "total war warhammer iii",
+        "total war: warhammer 3",
+        "total war warhammer 3",
+        "totalwar:warhammeriii",
+        "totalwarwarhammeriii",
+        "全面战争：战锤 iii",
+        "全面战争：战锤iii",
+        "全面战争战锤iii",
+        "全面战争：战锤3",
+        "全面战争战锤3",
+    }
+)
+
 
 def _normalize_game_key(game_name: str | None) -> str:
     text = str(game_name or "").strip().casefold()
@@ -440,6 +458,30 @@ def is_civilization_vi_game(game_name: str = "", game_id: int | str = 0) -> bool
         return True
     # Avoid matching the "vi" inside the word "civilization" itself.
     return key in {"civilizationvi", "civvi", "civ6"} or key.endswith("civilizationvi")
+
+
+def is_warhammer3_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Total War: WARHAMMER III / 全面战争：战锤 III."""
+    gid = _coerce_game_id(game_id)
+    if gid in WARHAMMER3_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in WARHAMMER3_NAME_ALIASES}
+    if key in aliases:
+        return True
+    lower = raw.casefold()
+    has_total_war = "totalwar" in key or "全面战争" in raw
+    has_warhammer = "warhammer" in key or "战锤" in raw
+    has_three = (
+        "iii" in lower
+        or "ⅲ" in raw
+        or "Ⅲ" in raw
+        or bool(re.search(r"(?:^|[^\d])3(?:[^\d]|$)", raw))
+    )
+    return has_total_war and has_warhammer and has_three
 
 
 def omits_steam_workshop_source(game_name: str = "", game_id: int | str = 0) -> bool:

@@ -27,16 +27,24 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _iter_pak_files(
+def iter_suffix_payload_files(
     source: Path,
     *,
+    suffix: str,
     allowed_rel_paths: frozenset[str] | None = None,
 ) -> list[Path]:
+    """Recursively list payload files with *suffix* (case-insensitive).
+
+    Skips ``.info`` / ``info`` / ``历史版本`` and other ignored path parts.
+    """
     from services.deploy_fs import safe_iter_files
 
     source = source.resolve()
+    needle = str(suffix or "").strip()
+    if not needle.startswith("."):
+        needle = f".{needle}"
     out: list[Path] = []
-    for path in sorted(safe_iter_files(source, suffix=".pak")):
+    for path in sorted(safe_iter_files(source, suffix=needle)):
         if path.name.startswith("."):
             continue
         try:
@@ -51,6 +59,16 @@ def _iter_pak_files(
             continue
         out.append(path)
     return out
+
+
+def _iter_pak_files(
+    source: Path,
+    *,
+    allowed_rel_paths: frozenset[str] | None = None,
+) -> list[Path]:
+    return iter_suffix_payload_files(
+        source, suffix=".pak", allowed_rel_paths=allowed_rel_paths
+    )
 
 
 def content_has_pak_files(ctx: DeployContext) -> bool:

@@ -195,7 +195,7 @@ class ConflictDetector:
             mid = str(manifest.mod_id or "").strip()
             if not mid:
                 meta = self.files.load_metadata(folder)
-                mid = str(meta.published_file_id or "") if meta else ""
+                mid = str(meta.entity_internal_id() or "") if meta else ""
             if not mid:
                 continue
             if mid.isdigit() and mid not in known:
@@ -514,7 +514,7 @@ class ConflictDetector:
             if manifest is not None and str(manifest.mod_id or "").strip() == mod_id:
                 return folder
             meta = self.files.load_metadata(folder)
-            if meta and str(meta.published_file_id or "").strip() == mod_id:
+            if meta and str(meta.entity_internal_id() or "").strip() == mod_id:
                 return folder
         return None
 

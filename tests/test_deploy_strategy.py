@@ -18,6 +18,7 @@ from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import MANIFEST_FILENAME, load_manifest
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -34,6 +35,7 @@ def _write_meta(mod_dir: Path, *, mid: str, title: str, app_id: int, game: str) 
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mid}",\n'
         f'  "published_file_id": "{mid}",\n'
         f'  "title": "{title}",\n'
         f'  "app_id": {app_id},\n'
@@ -66,7 +68,8 @@ def test_generic_deploy_and_manifest(tmp_path: Path, db: DatabaseManager) -> Non
         mod_path=str(mods_root),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(ModMetadata(published_file_id="91001", title="CoolMod", app_id=100))
+    create_steam_test_mod(db, external_id="91001", title="CoolMod", app_id=100)
+    bind_managed_path(db, "91001", source, title="CoolMod")
 
     deployer = ModDeployer(library_root=library, db=db)
     result = deployer.deploy_mod("91001")
@@ -101,7 +104,8 @@ def test_generic_undeploy(tmp_path: Path, db: DatabaseManager) -> None:
     source = _generic_mod(library, mid="91002")
 
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(mods_root))
-    db.upsert_mod(ModMetadata(published_file_id="91002", title="CoolMod", app_id=100))
+    create_steam_test_mod(db, external_id="91002", title="CoolMod", app_id=100)
+    bind_managed_path(db, "91002", source, title="CoolMod")
 
     deployer = ModDeployer(library_root=library, db=db)
     assert deployer.deploy_mod("91002")["success"] is True
@@ -140,9 +144,8 @@ def test_palworld_logicmods_to_paks(tmp_path: Path, db: DatabaseManager) -> None
         mod_path=str(tmp_path / "unused"),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="92001", title="LogicPack", app_id=1623730)
-    )
+    create_steam_test_mod(db, external_id="92001", title="LogicPack", app_id=1623730)
+    bind_managed_path(db, "92001", mod, title="LogicPack")
 
     deployer = ModDeployer(library_root=library, db=db)
     result = deployer.deploy_mod("92001")
@@ -176,9 +179,8 @@ def test_palworld_loose_pak_to_tilde_mods(tmp_path: Path, db: DatabaseManager) -
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="92002", title="LoosePak", app_id=1623730)
-    )
+    create_steam_test_mod(db, external_id="92002", title="LoosePak", app_id=1623730)
+    bind_managed_path(db, "92002", mod, title="LoosePak")
 
     deployer = ModDeployer(library_root=library, db=db)
     result = deployer.deploy_mod("92002")
@@ -206,8 +208,10 @@ def test_undeploy_only_own_files_leaves_others(
     _write_meta(b, mid="93002", title="OtherMod", app_id=100, game="SomeGame")
 
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(mods_root))
-    db.upsert_mod(ModMetadata(published_file_id="93001", title="CoolMod", app_id=100))
-    db.upsert_mod(ModMetadata(published_file_id="93002", title="OtherMod", app_id=100))
+    create_steam_test_mod(db, external_id="93001", title="CoolMod", app_id=100)
+    bind_managed_path(db, "93001", a, title="CoolMod")
+    create_steam_test_mod(db, external_id="93002", title="OtherMod", app_id=100)
+    bind_managed_path(db, "93002", b, title="OtherMod")
 
     deployer = ModDeployer(library_root=library, db=db)
     assert deployer.deploy_mod("93001")["success"]
@@ -249,7 +253,8 @@ def test_palworld_undeploy_isolation(tmp_path: Path, db: DatabaseManager) -> Non
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    db.upsert_mod(ModMetadata(published_file_id="94001", title="Mine", app_id=1623730))
+    create_steam_test_mod(db, external_id="94001", title="Mine", app_id=1623730)
+    bind_managed_path(db, "94001", mod, title="Mine")
 
     deployer = ModDeployer(library_root=library, db=db)
     assert deployer.deploy_mod("94001")["success"]
@@ -269,7 +274,8 @@ def test_manifest_json_shape(tmp_path: Path, db: DatabaseManager) -> None:
     mods_root.mkdir()
     source = _generic_mod(library, mid="95001")
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(mods_root))
-    db.upsert_mod(ModMetadata(published_file_id="95001", title="CoolMod", app_id=100))
+    create_steam_test_mod(db, external_id="95001", title="CoolMod", app_id=100)
+    bind_managed_path(db, "95001", source, title="CoolMod")
 
     ModDeployer(library_root=library, db=db).deploy_mod("95001")
     raw = json.loads(

@@ -21,6 +21,7 @@ from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy import _schedule_post_deploy_conflict_scan
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -53,7 +54,7 @@ def _write_targets(folder: Path, mid: str, targets: list[str]) -> None:
     save_manifest(
         folder,
         DeployManifest(
-            internal_id=mid,
+            mod_id=mid,
             deploy_time="t",
             deploy_type="folder_copy",
             files=[
@@ -72,7 +73,7 @@ def test_detector_persist_never_writes_conflict_status(
     for mid in ("101", "102"):
         folder = _seed(library, mid)
         _write_targets(folder, mid, [shared])
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=f"M{mid}"))
+        create_steam_test_mod(db, external_id=mid, title=f"M{mid}")
     db.add_mod_relationship(101, 102, RELATIONSHIP_CONFLICT)
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
@@ -94,7 +95,7 @@ def test_post_deploy_scan_is_noop_for_conflict_status(
     for mid in ("201", "202"):
         folder = _seed(library, mid)
         _write_targets(folder, mid, [shared])
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=f"M{mid}"))
+        create_steam_test_mod(db, external_id=mid, title=f"M{mid}")
     db.add_mod_relationship(201, 202, RELATIONSHIP_CONFLICT)
     _schedule_post_deploy_conflict_scan(library, db=db)
     assert db.get_mod_status(201).conflict_status == CONFLICT_STATUS_NONE
@@ -111,7 +112,7 @@ def test_user_mark_survives_detector_and_is_only_user_writer(
     library = tmp_path / "mod"
     folder = _seed(library, "301")
     _write_targets(folder, "301", [str((tmp_path / "t.pak").resolve())])
-    db.upsert_mod(ModMetadata(published_file_id="301", title="U"))
+    create_steam_test_mod(db, external_id="301", title="U")
     set_conflict_annotation(301, note="user", db=db)
     ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert db.get_mod_status(301).conflict_status == CONFLICT_STATUS_CONFLICT
@@ -125,7 +126,7 @@ def test_migration_clears_polluted_conflict_status(tmp_path: Path) -> None:
 
     DatabaseManager.reset_instance()
     db = DatabaseManager.instance(tmp_path / "migrate_conflict.db")
-    db.upsert_mod(ModMetadata(published_file_id="401", title="Polluted"))
+    create_steam_test_mod(db, external_id="401", title="Polluted")
     with db._lock:  # noqa: SLF001
         # Simulate upgrade: drop one-shot flag, plant polluted row, re-run.
         db._conn.execute(  # noqa: SLF001
@@ -173,13 +174,7 @@ def test_library_cache_does_not_conflate_conflict_into_identity(
 
     library = tmp_path / "mod"
     folder = _seed(library, "501")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="501",
-            title="Card",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="501", title="Card")
     db.update_mod_identity_fields(
         "501",
         last_known_path=str(folder.resolve()),

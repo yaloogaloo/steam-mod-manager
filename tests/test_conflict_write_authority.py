@@ -24,8 +24,9 @@ from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_reconcile import reconcile_library
 from services.library_status import CONTENT_CONTENT_MISSING, CONTENT_HEALTHY, CONTENT_IDENTITY_CONFLICT
 from services.user_annotation import clear_conflict_annotation, set_conflict_annotation
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 ROOT = Path(__file__).resolve().parents[1]
-_FORBIDDEN_CONFLICT_WRITERS = (ROOT / 'services' / 'conflict.py', ROOT / 'services' / 'deploy.py', ROOT / 'services' / 'library_reconcile.py', ROOT / 'services' / 'identity_repair.py', ROOT / 'services' / 'mod_identity_repair.py', ROOT / 'services' / 'identity_service.py', ROOT / 'services' / 'mod_refresh.py', ROOT / 'services' / 'sync.py', ROOT / 'services' / 'content_status_eval.py', ROOT / 'services' / 'library_status.py', ROOT / 'services' / 'mod_library_cache.py', ROOT / 'ui' / 'library_view.py', ROOT / 'ui' / 'mod_card.py', ROOT / 'ui' / 'sync_thread.py', ROOT / 'ui' / 'import_thread.py')
+_FORBIDDEN_CONFLICT_WRITERS = (ROOT / 'services' / 'conflict.py', ROOT / 'services' / 'deploy.py', ROOT / 'services' / 'library_reconcile.py', ROOT / 'services' / 'identity_repair.py', ROOT / 'services' / 'identity_repair_service.py', ROOT / 'services' / 'identity_service.py', ROOT / 'services' / 'mod_refresh.py', ROOT / 'services' / 'sync.py', ROOT / 'services' / 'content_status_eval.py', ROOT / 'services' / 'library_status.py', ROOT / 'services' / 'mod_library_cache.py', ROOT / 'ui' / 'library_view.py', ROOT / 'ui' / 'mod_card.py', ROOT / 'ui' / 'sync_thread.py', ROOT / 'ui' / 'import_thread.py')
 _BANNED_CALL_NAMES = frozenset({'update_mod_conflict_annotation', 'set_conflict_annotation', 'clear_conflict_annotation', 'apply_conflict_annotation'})
 _ALLOWED_WRITE_MODULES = frozenset({'services/user_annotation.py', 'ui/mod_detail_panel.py', 'core/db_manager.py'})
 
@@ -105,7 +106,8 @@ def test_content_missing_does_not_produce_conflict(tmp_path: Path, db: DatabaseM
     library = tmp_path / 'mod'
     folder = _seed(library, '701', with_payload=False)
     db.update_game_deploy_config(424242, name='Game')
-    db.upsert_mod(ModMetadata(published_file_id='701', title='Empty', managed_path=str(folder), app_id=424242))
+    create_steam_test_mod(db, external_id='701', title='Empty', app_id=424242, game_name='Game')
+    bind_managed_path(db, '701', folder)
     assert db.get_mod_status(701).conflict_status == CONFLICT_STATUS_NONE
     status = evaluate_content_status(folder_present=True, managed_path=folder, metadata_missing=False)
     assert status == CONTENT_CONTENT_MISSING
@@ -120,7 +122,8 @@ def test_missing_preserves_user_conflict_annotation(tmp_path: Path, db: Database
     library = tmp_path / 'mod'
     folder = _seed(library, '702', with_payload=True)
     db.update_game_deploy_config(424242, name='Game')
-    db.upsert_mod(ModMetadata(published_file_id='702', title='KeepMark', managed_path=str(folder), app_id=424242))
+    create_steam_test_mod(db, external_id='702', title='KeepMark', app_id=424242, game_name='Game')
+    bind_managed_path(db, '702', folder)
     set_conflict_annotation(702, note='user kept', db=db)
     assert db.get_mod_status(702).conflict_status == CONFLICT_STATUS_CONFLICT
     (folder / 'mod.pak').unlink()
@@ -139,7 +142,8 @@ def test_identity_conflict_does_not_write_user_conflict(tmp_path: Path, db: Data
     library = tmp_path / 'mod'
     folder = _seed(library, '703')
     db.update_game_deploy_config(424242, name='Game')
-    db.upsert_mod(ModMetadata(published_file_id='703', title='Id', managed_path=str(folder), app_id=424242))
+    create_steam_test_mod(db, external_id='703', title='Id', app_id=424242, game_name='Game')
+    bind_managed_path(db, '703', folder)
     db.update_mod_identity_fields('703', identity_status=CONTENT_IDENTITY_CONFLICT)
     db.update_mod_content_status('703', content_status=CONTENT_HEALTHY)
     assert db.get_mod_status(703).conflict_status == CONFLICT_STATUS_NONE
@@ -150,7 +154,8 @@ def test_identity_conflict_does_not_write_user_conflict(tmp_path: Path, db: Data
 def test_user_annotation_is_only_writer_roundtrip(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / 'mod'
     folder = _seed(library, '704')
-    db.upsert_mod(ModMetadata(published_file_id='704', title='User', managed_path=str(folder)))
+    create_steam_test_mod(db, external_id='704', title='User')
+    bind_managed_path(db, '704', folder)
     db.update_mod_status(704, invalid=False, touch_check_time=True)
     assert db.get_mod_status(704).conflict_status == CONFLICT_STATUS_NONE
     set_conflict_annotation(704, note='from detail', db=db)

@@ -20,9 +20,9 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
 from services.mod_library_cache import reset_library_cache
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from ui.library_query import (
     FILTER_CATEGORY_ALL,
     FILTER_DEPLOYMENT_RECORD,
@@ -58,6 +58,15 @@ def db(tmp_path: Path) -> DatabaseManager:
     reset_library_cache()
 
 
+def _bind_type_filter(db: DatabaseManager, app_id: int, name: str, mids: list[str]):
+    from services.mod_type_catalog import get_mod_type_catalog
+
+    created = get_mod_type_catalog().add_type(app_id, name)
+    for mid in mids:
+        db.set_mod_type_id(mid, created.type_id)
+    return created
+
+
 def _seed(
     lib: Path,
     db: DatabaseManager,
@@ -82,6 +91,7 @@ def _seed(
         (info / METADATA_FILENAME).write_text(
             json.dumps(
                 {
+                    "internal_id": mid,
                     "published_file_id": mid,
                     "title": title,
                     "game_name": game,
@@ -90,21 +100,14 @@ def _seed(
             ),
             encoding="utf-8",
         )
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=title,
-                app_id=app_id,
-                game_name=game,
-                managed_path=str(folder),
-            )
-        )
-        db.update_mod_identity_fields(
-            mid,
-            folder_present=True,
-            last_known_path=str(folder),
+        create_steam_test_mod(
+            db,
+            external_id=mid,
+            title=title,
             app_id=app_id,
+            game_name=game,
         )
+        bind_managed_path(db, mid, folder, game_name=game, title=title)
 
 
 def _cards_on_first_row(view: ModLibraryView) -> list[ModCardWidget]:
@@ -288,6 +291,83 @@ def test_scroll_reuse_does_not_insert_pads_into_flow(
     assert len(first) == LIBRARY_CARDS_PER_ROW
 
 
+def _bound_ids(view: ModLibraryView) -> list[str]:
+    return [
+        str(getattr(index, "mod_id", "") or "") for index, _ in view._card_entries
+    ]
+
+
+def _filtered_ids(view: ModLibraryView) -> list[str]:
+    return [
+        str(getattr(index, "mod_id", "") or "")
+        for index, _ in view._filtered_row_entries
+    ]
+
+
+def _open_game(
+    qapp: QApplication,
+    lib: Path,
+    game: str,
+    app_id: int,
+) -> ModLibraryView:
+    view = ModLibraryView()
+    view.resize(1100, 800)
+    view.show()
+    qapp.processEvents()
+    view.set_target_root(str(lib))
+    view.refresh(force=True, reconcile=False)
+    qapp.processEvents()
+    view._current_game_filter = game
+    view.current_game_id = app_id
+    view.current_game_name = game
+    view._render_mod_cards(ModFileManager(lib), force_reload=True)
+    qapp.processEvents()
+    view._sync_viewport_cards()
+    qapp.processEvents()
+    return view
+
+
+def _scroll_to_bottom(qapp: QApplication, view: ModLibraryView) -> None:
+    vp_w = int(view.scroll.viewport().width() or 1100)
+    n = len(view._filtered_row_entries)
+    view.library_host.setMinimumHeight(estimate_total_height(n, vp_w))
+    qapp.processEvents()
+    view._set_scroll_value(view.scroll.verticalScrollBar().maximum())
+    qapp.processEvents()
+    view._sync_viewport_cards()
+    qapp.processEvents()
+    assert view._capture_scroll() > 0
+    assert len(view._cards) < n
+
+
+def _assert_first_screen(view: ModLibraryView, expected_count: int) -> None:
+    assert len(view._filtered_row_entries) == expected_count
+    assert view.count_label.text().startswith(f"{expected_count} Mods")
+    bound = _bound_ids(view)
+    filtered = _filtered_ids(view)
+    assert bound
+    assert bound[0] == filtered[0]
+    assert bound != filtered[-2:]
+    assert filtered[0] in bound
+    assert len(bound) == expected_count
+    assert view._capture_scroll() == 0
+
+
+def _assert_virtualization_still_windows(
+    qapp: QApplication, view: ModLibraryView
+) -> None:
+    n = len(view._filtered_row_entries)
+    assert n > LIBRARY_CARDS_PER_ROW * 3
+    vp_w = int(view.scroll.viewport().width() or 1100)
+    view.library_host.setMinimumHeight(estimate_total_height(n, vp_w))
+    qapp.processEvents()
+    view._set_scroll_value(800)
+    view._sync_viewport_cards()
+    qapp.processEvents()
+    assert 0 < len(view._cards) < n
+    assert view._capture_scroll() > 0 or _bound_ids(view)[0] != _filtered_ids(view)[0]
+
+
 def test_clamp_scroll_y_rejects_stale_offset_on_short_list() -> None:
     """Leftover scroll from a long list must not produce a tail window of 2/7."""
     stale = 660
@@ -306,98 +386,215 @@ def test_clamp_scroll_y_rejects_stale_offset_on_short_list() -> None:
     )
     assert window.first_index == 0
     assert window.last_index == 7
-    # Unclamped math is the regression: last two of seven.
-    leaked = compute_viewport_window(
+    # Window math itself must clamp — callers may still pass a stale offset.
+    clamped_window = compute_viewport_window(
         item_count=7,
         scroll_y=stale,
         viewport_width=1100,
         viewport_height=700,
     )
-    assert leaked.last_index - leaked.first_index == 2
-    assert leaked.first_index == 5
+    assert clamped_window.first_index == 0
+    assert clamped_window.last_index == 7
+    # Unclamped row math (the original regression): last two of seven.
+    cols = estimate_columns(1100)
+    first_row = max(0, stale // CARD_SLOT_HEIGHT - VIEWPORT_ROW_BUFFER)
+    leaked_first = min(7, first_row * cols)
+    assert leaked_first == 5
+    assert 7 - leaked_first == 2
 
 
 def test_filter_shrink_100_to_7_binds_first_screen_not_tail(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     """100-item list scrolled to bottom → category shrinks to 7 → first screen."""
-    from core.db_manager import TAG_TYPE_CATEGORY
-
     lib = tmp_path / "mod"
     game = "ShrinkGame"
     app_id = 601
     _seed(lib, db, game, 100, app_id=app_id)
-    db.add_game_category(app_id, "综合")
     tagged_ids = [str(app_id * 1000 + i) for i in range(7)]
-    for mid in tagged_ids:
-        db.add_mod_tag(mid, TAG_TYPE_CATEGORY, "综合")
+    created = _bind_type_filter(db, app_id, "综合", tagged_ids)
     reset_library_cache()
 
-    view = ModLibraryView()
-    view.resize(1100, 800)
-    view.show()
-    qapp.processEvents()
-    view.set_target_root(str(lib))
-    view.refresh(force=True, reconcile=False)
-    qapp.processEvents()
-    view._current_game_filter = game
-    view.current_game_id = app_id
-    view._render_mod_cards(ModFileManager(lib), force_reload=True)
-    qapp.processEvents()
-    view._sync_viewport_cards()
-    qapp.processEvents()
-
+    view = _open_game(qapp, lib, game, app_id)
     assert len(view._filtered_row_entries) == 100
     assert "100 Mods" in view.count_label.text()
     assert len(view._cards) < 100
+    _scroll_to_bottom(qapp, view)
 
-    vp_w = int(view.scroll.viewport().width() or 1100)
-    tall = estimate_total_height(100, vp_w)
-    view.library_host.setMinimumHeight(tall)
-    qapp.processEvents()
-    view._set_scroll_value(view.scroll.verticalScrollBar().maximum())
-    qapp.processEvents()
-    view._sync_viewport_cards()
-    qapp.processEvents()
-    assert view._capture_scroll() > 0
-
-    view._category_filter = "综合"
+    view._category_filter = str(created.type_id)
     view._last_filter_sig = None
     view._apply_view_filter()
     qapp.processEvents()
 
-    assert len(view._filtered_row_entries) == 7
-    assert view.count_label.text().startswith("7 Mods")
-    bound_ids = [
-        str(getattr(index, "mod_id", "") or "") for index, _ in view._card_entries
-    ]
-    filtered_ids = [
-        str(getattr(index, "mod_id", "") or "")
-        for index, _ in view._filtered_row_entries
-    ]
-    assert bound_ids
-    assert bound_ids[0] == filtered_ids[0]
-    assert bound_ids != filtered_ids[-2:]
-    assert filtered_ids[0] in bound_ids
-    assert len(bound_ids) >= min(7, LIBRARY_CARDS_PER_ROW)
-    assert view._capture_scroll() == 0
+    _assert_first_screen(view, 7)
 
-    # Scrolling the restored 100-item list still windows (virtualization intact).
     view._category_filter = FILTER_CATEGORY_ALL
     view._last_filter_sig = None
     view._apply_view_filter()
     qapp.processEvents()
     assert len(view._filtered_row_entries) == 100
     assert "100 Mods" in view.count_label.text()
-    view.library_host.setMinimumHeight(estimate_total_height(100, vp_w))
+    _assert_virtualization_still_windows(qapp, view)
+
+
+def test_sync_viewport_cards_sanitizes_stale_scroll_y(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    """_sync_viewport_cards must never bind a tail window from an illegal offset."""
+    lib = tmp_path / "mod"
+    game = "SanitizeGame"
+    app_id = 602
+    _seed(lib, db, game, 100, app_id=app_id)
+    created = _bind_type_filter(
+        db, app_id, "综合", [str(app_id * 1000 + i) for i in range(7)]
+    )
+    reset_library_cache()
+
+    view = _open_game(qapp, lib, game, app_id)
+    _scroll_to_bottom(qapp, view)
+    view._category_filter = str(created.type_id)
+    view._last_filter_sig = None
+    view._apply_view_filter()
     qapp.processEvents()
-    view._set_scroll_value(800)
-    view._sync_viewport_cards()
+    view._sync_viewport_cards(scroll_y=5000)
     qapp.processEvents()
+    _assert_first_screen(view, 7)
+
+
+def test_search_shrink_100_to_7_binds_first_screen(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    lib = tmp_path / "mod"
+    game = "SearchGame"
+    app_id = 603
+    _seed(lib, db, game, 100, app_id=app_id, title_prefix="KeepHit", hit_count=7)
+    reset_library_cache()
+    view = _open_game(qapp, lib, game, app_id)
+    _scroll_to_bottom(qapp, view)
+    view.search_box.setText("KeepHit")
+    view._apply_view_filter()
+    qapp.processEvents()
+    _assert_first_screen(view, 7)
+    view.search_box.setText("")
+    view._apply_view_filter()
+    qapp.processEvents()
+    _assert_virtualization_still_windows(qapp, view)
+
+
+def test_favorite_shrink_100_to_7_binds_first_screen(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    lib = tmp_path / "mod"
+    game = "FavGame"
+    app_id = 604
+    _seed(lib, db, game, 100, app_id=app_id)
+    for i in range(7):
+        db.update_mod_user_metadata(
+            str(app_id * 1000 + i),
+            {
+                "display_name": "",
+                "custom_description": "",
+                "user_notes": "",
+                "favorite": True,
+            },
+        )
+    reset_library_cache()
+    view = _open_game(qapp, lib, game, app_id)
+    _scroll_to_bottom(qapp, view)
+    view._set_library_status_filter(FILTER_FAVORITE)
+    qapp.processEvents()
+    _assert_first_screen(view, 7)
+
+
+def test_game_switch_100_to_7_binds_first_screen(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    lib = tmp_path / "mod"
+    _seed(lib, db, "GameBig", 100, app_id=605)
+    _seed(lib, db, "GameSmall", 7, app_id=606)
+    reset_library_cache()
+    view = _open_game(qapp, lib, "GameBig", 605)
+    _scroll_to_bottom(qapp, view)
+    leftover = view._capture_scroll()
+    assert leftover > 0
+    view._set_current_game_context("GameSmall", game_id=606)
+    # Leave the previous game's scroll_y in place — filter rebind must clamp.
+    view._render_mod_cards(ModFileManager(lib), force_reload=False)
+    qapp.processEvents()
+    _assert_first_screen(view, 7)
+
+
+def test_sort_change_clamps_and_keeps_virtualization(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    lib = tmp_path / "mod"
+    game = "SortGame"
+    app_id = 607
+    _seed(lib, db, game, 100, app_id=app_id)
+    reset_library_cache()
+    view = _open_game(qapp, lib, game, app_id)
+    _scroll_to_bottom(qapp, view)
+    view._sort_mode = SORT_NAME
+    view._last_filter_sig = None
+    view._apply_view_filter()
+    qapp.processEvents()
+    assert len(view._filtered_row_entries) == 100
+    assert "100 Mods" in view.count_label.text()
     assert len(view._cards) < 100
-    assert len(view._cards) > 0
-    scrolled_ids = [
-        str(getattr(index, "mod_id", "") or "") for index, _ in view._card_entries
-    ]
-    assert scrolled_ids
-    assert view._capture_scroll() > 0 or scrolled_ids[0] != filtered_ids[0]
+    n = len(view._filtered_row_entries)
+    vw, vh = view._viewport_metrics()
+    legal = clamp_scroll_y(view._capture_scroll(), n, vw, vh)
+    assert view._capture_scroll() == legal
+    bound = _bound_ids(view)
+    filtered = _filtered_ids(view)
+    assert bound
+    assert bound[0] in filtered
+    assert bound[-1] in filtered
+
+
+def test_deployment_record_shrink_binds_first_screen(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    lib = tmp_path / "mod"
+    game = "RecordGame"
+    app_id = 608
+    _seed(lib, db, game, 100, app_id=app_id)
+    rec_ids = [str(app_id * 1000 + i) for i in range(7)]
+    record = db.create_deployment_record(app_id, "seven", rec_ids)
+    reset_library_cache()
+    view = _open_game(qapp, lib, game, app_id)
+    _scroll_to_bottom(qapp, view)
+    view._set_library_status_filter(
+        FILTER_DEPLOYMENT_RECORD,
+        record_id=int(record.id),
+        record_name=record.name,
+    )
+    qapp.processEvents()
+    _assert_first_screen(view, 7)
+
+
+def test_restore_and_resize_clamp_stale_scroll(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    lib = tmp_path / "mod"
+    game = "RestoreGame"
+    app_id = 609
+    _seed(lib, db, game, 100, app_id=app_id)
+    created = _bind_type_filter(
+        db, app_id, "综合", [str(app_id * 1000 + i) for i in range(7)]
+    )
+    reset_library_cache()
+    view = _open_game(qapp, lib, game, app_id)
+    _scroll_to_bottom(qapp, view)
+    view._category_filter = str(created.type_id)
+    view._last_filter_sig = None
+    view._apply_view_filter()
+    qapp.processEvents()
+    view._restore_scroll_after_layout(5000)
+    qapp.processEvents()
+    _assert_first_screen(view, 7)
+    view.resize(1200, 820)
+    qapp.processEvents()
+    view._clamp_viewport_after_layout()
+    qapp.processEvents()
+    _assert_first_screen(view, 7)

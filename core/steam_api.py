@@ -494,20 +494,35 @@ class SteamWorkshopClient:
         scrape_workers: int = 12,
     ) -> list[ModMetadata]:
         """
-        Resolve many Mod IDs with DB interception.
+        Resolve Workshop IDs with DB interception for **existing** entities.
 
-        Already-known IDs are served from SQLite; only missing IDs are
-        batched to ``GetPublishedFileDetails`` and then upserted.
+        Workshop ``published_file_id`` is never treated as ``mods.mod_id``.
+        Cache hits resolve Workshop → Internal PK; network results UPDATE
+        existing rows only via :meth:`DatabaseManager.upsert_mods` (no INSERT).
         """
         ids = [str(i) for i in published_file_ids if str(i).strip()]
         if not ids:
             return []
 
-        cached = self.db.get_mods_by_ids(ids)
+        cached_by_workshop: dict[str, ModMetadata] = {}
+        for wid in ids:
+            entity = self.db.resolve_steam_entity_mod_id(wid)
+            if entity is None:
+                continue
+            row = self.db.get_mod(entity)
+            if row is None:
+                continue
+            # Preserve Workshop axis on the returned stub for callers.
+            if not str(row.published_file_id or "").strip():
+                row.published_file_id = wid
+            if not str(row.internal_id or "").strip():
+                row.internal_id = entity
+            cached_by_workshop[wid] = row
+
         missing = [
-            mid
-            for mid in ids
-            if mid not in cached or not cached[mid].title
+            wid
+            for wid in ids
+            if wid not in cached_by_workshop or not cached_by_workshop[wid].title
         ]
 
         fetched: dict[str, ModMetadata] = {}
@@ -524,7 +539,14 @@ class SteamWorkshopClient:
                 for meta in batch:
                     fetched[meta.published_file_id] = meta
                     if meta.title and not meta.fetch_error:
-                        to_store.append(meta)
+                        # Bind internal_id when entity already exists.
+                        entity = self.db.resolve_steam_entity_mod_id(
+                            meta.published_file_id,
+                            app_id=int(meta.app_id or 0),
+                        )
+                        if entity:
+                            meta.internal_id = entity
+                            to_store.append(meta)
                 if to_store:
                     self.db.upsert_mods(to_store)
                 done += len(chunk)
@@ -539,8 +561,8 @@ class SteamWorkshopClient:
         for mid in ids:
             if mid in fetched and fetched[mid].title:
                 ordered.append(fetched[mid])
-            elif mid in cached and cached[mid].title:
-                ordered.append(cached[mid])
+            elif mid in cached_by_workshop and cached_by_workshop[mid].title:
+                ordered.append(cached_by_workshop[mid])
             elif mid in fetched:
                 ordered.append(fetched[mid])
             else:

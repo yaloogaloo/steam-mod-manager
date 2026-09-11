@@ -16,8 +16,9 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services import deployment_record as dr
+from services.identity_service import create_mod_identity, identity_create_scope
 from services.mod_library_cache import ModCardData
 from ui.library_query import (
     FILTER_ALL,
@@ -59,19 +60,23 @@ def _game(db: DatabaseManager) -> None:
 
 
 def _mod(db: DatabaseManager, mod_id: int, *, deployed: bool) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=str(mod_id),
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mod_id),
+            workshop_id=str(mod_id),
             title=f"Mod {mod_id}",
             app_id=STARDEW,
+            game_name="Stardew Valley",
         )
-    )
+    entity_id = int(created.mod_id)
     db.update_mod_deploy_status(
-        mod_id,
+        entity_id,
         deploy_status=(
             DEPLOY_STATUS_DEPLOYED if deployed else DEPLOY_STATUS_NOT_DEPLOYED
         ),
-        deploy_path="" if not deployed else f"/fake/{mod_id}",
+        deploy_path="" if not deployed else f"/fake/{entity_id}",
     )
 
 

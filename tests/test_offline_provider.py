@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
     PLATFORM_GITHUB,
@@ -83,13 +84,9 @@ def test_steam_provider_calls_ensure_offline_page(
     lib = tmp_path / "mod"
     lib.mkdir()
     folder = _seed(lib, mid="3761838546", title="SteamMod")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="3761838546",
-            title="SteamMod",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="3761838546", title="SteamMod")
+    bind_managed_path(db, "3761838546", folder, title="SteamMod")
+
     db.update_mod_platform_info(
         "3761838546",
         platform=PLATFORM_STEAM,

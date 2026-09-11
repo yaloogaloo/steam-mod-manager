@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 
 pytest.importorskip("PySide6")
 
@@ -58,7 +59,8 @@ def test_open_offline_blocks_empty_path(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     folder = _seed_mod(tmp_path / "lib", mid="92001", title="No Offline")
-    db.upsert_mod(ModMetadata(published_file_id="92001", title="No Offline"))
+    create_steam_test_mod(db, external_id="92001", title="No Offline")
+
     panel = ModDetailPanel()
     panel.show_mod(folder)
 
@@ -85,17 +87,29 @@ def test_open_offline_uses_from_local_file(
     index = folder / INFO_DIR_NAME / "offline" / "index.html"
     index.parent.mkdir(parents=True)
     index.write_text("<html><body>ok</body></html>", encoding="utf-8")
-    meta = ModMetadata(
-        published_file_id="92002",
+    created = create_steam_test_mod(db, external_id="92002", title="Has Offline")
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
         title="Has Offline",
-        offline_page_path=str(index),
-        managed_path=str(folder),
+        external_id="92002",
+        workspace_id=str(created.workspace_id or "92002"),
     )
-    db.upsert_mod(meta)
+    bind_managed_path(db, created.mod_id, folder, title="Has Offline")
+    # Case B: catalog/path fields only (identity already exists)
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="92002",
+            title="Has Offline",
+            offline_page_path=str(index),
+            managed_path=str(folder),
+        )
+    )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
-    panel._metadata.offline_page_path = str(index)
+    panel.show_mod(folder, mod_id=str(created.mod_id))
+    if panel._metadata is not None:
+        panel._metadata.offline_page_path = str(index)
 
     opened: list[QUrl] = []
     monkeypatch.setattr(

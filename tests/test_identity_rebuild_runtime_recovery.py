@@ -277,7 +277,7 @@ def test_mapping_migrate_restores_deployment_and_favorite(tmp_path: Path) -> Non
     new_uuid = "99999999-aaaa-bbbb-cccc-ddddeeeeffff"
     _insert_mod(
         live,
-        internal_id=1,
+        mod_id=1,
         internal_id=new_uuid,
         workspace_id="42",
         app_id=916440,
@@ -290,7 +290,7 @@ def test_mapping_migrate_restores_deployment_and_favorite(tmp_path: Path) -> Non
     bak = DatabaseManager.instance(bak_db)
     _insert_mod(
         bak,
-        internal_id=9000000000000999,
+        mod_id=9000000000000999,
         internal_id="old-uuid",
         workspace_id="42",
         app_id=916440,

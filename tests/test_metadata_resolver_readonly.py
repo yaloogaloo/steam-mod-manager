@@ -15,6 +15,7 @@ from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_
 from services.metadata_backup import backup_root, load_backup
 from services.metadata_backup_sync import sync_after_metadata_change
 from services.mod_metadata_resolver import resolve_mod_metadata
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -47,6 +48,7 @@ def _write_mod(
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     payload = {
+        "internal_id": mod_id,
         "published_file_id": mod_id,
         "title": meta_title or title,
         "display_name": meta_title or title,
@@ -94,14 +96,9 @@ def test_case1_resolver_is_pure_read(
     folder = _write_mod(
         library, game="G", title="M1", mod_id="940001", meta_title="INFO", with_cover=True
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940001",
-            title="INFO",
-            game_name="G",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940001", title="INFO", game_name="G")
+    bind_managed_path(db, "940001", folder, title="INFO")
+
     before = _snapshot_backup_state("940001")
     time.sleep(0.02)
     resolved = resolve_mod_metadata("940001", folder)
@@ -123,13 +120,9 @@ def test_case2_detail_open_does_not_sync(
     folder = _write_mod(
         library, game="G", title="M2", mod_id="940002", meta_title="Detail", with_offline=True
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940002",
-            title="Detail",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940002", title="Detail")
+    bind_managed_path(db, "940002", folder, title="Detail")
+
     calls: list[tuple] = []
 
     def track(*args, **kwargs):
@@ -159,13 +152,9 @@ def test_case3_edit_syncs_backup_title(
 ) -> None:
     library = tmp_path / "mod"
     folder = _write_mod(library, game="G", title="M3", mod_id="940003", meta_title="A")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940003",
-            title="A",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940003", title="A")
+    bind_managed_path(db, "940003", folder, title="A")
+
     assert load_backup("940003").metadata.get("title") == "A"
     data = json.loads(
         (folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8")
@@ -189,13 +178,9 @@ def test_case4_repeated_sync_is_idempotent(
         with_cover=True,
         with_offline=True,
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940004",
-            title="Idem",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940004", title="Idem")
+    bind_managed_path(db, "940004", folder, title="Idem")
+
     sync_after_metadata_change("940004", folder, "edit")
     sync_after_metadata_change("940004", folder, "edit")
     sync_after_metadata_change("940004", folder, "edit")
@@ -214,13 +199,9 @@ def test_case5_deleting_info_cover_removes_backup_cover(
     folder = _write_mod(
         library, game="G", title="M5", mod_id="940005", meta_title="Cover", with_cover=True
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940005",
-            title="Cover",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940005", title="Cover")
+    bind_managed_path(db, "940005", folder, title="Cover")
+
     assert list(backup_root("940005").glob("cover.*"))
     cover = folder / INFO_DIR_NAME / "cover.jpg"
     cover.unlink()
@@ -240,13 +221,9 @@ def test_case6_deleting_mod_folder_keeps_backup(
     folder = _write_mod(
         library, game="G", title="M6", mod_id="940006", meta_title="Keep"
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940006",
-            title="Keep",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940006", title="Keep")
+    bind_managed_path(db, "940006", folder, title="Keep")
+
     assert (backup_root("940006") / "metadata.json").is_file()
     shutil.rmtree(folder)
     assert not folder.exists()
@@ -264,13 +241,9 @@ def test_case7_backup_never_writes_info(
     folder = _write_mod(
         library, game="G", title="M7", mod_id="940007", meta_title="INFO"
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940007",
-            title="INFO",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id="940007", title="INFO")
+    bind_managed_path(db, "940007", folder, title="INFO")
+
     backup_meta = backup_root("940007") / "metadata.json"
     polluted = json.loads(backup_meta.read_text(encoding="utf-8"))
     polluted["title"] = "BACKUP"
@@ -299,14 +272,9 @@ def test_case8_offline_manager_syncs_once(
 
     library = tmp_path / "mod"
     folder = _write_mod(library, game="G", title="M8", mod_id="940008", meta_title="Off")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="940008",
-            title="Off",
-            managed_path=str(folder),
-            source_type="steam",
-        )
-    )
+    create_steam_test_mod(db, external_id="940008", title="Off")
+    bind_managed_path(db, "940008", folder, title="Off")
+
     calls: list[str] = []
 
     def fake_sync(mod_id, managed_path, reason):

@@ -265,6 +265,31 @@ def test_7_backup_cannot_restore_entity_via_external_workspace_app(
     assert "INSERT INTO mods" not in body
 
 
+def test_text_internal_id_is_business_identity_distinct_from_pk(
+    db: DatabaseManager,
+) -> None:
+    """TEXT ``mods.internal_id`` is Frozen entity identity; FK columns stay PK."""
+    created = create_mod_identity(
+        db,
+        platform=PLATFORM_NEXUS,
+        external_id="9002",
+        source_url="https://www.nexusmods.com/stardewvalley/mods/9002",
+        title="ProofAlias",
+        app_id=STARDEW,
+        game_name="Stardew",
+        operation="import",
+    )
+    mid = str(created.mod_id)
+    proof = str((db.get_mod_backup_row(mid) or {}).get("internal_id") or "")
+    assert proof
+    assert proof != mid
+    assert db.find_mod_by_internal_id(proof) == mid
+    assert db.get_mod_display_info(mid) is not None
+    rec = db.create_collection(STARDEW, "Proof")
+    with pytest.raises(ValueError, match="invalid mod_id"):
+        db.add_mods_to_collection(rec.collection_id, [proof])
+
+
 def test_contract_documents_id_boundary() -> None:
     text = CONTRACT.read_text(encoding="utf-8")
     for token in (

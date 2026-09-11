@@ -27,6 +27,8 @@ from services.identity_invariants import (
     scan_id_architecture_source,
     scan_reconcile_identity_lifecycle,
 )
+from services.user_annotation import clear_conflict_annotation, set_conflict_annotation
+from tests.helpers.identity import create_steam_test_mod
 
 
 ANNO_0360 = "9000000000000360"
@@ -111,8 +113,8 @@ def test_a_same_input_same_diagnostic(tmp_path: Path, db: DatabaseManager) -> No
     b = _seed(library, "902")
     _write_targets(a, "901", [shared])
     _write_targets(b, "902", [shared])
-    db.upsert_mod(ModMetadata(published_file_id="901", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="902", title="B"))
+    create_steam_test_mod(db, external_id="901", title="A")
+    create_steam_test_mod(db, external_id="902", title="B")
     det = ConflictDetector(library, db=db)
     first = det.check_all_mods(persist=False)
     second = det.check_all_mods(persist=False)
@@ -129,8 +131,8 @@ def test_b_path_overlap_is_diagnostic_only(tmp_path: Path, db: DatabaseManager) 
     b = _seed(library, "912")
     _write_targets(a, "911", [shared])
     _write_targets(b, "912", [shared])
-    db.upsert_mod(ModMetadata(published_file_id="911", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="912", title="B"))
+    create_steam_test_mod(db, external_id="911", title="A")
+    create_steam_test_mod(db, external_id="912", title="B")
     before_rel = _rel_count(db)
     before_count = db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0]  # noqa: SLF001
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
@@ -147,14 +149,14 @@ def test_c_resolve_survives_persist_rescan(tmp_path: Path, db: DatabaseManager) 
     for mid in ("921", "922"):
         folder = _seed(library, mid)
         _write_targets(folder, mid, [shared])
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=f"M{mid}"))
+        create_steam_test_mod(db, external_id=mid, title=f"M{mid}")
     det = ConflictDetector(library, db=db)
     det.check_all_mods(persist=True)
     assert db.get_mod_status(921).conflict_status == CONFLICT_STATUS_NONE
-    db.update_mod_status(921, conflict_status=CONFLICT_STATUS_CONFLICT, conflict_note="user")
+    set_conflict_annotation(921, note="user", db=db)
     det.check_all_mods(persist=True)
     assert db.get_mod_status(921).conflict_status == CONFLICT_STATUS_CONFLICT
-    db.update_mod_status(921, conflict_status=CONFLICT_STATUS_NONE, conflict_note="")
+    clear_conflict_annotation(921, db=db)
     det.check_all_mods(persist=True)
     assert db.get_mod_status(921).conflict_status == CONFLICT_STATUS_NONE
     report = det.check_all_mods(persist=False)["921"]
@@ -169,9 +171,9 @@ def test_d_persist_false_is_read_only(tmp_path: Path, db: DatabaseManager) -> No
     b = _seed(library, "932")
     _write_targets(a, "931", [shared])
     _write_targets(b, "932", [shared])
-    db.upsert_mod(ModMetadata(published_file_id="931", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="932", title="B"))
-    db.update_mod_status(931, conflict_status=CONFLICT_STATUS_CONFLICT, conflict_note="keep")
+    create_steam_test_mod(db, external_id="931", title="A")
+    create_steam_test_mod(db, external_id="932", title="B")
+    set_conflict_annotation(931, note="keep", db=db)
     before = _mods_snapshot(db)
     before_rel = _rel_count(db)
     ConflictDetector(library, db=db).check_all_mods(persist=False)
@@ -188,8 +190,8 @@ def test_e_detection_does_not_create_mods(tmp_path: Path, db: DatabaseManager) -
     b = _seed(library, "942")
     _write_targets(a, "941", [shared])
     _write_targets(b, "942", [shared])
-    db.upsert_mod(ModMetadata(published_file_id="941", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="942", title="B"))
+    create_steam_test_mod(db, external_id="941", title="A")
+    create_steam_test_mod(db, external_id="942", title="B")
     ids_before = {
         str(r["mod_id"]): str(r["workspace_id"] or "")
         for r in db._conn.execute("SELECT mod_id, workspace_id FROM mods")  # noqa: SLF001
@@ -277,16 +279,16 @@ def test_relationship_still_persists_as_conflict(
     b = _seed(library, "952")
     _write_targets(a, "951", [t_a])
     _write_targets(b, "952", [t_b])
-    db.upsert_mod(ModMetadata(published_file_id="951", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="952", title="B"))
+    create_steam_test_mod(db, external_id="951", title="A")
+    create_steam_test_mod(db, external_id="952", title="B")
     db.add_mod_relationship(951, 952, RELATIONSHIP_CONFLICT)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["951"].status == CONFLICT_STATUS_CONFLICT
-    assert db.get_mod_status(951).conflict_status == CONFLICT_STATUS_CONFLICT
+    # Scheme B: relationship is a diagnostic; detector must not write user conflict_status.
     assert any(
         c.conflict_type == ConflictType.RELATIONSHIP.value
         for c in reports["951"].conflicts
     )
+    assert db.get_mod_status(951).conflict_status == CONFLICT_STATUS_NONE
     assert not any(
         c.conflict_type == ConflictType.FILE_OVERWRITE.value
         for c in reports["951"].conflicts

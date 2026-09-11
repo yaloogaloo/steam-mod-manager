@@ -9,6 +9,7 @@ import pytest
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
 from core.models import ModMetadata
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from services.custom_deploy_path_stale import (
     ACTION_CLEAR_TO_INHERIT,
     STALE_DRIVE_MIGRATE,
@@ -61,15 +62,9 @@ def _seed(
         f'{{"internal_id":"{mid}","app_id":{ANNO},"title":"{title}"}}',
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=title,
-            app_id=ANNO,
-            game_name="Anno 1800",
-            managed_path=str(folder),
-        )
-    )
+    create_steam_test_mod(db, external_id=mid, title=title, app_id=ANNO, game_name="Anno 1800")
+    bind_managed_path(db, mid, folder, title=title)
+
     db.update_mod_identity_fields(
         mid,
         internal_id=mid,

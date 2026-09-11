@@ -20,6 +20,7 @@ from core.db_manager import (
 from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -34,14 +35,17 @@ def qapp() -> QApplication:
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     manager = DatabaseManager(tmp_path / "rel.db")
+    from core.game_info import GameInfo
+
+    manager.upsert_game(GameInfo(app_id=1, name="G", folder_name="G"))
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
 
 
 def test_create_dependency(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="1", title="Child"))
-    db.upsert_mod(ModMetadata(published_file_id="2", title="UE4SS"))
+    create_steam_test_mod(db, external_id="1", title="Child")
+    create_steam_test_mod(db, external_id="2", title="UE4SS")
     rel = db.add_mod_relationship(1, 2, RELATIONSHIP_DEPENDENCY)
     assert rel.relationship_type == RELATIONSHIP_DEPENDENCY
     assert rel.target_mod_id == "2"
@@ -54,8 +58,8 @@ def test_create_dependency(db: DatabaseManager) -> None:
 
 
 def test_duplicate_relationship_not_duplicated(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="10", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="11", title="B"))
+    create_steam_test_mod(db, external_id="10", title="A")
+    create_steam_test_mod(db, external_id="11", title="B")
     a = db.add_mod_relationship(10, 11, RELATIONSHIP_CONFLICT)
     b = db.add_mod_relationship(10, 11, RELATIONSHIP_CONFLICT)
     assert a.id == b.id
@@ -63,8 +67,8 @@ def test_duplicate_relationship_not_duplicated(db: DatabaseManager) -> None:
 
 
 def test_remove_relationship(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="20", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="21", title="B"))
+    create_steam_test_mod(db, external_id="20", title="A")
+    create_steam_test_mod(db, external_id="21", title="B")
     rel = db.add_mod_relationship(20, 21, RELATIONSHIP_ADDON)
     assert db.remove_mod_relationship(rel.id) is True
     assert db.get_mod_relationships(20)["addons"] == []
@@ -72,9 +76,9 @@ def test_remove_relationship(db: DatabaseManager) -> None:
 
 
 def test_all_relationship_types(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="30", title="Base"))
+    create_steam_test_mod(db, external_id="30", title="Base")
     for i, title in enumerate(("Dep", "Conf", "Add", "Pat"), start=31):
-        db.upsert_mod(ModMetadata(published_file_id=str(i), title=title))
+        create_steam_test_mod(db, external_id=str(i), title=title)
     db.add_mod_relationship(30, 31, RELATIONSHIP_DEPENDENCY)
     db.add_mod_relationship(30, 32, RELATIONSHIP_CONFLICT)
     db.add_mod_relationship(30, 33, RELATIONSHIP_ADDON)
@@ -87,9 +91,9 @@ def test_all_relationship_types(db: DatabaseManager) -> None:
 
 
 def test_counts_for_card_badge(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="40", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="41", title="B"))
-    db.upsert_mod(ModMetadata(published_file_id="42", title="C"))
+    create_steam_test_mod(db, external_id="40", title="A")
+    create_steam_test_mod(db, external_id="41", title="B")
+    create_steam_test_mod(db, external_id="42", title="C")
     db.add_mod_relationship(40, 41, RELATIONSHIP_DEPENDENCY)
     db.add_mod_relationship(40, 42, RELATIONSHIP_CONFLICT)
     assert db.get_relationship_counts([40])["40"] == (1, 1)
@@ -104,14 +108,15 @@ def test_deploy_dependency_disabled_warning(
     info.mkdir(parents=True)
     (folder / "a.txt").write_text("x", encoding="utf-8")
     (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"50","title":"Child","app_id":1,"game_name":"G"}',
+        '{"internal_id":"50","published_file_id":"50","title":"Child","app_id":1,"game_name":"G"}',
         encoding="utf-8",
     )
     db.update_game_deploy_config(
         1, name="G", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
-    db.upsert_mod(ModMetadata(published_file_id="50", title="Child", app_id=1))
-    db.upsert_mod(ModMetadata(published_file_id="51", title="UE4SS", app_id=1))
+    create_steam_test_mod(db, external_id="50", title="Child", app_id=1)
+    bind_managed_path(db, "50", folder, title="Child")
+    create_steam_test_mod(db, external_id="51", title="UE4SS", app_id=1)
     db.add_mod_relationship(50, 51, RELATIONSHIP_DEPENDENCY)
     db.disable_mod(51)
 
@@ -153,6 +158,7 @@ def test_deploy_dependency_disabled_warning(
 
     class Ctx:
         mod_id = "50"
+        internal_id = "50"
         app_id = 1
         source = folder
         managed_path = folder
@@ -186,8 +192,8 @@ def test_deploy_dependency_disabled_warning(
 
 
 def test_known_conflict_warning(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="60", title="A"))
-    db.upsert_mod(ModMetadata(published_file_id="61", title="Old Character Mod"))
+    create_steam_test_mod(db, external_id="60", title="A")
+    create_steam_test_mod(db, external_id="61", title="Old Character Mod")
     db.add_mod_relationship(60, 61, RELATIONSHIP_CONFLICT)
     warns = db.check_relationship_deploy_warnings(60)
     assert len(warns) == 1
@@ -201,26 +207,28 @@ def test_detail_panel_shows_relationships(
     from ui.mod_detail_panel import ModDetailPanel
 
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
+    monkeypatch.setattr("core.db_manager.get_db", lambda: db)
     library = tmp_path / "mod"
     folder = library / "G" / "70"
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"70","title":"Main","app_id":1,"game_name":"G"}',
+        '{"internal_id":"70","published_file_id":"70","title":"Main","app_id":1,"game_name":"G"}',
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="70", title="Main"))
-    db.upsert_mod(ModMetadata(published_file_id="71", title="UE4SS"))
-    db.upsert_mod(ModMetadata(published_file_id="72", title="Old Character Mod"))
-    db.upsert_mod(ModMetadata(published_file_id="73", title="Costume Pack"))
-    db.upsert_mod(ModMetadata(published_file_id="74", title="Performance Fix"))
+    create_steam_test_mod(db, external_id="70", title="Main", app_id=1)
+    bind_managed_path(db, "70", folder, title="Main")
+    create_steam_test_mod(db, external_id="71", title="UE4SS", app_id=1)
+    create_steam_test_mod(db, external_id="72", title="Old Character Mod", app_id=1)
+    create_steam_test_mod(db, external_id="73", title="Costume Pack", app_id=1)
+    create_steam_test_mod(db, external_id="74", title="Performance Fix", app_id=1)
     db.add_mod_relationship(70, 71, RELATIONSHIP_DEPENDENCY)
     db.add_mod_relationship(70, 72, RELATIONSHIP_CONFLICT)
     db.add_mod_relationship(70, 73, RELATIONSHIP_ADDON)
     db.add_mod_relationship(70, 74, RELATIONSHIP_PATCH)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=70)
     assert panel._rel_lists["dependencies"].count() == 1
     assert "UE4SS" in panel._rel_lists["dependencies"].item(0).text()
     assert "Old Character Mod" in panel._rel_lists["conflicts"].item(0).text()

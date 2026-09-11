@@ -11,6 +11,7 @@ from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import load_manifest
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -27,6 +28,7 @@ def _write_meta(mod: Path, mid: str) -> None:
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         "{\n"
+        f'  "internal_id": "{mid}",\n'
         f'  "published_file_id": "{mid}",\n'
         f'  "title": "{mod.name}",\n'
         '  "app_id": 1623730,\n'
@@ -61,9 +63,8 @@ def test_root_pak_goes_to_tilde_mods_under_install(
         mod_path=str(decoy_mod_path),
         deploy_type="palworld_pak",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="99101", title="Loose", app_id=1623730)
-    )
+    create_steam_test_mod(db, external_id="99101", title="Loose", app_id=1623730)
+    bind_managed_path(db, "99101", mod, title="Loose")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("99101")
     assert result["success"] is True
@@ -102,9 +103,8 @@ def test_logicmods_go_under_paks_logicmods(
         mod_path=str(decoy),
         deploy_type="palworld_pak",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="99102", title="LogicPack", app_id=1623730)
-    )
+    create_steam_test_mod(db, external_id="99102", title="LogicPack", app_id=1623730)
+    bind_managed_path(db, "99102", mod, title="LogicPack")
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("99102")
     assert result["success"] is True
@@ -140,7 +140,8 @@ def test_never_copies_into_mod_path(tmp_path: Path, db: DatabaseManager) -> None
         mod_path=str(mod_path),
         deploy_type="palworld_pak",
     )
-    db.upsert_mod(ModMetadata(published_file_id="99103", title="Both", app_id=1623730))
+    create_steam_test_mod(db, external_id="99103", title="Both", app_id=1623730)
+    bind_managed_path(db, "99103", mod, title="Both")
 
     assert ModDeployer(library_root=library, db=db).deploy_mod("99103")["success"]
     assert list(mod_path.rglob("*")) == []  # untouched
@@ -169,9 +170,8 @@ def test_undeploy_removes_correct_install_targets(
         install_path=str(install),
         deploy_type="palworld_pak",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id="99104", title="CleanMe", app_id=1623730)
-    )
+    create_steam_test_mod(db, external_id="99104", title="CleanMe", app_id=1623730)
+    bind_managed_path(db, "99104", mod, title="CleanMe")
 
     dep = ModDeployer(library_root=library, db=db)
     assert dep.deploy_mod("99104")["success"]

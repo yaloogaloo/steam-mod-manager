@@ -8,10 +8,13 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules.manifest import load_manifest
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -23,29 +26,32 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(library: Path, mods: Path, *, mid: str = "88001") -> Path:
+def _seed(
+    db: DatabaseManager, library: Path, mods: Path, *, mid: str = "88001"
+) -> Path:
     folder = library / "Game" / "IdemMod"
     folder.mkdir(parents=True)
-    info = folder / INFO_DIR_NAME
-    info.mkdir()
     (folder / "a.txt").write_text("payload", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        '  "title": "IdemMod",\n'
-        '  "app_id": 1,\n'
-        '  "game_name": "Game"\n'
-        "}\n",
-        encoding="utf-8",
-    )
     mods.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(
+        db, external_id=mid, title="IdemMod", app_id=1, game_name="Game"
+    )
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
+        title="IdemMod",
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=1,
+        game_name="Game",
+    )
+    bind_managed_path(db, created.mod_id, folder, title="IdemMod", game_name="Game")
     return folder
 
 
 def test_redeploy_twice_idempotent(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     mods = tmp_path / "game" / "Mods"
-    _seed(library, mods)
     db.update_game_deploy_config(
         1,
         name="Game",
@@ -53,7 +59,7 @@ def test_redeploy_twice_idempotent(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(ModMetadata(published_file_id="88001", title="IdemMod", app_id=1))
+    _seed(db, library, mods)
 
     deployer = ModDeployer(library_root=library, db=db)
     first = deployer.deploy_mod("88001")
@@ -77,7 +83,6 @@ def test_concurrent_second_deploy_rejected(
 ) -> None:
     library = tmp_path / "mod"
     mods = tmp_path / "game" / "Mods"
-    _seed(library, mods, mid="88002")
     db.update_game_deploy_config(
         1,
         name="Game",
@@ -85,7 +90,7 @@ def test_concurrent_second_deploy_rejected(
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    db.upsert_mod(ModMetadata(published_file_id="88002", title="IdemMod", app_id=1))
+    _seed(db, library, mods, mid="88002")
 
     gate = threading.Event()
     proceed = threading.Event()

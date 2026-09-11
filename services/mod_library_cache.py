@@ -54,7 +54,7 @@ class ModCardData:
     cover: str
     description: str
     tags: str
-    size: int
+    size: int | None
     updated_time: float
     managed_path: str
     game_folder: str
@@ -69,6 +69,7 @@ class ModCardData:
     has_offline: bool = False
     offline_status: str = "none"
     invalid: bool = False
+    abandoned: bool = False
     conflict: bool = False
     conflict_status: str = "none"
     enabled: bool = True
@@ -85,6 +86,8 @@ class ModCardData:
     identity_status: str = "ok"
     relation_deps: int = 0
     relation_conflicts: int = 0
+    size_status: str = "unknown"
+    type_id: int | None = None
 
     @property
     def internal_id(self) -> str:
@@ -120,11 +123,25 @@ class LibrarySnapshot:
 def card_data_to_metadata(data: ModCardData) -> ModMetadata:
     """Adapt Projection → legacy ModMetadata for Detail/Card paint.
 
-    ``published_file_id`` carries internal_id for historical callers that still
-    read that field as the entity key. It is not a Workshop identity lookup.
+    Identity axes (never merge)::
+
+        data.id            → ModMetadata.internal_id   (session PK handle)
+        Frozen TEXT identity is ``mods.internal_id``; resolve via resolve_mod_pk.
+        data.external_id   → ModMetadata.published_file_id when Steam Workshop
+        data.workspace_id  → not copied (display-only; lives in DB/sidecar)
     """
+    from services.identity_service import sidecar_published_file_id
+
+    mid = str(data.id or "").strip()
+    plat = normalize_platform(data.platform or PLATFORM_STEAM)
+    pub = sidecar_published_file_id(
+        mod_id=mid,
+        platform=plat,
+        external_id=str(data.external_id or "").strip(),
+    )
     return ModMetadata(
-        published_file_id=str(data.id or ""),
+        published_file_id=pub,
+        internal_id=mid,
         title=str(data.metadata_title or data.title or ""),
         description="",  # Layer-1: never ship description on list bind
         managed_path=str(data.managed_path or ""),
@@ -132,10 +149,36 @@ def card_data_to_metadata(data: ModCardData) -> ModMetadata:
         cover_path=str(data.cover or "") or None,
         url=str(data.source_url or ""),
         game_name=str(data.game_folder or data.game_name or ""),
-        source_type=normalize_platform(data.platform or PLATFORM_STEAM),
+        source_type=plat,
         json_display_name=str(data.json_display_name or ""),
         offline_page_path=None,
     )
+
+
+def _row_type_id(row: dict[str, Any]) -> int | None:
+    raw = row.get("type_id")
+    if raw is None or raw == "":
+        return None
+    try:
+        tid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return tid if tid > 0 else None
+
+
+def _row_local_size_bytes(row: dict[str, Any]) -> int | None:
+    raw = row.get("local_size_bytes")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_local_size_status(row: dict[str, Any]) -> str:
+    text = str(row.get("local_size_status") or "unknown").strip() or "unknown"
+    return text
 
 
 def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
@@ -157,6 +200,7 @@ def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
         conflict=bool(row.get("conflict")),
         conflict_status=str(row.get("conflict_status") or "none"),
         invalid=bool(row.get("invalid")),
+        abandoned=bool(row.get("abandoned")),
         enabled=bool(row.get("enabled", True)),
         has_offline=bool(row.get("has_offline")),
         mtime=float(row.get("mtime") or 0.0),
@@ -171,6 +215,9 @@ def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
         relation_deps=int(row.get("relation_deps") or 0),
         relation_conflicts=int(row.get("relation_conflicts") or 0),
         notes_preview=str(row.get("notes_preview") or ""),
+        local_size_bytes=_row_local_size_bytes(row),
+        local_size_status=_row_local_size_status(row),
+        type_id=_row_type_id(row),
     )
 
 
@@ -178,14 +225,16 @@ def list_item_to_card_data(item: ModListItem) -> ModCardData:
     """Adapt Layer-1 item → UI card DTO (description always empty)."""
     content = str(item.content_status or "")
     missing = content == "content_missing"
-    return ModCardData(
+    status = str(getattr(item, "local_size_status", "") or "unknown")
+    measured = item.local_size_bytes if status == "ok" else None
+    data = ModCardData(
         id=item.internal_id,
         title=item.name,
         platform=item.platform or PLATFORM_STEAM,
         cover=item.cover_path,
         description="",
         tags=item.category_tags,
-        size=0,
+        size=measured,
         updated_time=float(item.mtime or 0.0),
         managed_path=item.managed_path,
         game_folder=item.game_folder,
@@ -200,6 +249,7 @@ def list_item_to_card_data(item: ModListItem) -> ModCardData:
         has_offline=item.has_offline,
         offline_status=item.offline_status,
         invalid=item.invalid,
+        abandoned=bool(getattr(item, "abandoned", False)),
         conflict=item.conflict,
         conflict_status=str(item.conflict_status or "none"),
         enabled=item.enabled,
@@ -216,7 +266,19 @@ def list_item_to_card_data(item: ModListItem) -> ModCardData:
         identity_status=str(getattr(item, "identity_status", "") or "ok"),
         relation_deps=item.relation_deps,
         relation_conflicts=item.relation_conflicts,
+        size_status=status,
+        type_id=item.type_id,
     )
+    if item.type_id:
+        try:
+            from services.mod_type_catalog import get_mod_type_catalog
+
+            type_name = get_mod_type_catalog().resolve_name(item.game_id, item.type_id)
+        except Exception:  # noqa: BLE001
+            type_name = ""
+        if type_name:
+            data = replace(data, category_tags=type_name, tags=type_name)
+    return data
 
 
 def apply_content_status_to_card_data(
@@ -244,8 +306,21 @@ def apply_content_status_to_card_data(
 
 
 def fetch_mod_list_item(internal_id: str | int) -> ModListItem | None:
-    """Load one Layer-1 row from SQLite (full projection source of truth)."""
-    mid = str(internal_id or "").strip()
+    """Load one Layer-1 row from SQLite (full projection source of truth).
+
+    Accepts Frozen TEXT ``internal_id`` or a PK session handle. The Layer-1
+    ``ModListItem.internal_id`` field remains the session row key
+    (``mods.mod_id``) — not Frozen identity.
+    """
+    from services.identity_service import resolve_mod_pk
+
+    token = str(internal_id or "").strip()
+    if not token:
+        return None
+    try:
+        mid = resolve_mod_pk(token, db=get_db())
+    except Exception:  # noqa: BLE001
+        mid = token if token.isdigit() else ""
     if not mid.isdigit():
         return None
     try:
@@ -258,8 +333,11 @@ def fetch_mod_list_item(internal_id: str | int) -> ModListItem | None:
     item = mod_list_item_from_row(rows[0])
     try:
         fields = get_db().get_mods_search_fields([mid]).get(mid)
-        if fields is not None and str(fields.category_tags or "").strip():
-            item = replace(item, category_tags=str(fields.category_tags or ""))
+        if fields is not None:
+            if str(fields.category_tags or "").strip():
+                item = replace(item, category_tags=str(fields.category_tags or ""))
+            if getattr(fields, "type_id", None) is not None:
+                item = replace(item, type_id=fields.type_id)
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -357,6 +435,68 @@ class ModLibraryCache:
         self._by_id[data.id] = data
         self._all = [c for c in self._all if c.id != data.id]
         self._all.append(data)
+
+    def patch_local_size(
+        self,
+        internal_id: str | int,
+        *,
+        size_bytes: int | None,
+        status: str,
+    ) -> ModCardData | None:
+        """
+        Replace warm size scalars only — never ``notify_mod_changed``.
+
+        ``ok`` + 0 is a real empty directory. Other statuses do not expose bytes
+        as a sortable size. Returns None when the Mod is not in the warm cache.
+        """
+        mid = str(internal_id or "").strip()
+        if not mid:
+            return None
+        existing = self._by_id.get(mid)
+        if existing is None:
+            return None
+        text = str(status or "unknown").strip() or "unknown"
+        measured = size_bytes if text == "ok" else None
+        if text == "ok" and measured is not None:
+            try:
+                measured = int(measured)
+            except (TypeError, ValueError):
+                measured = None
+                text = "unknown"
+        updated = replace(existing, size=measured, size_status=text)
+        self.put_card_data(updated)
+        if self._snapshot is not None:
+            cards: list[ModCardData] = []
+            found = False
+            for card in self._snapshot.cards:
+                if str(card.id) == mid:
+                    cards.append(updated)
+                    found = True
+                else:
+                    cards.append(card)
+            if not found:
+                cards.append(updated)
+            items: list[ModListItem] = []
+            for existing_item in list(self._snapshot.list_items or []):
+                if str(existing_item.internal_id) == mid:
+                    items.append(
+                        replace(
+                            existing_item,
+                            local_size_bytes=size_bytes,
+                            local_size_status=text,
+                        )
+                    )
+                else:
+                    items.append(existing_item)
+            self._snapshot = LibrarySnapshot(
+                cards=cards,
+                games=self._snapshot.games,
+                total_count=len(cards),
+                library_root=self._snapshot.library_root,
+                list_items=items,
+            )
+            self._all = list(cards)
+        return updated
 
     def refresh_projection(self, internal_id: str | int) -> ModCardData | None:
         """
@@ -466,12 +606,14 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
             if str(r.get("internal_id") or "").isdigit()
         ]
         cat_map: dict[str, str] = {}
+        type_map: dict[str, int | None] = {}
         rel_counts: dict[str, tuple[int, int]] = {}
         if mod_ids:
             try:
                 fields_map = db.get_mods_search_fields(mod_ids)
                 for mid, fields in fields_map.items():
                     cat_map[mid] = str(getattr(fields, "category_tags", "") or "")
+                    type_map[mid] = getattr(fields, "type_id", None)
             except Exception:  # noqa: BLE001
                 logger.debug("category batch failed", exc_info=True)
             try:
@@ -492,6 +634,8 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
             row_out = dict(row)
             if mid in cat_map and cat_map[mid]:
                 row_out["category_tags"] = cat_map[mid]
+            if mid in type_map:
+                row_out["type_id"] = type_map[mid]
             if mid in rel_counts:
                 deps, confs = rel_counts[mid]
                 row_out["relation_deps"] = int(deps)

@@ -277,15 +277,51 @@ def test_static_id_semantic_violations_are_detectable(db: DatabaseManager, tmp_p
 def test_steam_upsert_workspace_from_workshop_not_internal_fallback(
     db: DatabaseManager,
 ) -> None:
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_WORKSHOP, title="Katana", app_id=100))
-    info = db.get_mod_display_info(STEAM_WORKSHOP)
+    """Catalog upsert must not mint an entity; workspace stays Workshop ID.
+
+    Identity Write Boundary: ``upsert_mod`` is UPDATE-only. Create belongs to
+    ``create_mod_identity``. Workspace is derived from Workshop / external_id,
+    never from Internal ID.
+    """
+    db.upsert_mod(
+        ModMetadata(published_file_id=STEAM_WORKSHOP, title="Katana", app_id=100)
+    )
+    assert db.get_mod_display_info(STEAM_WORKSHOP) is None
+    assert db.get_mod(STEAM_WORKSHOP) is None
+
+    created = create_mod_identity(
+        db,
+        platform=PLATFORM_STEAM,
+        workshop_id=STEAM_WORKSHOP,
+        external_id=STEAM_WORKSHOP,
+        source_url=steam_workshop_url(STEAM_WORKSHOP),
+        title="Katana",
+        app_id=100,
+        game_name="SomeGame",
+        operation="import",
+    )
+    info = db.get_mod_display_info(created.mod_id)
     assert info is not None
     assert info.external_id == STEAM_WORKSHOP
     assert info.workspace_id == STEAM_WORKSHOP
-    # Semantics remain distinct even when numbers match.
-    assert info.mod_id == STEAM_WORKSHOP
     assert resolve_workspace_id(PLATFORM_STEAM, mod_id=info.mod_id) == ""
-    assert resolve_workspace_id(PLATFORM_STEAM, external_id=info.external_id) == info.workspace_id
+    assert (
+        resolve_workspace_id(PLATFORM_STEAM, external_id=info.external_id)
+        == info.workspace_id
+    )
+
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id=STEAM_WORKSHOP, title="Katana Official", app_id=100
+        )
+    )
+    refreshed = db.get_mod_display_info(created.mod_id)
+    assert refreshed is not None
+    assert refreshed.workspace_id == STEAM_WORKSHOP
+    assert refreshed.steam_name == "Katana Official"
+    assert (
+        db._conn.execute("SELECT COUNT(*) AS n FROM mods").fetchone()["n"] == 1
+    )
 
 
 def test_github_workspace_is_not_internal_id(db: DatabaseManager) -> None:

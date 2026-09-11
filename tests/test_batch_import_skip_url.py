@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from core.db_manager import DatabaseManager
 from core.mod_platform import PLATFORM_GITHUB, PLATFORM_NEXUS
@@ -60,8 +60,10 @@ def test_collect_params_single_github_does_not_guess_batch(
         lambda *args, **kwargs: _warn(*args, **kwargs),
     )
 
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_github.setChecked(True)
@@ -93,8 +95,10 @@ def test_collect_params_single_github_still_requires_url(
         lambda *args, **kwargs: _warn(args[0] if args else None, args[1] if len(args) > 1 else "", args[2] if len(args) > 2 else ""),
     )
 
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_github.setChecked(True)
@@ -117,7 +121,7 @@ def test_nexus_batch_forces_empty_source_url(
     result = NexusImporter(db=db).import_mod(
         source_folder=folder,
         title="Cool_Mod_Name",
-        nexus_id="Cool_Mod_Name",
+        nexus_id="10062",
         nexus_url="",
         library_root=lib,
         context={"game_id": 1623730, "game_name": "Palworld"},
@@ -156,8 +160,10 @@ def test_nexus_single_dialog_keeps_source_url(
 ) -> None:
     del db
     parent = _batch_parent(tmp_path)
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_nexus.setChecked(True)

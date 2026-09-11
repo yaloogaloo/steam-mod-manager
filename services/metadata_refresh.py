@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from core.models import ModMetadata, is_unknown_mod_title
+from services.crash_trace import log_exception, traced
 from core.mod_platform import (
     PLATFORM_MODIO,
     PLATFORM_NEXUS,
@@ -619,6 +620,7 @@ def rename_managed_folder_for_title(
     return target, True
 
 
+@traced("refresh_steam_mod_metadata")
 def refresh_steam_mod_metadata(
     mod_id: str | int,
     managed_path: str | Path,
@@ -1312,6 +1314,12 @@ def refresh_selected_mods_metadata(
                 silent_correct_nexus_workspace_id(mid)
             results.append(result)
         except Exception as exc:  # noqa: BLE001
+            log_exception(
+                "refresh_selected_mods_metadata.item",
+                mod_id=mid,
+                platform=plat,
+                path=str(path),
+            )
             results.append(
                 MetadataRefreshResult(
                     mod_id=mid,

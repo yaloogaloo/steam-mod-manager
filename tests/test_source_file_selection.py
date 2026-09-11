@@ -40,6 +40,7 @@ from services.importers.source_files import (
 )
 from services.importers.steam import SteamImporter
 from services.mod_files import ModFileManager
+from tests.helpers.identity import create_steam_test_mod
 
 
 PALWORLD = ImportContext(game_id=1623730, game_name="Palworld")
@@ -86,7 +87,7 @@ def test_selected_for_deploy_prefers_over_enabled_on_load() -> None:
 
 
 def test_manager_set_file_selection_syncs_both(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9101", title="Pack"))
+    create_steam_test_mod(db, external_id="9101", title="Pack")
     mgr = ModFileManager(db)
     entry = mgr.add_file(
         "9101",
@@ -148,8 +149,9 @@ def test_steam_file_entries_tagged_workshop_content() -> None:
 def test_nexus_roles_and_defaults(tmp_path: Path, db: DatabaseManager) -> None:
     folder = tmp_path / "CharacterA"
     folder.mkdir()
-    (folder / "Main.pak").write_bytes(b"M")
-    (folder / "HatAddon.pak").write_bytes(b"H")
+    # Files list enrolls archives only (.zip/.7z/.rar) — not loose .pak.
+    (folder / "Main.zip").write_bytes(b"M")
+    (folder / "HatAddon.zip").write_bytes(b"H")
 
     scanned = build_nexus_mod_files(folder)
     assert len(scanned.files) == 2
@@ -285,7 +287,7 @@ def test_deploy_prefers_selected_for_deploy(db: DatabaseManager, tmp_path: Path)
     source.mkdir()
     (source / "main.pak").write_bytes(b"M")
     (source / "hat.pak").write_bytes(b"H")
-    db.upsert_mod(ModMetadata(published_file_id="9201", title="Multi"))
+    create_steam_test_mod(db, external_id="9201", title="Multi")
 
     # selected_for_deploy False even if we somehow had enabled True historically —
     # from_dict syncs both; construct via JSON blob that only has selected.
@@ -321,7 +323,7 @@ def test_deploy_falls_back_to_enabled(db: DatabaseManager, tmp_path: Path) -> No
     source.mkdir()
     (source / "main.pak").write_bytes(b"M")
     (source / "hat.pak").write_bytes(b"H")
-    db.upsert_mod(ModMetadata(published_file_id="9202", title="Legacy"))
+    create_steam_test_mod(db, external_id="9202", title="Legacy")
     # Old JSON: only enabled (no selected_for_deploy key in stored dict before load).
     # After from_dict both are set; resolve still treats selection correctly.
     db.set_mod_files(
@@ -378,14 +380,14 @@ def test_deploy_falls_back_to_enabled(db: DatabaseManager, tmp_path: Path) -> No
 
 
 def test_deploy_empty_bundle_still_none(db: DatabaseManager, tmp_path: Path) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9203", title="Steam"))
+    create_steam_test_mod(db, external_id="9203", title="Steam")
     source = tmp_path / "mod"
     source.mkdir()
     assert resolve_deploy_sources("9203", source, db=db) is None
 
 
 def test_reset_default_and_clear_optional(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="9301", title="NexusPack"))
+    create_steam_test_mod(db, external_id="9301", title="NexusPack")
     mgr = ModFileManager(db)
     mgr.replace_all(
         "9301",

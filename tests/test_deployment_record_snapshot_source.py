@@ -12,8 +12,9 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services import deployment_record as dr
+from services.identity_service import create_mod_identity, identity_create_scope
 from ui.library_query import (
     FILTER_DEPLOYMENT_RECORD,
     RECORD_STATUS_LABEL_EXTRA,
@@ -44,23 +45,29 @@ def _mod(
     deployed: bool,
     last_known_path: str = "",
 ) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=str(mod_id),
+    game = db.get_game(app_id) if app_id else None
+    game_name = game.name if game is not None else GAME_FOLDER
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mod_id),
+            workshop_id=str(mod_id),
             title=f"Mod {mod_id}",
             app_id=app_id,
+            game_name=game_name,
         )
-    )
+    entity_id = int(created.mod_id)
     db.update_mod_deploy_status(
-        mod_id,
+        entity_id,
         deploy_status=(
             DEPLOY_STATUS_DEPLOYED if deployed else DEPLOY_STATUS_NOT_DEPLOYED
         ),
-        deploy_path="" if not deployed else f"/fake/{mod_id}",
+        deploy_path="" if not deployed else f"/fake/{entity_id}",
     )
     if last_known_path:
         db.update_mod_backup_snapshot(
-            mod_id,
+            entity_id,
             last_known_path=last_known_path,
             folder_present=True,
             backup_metadata_json="{}",

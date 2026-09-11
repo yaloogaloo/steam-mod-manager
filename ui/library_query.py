@@ -51,6 +51,7 @@ FILTER_CATEGORY_ALL = "category_all"
 SORT_MTIME = "mtime"
 SORT_NAME = "name"
 SORT_NAME_DESC = "name_desc"
+SORT_SIZE = "size"
 
 
 def resolve_mod_library_title(
@@ -126,6 +127,7 @@ FILTER_LABELS: tuple[tuple[str, str], ...] = (
 SORT_LABELS: tuple[tuple[str, str], ...] = (
     (SORT_MTIME, "最近修改"),
     (SORT_NAME, "名称"),
+    (SORT_SIZE, "大小"),
 )
 
 
@@ -154,9 +156,12 @@ class ModFilterIndex:
     conflict_status: str = "none"
     enabled: bool = True
     category_tags: str = ""
+    type_id: int | None = None
     content_status: str = ""
     identity_status: str = "ok"
     source_type: str = ""
+    local_size_bytes: int | None = None
+    local_size_status: str = "unknown"
 
 
 def normalize_record_mod_id(raw: object) -> str:
@@ -270,10 +275,19 @@ def compute_record_relative_status(
 def offline_page_exists(
     managed_path: Path, *, mod_id: str | int | None = None
 ) -> bool:
-    """True when resolver finds an offline page (``.info`` or backup)."""
+    """True when an offline page file exists under ``.info`` (or backup).
+
+    Prefer identity-aware resolver when ``mod_id`` / DB row is available; fall
+    back to the path-only offline contract so Library probes without a bound
+    entity still work.
+    """
     from services.mod_metadata_resolver import resolve_offline_page
 
-    return resolve_offline_page(mod_id, managed_path) is not None
+    if resolve_offline_page(mod_id, managed_path) is not None:
+        return True
+    from services.offline.paths import resolve_offline_page as resolve_offline_fs
+
+    return resolve_offline_fs(managed_path) is not None
 
 
 def folder_mtime(managed_path: Path) -> float:
@@ -458,9 +472,31 @@ def matches_category_filter(index: ModFilterIndex, category_key: str) -> bool:
     key = (category_key or FILTER_CATEGORY_ALL).strip()
     if key in ("", FILTER_ALL, FILTER_CATEGORY_ALL, "全部标签", "全部分类"):
         return True
-    tags = (index.category_tags or "").casefold().split()
-    needle = key.casefold()
-    return needle in tags or needle in (index.category_tags or "").casefold()
+    try:
+        want = int(key)
+    except (TypeError, ValueError):
+        return False
+    have = getattr(index, "type_id", None)
+    if have is None:
+        return False
+    try:
+        return int(have) == want
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_local_size_bytes(index: ModFilterIndex) -> int | None:
+    """Persisted observation bytes when status is ``ok``; else None (not 0)."""
+    status = str(getattr(index, "local_size_status", "") or "").strip()
+    if status != "ok":
+        return None
+    raw = getattr(index, "local_size_bytes", None)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def sort_key(index: ModFilterIndex, sort_mode: str):
@@ -470,6 +506,9 @@ def sort_key(index: ModFilterIndex, sort_mode: str):
     ARCHITECTURE RULE: 「最近修改」 must not fall back to name as the secondary
     key — equal ``mtime`` (common after system status recovery) would make
     SORT_MTIME identical to SORT_NAME and sorting would appear broken.
+
+    「大小」 uses persisted ``local_size_bytes`` only. ``ok`` + 0 is valid.
+    unknown / missing / failed sort after every valid size (never coerced to 0).
     """
     mode = sort_mode or SORT_MTIME
     mid = str(index.mod_id or "")
@@ -479,6 +518,13 @@ def sort_key(index: ModFilterIndex, sort_mode: str):
     if mode == SORT_NAME_DESC:
         # Ascending key; callers apply reverse=True for DESC.
         return (name, mid)
+    if mode == SORT_SIZE:
+        size = _valid_local_size_bytes(index)
+        if size is None:
+            # Same residual tie-breaker as SORT_NAME (name, mid). Do not rank
+            # unknown/missing/failed against each other as a product rule.
+            return (1, 0, name, mid)
+        return (0, size, name, mid)
     try:
         mid_num = int(mid) if mid.isdigit() else 0
     except ValueError:
@@ -555,3 +601,68 @@ def filter_sort_entries(
     mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
     matched.sort(key=lambda pair: sort_key(pair[0], mode), reverse=reverse)
     return matched
+
+
+def index_matches_current_view(
+    index: ModFilterIndex,
+    *,
+    query: str = "",
+    filter_key: str = FILTER_ALL,
+    platform_key: str = FILTER_PLATFORM_ALL,
+    category_key: str = FILTER_CATEGORY_ALL,
+    record_mod_ids: frozenset[str] | None = None,
+    deployed_only: bool = False,
+) -> bool:
+    """True when *index* would appear in the current Library view (no sort)."""
+    if deployed_only and not bool(index.deployed):
+        return False
+    if filter_key == FILTER_DEPLOYMENT_RECORD:
+        if not matches_record_visibility(index, record_mod_ids):
+            return False
+    elif not matches_status_filter(index, filter_key):
+        return False
+    if not matches_search(index, query):
+        return False
+    if not matches_platform_filter(index, platform_key):
+        return False
+    if not matches_category_filter(index, category_key):
+        return False
+    return True
+
+
+def projection_requires_view_recompute(
+    old: ModFilterIndex | None,
+    new: ModFilterIndex,
+    *,
+    query: str = "",
+    filter_key: str = FILTER_ALL,
+    platform_key: str = FILTER_PLATFORM_ALL,
+    category_key: str = FILTER_CATEGORY_ALL,
+    sort_mode: str = SORT_MTIME,
+    record_mod_ids: frozenset[str] | None = None,
+    deployed_only: bool = False,
+) -> bool:
+    """
+    Whether a patched projection must re-run filter/sort (not a card rebind).
+
+    Card-only fields (cover, notes unused by sort, size when sort is not Size)
+    must return False. Name / category / status / Size-sort keys that change
+    membership or sort order return True.
+    """
+    if old is None:
+        return True
+    kwargs = dict(
+        query=query,
+        filter_key=filter_key,
+        platform_key=platform_key,
+        category_key=category_key,
+        record_mod_ids=record_mod_ids,
+        deployed_only=deployed_only,
+    )
+    if index_matches_current_view(old, **kwargs) != index_matches_current_view(
+        new, **kwargs
+    ):
+        return True
+    reverse = (sort_mode or "") == SORT_NAME_DESC
+    mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
+    return sort_key(old, mode) != sort_key(new, mode)

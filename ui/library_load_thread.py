@@ -43,6 +43,9 @@ class LibraryLoadWorker(QThread):
                 return
             self.loaded.emit(snapshot)
         except Exception as exc:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("LibraryLoadWorker.run")
             self.failed.emit(str(exc))
         finally:
             try:

@@ -142,7 +142,7 @@ def test_delete_duplicate_and_rebind_and_fix_info(tmp_path: Path) -> None:
     # DB currently bound to pollution copy.
     _insert(
         db,
-        internal_id=9000000000003116,
+        mod_id=9000000000003116,
         path=poll,
         workspace_id="6304",
         internal_id=db_iid,

@@ -8,10 +8,13 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_lock import deploy_operation_lock
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -23,27 +26,29 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed_mod(library: Path, mod_id: str = "9001") -> Path:
+def _seed_mod(db: DatabaseManager, library: Path, mod_id: str = "9001") -> Path:
     folder = library / "Game" / mod_id
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
+    folder.mkdir(parents=True)
     (folder / "data.txt").write_text("x", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mod_id}",\n'
-        '  "title": "LockTest",\n'
-        '  "app_id": 1,\n'
-        '  "game_name": "Game"\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mod_id, title="LockTest", app_id=1, game_name="Game"
     )
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
+        title="LockTest",
+        external_id=mod_id,
+        workspace_id=str(created.workspace_id or mod_id),
+        app_id=1,
+        game_name="Game",
+    )
+    bind_managed_path(db, created.mod_id, folder, title="LockTest", game_name="Game")
     return folder
 
 
 def test_deploy_operation_lock_rejects_concurrent() -> None:
     entered = threading.Event()
     release = threading.Event()
-    errors: list[str] = []
 
     def _holder() -> None:
         with deploy_operation_lock("9001", app_id=1):
@@ -66,7 +71,6 @@ def test_deploy_mod_rejects_second_inflight(
     tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    _seed_mod(library)
     db.update_game_deploy_config(
         1,
         name="Game",
@@ -75,7 +79,7 @@ def test_deploy_mod_rejects_second_inflight(
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
     (tmp_path / "mods").mkdir(parents=True)
-    db.upsert_mod(ModMetadata(published_file_id="9001", title="LockTest", app_id=1))
+    _seed_mod(db, library)
 
     gate = threading.Event()
     proceed = threading.Event()

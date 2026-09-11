@@ -11,7 +11,15 @@ import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPixmap,
+    QTextDocument,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -57,6 +65,33 @@ from core.db_manager import (
 
 TAG_TYPE_ABANDONED = "abandoned"
 
+
+def _mod_type_name_from_info(info: object | None) -> str:
+    """Type Definition display name from already-loaded display info."""
+    if info is None:
+        return ""
+    try:
+        from services.mod_type_catalog import get_mod_type_catalog
+
+        return get_mod_type_catalog().resolve_name(
+            getattr(info, "app_id", 0),
+            getattr(info, "type_id", None),
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _primary_mod_type(mod_id: str) -> str:
+    """Resolved Type Definition name for this Mod (display only)."""
+    mid = str(mod_id or "").strip()
+    if not mid:
+        return ""
+    try:
+        info = get_db().get_mod_display_info(mid)
+    except Exception:  # noqa: BLE001
+        return ""
+    return _mod_type_name_from_info(info)
+
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
     OFFLINE_STATUS_FAILED,
@@ -74,6 +109,7 @@ from core.mod_platform import (
     normalize_platform,
     supports_offline_page_download,
 )
+from ui.dependency_item_widget import DependencyListHost, project_dependency_items
 from ui.mod_files_ux import (
     count_selected,
     file_badge_kind,
@@ -96,7 +132,7 @@ from core.mod_status import (
     CONFLICT_STATUS_WARNING,
     ModStatus,
 )
-from core.models import ModMetadata
+from core.models import ModMetadata, visible_extension_category
 from core.witcher3_game_version import (
     is_witcher3_game,
     witcher3_game_version_label,
@@ -192,10 +228,6 @@ class ElideLabel(QLabel):
         if not int(align):
             align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         painter.drawText(self.contentsRect(), int(align), elided)
-
-
-# Back-compat alias used by older call sites / tests.
-_ElidedLabel = ElideLabel
 
 
 COVER_W = 140
@@ -320,8 +352,9 @@ def _format_description_rich_html(text: str) -> str:
 META_DESC_MAX_HEIGHT_PX = 560
 # Frame includes caption + truncated hint + inner margins.
 META_DESC_FRAME_MAX_HEIGHT_PX = META_DESC_MAX_HEIGHT_PX + 56
-# Name / 原名 block: at most two lines.
-META_RICH_MAX_HEIGHT_PX = 48
+# Name / 原名 / 分类: three logical rows. Budget must fit wrapping 原名
+# plus 分类 — 72px clipped the third row whenever 原名 was present.
+META_RICH_MAX_HEIGHT_PX = 132
 # Footer single-line fields.
 META_FOOTER_LINE_MAX_HEIGHT_PX = 22
 META_SOURCE_LINE_MAX_HEIGHT_PX = 40
@@ -572,6 +605,28 @@ class ModDetailPanel(QWidget):
         game_id: int | str | None = None,
         game_name: str = "",
     ) -> None:
+        from services.crash_trace import log_exception
+
+        try:
+            self._show_mod_body(
+                managed_path, mod_id=mod_id, game_id=game_id, game_name=game_name
+            )
+        except Exception:
+            log_exception(
+                "ModDetailPanel.show_mod",
+                mod_id=mod_id,
+                path=str(managed_path) if managed_path else None,
+            )
+            raise
+
+    def _show_mod_body(
+        self,
+        managed_path: str | Path | None = None,
+        *,
+        mod_id: str | int | None = None,
+        game_id: int | str | None = None,
+        game_name: str = "",
+    ) -> None:
         """Load metadata via the unified resolver (no Steam I/O)."""
         from ui.popup_trace import log_popup
         from services.mod_metadata_resolver import resolve_mod_metadata
@@ -615,24 +670,25 @@ class ModDetailPanel(QWidget):
         if resolved is not None:
             meta = resolved.to_mod_metadata()
         else:
+            mid_stub = str(mod_id or "").strip()
             meta = ModMetadata(
-                published_file_id=(
-                    str(mod_id or "").strip()
-                    or (
-                        self._managed_path.name
-                        if self._managed_path.name.isdigit()
-                        else ""
-                    )
-                ),
+                published_file_id="",
+                internal_id=mid_stub if mid_stub.isdigit() else "",
                 title=self._managed_path.name,
                 managed_path=str(self._managed_path),
             )
         meta.managed_path = str(self._managed_path)
         meta.local_path = str(self._managed_path)
+        if str(mod_id or "").strip().isdigit() and not str(meta.internal_id or "").strip():
+            meta.internal_id = str(mod_id).strip()
         self._metadata = meta
 
         self._display_info = None
-        mid = str(mod_id or meta.published_file_id or "").strip()
+        mid = str(
+            mod_id
+            or meta.entity_internal_id()
+            or ""
+        ).strip()
         if str(mid).isdigit():
             perf.phase("database query")
             try:
@@ -706,7 +762,9 @@ class ModDetailPanel(QWidget):
 
                 invalidate_metadata(path)
             except Exception:  # noqa: BLE001
-                pass
+                from services.crash_trace import log_exception
+
+                log_exception("ModDetailPanel._reload_current_detail_from_projection.invalidate")
         self.show_mod(
             path,
             mod_id=mid or None,
@@ -759,6 +817,9 @@ class ModDetailPanel(QWidget):
             self.btn_add_dependency.setEnabled(False)
         if hasattr(self, "dep_summary_label"):
             self.dep_summary_label.setText("依赖于 —")
+            self.dep_summary_label.show()
+        if hasattr(self, "dep_list_host"):
+            self.dep_list_host.set_items([])
         if hasattr(self, "_files_section_frame"):
             self._files_section_frame.hide()
         self.view_deploy.clear()
@@ -841,9 +902,7 @@ class ModDetailPanel(QWidget):
         self.setEnabled(True)
 
         self._set_header_title(f"已选 {len(ids)} 个 Mod")
-        if hasattr(self, "view_name"):
-            self.view_name.setText(f"已选 {len(ids)} 个 Mod")
-        elif hasattr(self, "view_name_caption"):
+        if hasattr(self, "view_name_caption"):
             self.view_name_caption.setText(f"已选 {len(ids)} 个 Mod")
         if hasattr(self, "view_source_url"):
             self.view_source_url.setText("—")
@@ -906,7 +965,7 @@ class ModDetailPanel(QWidget):
         if info is not None:
             mid = str(info.mod_id or "").strip()
         if not mid and self._resolved is not None:
-            mid = str(self._resolved.published_file_id or "").strip()
+            mid = str(self._resolved.internal_id or "").strip()
         if not mid:
             mid = str(self.current_mod_id() or "").strip()
         if not mid.isdigit():
@@ -976,6 +1035,17 @@ class ModDetailPanel(QWidget):
                 pass
 
         try:
+            type_options: list[tuple[int, str]] = []
+            current_type_id = info.type_id if info is not None else None
+            try:
+                from services.mod_type_catalog import get_mod_type_catalog
+
+                type_options = [
+                    (t.type_id, t.name)
+                    for t in get_mod_type_catalog().list_types(game_id)
+                ]
+            except Exception:  # noqa: BLE001
+                type_options = []
             dlg = EditModDialog(
                 self,
                 mod_id=mid,
@@ -991,6 +1061,9 @@ class ModDetailPanel(QWidget):
                     info.custom_deploy_path if info else ""
                 ),
                 game_version=(info.game_version if info else ""),
+                mod_type_id=current_type_id,
+                type_options=type_options,
+                category=(info.category if info else ""),
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -1019,10 +1092,13 @@ class ModDetailPanel(QWidget):
                 "platform": values["platform"],
                 "source_url": values["source_url"],
                 "custom_deploy_path": values.get("custom_deploy_path", ""),
+                "category": values.get("category", ""),
             }
             if "game_version" in values:
                 payload["game_version"] = values["game_version"]
             self._display_info = get_db().update_mod_user_metadata(mid, payload)
+            if "type_id" in values:
+                get_db().set_mod_type_id(mid, values.get("type_id"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "保存失败", str(exc))
             return
@@ -1176,17 +1252,9 @@ class ModDetailPanel(QWidget):
         layout.addWidget(self._build_files_section())
         layout.addWidget(self._build_flag_tags_section())
         layout.addWidget(self._build_dependency_pill_section())
-        # Legacy sections kept off-screen for fill/wire/test attribute compatibility.
-        self._legacy_host = QWidget()
-        self._legacy_host.hide()
-        legacy = QVBoxLayout(self._legacy_host)
-        legacy.setContentsMargins(0, 0, 0, 0)
-        legacy.setSpacing(0)
-        legacy.addWidget(self._build_status_section())
-        legacy.addWidget(self._build_version_section())
-        legacy.addWidget(self._build_relations_section())
-        legacy.addWidget(self._build_legacy_user_tags_section())
-        layout.addWidget(self._legacy_host)
+        # Off-screen fill/wire surfaces (deploy status, relations, tags).
+        # Parent to the panel — never part of the scroll composition.
+        self._attach_offscreen_status_surfaces()
 
         layout.addStretch(1)
         self._view_scroll.setWidget(body)
@@ -1196,6 +1264,24 @@ class ModDetailPanel(QWidget):
         outer.addWidget(self._build_actions_footer())
         self._wire_view_actions()
         return page
+
+    def _attach_offscreen_status_surfaces(self) -> None:
+        """Build deploy/status/relations widgets off the visible scroll tree.
+
+        These remain attributes for fill helpers and existing tests, but are
+        not children of ``_view_scroll`` and must stay hidden.
+        """
+        host = QWidget(self)
+        host.hide()
+        host.setObjectName("detailOffscreenHost")
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_status_section())
+        layout.addWidget(self._build_version_section())
+        layout.addWidget(self._build_relations_section())
+        layout.addWidget(self._build_offscreen_user_tags_section())
+        self._offscreen_host = host
 
     def _make_icon_button(
         self,
@@ -1328,9 +1414,8 @@ class ModDetailPanel(QWidget):
         top.addWidget(title_host, stretch=1)
         outer.addLayout(top)
 
-        # Hidden stubs for removed header actions (API / older tests).
-        self._header_actions = QWidget(header)
-        self._header_actions.hide()
+        # Hidden stubs retained where tests / wiring still reference them.
+        # Not part of the visible header composition.
         self.btn_edit = QPushButton("编辑", header)
         self.btn_edit.hide()
         self.btn_remove_mod = QPushButton("删除", header)
@@ -1643,6 +1728,12 @@ class ModDetailPanel(QWidget):
         self.dep_summary_label.setObjectName("detailPanelMeta")
         self.dep_summary_label.setWordWrap(True)
         layout.addWidget(self.dep_summary_label)
+
+        self.dep_list_host = DependencyListHost()
+        self.dep_list_host.item_remove_requested.connect(
+            self._on_remove_dependency_item
+        )
+        layout.addWidget(self.dep_list_host)
         return frame
 
     def _build_status_section(self) -> QFrame:
@@ -1860,7 +1951,7 @@ class ModDetailPanel(QWidget):
         )
         self.meta_rich_label.setMaximumHeight(META_RICH_MAX_HEIGHT_PX)
         self.meta_rich_label.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
         body.addWidget(self.meta_rich_label)
 
@@ -1942,7 +2033,10 @@ class ModDetailPanel(QWidget):
             body.addWidget(lab)
 
         # Legacy mirrors kept for fill helpers / older tests (not in the layout).
-        for lab in (self.meta_name_line, self.meta_desc_line):
+        # 「原名」/「分类」must NOT be standalone layout rows — they live in
+        # meta_rich_label with the same ``_line()`` metadata row helper.
+        self.meta_category_line = QLabel()
+        for lab in (self.meta_name_line, self.meta_desc_line, self.meta_category_line):
             lab.setObjectName("detailMetaLine")
             lab.setWordWrap(True)
             lab.setTextInteractionFlags(
@@ -1950,9 +2044,6 @@ class ModDetailPanel(QWidget):
             )
             lab.hide()
             lab.setParent(frame)
-
-        # Legacy hidden fields kept for fill / copy helpers / older tests.
-        # 「原名」must NOT be a standalone QLabel — it lives in meta_rich_label only.
         self.view_platform = QLabel()
         self.view_name_caption = QLabel("名称：")
         self.view_steam = QLabel()
@@ -2042,8 +2133,8 @@ class ModDetailPanel(QWidget):
             self._rel_add_buttons[key] = add_btn
         return frame
 
-    def _build_legacy_user_tags_section(self) -> QFrame:
-        """Hidden Phase C: keep widgets for tests / data compatibility."""
+    def _build_offscreen_user_tags_section(self) -> QFrame:
+        """Off-screen tag editors used by fill/save helpers (not in scroll body)."""
         tags_sec = self._make_section("用户标记")
         tags_body = tags_sec.layout()
         assert isinstance(tags_body, QVBoxLayout)
@@ -2552,6 +2643,8 @@ class ModDetailPanel(QWidget):
         self._render_metadata_rich_block(
             name_value=name_value,
             original_name=steam_name,
+            category=str(info.category or "").strip() if info is not None else "",
+            mod_type=_mod_type_name_from_info(info),
             desc_text=desc_text,
             platform_name=platform_name,
             workspace_id=workspace_id,
@@ -2701,10 +2794,24 @@ class ModDetailPanel(QWidget):
         token = f"{mid}:{root}"
         self._size_token = token
 
-        from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
+        from services.size_observation import (
+            SizeObservation,
+            enqueue_mod_size,
+            observe_mod_size,
+        )
+
+        def _apply(obs: SizeObservation) -> None:
+            self._on_size_observation_ready(token, obs)
+
+        if mid.isdigit():
+            enqueue_mod_size(mid, root, force=True, on_done=_apply)
+            return
+
+        # Path-only fallback (no Internal ID) — still off the UI thread.
+        from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal
 
         class _SizeSignals(QObject):
-            finished = Signal(str, int)
+            finished = Signal(str, object)
 
         class _SizeTask(QRunnable):
             def __init__(self, tok: str, path: Path, signals: _SizeSignals) -> None:
@@ -2714,27 +2821,50 @@ class ModDetailPanel(QWidget):
                 self._signals = signals
 
             def run(self) -> None:  # noqa: D401
-                try:
-                    total = int(get_directory_size(self._path))
-                except Exception:  # noqa: BLE001
-                    total = -1
-                self._signals.finished.emit(self._tok, total)
+                from services.size_observation import set_size_observation_ui_guard
 
-        # Keep QObject alive until the callback fires.
+                set_size_observation_ui_guard(False)
+                try:
+                    obs = observe_mod_size("", self._path, force=True, persist=False)
+                except Exception:  # noqa: BLE001
+                    obs = None
+                self._signals.finished.emit(self._tok, obs)
+
         signals = _SizeSignals(self)
         self._size_signals = signals
-        signals.finished.connect(self._on_size_badge_ready)
+        signals.finished.connect(
+            lambda tok, payload: self._on_size_observation_ready(tok, payload),
+            Qt.ConnectionType.QueuedConnection,
+        )
         QThreadPool.globalInstance().start(_SizeTask(token, root, signals))
 
-    def _on_size_badge_ready(self, token: str, total: int) -> None:
+    def _on_size_observation_ready(self, token: str, obs: object) -> None:
         if str(token) != getattr(self, "_size_token", ""):
             return
         if self._mode != MODE_VIEW:
             return
-        if total < 0:
+        from services.size_observation import SIZE_STATUS_OK, SizeObservation
+
+        if not isinstance(obs, SizeObservation) or obs.status != SIZE_STATUS_OK:
             self._render_header_size_badge("")
             return
-        self._render_header_size_badge(format_size(int(total)))
+        size = int(obs.size_bytes or 0)
+        self._render_header_size_badge(format_size(size))
+
+    def _on_size_badge_ready(self, token: str, total: object) -> None:
+        """Legacy slot — bytes payload from older workers."""
+        if str(token) != getattr(self, "_size_token", ""):
+            return
+        if self._mode != MODE_VIEW:
+            return
+        try:
+            size = int(total)  # noqa: FURB123
+        except (TypeError, ValueError):
+            size = -1
+        if size < 0:
+            self._render_header_size_badge("")
+            return
+        self._render_header_size_badge(format_size(size))
 
     def _refresh_size_badge(self) -> None:
         """Legacy sync path — prefer ``_request_size_badge_async``."""
@@ -2754,11 +2884,27 @@ class ModDetailPanel(QWidget):
         except OSError:
             return ""
 
+    def _sync_meta_rich_label_height(self) -> None:
+        """Fit the name/原名/分类 block to its document; never clip 分类."""
+        lab = self.meta_rich_label
+        width = int(lab.width() or 0)
+        if width <= 0:
+            width = max(int(lab.sizeHint().width() or 0), 360)
+        doc = QTextDocument()
+        doc.setDefaultFont(lab.font())
+        doc.setDocumentMargin(0)
+        doc.setHtml(str(lab.text() or ""))
+        doc.setTextWidth(width)
+        needed = max(18, int(doc.size().height()) + 6)
+        lab.setFixedHeight(min(needed, META_RICH_MAX_HEIGHT_PX))
+
     def _render_metadata_rich_block(
         self,
         *,
         name_value: str,
         original_name: str = "",
+        category: str = "",
+        mod_type: str = "",
         desc_text: str,
         platform_name: str,
         workspace_id: str,
@@ -2790,8 +2936,16 @@ class ModDetailPanel(QWidget):
         orig = str(original_name or "").strip()
         if orig and orig != str(name_value or "").strip():
             parts.append(_line(f"<b>原名：</b> {esc(orig)}"))
+        shown_cat = visible_extension_category(mod_type, category)
+        if shown_cat:
+            parts.append(_line(f"<b>分类：</b> {esc(shown_cat)}"))
         html_body = _strip_leading_html_blank("".join(parts))
         self.meta_rich_label.setText(html_body)
+        self._sync_meta_rich_label_height()
+        if shown_cat:
+            self.meta_category_line.setText(f"分类：{shown_cat}")
+        else:
+            self.meta_category_line.clear()
 
         desc = str(desc_text or "").strip()
         if desc:
@@ -2874,7 +3028,9 @@ class ModDetailPanel(QWidget):
             return
         from services.importers.image_picker import apply_cover_to_mod
 
-        mid = self.current_mod_id() or self._metadata.published_file_id
+        mid = self.current_mod_id() or (
+            self._metadata.entity_internal_id() if self._metadata else ""
+        )
         try:
             rel = apply_cover_to_mod(
                 self._managed_path, chosen, mod_id=mid, update_db=True
@@ -3091,6 +3247,15 @@ class ModDetailPanel(QWidget):
         self._set_refresh_button_state("running")
 
     def _on_metadata_refresh_finished(self, result: object) -> None:
+        from services.crash_trace import log_exception
+
+        try:
+            self._on_metadata_refresh_finished_body(result)
+        except Exception:
+            log_exception("ModDetailPanel._on_metadata_refresh_finished")
+            raise
+
+    def _on_metadata_refresh_finished_body(self, result: object) -> None:
         from services.metadata_refresh import MetadataRefreshResult
         from services.path_lifecycle import resolve_managed_folder
 
@@ -3111,7 +3276,11 @@ class ModDetailPanel(QWidget):
 
                 invalidate_directory_size(path)
             except Exception:  # noqa: BLE001
-                pass
+                from services.crash_trace import log_exception
+
+                log_exception(
+                    "ModDetailPanel._on_metadata_refresh_finished.invalidate_directory_size"
+                )
             self._recheck_missing_content(path)
             self._reload_current_detail_from_projection(path, mod_id=mid)
             self.metadata_saved.emit(path)
@@ -3569,7 +3738,7 @@ class ModDetailPanel(QWidget):
             self._apply_file_badge_role(fid, value)
 
     def _build_github_context_menu(self, menu: QMenu, entry) -> None:
-        """GitHub / non-Nexus: Main / Source / clear — unchanged semantics."""
+        """GitHub / non-Nexus: Main / Source / clear — GitHub allows many of each."""
         act_main = menu.addAction("设为 Main (主文件)")
         act_main.setData(("github", "Main"))
         act_source = menu.addAction("设为 Source (源码)")
@@ -3604,7 +3773,11 @@ class ModDetailPanel(QWidget):
         self._reload_files_after_mutation()
 
     def _apply_file_badge_role(self, file_id: str, kind: str | None) -> None:
-        """Assign Main / Source / Other via exclusive role mapping, then refresh."""
+        """Assign Main / Source / Other on one file, then refresh.
+
+        GitHub keeps every other file's role (multiple Main / Source allowed).
+        Steam / other platforms keep the previous exclusive mapping.
+        """
         mid = self.current_mod_id()
         if not mid or not file_id:
             return
@@ -3613,35 +3786,40 @@ class ModDetailPanel(QWidget):
         ).strip().lower()
         try:
             mgr = ModFilesJsonManager(get_db())
-            files = mgr.get_files(mid)
-            main_id = ""
-            source_id = ""
-            for entry in files:
-                badge = file_badge_kind(entry)
-                eid = str(entry.id or "")
-                if badge == "Main" and not main_id:
-                    main_id = eid
-                elif badge == "Source" and not source_id:
-                    source_id = eid
-            if kind == "Main":
-                main_id = file_id
-                if source_id == file_id:
-                    source_id = ""
-            elif kind == "Source":
-                source_id = file_id
-                if main_id == file_id:
-                    main_id = ""
+            if platform == PLATFORM_GITHUB:
+                mgr.set_file_badge_role(
+                    mid, file_id, kind, platform=platform
+                )
             else:
-                if main_id == file_id:
-                    main_id = ""
-                if source_id == file_id:
-                    source_id = ""
-            mgr.set_file_role_mapping(
-                mid,
-                main_file_id=main_id or None,
-                source_file_id=source_id or None,
-                platform=platform,
-            )
+                files = mgr.get_files(mid)
+                main_id = ""
+                source_id = ""
+                for entry in files:
+                    badge = file_badge_kind(entry)
+                    eid = str(entry.id or "")
+                    if badge == "Main" and not main_id:
+                        main_id = eid
+                    elif badge == "Source" and not source_id:
+                        source_id = eid
+                if kind == "Main":
+                    main_id = file_id
+                    if source_id == file_id:
+                        source_id = ""
+                elif kind == "Source":
+                    source_id = file_id
+                    if main_id == file_id:
+                        main_id = ""
+                else:
+                    if main_id == file_id:
+                        main_id = ""
+                    if source_id == file_id:
+                        source_id = ""
+                mgr.set_file_role_mapping(
+                    mid,
+                    main_file_id=main_id or None,
+                    source_file_id=source_id or None,
+                    platform=platform,
+                )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "更新文件失败", str(exc))
             return
@@ -3806,12 +3984,20 @@ class ModDetailPanel(QWidget):
             return
         for lst in self._rel_lists.values():
             lst.clear()
+        empty_grouped: dict[str, list] = {
+            "dependencies": [],
+            "conflicts": [],
+            "addons": [],
+            "patches": [],
+        }
         mid = self.current_mod_id()
         if not mid or not mid.isdigit():
+            self._refresh_dependency_pill(empty_grouped)
             return
         try:
             grouped = get_db().get_mod_relationships(mid)
         except Exception:  # noqa: BLE001
+            self._refresh_dependency_pill(empty_grouped)
             return
         for key, items in grouped.items():
             lst = self._rel_lists.get(key)
@@ -3825,38 +4011,51 @@ class ModDetailPanel(QWidget):
                 row.setData(Qt.ItemDataRole.UserRole, int(item.get("id") or 0))
                 row.setToolTip(f"ID {tid}")
                 lst.addItem(row)
-        self._refresh_dependency_pill()
+        self._refresh_dependency_pill(grouped)
 
-    def _refresh_dependency_pill(self) -> None:
-        if not hasattr(self, "dep_summary_label"):
+    def _dependency_deploy_status_map(
+        self, rows: list[dict]
+    ) -> dict[str, str]:
+        """Read mods.deploy_status for each dependency Internal ID (UI only)."""
+        out: dict[str, str] = {}
+        for row in rows:
+            tid = str(row.get("mod_id") or row.get("target_mod_id") or "").strip()
+            if not tid.isdigit() or tid in out:
+                continue
+            try:
+                info = get_db().get_mod_deploy_info(tid)
+            except Exception:  # noqa: BLE001
+                info = None
+            raw = str(info.deploy_status or "") if info is not None else ""
+            out[tid] = raw
+        return out
+
+    def _refresh_dependency_pill(self, grouped: dict | None = None) -> None:
+        """Render the current dependency projection plus mods.deploy_status."""
+        if not hasattr(self, "dep_list_host"):
             return
         mid = self.current_mod_id()
-        lines: list[str] = []
-        if mid and mid.isdigit():
-            try:
-                grouped = get_db().get_mod_relationships(mid)
-                for item in grouped.get("dependencies") or []:
-                    title = str(item.get("title") or "").strip()
-                    tid = str(item.get("mod_id") or "").strip()
-                    if title and tid:
-                        lines.append(title)
-                    elif title or tid:
-                        lines.append(title or tid)
-            except Exception:  # noqa: BLE001
-                pass
-            resolved = getattr(self, "_resolved", None)
-            if resolved is not None:
-                known = {ln.split("\n", 1)[0] for ln in lines}
-                for wid in resolved.dependencies or []:
-                    text = str(wid or "").strip()
-                    if text and text not in known and not any(
-                        text in ln for ln in lines
-                    ):
-                        lines.append(text)
-        if lines:
-            self.dep_summary_label.setText("\n".join(lines))
-        else:
-            self.dep_summary_label.setText("依赖于 —")
+        sidecar: list[str] = []
+        resolved = getattr(self, "_resolved", None)
+        if resolved is not None:
+            sidecar = [
+                str(token or "").strip()
+                for token in (getattr(resolved, "dependencies", None) or [])
+                if str(token or "").strip()
+            ]
+        rows = list((grouped or {}).get("dependencies") or [])
+        status_by_id = self._dependency_deploy_status_map(rows)
+        items = project_dependency_items(
+            rows,
+            sidecar,
+            deploy_status_by_internal_id=status_by_id,
+        )
+        self.dep_list_host.set_items(items)
+        if hasattr(self, "dep_summary_label"):
+            empty = not items
+            self.dep_summary_label.setVisible(empty)
+            if empty:
+                self.dep_summary_label.setText("依赖于 —")
         if hasattr(self, "btn_add_dependency"):
             self.btn_add_dependency.setEnabled(
                 bool(mid and mid.isdigit())
@@ -3872,7 +4071,7 @@ class ModDetailPanel(QWidget):
         text, ok = QInputDialog.getText(
             self,
             "添加依赖",
-            "请输入被依赖 Mod 的 Internal ID（数据库 ID）：",
+            "请输入被依赖 Mod 的 Workspace ID：",
         )
         if not ok:
             return
@@ -3880,19 +4079,16 @@ class ModDetailPanel(QWidget):
         if not wid:
             return
         db = get_db()
-        target = wid if wid.isdigit() and db.get_mod(wid) is not None else None
-        if not target:
-            QMessageBox.warning(
-                self,
-                "添加依赖失败",
-                f"本地库中未找到 Internal ID：{wid}",
-            )
-            return
-        if target == mid:
-            QMessageBox.warning(self, "添加依赖失败", "不能将自身设为依赖")
-            return
         try:
-            db.add_mod_relationship(mid, target, RELATIONSHIP_DEPENDENCY)
+            from services.mod_relationships import add_dependency_by_workspace_id
+
+            add_dependency_by_workspace_id(mid, wid, db=db)
+        except LookupError as exc:
+            QMessageBox.warning(self, "添加依赖失败", str(exc))
+            return
+        except ValueError as exc:
+            QMessageBox.warning(self, "添加依赖失败", str(exc))
+            return
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "添加依赖失败", str(exc))
             return
@@ -3910,8 +4106,9 @@ class ModDetailPanel(QWidget):
                     for x in (data.get("dependencies") or [])
                     if str(x or "").strip()
                 ]
-                if target not in deps:
-                    deps.append(target)
+                # Sidecar tokens stay Workspace ID (deploy resolver); DB uses PK.
+                if wid not in deps:
+                    deps.append(wid)
                 data["dependencies"] = deps
                 persist_unified_metadata_dict(self._managed_path, data)
             except Exception:  # noqa: BLE001
@@ -3964,10 +4161,16 @@ class ModDetailPanel(QWidget):
         if item is None:
             return
         rid = item.data(Qt.ItemDataRole.UserRole)
-        if not rid:
+        self._remove_relationship_by_id(int(rid or 0))
+
+    def _on_remove_dependency_item(self, relation_id: int) -> None:
+        self._remove_relationship_by_id(int(relation_id or 0))
+
+    def _remove_relationship_by_id(self, relation_id: int) -> None:
+        if not relation_id:
             return
         try:
-            get_db().remove_mod_relationship(int(rid))
+            get_db().remove_mod_relationship(int(relation_id))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "删除关系失败", str(exc))
             return
@@ -4056,6 +4259,7 @@ class ModDetailPanel(QWidget):
             return
         get_db().enable_mod(mid)
         self._fill_lifecycle_status()
+        self._sync_wh3_used_mods()
         if self._managed_path is not None:
             self.tags_saved.emit(self._managed_path)
 
@@ -4065,8 +4269,19 @@ class ModDetailPanel(QWidget):
             return
         get_db().disable_mod(mid)
         self._fill_lifecycle_status()
+        self._sync_wh3_used_mods()
         if self._managed_path is not None:
             self.tags_saved.emit(self._managed_path)
+
+    def _sync_wh3_used_mods(self) -> None:
+        from services.wh3_activation import is_wh3_activation_app, sync_used_mods_txt
+
+        if not is_wh3_activation_app(self._context_game_id or 0):
+            return
+        try:
+            sync_used_mods_txt()
+        except Exception:  # noqa: BLE001
+            logger.debug("WH3 used_mods sync after enable/disable failed", exc_info=True)
 
     def _on_add_category_tag(self) -> None:
         mid = self.current_mod_id()
@@ -4636,6 +4851,16 @@ class ModDetailPanel(QWidget):
 
     def _on_cover_path_release_requested(self, path_key: str) -> None:
         """Drop detail cover pixmap when this Mod folder is about to rename."""
+        from services.crash_trace import log_exception
+
+        try:
+            self._on_cover_path_release_requested_body(path_key)
+        except Exception:
+            log_exception("ModDetailPanel._on_cover_path_release_requested")
+            raise
+
+    def _on_cover_path_release_requested_body(self, path_key: str) -> None:
+        """Drop detail cover pixmap when this Mod folder is about to rename."""
         if self._managed_path is None:
             return
         try:
@@ -4780,7 +5005,7 @@ class ModDetailPanel(QWidget):
         worker = OfflineArchiveWorker(
             self._managed_path,
             platform=self._current_platform,
-            published_file_id=self._metadata.published_file_id,
+            internal_id=self._metadata.entity_internal_id(),
             metadata=self._metadata,
             library_root=self._library_root,
             force_refresh=True,
@@ -4876,7 +5101,7 @@ class ModDetailPanel(QWidget):
             self._managed_path,
             path,
             platform=plat,
-            published_file_id=self._metadata.published_file_id,
+            internal_id=self._metadata.entity_internal_id(),
             library_root=self._library_root,
             parent=self,
         )
@@ -5084,8 +5309,8 @@ class ModDetailPanel(QWidget):
         path = self._managed_path
         if meta is None or path is None:
             return
-        mid = meta.published_file_id
-        if not str(mid).isdigit():
+        mid = str(meta.entity_internal_id() or "").strip()
+        if not mid.isdigit():
             QMessageBox.warning(self, "保存失败", "缺少有效的 Mod ID。")
             return
         try:
@@ -5113,8 +5338,22 @@ class ModDetailPanel(QWidget):
     # ------------------------------------------------------------------
 
     def current_mod_id(self) -> str:
-        if self._metadata and str(self._metadata.published_file_id).isdigit():
-            return str(self._metadata.published_file_id)
+        """Return ``mods.mod_id`` — never Workshop / workspace axes."""
+        info = self._display_info
+        if info is not None:
+            mid = str(getattr(info, "mod_id", "") or "").strip()
+            if mid.isdigit():
+                return mid
+        resolved = self._resolved
+        if resolved is not None:
+            mid = str(getattr(resolved, "internal_id", "") or "").strip()
+            if mid.isdigit():
+                return mid
+        meta = self._metadata
+        if meta is not None:
+            mid = str(meta.entity_internal_id() or "").strip()
+            if mid.isdigit():
+                return mid
         return ""
 
     def _request_deploy(self) -> None:

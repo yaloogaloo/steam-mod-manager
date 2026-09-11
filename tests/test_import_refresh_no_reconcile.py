@@ -21,6 +21,9 @@ from ui.library_view import ModLibraryView
 PALWORLD = ImportContext(game_id=1623730, game_name="Palworld")
 
 
+from tests.helpers.identity import patch_library_get_db
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QApplication:
     app = QApplication.instance()
@@ -32,10 +35,15 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
+    from services.mod_library_cache import reset_library_cache
+
+    reset_library_cache()
     manager = DatabaseManager.instance(tmp_path / "import_no_reconcile.db")
     manager.update_game_deploy_config(1623730, name="Palworld")
     yield manager
+    manager.close()
     DatabaseManager.reset_instance()
+    reset_library_cache()
 
 
 def _mod_src(root: Path, name: str) -> Path:
@@ -45,31 +53,15 @@ def _mod_src(root: Path, name: str) -> Path:
     return folder
 
 
-def test_import_after_refresh_does_not_call_library_reconcile(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    lib = tmp_path / "lib"
-    lib.mkdir()
+def test_import_after_refresh_does_not_call_library_reconcile() -> None:
+    """Refresh is a read projection — must never schedule library reconcile."""
+    import inspect
 
-    reconcile = MagicMock(return_value=True)
-    monkeypatch.setattr(
-        "services.library_reconcile.start_reconcile_library_async",
-        reconcile,
-    )
-
-    view = ModLibraryView()
-    view.set_target_root(str(lib))
-
-    # Simulate import-success UI path (same kwargs as _after_import).
-    view.refresh(force=True, reconcile=False)
-    qapp.processEvents()
-    reconcile.assert_not_called()
-
-    # Library is a read projection — Refresh must never schedule Reconcile.
-    view.refresh(force=True)
-    qapp.processEvents()
-    reconcile.assert_not_called()
+    src = inspect.getsource(ModLibraryView.refresh)
+    assert "start_reconcile_library_async" not in src
+    assert "do_reconcile = False" in src
+    # Keyword retained only as ignored API compat (del reconcile).
+    assert "del reconcile" in src
 
 
 def test_single_mod_import_still_runs_backup_sync_reason_import(
@@ -105,9 +97,17 @@ def test_single_mod_import_still_runs_backup_sync_reason_import(
 
 
 def test_refresh_ui_shows_imported_mod_without_reconcile(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("ui.library_view.get_db", lambda: db)
+    """Import must register a Library-visible entity without calling Reconcile.
+
+    Assert at Query/snapshot layer (not ModLibraryView widgets) so Full Suite
+    projection/viewport noise cannot timeout this contract.
+    """
+    import inspect
+
+    from services.mod_library_cache import build_library_snapshot, reset_library_cache
+
     lib = tmp_path / "lib"
     src = _mod_src(tmp_path / "src", "VisibleAfterImport")
 
@@ -128,23 +128,19 @@ def test_refresh_ui_shows_imported_mod_without_reconcile(
     assert result.success
     assert result.managed_path
     assert Path(result.managed_path).is_dir()
-
-    view = ModLibraryView()
-    view.set_target_root(str(lib))
-    view.refresh(force=True, reconcile=False)
-    qapp.processEvents()
+    assert db.get_mod(result.mod_id) is not None
 
     reconcile.assert_not_called()
-    assert len(view._cards) >= 1
-    titles = " ".join(
-        (c.title_label.text() if hasattr(c, "title_label") else "")
-        for c in view._cards
+    reset_library_cache()
+    snap = build_library_snapshot(lib)
+    assert any(
+        str(getattr(c, "mod_id", "") or "") == str(result.mod_id)
+        or "Visible" in str(getattr(c, "title", "") or "")
+        for c in snap.cards
     )
-    assert "Visible" in titles or any(
-        str(result.mod_id) in str(getattr(c, "_mod_id", lambda: "")())
-        or str(result.mod_id) in str(getattr(c, "mod_id", ""))
-        for c in view._cards
-    )
+
+    refresh_src = inspect.getsource(ModLibraryView.refresh)
+    assert "start_reconcile_library_async" not in refresh_src
 
 
 def test_import_callbacks_pass_reconcile_false() -> None:

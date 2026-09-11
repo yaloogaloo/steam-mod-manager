@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS games (
 );
 
 CREATE TABLE IF NOT EXISTS mods (
-    -- Internal ID: SQLite PK only. Never user-facing. Never Workspace ID.
+    -- SQLite PK / FK handle only. Never user-facing. Never Workspace ID.
+    -- Frozen Entity Identity is TEXT mods.internal_id (added via migration).
     mod_id      INTEGER PRIMARY KEY,
     app_id      INTEGER NOT NULL DEFAULT 0,
     title       TEXT NOT NULL DEFAULT '',
@@ -101,6 +102,11 @@ CREATE TABLE IF NOT EXISTS mods (
     -- Witcher 3 ONLY: original | next_gen | remake. NULL for every other game.
     -- Not mod_version, not Mod.io version, not Steam revision, not identity.
     game_version TEXT,
+    -- Optional free-text subcategory. Displayed only when type is「拓展」.
+    -- Not a taxonomy / not category_tags / not sidecar.category (type label).
+    category TEXT,
+    -- Game-scoped Type Definition id. NULL = unbound. Never a type name.
+    type_id INTEGER,
     updated_at  TEXT NOT NULL,
     FOREIGN KEY (app_id) REFERENCES games(app_id)
 );
@@ -202,6 +208,39 @@ CREATE TABLE IF NOT EXISTS identity_audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_identity_audit_log_mod_id
     ON identity_audit_log(mod_id);
+
+CREATE TABLE IF NOT EXISTS collections (
+    collection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id        INTEGER NOT NULL,
+    name          TEXT NOT NULL,
+    cover_path    TEXT NOT NULL DEFAULT '',
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    FOREIGN KEY (app_id) REFERENCES games(app_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collections_app_id
+    ON collections(app_id);
+-- Per-game display name uniqueness (user-facing identity).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_collections_app_name
+    ON collections(app_id, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS collection_mods (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    -- FK to mods.mod_id (SQLite PK). Never workspace_id. Never TEXT internal_id.
+    mod_id        INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY (collection_id) REFERENCES collections(collection_id) ON DELETE CASCADE,
+    FOREIGN KEY (mod_id) REFERENCES mods(mod_id),
+    UNIQUE (collection_id, mod_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collection_mods_collection_id
+    ON collection_mods(collection_id);
+CREATE INDEX IF NOT EXISTS idx_collection_mods_mod_id
+    ON collection_mods(mod_id);
 """
 
 # Columns added after the initial schema — applied on every startup.
@@ -259,9 +298,19 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     # Witcher 3 ONLY compatibility edition. NULL = not applicable (non-Witcher 3).
     # Never DEFAULT 'next_gen' — that would stamp every game.
     ("game_version", "TEXT"),
+    # Optional「分类」for type=拓展. NULL/empty = hidden. Not category_tags.
+    ("category", "TEXT"),
+    # Game-scoped Type Definition id. NULL = unbound. Not a type name.
+    ("type_id", "INTEGER"),
     # Filesystem observation stamps (NOT identity). Cheap L0 probe memory only.
     ("fs_observed_at", "TEXT NOT NULL DEFAULT ''"),
     ("fs_root_mtime", "REAL"),
+    # Local managed-directory size observation (NOT Steam archive / file_size).
+    # local_size_bytes NULL = unknown (never observed). 0 + status=ok = empty dir.
+    ("local_size_bytes", "INTEGER"),
+    ("local_size_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("local_size_observed_at", "TEXT NOT NULL DEFAULT ''"),
+    ("local_size_root_mtime", "REAL"),
 )
 
 DEPLOY_STATUS_NOT_DEPLOYED = "not_deployed"
@@ -274,6 +323,7 @@ SUPPORTED_DEPLOY_TYPES = (DEPLOY_TYPE_FOLDER_COPY, DEPLOY_TYPE_PALWORLD_PAK)
 # User tags / conflict relations (SQLite only — never written to .info)
 TAG_TYPE_INVALID = "invalid"
 TAG_TYPE_CONFLICT = "conflict"
+TAG_TYPE_ABANDONED = "abandoned"
 TAG_TYPE_CATEGORY = "category"
 RELATION_TYPE_CONFLICT = "conflict"
 
@@ -300,6 +350,8 @@ _MOD_SELECT_COLS = (
     "offline_status, offline_provider, offline_updated_at, "
     "cover_path, "
     "game_version, "
+    "category, "
+    "type_id, "
     "updated_at"
 )
 
@@ -428,6 +480,10 @@ class ModDisplayInfo:
     cover_path: str = ""
     # Witcher 3 ONLY: original | next_gen | remake. Empty = NULL / not applicable.
     game_version: str = ""
+    # Optional「分类」free text. Empty/NULL when unset. Not category_tags.
+    category: str = ""
+    # Bound Type Definition id for this Mod's game. None = unbound.
+    type_id: int | None = None
 
     @property
     def mod_files(self) -> ModFilesBundle:
@@ -473,6 +529,7 @@ class ModSearchFields:
     conflict_status: str = CONFLICT_STATUS_NONE
     enabled: bool = True
     category_tags: str = ""
+    type_id: int | None = None
     # Library sort authority (ISO → epoch via updated_at_to_mtime).
     updated_at: str = ""
 
@@ -565,6 +622,32 @@ class DeploymentRecord:
             "name": self.name,
             "created_at": self.created_at or "",
             "updated_at": self.updated_at or "",
+        }
+
+
+@dataclass(frozen=True)
+class CollectionRecord:
+    """Named Mod Collection for one game (browse/org only — not deploy / WH3)."""
+
+    collection_id: int
+    app_id: int
+    name: str
+    cover_path: str = ""
+    sort_order: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    mod_count: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "collection_id": self.collection_id,
+            "app_id": self.app_id,
+            "name": self.name,
+            "cover_path": self.cover_path or "",
+            "sort_order": self.sort_order,
+            "created_at": self.created_at or "",
+            "updated_at": self.updated_at or "",
+            "mod_count": int(self.mod_count or 0),
         }
 
 
@@ -1650,46 +1733,209 @@ class DatabaseManager:
             ).fetchall()
         return {str(row["mod_id"]): _mod_from_row(row) for row in rows}
 
+    def resolve_steam_entity_mod_id(
+        self,
+        workshop_id: str | int = "",
+        *,
+        app_id: int = 0,
+        internal_id: str | int = "",
+    ) -> str | None:
+        """Map Steam Workshop ID → existing ``mods.mod_id``. Never creates rows.
+
+        Resolution order:
+        1. Explicit ``internal_id`` when that PK exists
+        2. ``(platform=steam, app_id, external_id|workspace_id)`` when app_id > 0
+        3. Unambiguous steam ``external_id`` / ``workspace_id`` match
+        4. Legacy coincidence: ``mod_id == workshop_id`` steam-range row
+        """
+        iid = str(internal_id or "").strip()
+        if iid.isdigit():
+            with self._lock:
+                hit = self._conn.execute(
+                    "SELECT 1 FROM mods WHERE mod_id = ?",
+                    (int(iid),),
+                ).fetchone()
+            if hit is not None:
+                return iid
+
+        wid = str(workshop_id or "").strip()
+        if not wid.isdigit():
+            return None
+        if int(wid) >= NON_STEAM_MOD_ID_BASE:
+            return None
+        aid = int(app_id or 0)
+
+        def _one(sql: str, params: tuple[Any, ...]) -> str | None:
+            row = self._conn.execute(sql, params).fetchone()
+            if row is None:
+                return None
+            mid = str(row["mod_id"] or "").strip()
+            return mid if mid.isdigit() else None
+
+        with self._lock:
+            if aid > 0:
+                for col in ("external_id", "workspace_id"):
+                    found = _one(
+                        f"""
+                        SELECT mod_id FROM mods
+                        WHERE platform = ?
+                          AND app_id = ?
+                          AND TRIM(COALESCE({col}, '')) = ?
+                        LIMIT 1
+                        """,
+                        (PLATFORM_STEAM, aid, wid),
+                    )
+                    if found:
+                        return found
+
+            for col in ("external_id", "workspace_id"):
+                rows = self._conn.execute(
+                    f"""
+                    SELECT mod_id, app_id FROM mods
+                    WHERE platform = ?
+                      AND TRIM(COALESCE({col}, '')) = ?
+                    """,
+                    (PLATFORM_STEAM, wid),
+                ).fetchall()
+                if len(rows) == 1:
+                    mid = str(rows[0]["mod_id"] or "").strip()
+                    if mid.isdigit():
+                        return mid
+                if aid > 0 and rows:
+                    matched = [
+                        str(r["mod_id"])
+                        for r in rows
+                        if int(r["app_id"] or 0) == aid
+                        and str(r["mod_id"] or "").strip().isdigit()
+                    ]
+                    if len(matched) == 1:
+                        return matched[0]
+
+            # Legacy Steam PK == Workshop digits (historical scheme).
+            legacy = self._conn.execute(
+                """
+                SELECT mod_id, platform FROM mods WHERE mod_id = ?
+                """,
+                (int(wid),),
+            ).fetchone()
+            if legacy is not None:
+                plat = normalize_platform_if_known(str(legacy["platform"] or ""))
+                if plat in ("", PLATFORM_STEAM):
+                    return wid
+        return None
+
     def upsert_mod(self, meta: ModMetadata, *, allow_insert: bool | None = None) -> None:
         """
-        Update Steam Workshop fields for an existing row.
+        Update Steam catalog fields on an **existing** entity.
 
-        INSERT is forbidden unless *allow_insert* is true or an IdentityService
-        create scope / import lifecycle is active. Reconcile must never obtain
-        INSERT capability by passing a numeric ID.
+        Write boundary (Identity Contract)::
+
+            published_file_id  — Steam Workshop ID only (source association)
+            mods.mod_id        — resolved Internal PK; never overwritten
+
+        Flow: resolve existing entity → UPDATE by ``mods.mod_id``.
+        Catalog / Steam API paths must not INSERT. INSERT is allowed only when
+        ``allow_insert=True`` or an IdentityService create scope is active
+        (Sync/Import ``create_mod_identity``), using the historical Steam PK
+        scheme where Internal ID digits may equal Workshop ID.
         """
-        if not meta.published_file_id or not str(meta.published_file_id).isdigit():
+        workshop = str(meta.published_file_id or "").strip()
+        if not workshop.isdigit():
             return
         if not meta.title:
             return
-        mid = int(meta.published_file_id)
-        if mid >= NON_STEAM_MOD_ID_BASE:
+        if int(workshop) >= NON_STEAM_MOD_ID_BASE:
             return
-        existing = self.get_mod(str(mid))
-        if existing is None:
-            if allow_insert is None:
-                from services.identity_service import (
-                    LIFECYCLE_IMPORT,
-                    LIFECYCLE_RECONCILE,
-                    current_lifecycle,
-                    is_internal_create_allowed,
-                )
 
-                life = current_lifecycle()
-                if life == LIFECYCLE_RECONCILE:
-                    allow_insert = False
-                else:
-                    allow_insert = is_internal_create_allowed() or life in (
-                        "",
-                        LIFECYCLE_IMPORT,
-                    )
-            if not allow_insert:
-                logger.warning(
-                    "upsert_mod refused INSERT mod_id=%s (creation gate)",
-                    mid,
+        entity = self.resolve_steam_entity_mod_id(
+            workshop,
+            app_id=int(meta.app_id or 0),
+            internal_id=str(meta.internal_id or "").strip(),
+        )
+        if entity is not None:
+            mid = int(entity)
+            source = steam_workshop_url(workshop)
+            with self._lock:
+                self._conn.execute(
+                    """
+                    UPDATE mods SET
+                        app_id = CASE
+                            WHEN ? > 0 THEN ?
+                            ELSE app_id
+                        END,
+                        title = ?,
+                        preview_url = ?,
+                        description = ?,
+                        platform = CASE
+                            WHEN platform IS NULL OR TRIM(platform) = ''
+                            THEN ?
+                            ELSE platform
+                        END,
+                        source_url = CASE
+                            WHEN source_url IS NULL OR TRIM(source_url) = ''
+                            THEN ?
+                            ELSE source_url
+                        END,
+                        external_id = CASE
+                            WHEN external_id IS NULL OR TRIM(external_id) = ''
+                            THEN ?
+                            ELSE external_id
+                        END,
+                        workspace_id = CASE
+                            WHEN workspace_id IS NULL OR TRIM(workspace_id) = ''
+                            THEN ?
+                            ELSE workspace_id
+                        END
+                    WHERE mod_id = ?
+                    """,
+                    (
+                        int(meta.app_id or 0),
+                        int(meta.app_id or 0),
+                        meta.title,
+                        meta.preview_url or "",
+                        meta.description or "",
+                        PLATFORM_STEAM,
+                        source,
+                        workshop,
+                        workshop,
+                        mid,
+                    ),
                 )
-                return
-        source = steam_workshop_url(mid)
+                self._ensure_witcher3_game_version_default_locked(
+                    mid, int(meta.app_id or 0)
+                )
+                self._conn.commit()
+            return
+
+        if allow_insert is None:
+            from services.identity_service import (
+                LIFECYCLE_IMPORT,
+                LIFECYCLE_RECONCILE,
+                LIFECYCLE_SYNC,
+                current_lifecycle,
+                is_internal_create_allowed,
+            )
+
+            life = current_lifecycle()
+            if life == LIFECYCLE_RECONCILE:
+                allow_insert = False
+            else:
+                # Empty lifecycle must NOT auto-create (closes Steam API PK mint).
+                allow_insert = is_internal_create_allowed() or life in (
+                    LIFECYCLE_IMPORT,
+                    LIFECYCLE_SYNC,
+                )
+        if not allow_insert:
+            logger.warning(
+                "upsert_mod refused INSERT workshop=%s (no existing entity; "
+                "Steam published_file_id is not mods.mod_id)",
+                workshop,
+            )
+            return
+
+        # IdentityService create only — historical Steam PK may equal Workshop.
+        mid = int(workshop)
+        source = steam_workshop_url(workshop)
         with self._lock:
             self._conn.execute(
                 """
@@ -1722,10 +1968,10 @@ class DatabaseManager:
                     meta.preview_url or "",
                     meta.description or "",
                     PLATFORM_STEAM,
-                    source,  # URL from Workshop ID (platform identity)
-                    str(mid),  # external_id = Workshop ID
-                    str(mid),  # workspace_id FROM Workshop ID (equals PK by Steam scheme)
-                    _utc_now(),  # INSERT only — Sync must not bump updated_at
+                    source,
+                    workshop,
+                    workshop,
+                    _utc_now(),
                 ),
             )
             self._ensure_witcher3_game_version_default_locked(
@@ -1736,18 +1982,28 @@ class DatabaseManager:
     def upsert_mods(self, metas: Iterable[ModMetadata]) -> int:
         """Batch Steam **update** for existing rows only — never INSERT.
 
-        Entity create is Sync/Import via IdentityService only. Catalog refresh
-        must not mint Mod entities.
+        Resolves each Workshop ``published_file_id`` to ``mods.mod_id`` first.
+        Entity create is Sync/Import via IdentityService only.
         """
         rows: list[tuple[Any, ...]] = []
         for meta in metas:
-            if not meta.published_file_id or not str(meta.published_file_id).isdigit():
+            workshop = str(meta.published_file_id or "").strip()
+            if not workshop.isdigit() or not meta.title:
                 continue
-            if not meta.title:
+            if int(workshop) >= NON_STEAM_MOD_ID_BASE:
                 continue
-            mid = int(meta.published_file_id)
-            if mid >= NON_STEAM_MOD_ID_BASE:
+            entity = self.resolve_steam_entity_mod_id(
+                workshop,
+                app_id=int(meta.app_id or 0),
+                internal_id=str(meta.internal_id or "").strip(),
+            )
+            if entity is None:
+                logger.warning(
+                    "upsert_mods skipped workshop=%s (no existing entity)",
+                    workshop,
+                )
                 continue
+            mid = int(entity)
             rows.append(
                 (
                     int(meta.app_id or 0),
@@ -1755,9 +2011,9 @@ class DatabaseManager:
                     meta.preview_url or "",
                     meta.description or "",
                     PLATFORM_STEAM,
-                    steam_workshop_url(mid),
-                    str(mid),
-                    str(mid),
+                    steam_workshop_url(workshop),
+                    workshop,
+                    workshop,
                     mid,
                 )
             )
@@ -1768,11 +2024,15 @@ class DatabaseManager:
             self._conn.executemany(
                 """
                 UPDATE mods SET
-                    app_id = ?,
+                    app_id = CASE WHEN ? > 0 THEN ? ELSE app_id END,
                     title = ?,
                     preview_url = ?,
                     description = ?,
-                    platform = ?,
+                    platform = CASE
+                        WHEN platform IS NULL OR TRIM(platform) = ''
+                        THEN ?
+                        ELSE platform
+                    END,
                     source_url = CASE
                         WHEN source_url IS NULL OR TRIM(source_url) = ''
                         THEN ?
@@ -1790,7 +2050,31 @@ class DatabaseManager:
                     END
                 WHERE mod_id = ?
                 """,
-                rows,
+                [
+                    (
+                        app_id,
+                        app_id,
+                        title,
+                        preview,
+                        desc,
+                        plat,
+                        source,
+                        ext,
+                        ws,
+                        mid,
+                    )
+                    for (
+                        app_id,
+                        title,
+                        preview,
+                        desc,
+                        plat,
+                        source,
+                        ext,
+                        ws,
+                        mid,
+                    ) in rows
+                ],
             )
             updated = int(self._conn.total_changes - before)
             self._conn.commit()
@@ -2638,6 +2922,99 @@ class DatabaseManager:
             )
             self._conn.commit()
 
+    def update_mod_size_observation(
+        self,
+        mod_id: int | str,
+        *,
+        status: str,
+        size_bytes: int | None,
+        observed_at: str,
+        root_mtime: float | None,
+    ) -> None:
+        """Persist local directory size observation (not identity, not updated_at)."""
+        mid = int(str(mod_id).strip())
+        stamp = str(observed_at or "").strip()
+        state = str(status or "unknown").strip() or "unknown"
+        bytes_val: int | None
+        if size_bytes is None:
+            bytes_val = None
+        else:
+            bytes_val = int(size_bytes)
+        with self._lock:
+            present = self._conn.execute(
+                "SELECT 1 FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+            if present is None:
+                return
+            self._conn.execute(
+                """
+                UPDATE mods SET
+                    local_size_bytes = ?,
+                    local_size_status = ?,
+                    local_size_observed_at = ?,
+                    local_size_root_mtime = ?
+                WHERE mod_id = ?
+                """,
+                (bytes_val, state, stamp, root_mtime, mid),
+            )
+            self._conn.commit()
+
+    def get_mod_size_observation(self, mod_id: int | str) -> dict[str, Any] | None:
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT mod_id, last_known_path, folder_present,
+                       local_size_bytes, local_size_status,
+                       local_size_observed_at, local_size_root_mtime,
+                       fs_root_mtime
+                FROM mods WHERE mod_id = ?
+                """,
+                (mid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {str(k): row[k] for k in row.keys()}
+
+    def list_mod_size_observation_rows(
+        self,
+        *,
+        game_id: int | None = None,
+        mod_ids: list[str] | list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """SQL-only size observation rows (no filesystem walk)."""
+        clauses: list[str] = ["TRIM(COALESCE(last_known_path, '')) != ''"]
+        params: list[Any] = []
+        gid = int(game_id or 0)
+        if gid > 0:
+            clauses.append("app_id = ?")
+            params.append(gid)
+        ids = [
+            int(str(x).strip())
+            for x in (mod_ids or ())
+            if str(x).strip().isdigit()
+        ]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"mod_id IN ({placeholders})")
+            params.extend(ids)
+        where = " AND ".join(clauses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT mod_id, last_known_path, folder_present,
+                       local_size_bytes, local_size_status,
+                       local_size_observed_at, local_size_root_mtime,
+                       fs_root_mtime
+                FROM mods
+                WHERE {where}
+                ORDER BY mod_id
+                """,
+                params,
+            ).fetchall()
+        return [{str(k): row[k] for k in row.keys()} for row in rows]
+
     def update_mod_fs_observation(
         self,
         mod_id: int | str,
@@ -2674,7 +3051,9 @@ class DatabaseManager:
             row = self._conn.execute(
                 """
                 SELECT mod_id, last_known_path, folder_present,
-                       content_status, fs_observed_at, fs_root_mtime
+                       content_status, fs_observed_at, fs_root_mtime,
+                       local_size_bytes, local_size_status,
+                       local_size_observed_at, local_size_root_mtime
                 FROM mods WHERE mod_id = ?
                 """,
                 (mid,),
@@ -2797,6 +3176,11 @@ class DatabaseManager:
                     m.conflict_status,
                     m.identity_status,
                     m.is_invalid,
+                    EXISTS (
+                        SELECT 1 FROM mod_tags AS t
+                        WHERE t.mod_id = m.mod_id
+                          AND t.tag_type = '{TAG_TYPE_ABANDONED}'
+                    ) AS abandoned,
                     m.enabled,
                     m.offline_status,
                     m.external_id,
@@ -2805,6 +3189,9 @@ class DatabaseManager:
                     m.user_notes,
                     m.backup_offline_path,
                     m.updated_at,
+                    m.local_size_bytes,
+                    m.local_size_status,
+                    m.type_id,
                     COALESCE(g.name, '') AS game_name
                 FROM mods AS m
                 LEFT JOIN games AS g ON g.app_id = m.app_id
@@ -2865,6 +3252,8 @@ class DatabaseManager:
             has_offline = offline_status in ("archived", "generated") or bool(
                 backup_offline
             )
+            # Layer-1 session row key = SQLite PK. Frozen TEXT identity is
+            # mods.internal_id; business APIs must resolve via resolve_mod_pk.
             out.append(
                 {
                     "internal_id": mid,
@@ -2884,6 +3273,9 @@ class DatabaseManager:
                     "conflict": conflict_status == CONFLICT_STATUS_CONFLICT,
                     "conflict_status": conflict_status,
                     "invalid": bool(int(row["is_invalid"] or 0)),
+                    "abandoned": bool(
+                        int(row["abandoned"] or 0)
+                    ) if "abandoned" in row.keys() else False,
                     "enabled": bool(int(row["enabled"] if row["enabled"] is not None else 1)),
                     "has_offline": has_offline,
                     "mtime": updated_at_to_mtime(
@@ -2891,7 +3283,20 @@ class DatabaseManager:
                         if "updated_at" in row.keys()
                         else ""
                     ),
+                    "local_size_bytes": (
+                        None
+                        if "local_size_bytes" not in row.keys()
+                        or row["local_size_bytes"] is None
+                        else int(row["local_size_bytes"])
+                    ),
+                    "local_size_status": (
+                        str(row["local_size_status"] or "unknown").strip()
+                        or "unknown"
+                        if "local_size_status" in row.keys()
+                        else "unknown"
+                    ),
                     "category_tags": "",
+                    "type_id": _row_type_id(row),
                     "external_id": str(row["external_id"] or "").strip(),
                     "source_url": str(row["source_url"] or "").strip(),
                     "source_type": str(row["source_type"] or "").strip(),
@@ -3525,6 +3930,7 @@ class DatabaseManager:
                     m.conflict_status,
                     m.enabled,
                     m.updated_at,
+                    m.type_id,
                     COALESCE(g.name, '') AS game_name
                 FROM mods AS m
                 LEFT JOIN games AS g ON g.app_id = m.app_id
@@ -3601,6 +4007,7 @@ class DatabaseManager:
                 ),
                 enabled=enabled,
                 category_tags=" ".join(cat_map.get(mid) or []),
+                type_id=_row_type_id(row),
                 updated_at=(
                     str(row["updated_at"] or "") if "updated_at" in keys else ""
                 ),
@@ -3756,6 +4163,15 @@ class DatabaseManager:
                 if "game_version" in data:
                     self._apply_mod_game_version_locked(
                         mid, data.get("game_version")
+                    )
+                if "category" in data:
+                    text = str(data.get("category") or "").strip()
+                    self._conn.execute(
+                        """
+                        UPDATE mods SET category = ?, updated_at = ?
+                        WHERE mod_id = ?
+                        """,
+                        (text or None, now, mid),
                     )
                 self._ensure_mod_workspace_id_locked(mid)
             self._apply_user_override_flags_from_save(
@@ -4313,6 +4729,119 @@ class DatabaseManager:
             ).fetchall()
         return [str(r["name"]) for r in rows]
 
+    def list_legacy_type_names_by_game(self) -> dict[int, list[str]]:
+        """Exact ``(app_id, name)`` union of game_categories + category tags.
+
+        Legacy migration source only — not Type Definition authority.
+        """
+        names: dict[int, list[str]] = {}
+        seen: dict[int, set[str]] = {}
+        with self._lock:
+            cat_rows = self._conn.execute(
+                "SELECT app_id, name FROM game_categories ORDER BY app_id, id"
+            ).fetchall()
+            tag_rows = self._conn.execute(
+                """
+                SELECT m.app_id, t.tag_value AS name
+                FROM mod_tags AS t
+                JOIN mods AS m ON m.mod_id = t.mod_id
+                WHERE t.tag_type = ? AND t.tag_value != ''
+                ORDER BY m.app_id, t.id
+                """,
+                (TAG_TYPE_CATEGORY,),
+            ).fetchall()
+        for row in (*cat_rows, *tag_rows):
+            try:
+                aid = int(row["app_id"] or 0)
+            except (TypeError, ValueError):
+                continue
+            label = str(row["name"] or "")
+            if aid <= 0 or not label:
+                continue
+            bucket = seen.setdefault(aid, set())
+            if label in bucket:
+                continue
+            bucket.add(label)
+            names.setdefault(aid, []).append(label)
+        return names
+
+    def list_legacy_mod_type_names(self) -> list[tuple[str, int, str]]:
+        """Primary category tag per Mod: ``(mod_id, app_id, exact_name)``.
+
+        Uses the earliest ``mod_tags.id`` when a Mod has several category tags.
+        Legacy migration source only.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT m.mod_id, m.app_id, t.tag_value AS name
+                FROM mod_tags AS t
+                JOIN mods AS m ON m.mod_id = t.mod_id
+                WHERE t.tag_type = ?
+                  AND t.tag_value != ''
+                  AND t.id = (
+                    SELECT MIN(t2.id) FROM mod_tags AS t2
+                    WHERE t2.mod_id = t.mod_id
+                      AND t2.tag_type = ?
+                      AND t2.tag_value != ''
+                  )
+                """,
+                (TAG_TYPE_CATEGORY, TAG_TYPE_CATEGORY),
+            ).fetchall()
+        out: list[tuple[str, int, str]] = []
+        for row in rows:
+            try:
+                aid = int(row["app_id"] or 0)
+            except (TypeError, ValueError):
+                continue
+            label = str(row["name"] or "")
+            if aid <= 0 or not label:
+                continue
+            out.append((str(row["mod_id"]), aid, label))
+        return out
+
+    def bind_null_mod_type_ids(self, assignments: Mapping[str, int]) -> int:
+        """Set ``mods.type_id`` only where it is currently NULL. No updated_at."""
+        pairs: list[tuple[int, int]] = []
+        for raw_mid, raw_tid in (assignments or {}).items():
+            try:
+                mid = int(str(raw_mid).strip())
+                tid = int(raw_tid)
+            except (TypeError, ValueError):
+                continue
+            if mid <= 0 or tid <= 0:
+                continue
+            pairs.append((tid, mid))
+        if not pairs:
+            return 0
+        changed = 0
+        with self._lock:
+            for tid, mid in pairs:
+                cur = self._conn.execute(
+                    """
+                    UPDATE mods SET type_id = ?
+                    WHERE mod_id = ? AND type_id IS NULL
+                    """,
+                    (tid, mid),
+                )
+                changed += int(cur.rowcount or 0)
+            self._conn.commit()
+        return changed
+
+    def count_mods_and_type_bindings(self) -> tuple[int, int]:
+        """``(total mods, mods with type_id)``. No Identity reads."""
+        with self._lock:
+            total = int(self._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0])
+            bound = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM mods
+                    WHERE type_id IS NOT NULL AND type_id > 0
+                    """
+                ).fetchone()[0]
+            )
+        return total, bound
+
     def delete_game_category(self, app_id: int | str, name: str) -> bool:
         """Remove a game-defined type label. Does not strip Mod tags."""
         label = str(name or "").strip()
@@ -4558,6 +5087,489 @@ class DatabaseManager:
             self._conn.commit()
             return int(cur.rowcount or 0) > 0
 
+    # ------------------------------------------------------------------
+    # Collections (named Mod sets — browse/org only, no deploy / WH3)
+    # ------------------------------------------------------------------
+
+    def create_collection(self, app_id: int | str, name: str) -> CollectionRecord:
+        """
+        Insert a Collection for ``app_id``.
+
+        Name is stripped; empty names are rejected. Duplicate names per game
+        raise ``ValueError`` (UNIQUE COLLATE NOCASE), matching deployment records.
+        Does not write mods / deploy / WH3 load order.
+        """
+        aid = int(app_id)
+        label = str(name or "").strip()
+        if aid <= 0:
+            raise ValueError("app_id must be a positive game id")
+        if not label:
+            raise ValueError("collection name must be non-empty")
+        now = _utc_now()
+        with self._lock:
+            game = self._conn.execute(
+                "SELECT app_id FROM games WHERE app_id = ?",
+                (aid,),
+            ).fetchone()
+            if game is None:
+                raise ValueError(f"unknown game app_id={aid}")
+            row_max = self._conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) AS mx FROM collections WHERE app_id = ?",
+                (aid,),
+            ).fetchone()
+            next_order = int(row_max["mx"] or -1) + 1
+            try:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO collections (
+                        app_id, name, cover_path, sort_order, created_at, updated_at
+                    ) VALUES (?, ?, '', ?, ?, ?)
+                    """,
+                    (aid, label, next_order, now, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"collection name already exists for this game: {label!r}"
+                ) from exc
+            cid = int(cur.lastrowid)
+            self._conn.commit()
+            row = self._conn.execute(
+                """
+                SELECT collection_id, app_id, name, cover_path, sort_order,
+                       created_at, updated_at, 0 AS mod_count
+                FROM collections WHERE collection_id = ?
+                """,
+                (cid,),
+            ).fetchone()
+        assert row is not None
+        return _collection_from_row(row)
+
+    def list_collections(self, app_id: int | str) -> list[CollectionRecord]:
+        """Collections for one game, ordered by ``sort_order`` (then id)."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    c.collection_id,
+                    c.app_id,
+                    c.name,
+                    c.cover_path,
+                    c.sort_order,
+                    c.created_at,
+                    c.updated_at,
+                    (
+                        SELECT COUNT(*) FROM collection_mods AS m
+                        WHERE m.collection_id = c.collection_id
+                    ) AS mod_count
+                FROM collections AS c
+                WHERE c.app_id = ?
+                ORDER BY c.sort_order ASC, c.collection_id ASC
+                """,
+                (aid,),
+            ).fetchall()
+        return [_collection_from_row(r) for r in rows]
+
+    def get_collection(self, collection_id: int | str) -> CollectionRecord | None:
+        try:
+            cid = int(str(collection_id).strip())
+        except (TypeError, ValueError):
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT
+                    c.collection_id,
+                    c.app_id,
+                    c.name,
+                    c.cover_path,
+                    c.sort_order,
+                    c.created_at,
+                    c.updated_at,
+                    (
+                        SELECT COUNT(*) FROM collection_mods AS m
+                        WHERE m.collection_id = c.collection_id
+                    ) AS mod_count
+                FROM collections AS c
+                WHERE c.collection_id = ?
+                """,
+                (cid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _collection_from_row(row)
+
+    def rename_collection(
+        self, collection_id: int | str, name: str
+    ) -> CollectionRecord:
+        cid = int(str(collection_id).strip())
+        label = str(name or "").strip()
+        if not label:
+            raise ValueError("collection name must be non-empty")
+        now = _utc_now()
+        with self._lock:
+            existing = self._conn.execute(
+                """
+                SELECT collection_id, app_id, name FROM collections
+                WHERE collection_id = ?
+                """,
+                (cid,),
+            ).fetchone()
+            if existing is None:
+                raise LookupError(f"collection not found: {cid}")
+            clash = self._conn.execute(
+                """
+                SELECT collection_id FROM collections
+                WHERE app_id = ? AND name = ? COLLATE NOCASE
+                  AND collection_id != ?
+                LIMIT 1
+                """,
+                (int(existing["app_id"]), label, cid),
+            ).fetchone()
+            if clash is not None:
+                raise ValueError(
+                    f"collection name already exists for this game: {label!r}"
+                )
+            self._conn.execute(
+                """
+                UPDATE collections SET name = ?, updated_at = ?
+                WHERE collection_id = ?
+                """,
+                (label, now, cid),
+            )
+            self._conn.commit()
+        found = self.get_collection(cid)
+        assert found is not None
+        return found
+
+    def update_collection_cover_path(
+        self, collection_id: int | str, cover_path: str
+    ) -> CollectionRecord:
+        """Set ``collections.cover_path`` (relative to ``data_dir()``). No schema change."""
+        cid = int(str(collection_id).strip())
+        value = str(cover_path or "").strip()
+        now = _utc_now()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT collection_id FROM collections WHERE collection_id = ?",
+                (cid,),
+            ).fetchone()
+            if existing is None:
+                raise LookupError(f"collection not found: {cid}")
+            self._conn.execute(
+                """
+                UPDATE collections SET cover_path = ?, updated_at = ?
+                WHERE collection_id = ?
+                """,
+                (value, now, cid),
+            )
+            self._conn.commit()
+        found = self.get_collection(cid)
+        assert found is not None
+        return found
+
+    def delete_collection(self, collection_id: int | str) -> bool:
+        """
+        Delete a Collection and its memberships.
+
+        Does not delete ``mods`` rows, metadata, files, or deploy / WH3 state.
+        """
+        cid = int(str(collection_id).strip())
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM collection_mods WHERE collection_id = ?",
+                (cid,),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM collections WHERE collection_id = ?",
+                (cid,),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0) > 0
+
+    def reorder_collections(
+        self,
+        app_id: int | str,
+        ordered_ids: Sequence[int | str],
+    ) -> list[CollectionRecord]:
+        """Persist Collection list order for ``app_id``. Does not touch WH3."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return []
+        wanted: list[int] = []
+        seen: set[int] = set()
+        for raw in ordered_ids or ():
+            try:
+                cid = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0 or cid in seen:
+                continue
+            seen.add(cid)
+            wanted.append(cid)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT collection_id FROM collections
+                WHERE app_id = ?
+                ORDER BY sort_order ASC, collection_id ASC
+                """,
+                (aid,),
+            ).fetchall()
+            existing = [int(r["collection_id"]) for r in rows]
+            existing_set = set(existing)
+            final = [cid for cid in wanted if cid in existing_set]
+            for cid in existing:
+                if cid not in seen:
+                    final.append(cid)
+            now = _utc_now()
+            for index, cid in enumerate(final):
+                self._conn.execute(
+                    """
+                    UPDATE collections
+                    SET sort_order = ?, updated_at = ?
+                    WHERE collection_id = ? AND app_id = ?
+                    """,
+                    (index, now, cid, aid),
+                )
+            self._conn.commit()
+        return self.list_collections(aid)
+
+    def list_collection_member_ids(self, collection_id: int | str) -> list[str]:
+        """Membership FK values (``mods.mod_id`` as text) in one Collection."""
+        cid = int(str(collection_id).strip())
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id FROM collection_mods
+                WHERE collection_id = ?
+                ORDER BY id ASC
+                """,
+                (cid,),
+            ).fetchall()
+        out: list[str] = []
+        for row in rows:
+            raw = str(row["mod_id"] or "").strip()
+            if raw.isdigit():
+                out.append(str(int(raw)))
+            elif raw:
+                out.append(raw)
+        return out
+
+    def add_mod_to_collection(
+        self,
+        collection_id: int | str,
+        internal_id: int | str,
+    ) -> bool:
+        """
+        Add a Mod to a Collection by SQLite PK (``collection_mods.mod_id``).
+
+        Business callers must resolve Frozen TEXT ``internal_id`` first
+        (``services.collection``). INSERT OR IGNORE on UNIQUE(collection_id, mod_id).
+        Never writes mods.
+        """
+        return bool(self.add_mods_to_collection(collection_id, [internal_id]))
+
+    def add_mods_to_collection(
+        self,
+        collection_id: int | str,
+        internal_ids: Iterable[int | str],
+    ) -> int:
+        """Batch membership insert in one transaction. Returns rows inserted."""
+        cid = int(str(collection_id).strip())
+        ids = _normalize_mod_id_list(internal_ids)
+        if not ids:
+            return 0
+        now = _utc_now()
+        inserted = 0
+        with self._lock:
+            coll = self._conn.execute(
+                "SELECT collection_id, app_id FROM collections WHERE collection_id = ?",
+                (cid,),
+            ).fetchone()
+            if coll is None:
+                raise LookupError(f"collection not found: {cid}")
+            app_id = int(coll["app_id"])
+            placeholders = ",".join("?" for _ in ids)
+            owned = self._conn.execute(
+                f"""
+                SELECT mod_id FROM mods
+                WHERE mod_id IN ({placeholders}) AND app_id = ?
+                """,
+                [*ids, app_id],
+            ).fetchall()
+            owned_ids = {int(r["mod_id"]) for r in owned}
+            missing = [mid for mid in ids if mid not in owned_ids]
+            if missing:
+                raise ValueError(
+                    f"mod Internal ID not in this game: {missing[0]}"
+                )
+            for mid in ids:
+                cur = self._conn.execute(
+                    """
+                    INSERT OR IGNORE INTO collection_mods (
+                        collection_id, mod_id, created_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (cid, mid, now),
+                )
+                inserted += int(cur.rowcount or 0)
+            if inserted:
+                self._conn.execute(
+                    "UPDATE collections SET updated_at = ? WHERE collection_id = ?",
+                    (now, cid),
+                )
+            self._conn.commit()
+        return inserted
+
+    def remove_mod_from_collection(
+        self,
+        collection_id: int | str,
+        internal_id: int | str,
+    ) -> bool:
+        """Drop membership only — never deletes the Mod row."""
+        return bool(
+            self.remove_mods_from_collection(collection_id, [internal_id])
+        )
+
+    def remove_mods_from_collection(
+        self,
+        collection_id: int | str,
+        internal_ids: Iterable[int | str],
+    ) -> int:
+        cid = int(str(collection_id).strip())
+        ids = _normalize_mod_id_list(internal_ids)
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            cur = self._conn.execute(
+                f"""
+                DELETE FROM collection_mods
+                WHERE collection_id = ? AND mod_id IN ({placeholders})
+                """,
+                [cid, *ids],
+            )
+            removed = int(cur.rowcount or 0)
+            if removed:
+                self._conn.execute(
+                    "UPDATE collections SET updated_at = ? WHERE collection_id = ?",
+                    (_utc_now(), cid),
+                )
+            self._conn.commit()
+        return removed
+
+    def list_collection_ids_for_mods(
+        self, internal_ids: Iterable[int | str]
+    ) -> dict[str, set[int]]:
+        """Map Internal ID ``str(mods.mod_id)`` → Collection ids. Never workspace_id."""
+        ids = _normalize_mod_id_list(internal_ids)
+        out: dict[str, set[int]] = {str(mid): set() for mid in ids}
+        if not ids:
+            return out
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT collection_id, mod_id FROM collection_mods
+                WHERE mod_id IN ({placeholders})
+                """,
+                ids,
+            ).fetchall()
+        for row in rows:
+            mid = str(int(row["mod_id"]))
+            if mid in out:
+                out[mid].add(int(row["collection_id"]))
+        return out
+
+    def apply_collection_memberships(
+        self,
+        app_id: int | str,
+        internal_ids: Iterable[int | str],
+        add_collection_ids: Iterable[int | str],
+        remove_collection_ids: Iterable[int | str],
+    ) -> tuple[int, int]:
+        """
+        One-transaction membership apply for selected Mods.
+
+        Adds ``internal_ids`` to ``add_collection_ids`` and removes them from
+        ``remove_collection_ids``. Does not write mods / deploy / WH3.
+        Returns ``(inserted, removed)`` row counts.
+        """
+        aid = int(app_id)
+        mods = _normalize_mod_id_list(internal_ids)
+        add_ids = _normalize_positive_id_list(add_collection_ids)
+        remove_ids = _normalize_positive_id_list(remove_collection_ids)
+        if aid <= 0 or not mods or (not add_ids and not remove_ids):
+            return (0, 0)
+        now = _utc_now()
+        inserted = 0
+        removed = 0
+        with self._lock:
+            owned = self._conn.execute(
+                f"""
+                SELECT mod_id FROM mods
+                WHERE mod_id IN ({",".join("?" for _ in mods)}) AND app_id = ?
+                """,
+                [*mods, aid],
+            ).fetchall()
+            owned_ids = {int(r["mod_id"]) for r in owned}
+            missing = [mid for mid in mods if mid not in owned_ids]
+            if missing:
+                raise ValueError(
+                    f"mod Internal ID not in this game: {missing[0]}"
+                )
+            wanted = list(dict.fromkeys([*add_ids, *remove_ids]))
+            coll_rows = self._conn.execute(
+                f"""
+                SELECT collection_id FROM collections
+                WHERE app_id = ? AND collection_id IN ({",".join("?" for _ in wanted)})
+                """,
+                [aid, *wanted],
+            ).fetchall()
+            legal = {int(r["collection_id"]) for r in coll_rows}
+            add_ids = [cid for cid in add_ids if cid in legal]
+            remove_ids = [cid for cid in remove_ids if cid in legal]
+            if not add_ids and not remove_ids:
+                return (0, 0)
+            touched: set[int] = set()
+            for cid in add_ids:
+                for mid in mods:
+                    cur = self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO collection_mods (
+                            collection_id, mod_id, created_at
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (cid, mid, now),
+                    )
+                    n = int(cur.rowcount or 0)
+                    inserted += n
+                    if n:
+                        touched.add(cid)
+            for cid in remove_ids:
+                cur = self._conn.execute(
+                    f"""
+                    DELETE FROM collection_mods
+                    WHERE collection_id = ?
+                      AND mod_id IN ({",".join("?" for _ in mods)})
+                    """,
+                    [cid, *mods],
+                )
+                n = int(cur.rowcount or 0)
+                removed += n
+                if n:
+                    touched.add(cid)
+            for cid in touched:
+                self._conn.execute(
+                    "UPDATE collections SET updated_at = ? WHERE collection_id = ?",
+                    (now, cid),
+                )
+            self._conn.commit()
+        return (inserted, removed)
+
     def list_deployed_mod_ids_for_app(self, app_id: int | str) -> list[str]:
         """Mod IDs with ``deploy_status=deployed`` for one game (read-only)."""
         aid = int(app_id or 0)
@@ -4657,6 +5669,139 @@ class DatabaseManager:
             self.remove_category_tag(mod_id, tag)
         if label:
             self.add_category_tag(mod_id, label)
+
+    def get_mod_type_id(self, mod_id: int | str) -> int | None:
+        mid = int(str(mod_id).strip())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT type_id FROM mods WHERE mod_id = ?",
+                (mid,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_type_id(row)
+
+    def set_mod_type_id(
+        self,
+        mod_id: int | str,
+        type_id: int | str | None,
+        *,
+        touch_updated_at: bool = True,
+    ) -> None:
+        """Bind this Mod to a game-scoped Type ID (None clears). Never stores a name."""
+        mid = int(str(mod_id).strip())
+        tid = None
+        if type_id is not None and str(type_id).strip() != "":
+            try:
+                parsed = int(str(type_id).strip())
+            except (TypeError, ValueError):
+                parsed = 0
+            tid = parsed if parsed > 0 else None
+        with self._lock:
+            if touch_updated_at:
+                now = _mods_updated_at_now(reason="user_edit")
+                self._conn.execute(
+                    "UPDATE mods SET type_id = ?, updated_at = ? WHERE mod_id = ?",
+                    (tid, now, mid),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE mods SET type_id = ? WHERE mod_id = ?",
+                    (tid, mid),
+                )
+            self._conn.commit()
+
+    def list_mod_ids_with_type(self, app_id: int | str, type_id: int | str) -> list[str]:
+        aid = int(app_id or 0)
+        try:
+            tid = int(str(type_id).strip())
+        except (TypeError, ValueError):
+            return []
+        if aid <= 0 or tid <= 0:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id FROM mods
+                WHERE app_id = ? AND type_id = ?
+                """,
+                (aid, tid),
+            ).fetchall()
+        return [str(r["mod_id"]) for r in rows]
+
+    def clear_mods_type_id(self, app_id: int | str, type_id: int | str) -> int:
+        """Unbind every Mod in *app_id* from *type_id*. Does not bump updated_at."""
+        aid = int(app_id or 0)
+        try:
+            tid = int(str(type_id).strip())
+        except (TypeError, ValueError):
+            return 0
+        if aid <= 0 or tid <= 0:
+            return 0
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE mods SET type_id = NULL
+                WHERE app_id = ? AND type_id = ?
+                """,
+                (aid, tid),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def list_app_ids_with_type_bindings(self) -> list[int]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT app_id FROM mods
+                WHERE type_id IS NOT NULL AND type_id > 0
+                """
+            ).fetchall()
+        out: list[int] = []
+        for row in rows:
+            try:
+                aid = int(row["app_id"] or 0)
+            except (TypeError, ValueError):
+                continue
+            if aid > 0:
+                out.append(aid)
+        return out
+
+    def clear_orphan_mod_type_ids(
+        self, app_id: int | str, valid_type_ids: Iterable[int]
+    ) -> int:
+        """NULL type_id values in *app_id* that are not in *valid_type_ids*."""
+        aid = int(app_id or 0)
+        if aid <= 0:
+            return 0
+        valid = sorted(
+            {
+                int(x)
+                for x in (valid_type_ids or ())
+                if str(x).strip().lstrip("-").isdigit() and int(x) > 0
+            }
+        )
+        with self._lock:
+            if not valid:
+                cur = self._conn.execute(
+                    """
+                    UPDATE mods SET type_id = NULL
+                    WHERE app_id = ? AND type_id IS NOT NULL
+                    """,
+                    (aid,),
+                )
+            else:
+                placeholders = ",".join("?" for _ in valid)
+                cur = self._conn.execute(
+                    f"""
+                    UPDATE mods SET type_id = NULL
+                    WHERE app_id = ? AND type_id IS NOT NULL
+                      AND type_id NOT IN ({placeholders})
+                    """,
+                    (aid, *valid),
+                )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
 
     def append_identity_audit_log(
         self,
@@ -5013,8 +6158,9 @@ class DatabaseManager:
         REMOVED as an identity API — always returns ``None``.
 
         ``workspace_id`` cannot locate a Mod entity. Callers must pass
-        Internal ID (``mods.mod_id``) or resolve via
-        ``(platform, app_id, external_id)``.
+        Frozen ``internal_id`` (TEXT) resolved to ``mods.mod_id``, or a PK
+        handle. Never ``workspace_id``. Registration rematch uses
+        ``(platform, app_id, workspace_id)`` via ``find_mod_for_registration``.
         """
         _ = (workspace_id, app_id)
         return None
@@ -5269,15 +6415,22 @@ class DatabaseManager:
 
 def _normalize_mod_id_list(mod_ids: Iterable[int | str]) -> list[int]:
     """Deduped positive integer mod ids preserving first-seen order."""
+    return _normalize_positive_id_list(mod_ids, label="mod_id")
+
+
+def _normalize_positive_id_list(
+    values: Iterable[int | str], *, label: str = "id"
+) -> list[int]:
+    """Deduped positive integer ids preserving first-seen order."""
     seen: set[int] = set()
     out: list[int] = []
-    for raw in mod_ids or ():
+    for raw in values or ():
         text = str(raw).strip()
         if not text.isdigit():
-            raise ValueError(f"invalid mod_id: {raw!r}")
+            raise ValueError(f"invalid {label}: {raw!r}")
         mid = int(text)
         if mid <= 0:
-            raise ValueError(f"invalid mod_id: {raw!r}")
+            raise ValueError(f"invalid {label}: {raw!r}")
         if mid in seen:
             continue
         seen.add(mid)
@@ -5318,6 +6471,20 @@ def _deployment_record_from_row(row: sqlite3.Row) -> DeploymentRecord:
         name=str(row["name"] or ""),
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
+    )
+
+
+def _collection_from_row(row: sqlite3.Row) -> CollectionRecord:
+    keys = set(row.keys())
+    return CollectionRecord(
+        collection_id=int(row["collection_id"]),
+        app_id=int(row["app_id"]),
+        name=str(row["name"] or ""),
+        cover_path=str(row["cover_path"] or "") if "cover_path" in keys else "",
+        sort_order=int(row["sort_order"] or 0) if "sort_order" in keys else 0,
+        created_at=str(row["created_at"] or ""),
+        updated_at=str(row["updated_at"] or ""),
+        mod_count=int(row["mod_count"] or 0) if "mod_count" in keys else 0,
     )
 
 
@@ -5398,10 +6565,46 @@ def _mod_relationship_from_row(row: sqlite3.Row) -> ModRelationship:
     )
 
 
+def _row_type_id(row: sqlite3.Row | Mapping[str, Any]) -> int | None:
+    try:
+        keys = row.keys()
+    except Exception:  # noqa: BLE001
+        keys = ()
+    if "type_id" not in keys:
+        return None
+    raw = row["type_id"]
+    if raw is None or raw == "":
+        return None
+    try:
+        tid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return tid if tid > 0 else None
+
+
 def _mod_from_row(row: sqlite3.Row) -> ModMetadata:
     keys = row.keys()
+    mid = str(row["mod_id"])
+    # Workshop axis only — never invent published_file_id from Internal PK.
+    # Steam historical rows may still have PK == Workshop; callers that need
+    # the entity key must use ``internal_id`` / ``entity_internal_id()``.
+    ext = str(row["external_id"] or "") if "external_id" in keys else ""
+    plat = str(row["platform"] or "") if "platform" in keys else ""
+    pub = ""
+    try:
+        from services.identity_service import sidecar_published_file_id
+
+        pub = sidecar_published_file_id(
+            mod_id=mid, platform=plat, external_id=ext
+        )
+    except Exception:  # noqa: BLE001
+        pub = ""
+    if not pub and not is_internal_mod_id(mid):
+        # Legacy Steam PK==Workshop coincidence — keep Workshop-shaped token.
+        pub = mid
     return ModMetadata(
-        published_file_id=str(row["mod_id"]),
+        published_file_id=pub,
+        internal_id=mid,
         title=str(row["title"] or ""),
         description=str(row["description"] or ""),
         preview_url=str(row["preview_url"] or ""),
@@ -5495,6 +6698,10 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
     game_version = ""
     if "game_version" in keys and row["game_version"] is not None:
         game_version = str(row["game_version"] or "").strip()
+    category = ""
+    if "category" in keys and row["category"] is not None:
+        category = str(row["category"] or "").strip()
+    type_id = _row_type_id(row) if "type_id" in keys else None
     workspace_id = (
         str(row["workspace_id"] or "") if "workspace_id" in keys else ""
     )
@@ -5535,6 +6742,8 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
         offline_updated_at=offline_updated_at,
         cover_path=cover_path,
         game_version=game_version,
+        category=category,
+        type_id=type_id,
     )
 
 

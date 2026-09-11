@@ -462,20 +462,32 @@ def restore_info_sidecar_from_backup(
     """
     Restore ``.info`` from backup for an **existing** DB entity only.
 
+    ``mod_id`` may be Frozen TEXT ``internal_id`` or a PK handle. Restore
+    matches ``backup.internal_id == mods.internal_id``. The backup directory
+    name remains storage organization (``data/mod_backup/<mod_id>/``) and
+    is not Frozen identity.
+
     Refuses when backup identity does not match the DB row (no create, no
     guess, no fallback).
     """
-    mid = str(mod_id).strip()
+    from core.db_manager import get_db
+    from services.identity_service import resolve_mod_pk
+
     folder = Path(managed_path)
+    if not folder.is_dir():
+        return False
+    try:
+        database = db if db is not None else get_db()
+        mid = resolve_mod_pk(mod_id, db=database)
+    except Exception:  # noqa: BLE001
+        logger.debug("restore identity resolve failed", exc_info=True)
+        return False
     if not mid.isdigit() or not folder.is_dir():
         return False
     info_meta = folder / INFO_DIR_NAME / METADATA_FILENAME
     if info_meta.is_file():
         return False
     try:
-        from core.db_manager import get_db
-
-        database = db if db is not None else get_db()
         row = database.get_mod_backup_row(mid)
         if row is None:
             return False
@@ -521,8 +533,8 @@ def restore_info_sidecar_from_backup(
         # workspace_id is display/registration only — never a restore ownership key.
         _ = bak_ws, row_ws
 
-        # Stamp DB authority onto restored sidecar.
-        payload["internal_id"] = row_uuid or bak_uuid or mid
+        # Stamp DB authority onto restored sidecar. Never collapse to PK.
+        payload["internal_id"] = row_uuid or bak_uuid
         if row_ws:
             payload["workspace_id"] = row_ws
         if row_plat:
@@ -553,8 +565,10 @@ def sync_metadata_backup(
     Prefer :func:`services.metadata_backup_sync.sync_after_metadata_change`
     for write-event callers (adds reason logging + validation status).
 
-    ``mod_id`` must be the Internal Database ID when provided. Ownership is never
-    taken from workspace_id / external_id / published_file_id / folder name.
+    ``mod_id`` must be the SQLite PK (or a token ``resolve_mod_pk`` already
+    mapped). Ownership is never taken from workspace_id / external_id /
+    published_file_id / folder name. Frozen restore proof is
+    ``backup.internal_id == mods.internal_id``.
 
     When the Mod folder exists: snapshot ``.info`` → backup, mark folder present.
     When absent: mark missing only (does not create backup).

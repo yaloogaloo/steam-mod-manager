@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.helpers.deploy import patch_apply_then_unlink_targets
+
 import pytest
 
 from core.db_manager import (
@@ -23,6 +25,7 @@ from services.deploy_rules.manifest import (
     ManifestFileEntry,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 
 @pytest.fixture()
@@ -40,6 +43,7 @@ def _write_meta(mod_dir: Path, *, mid: str, title: str, app_id: int, game: str) 
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
+                "internal_id": mid,
                 "published_file_id": mid,
                 "title": title,
                 "app_id": app_id,
@@ -81,7 +85,8 @@ def _add_mod(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     _write_meta(mod, mid=mid, title=title, app_id=app_id, game="SomeGame")
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=app_id))
+    create_steam_test_mod(db, external_id=mid, title=title, app_id=app_id)
+    bind_managed_path(db, mid, mod, title=title)
     return mod
 
 
@@ -123,13 +128,18 @@ def test_case2_restore_game_original(tmp_path: Path, db: DatabaseManager) -> Non
     assert manifest is not None
     backed = [f for f in manifest.files if f.backup is not None]
     assert len(backed) == 1
-    assert Path(source / backed[0].backup.path).is_file()  # type: ignore[union-attr]
-    assert (source / INFO_DIR_NAME / BACKUPS_DIRNAME).is_dir()
+    bak = BackupManager(source, internal_id="92002").resolve_backup_file(
+        backed[0].backup  # type: ignore[union-attr]
+    )
+    assert bak.is_file()
+    assert not (source / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
+    assert "deploy_backup" in bak.as_posix()
 
     und = deployer.undeploy_mod("92002")
     assert und["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME-ORIGINAL"
     assert not (source / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
+    assert not BackupManager(source, internal_id="92002").listed_backup_files()
 
 
 def test_case3_multi_file_restore(tmp_path: Path, db: DatabaseManager) -> None:
@@ -173,15 +183,9 @@ def test_case4_deploy_failure_auto_restore(tmp_path: Path, db: DatabaseManager) 
 
     deployer = ModDeployer(library_root=library, db=db)
 
-    def boom(self, ctx):  # noqa: ANN001
-        # Simulate partial overwrite then hard failure
-        target = mods_root / "FailMod" / "a.txt"
-        target.write_text("PARTIAL-MOD", encoding="utf-8")
-        raise RuntimeError("simulated deploy failure")
-
-    with patch(
-        "services.deploy_rules.generic.FolderCopyStrategy.deploy",
-        boom,
+    with patch_apply_then_unlink_targets(
+        partial_write=(mods_root / "FailMod" / "a.txt", "PARTIAL-MOD"),
+        raise_after=RuntimeError("simulated deploy failure"),
     ):
         with pytest.raises(RuntimeError, match="simulated deploy failure"):
             deployer.deploy_mod("92004")

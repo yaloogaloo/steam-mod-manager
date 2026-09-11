@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -64,16 +65,8 @@ def test_detail_refresh_after_offline_save_mutation(
     )
     (folder / "mod.dll").write_bytes(b"dll")
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title="Offline Save Meta Title",
-            description="Keep this description after save.",
-            source_type=PLATFORM_STEAM,
-            url=meta_payload["url"],
-            author="OfflineAuthor",
-        )
-    )
+    create_steam_test_mod(db, external_id=mid, title="Offline Save Meta Title")
+
     db.update_mod_identity_fields(
         mid,
         folder_present=True,
@@ -129,9 +122,8 @@ def test_path_only_show_mod_blanks_without_internal_id(
         ),
         encoding="utf-8",
     )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="Should Not Vanish", author="PathOnlyAuthor")
-    )
+    create_steam_test_mod(db, external_id=mid, title="Should Not Vanish")
+
     db.update_mod_identity_fields(
         mid, folder_present=True, last_known_path=str(folder)
     )

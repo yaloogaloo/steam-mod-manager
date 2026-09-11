@@ -10,6 +10,7 @@ from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_remove import ModRemover
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 
 
 @pytest.fixture()
@@ -38,7 +39,18 @@ def test_remove_mod_deletes_library_and_db(tmp_path: Path, db: DatabaseManager) 
     db.update_game_deploy_config(
         1, name="Game", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
-    db.upsert_mod(ModMetadata(published_file_id="9901", title="R", app_id=1))
+    created = create_steam_test_mod(db, external_id="9901", title="R", app_id=1)
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
+        title="R",
+        external_id="9901",
+        workspace_id=str(created.workspace_id or "9901"),
+        app_id=1,
+        game_name="Game",
+    )
+    bind_managed_path(db, created.mod_id, folder, title="R", game_name="Game")
+
     db.add_category_tag(9901, "Fix")
 
     out = ModRemover(library, db=db).remove_mod(9901)

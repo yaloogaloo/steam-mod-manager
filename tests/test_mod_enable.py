@@ -10,6 +10,7 @@ from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -22,7 +23,8 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 
 def test_enable_disable_roundtrip(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="801", title="E"))
+    create_steam_test_mod(db, external_id="801", title="E")
+
     assert db.is_mod_enabled(801) is True
     assert db.disable_mod(801) is False
     assert db.is_mod_enabled(801) is False
@@ -45,7 +47,8 @@ def test_disabled_cannot_deploy(tmp_path: Path, db: DatabaseManager) -> None:
     db.update_game_deploy_config(
         1, name="Game", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
-    db.upsert_mod(ModMetadata(published_file_id="801", title="E", app_id=1))
+    create_steam_test_mod(db, external_id="801", title="E", app_id=1)
+
     db.disable_mod(801)
 
     out = ModDeployer(library_root=library, db=db).deploy_mod(801)

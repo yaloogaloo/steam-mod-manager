@@ -42,16 +42,30 @@ _tmp_*
 *.db-wal
 *.db-shm
 
+# Local temporary development artifacts (reports / audits / dumps / probes)
+# Prefer this tree over repo root, docs/, or data/ for one-shot outputs.
+_tmp/
+
 # Identity / deploy audit outputs (regenerable; never commit)
 tools/_audit_out/
 tools/identity_recovery_rollback/
 tools/_tmp_*
 tools/_tmp_dup_*
 
-# One-off live snapshots under docs (keep formal .md)
+# One-off JSON / live snapshots must not live under docs/ (keep formal .md)
+docs/*.json
 docs/_p0_*_live_snapshot.json
 docs/_phase_*_live_snapshot.json
 docs/p0_data_hygiene_inventory.json
+
+# Accidental audit dumps at repo root (use _tmp/audits/ or tools/_audit_out/)
+/p0_*.json
+/_phase*.json
+/*_audit*.json
+/*_pollution*.json
+/*_forensic*.json
+/*_probe*.json
+/*_dump*.json
 
 # Qt / PySide caches
 *.qmlc

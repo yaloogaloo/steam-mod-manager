@@ -188,12 +188,10 @@ def test_reconcile_unchanged_10000_mods_backup_queue_zero(
         )
         db._conn.commit()
 
-    # Minimal on-disk presence for path checks; identity bind is stubbed unchanged.
-    for folder in folders:
-        folder.mkdir(parents=True, exist_ok=True)
+    # Minimal Path objects — discovery stubbed (avoid 10k NTFS mkdir wall time).
+    folders = [library / game / f"Mod{i:05d}" for i in range(n)]
 
     def _ensure(folder, raw=None, db=None):
-        mid = str(Path(folder).name).replace("Mod", "")
         # Map Mod00000 → 2000000+index via folder name digits.
         idx = int("".join(ch for ch in Path(folder).name if ch.isdigit()) or "0")
         mid = str(2_000_000 + idx)
@@ -213,6 +211,33 @@ def test_reconcile_unchanged_10000_mods_backup_queue_zero(
     monkeypatch.setattr(
         "services.library_reconcile.read_info_metadata_dict",
         lambda folder: {"title": Path(folder).name},
+    )
+    monkeypatch.setattr(
+        "services.file_ops.ModFileManager.list_managed_mods",
+        lambda self: folders,
+    )
+    monkeypatch.setattr(
+        "services.path_lifecycle.detect_path_drift",
+        lambda *_a, **_k: None,
+    )
+    # Status recovery / content eval / identity persist rewrite sidecars for
+    # every folder — out of scope for the backup-queue contract and dominate
+    # wall time at 10k scale.
+    monkeypatch.setattr(
+        "services.status_recovery.run_status_recovery",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "services.status_recovery.run_status_model_cleanup_v2",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "services.identity_service.persist_identity",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "services.content_status_eval.persist_evaluated_content_status",
+        lambda *_a, **_k: None,
     )
 
     dirty_calls: list[tuple] = []
