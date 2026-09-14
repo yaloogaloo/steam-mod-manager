@@ -8,14 +8,12 @@ import pytest
 
 from core.db_manager import RELATIONSHIP_CONFLICT, DatabaseManager
 from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
-from core.models import ModMetadata
 from services.conflict import ConflictClass, ConflictDetector, ConflictType
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestFileEntry,
     save_manifest,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_invariants import (
     CONFLICT_DETECTOR_AUTO_CREATES_RELATIONSHIP,
     CONFLICT_DETECTOR_CREATES_IDENTITY,
@@ -28,7 +26,7 @@ from services.identity_invariants import (
     scan_reconcile_identity_lifecycle,
 )
 from services.user_annotation import clear_conflict_annotation, set_conflict_annotation
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 ANNO_0360 = "9000000000000360"
@@ -46,15 +44,27 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(library: Path, mid: str, *, title: str = "") -> Path:
+def _seed_folder(library: Path, mid: str, *, title: str = "") -> Path:
+    """Filesystem-only seed (Anno forced-PK forensic path uses this + SQL INSERT)."""
     folder = library / "Game" / (title or mid)
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"published_file_id":"{mid}","title":"{title or mid}","workspace_id":""}}',
-        encoding="utf-8",
-    )
+    folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def _seed(
+    library: Path,
+    db: DatabaseManager,
+    *,
+    external_id: str,
+    title: str = "",
+) -> tuple[Path, str]:
+    folder = _seed_folder(library, external_id, title=title)
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title or external_id
+    )
+    pk = str(created.mod_id)
+    prove_managed_folder(db, folder, handle=pk, title=title or external_id)
+    return folder, pk
 
 
 def _write_targets(folder: Path, mid: str, targets: list[str]) -> None:
@@ -109,36 +119,32 @@ def _rel_count(db: DatabaseManager) -> int:
 def test_a_same_input_same_diagnostic(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "a.dll").resolve())
-    a = _seed(library, "901")
-    b = _seed(library, "902")
-    _write_targets(a, "901", [shared])
-    _write_targets(b, "902", [shared])
-    create_steam_test_mod(db, external_id="901", title="A")
-    create_steam_test_mod(db, external_id="902", title="B")
+    a, pk_a = _seed(library, db, external_id="901", title="A")
+    b, pk_b = _seed(library, db, external_id="902", title="B")
+    _write_targets(a, pk_a, [shared])
+    _write_targets(b, pk_b, [shared])
     det = ConflictDetector(library, db=db)
     first = det.check_all_mods(persist=False)
     second = det.check_all_mods(persist=False)
-    assert first["901"].conflicts[0].as_dict() == second["901"].conflicts[0].as_dict()
-    assert first["901"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
-    assert first["901"].traces[0].rule_id == "FILE_OVERWRITE.identical_resolved_target"
-    assert first["901"].traces[0].overlap_count == 1
+    assert first[pk_a].conflicts[0].as_dict() == second[pk_a].conflicts[0].as_dict()
+    assert first[pk_a].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
+    assert first[pk_a].traces[0].rule_id == "FILE_OVERWRITE.identical_resolved_target"
+    assert first[pk_a].traces[0].overlap_count == 1
 
 
 def test_b_path_overlap_is_diagnostic_only(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "shared.pak").resolve())
-    a = _seed(library, "911")
-    b = _seed(library, "912")
-    _write_targets(a, "911", [shared])
-    _write_targets(b, "912", [shared])
-    create_steam_test_mod(db, external_id="911", title="A")
-    create_steam_test_mod(db, external_id="912", title="B")
+    a, pk_a = _seed(library, db, external_id="911", title="A")
+    b, pk_b = _seed(library, db, external_id="912", title="B")
+    _write_targets(a, pk_a, [shared])
+    _write_targets(b, pk_b, [shared])
     before_rel = _rel_count(db)
     before_count = db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0]  # noqa: SLF001
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["911"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
-    assert reports["911"].status == CONFLICT_STATUS_NONE
-    assert db.get_mod_status(911).conflict_status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
     assert _rel_count(db) == before_rel == 0
     assert db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0] == before_count  # noqa: SLF001
 
@@ -146,20 +152,22 @@ def test_b_path_overlap_is_diagnostic_only(tmp_path: Path, db: DatabaseManager) 
 def test_c_resolve_survives_persist_rescan(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "foo.dll").resolve())
+    pks: list[str] = []
     for mid in ("921", "922"):
-        folder = _seed(library, mid)
-        _write_targets(folder, mid, [shared])
-        create_steam_test_mod(db, external_id=mid, title=f"M{mid}")
+        folder, pk = _seed(library, db, external_id=mid, title=f"M{mid}")
+        _write_targets(folder, pk, [shared])
+        pks.append(pk)
+    pk_a = pks[0]
     det = ConflictDetector(library, db=db)
     det.check_all_mods(persist=True)
-    assert db.get_mod_status(921).conflict_status == CONFLICT_STATUS_NONE
-    set_conflict_annotation(921, note="user", db=db)
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
+    set_conflict_annotation(pk_a, note="user", db=db)
     det.check_all_mods(persist=True)
-    assert db.get_mod_status(921).conflict_status == CONFLICT_STATUS_CONFLICT
-    clear_conflict_annotation(921, db=db)
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_CONFLICT
+    clear_conflict_annotation(pk_a, db=db)
     det.check_all_mods(persist=True)
-    assert db.get_mod_status(921).conflict_status == CONFLICT_STATUS_NONE
-    report = det.check_all_mods(persist=False)["921"]
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
+    report = det.check_all_mods(persist=False)[pk_a]
     assert report.conflicts
     assert report.conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
@@ -167,18 +175,18 @@ def test_c_resolve_survives_persist_rescan(tmp_path: Path, db: DatabaseManager) 
 def test_d_persist_false_is_read_only(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "x.pak").resolve())
-    a = _seed(library, "931")
-    b = _seed(library, "932")
-    _write_targets(a, "931", [shared])
-    _write_targets(b, "932", [shared])
-    create_steam_test_mod(db, external_id="931", title="A")
-    create_steam_test_mod(db, external_id="932", title="B")
-    set_conflict_annotation(931, note="keep", db=db)
+    a, pk_a = _seed(library, db, external_id="931", title="A")
+    b, pk_b = _seed(library, db, external_id="932", title="B")
+    _write_targets(a, pk_a, [shared])
+    _write_targets(b, pk_b, [shared])
+    set_conflict_annotation(pk_a, note="keep", db=db)
     before = _mods_snapshot(db)
     before_rel = _rel_count(db)
     ConflictDetector(library, db=db).check_all_mods(persist=False)
     assert _mods_snapshot(db) == before
     assert _rel_count(db) == before_rel
+    from services.file_ops import INFO_DIR_NAME
+
     info = a / INFO_DIR_NAME / "conflict_trace.json"
     assert not info.is_file()
 
@@ -186,12 +194,10 @@ def test_d_persist_false_is_read_only(tmp_path: Path, db: DatabaseManager) -> No
 def test_e_detection_does_not_create_mods(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "z.pak").resolve())
-    a = _seed(library, "941")
-    b = _seed(library, "942")
-    _write_targets(a, "941", [shared])
-    _write_targets(b, "942", [shared])
-    create_steam_test_mod(db, external_id="941", title="A")
-    create_steam_test_mod(db, external_id="942", title="B")
+    a, pk_a = _seed(library, db, external_id="941", title="A")
+    b, pk_b = _seed(library, db, external_id="942", title="B")
+    _write_targets(a, pk_a, [shared])
+    _write_targets(b, pk_b, [shared])
     ids_before = {
         str(r["mod_id"]): str(r["workspace_id"] or "")
         for r in db._conn.execute("SELECT mod_id, workspace_id FROM mods")  # noqa: SLF001
@@ -220,12 +226,13 @@ def test_f_identity_invariants_still_clean() -> None:
 def test_g_anno_141_overlap_is_diagnostic_not_relationship(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
+    """Forced high-range PKs (Anno forensic fixture) — not create_steam_test_mod."""
     library = tmp_path / "mod"
     stamps = tmp_path / "stamps"
     stamps.mkdir()
     targets = [str((stamps / f"t{i:03d}.stamp").resolve()) for i in range(141)]
-    a = _seed(library, ANNO_0360, title="全产业模板")
-    b = _seed(library, ANNO_0362, title="布局模板")
+    a = _seed_folder(library, ANNO_0360, title="全产业模板")
+    b = _seed_folder(library, ANNO_0362, title="布局模板")
     _write_targets(a, ANNO_0360, targets)
     _write_targets(b, ANNO_0362, targets)
     _insert_other(db, ANNO_0360, "全产业模板", WS_0360)
@@ -275,21 +282,19 @@ def test_relationship_still_persists_as_conflict(
     library = tmp_path / "mod"
     t_a = str((tmp_path / "A.pak").resolve())
     t_b = str((tmp_path / "B.pak").resolve())
-    a = _seed(library, "951")
-    b = _seed(library, "952")
-    _write_targets(a, "951", [t_a])
-    _write_targets(b, "952", [t_b])
-    create_steam_test_mod(db, external_id="951", title="A")
-    create_steam_test_mod(db, external_id="952", title="B")
-    db.add_mod_relationship(951, 952, RELATIONSHIP_CONFLICT)
+    a, pk_a = _seed(library, db, external_id="951", title="A")
+    b, pk_b = _seed(library, db, external_id="952", title="B")
+    _write_targets(a, pk_a, [t_a])
+    _write_targets(b, pk_b, [t_b])
+    db.add_mod_relationship(pk_a, pk_b, RELATIONSHIP_CONFLICT)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     # Scheme B: relationship is a diagnostic; detector must not write user conflict_status.
     assert any(
         c.conflict_type == ConflictType.RELATIONSHIP.value
-        for c in reports["951"].conflicts
+        for c in reports[pk_a].conflicts
     )
-    assert db.get_mod_status(951).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
     assert not any(
         c.conflict_type == ConflictType.FILE_OVERWRITE.value
-        for c in reports["951"].conflicts
+        for c in reports[pk_a].conflicts
     )

@@ -14,7 +14,7 @@ from tests.helpers.identity import create_steam_test_mod
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "test_mods.db")
+    manager = DatabaseManager.instance(tmp_path / "test_mods.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -73,10 +73,11 @@ def test_migration_adds_user_columns(tmp_path: Path) -> None:
 def test_display_name_override_persists_across_reopen(tmp_path: Path) -> None:
     path = tmp_path / "persist.db"
     DatabaseManager.reset_instance()
-    db1 = DatabaseManager(path)
-    create_steam_test_mod(db1, external_id="222", title="Steam Original")
+    db1 = DatabaseManager.instance(path)
+    created = create_steam_test_mod(db1, external_id="222", title="Steam Original")
+    pk = str(created.mod_id)
     db1.update_mod_user_metadata(
-        222,
+        pk,
         {
             "display_name": "我的显示名",
             "custom_description": "自定义",
@@ -87,8 +88,8 @@ def test_display_name_override_persists_across_reopen(tmp_path: Path) -> None:
     db1.close()
     DatabaseManager.reset_instance()
 
-    db2 = DatabaseManager(path)
-    info = db2.get_mod_display_info(222)
+    db2 = DatabaseManager.instance(path)
+    info = db2.get_mod_display_info(pk)
     assert info is not None
     assert info.user_display_name == "我的显示名"
     assert info.display_name == "我的显示名"
@@ -105,11 +106,12 @@ def test_steam_upsert_preserves_user_fields(db: DatabaseManager) -> None:
 
     db.upsert_game(GameInfo(app_id=10, name="Game Ten"))
     db.upsert_game(GameInfo(app_id=20, name="Game Twenty"))
-    create_steam_test_mod(
+    created = create_steam_test_mod(
         db, external_id="333", title="Old Steam", app_id=10, game_name="Game Ten"
     )
+    pk = str(created.mod_id)
     db.update_mod_user_metadata(
-        333,
+        pk,
         {
             "display_name": "User Name",
             "custom_description": "User desc",
@@ -128,7 +130,7 @@ def test_steam_upsert_preserves_user_fields(db: DatabaseManager) -> None:
         )
     )
 
-    info = db.get_mod_display_info(333)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.steam_name == "New Steam Title"
     assert info.steam_description == "New Steam Desc"
@@ -142,9 +144,10 @@ def test_steam_upsert_preserves_user_fields(db: DatabaseManager) -> None:
 
 
 def test_steam_and_user_name_both_available(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="444", title="Steam Workshop Name")
-    db.update_mod_user_metadata(444, {"display_name": "Local Nickname"})
-    info = db.get_mod_display_info(444)
+    created = create_steam_test_mod(db, external_id="444", title="Steam Workshop Name")
+    pk = str(created.mod_id)
+    db.update_mod_user_metadata(pk, {"display_name": "Local Nickname"})
+    info = db.get_mod_display_info(pk)
     assert isinstance(info, ModDisplayInfo)
     assert info.display_name == "Local Nickname"
     assert info.steam_name == "Steam Workshop Name"
@@ -152,21 +155,23 @@ def test_steam_and_user_name_both_available(db: DatabaseManager) -> None:
 
 
 def test_empty_display_name_falls_back_to_steam(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="555", title="Only Steam")
-    db.update_mod_user_metadata(555, {"display_name": "  "})
-    info = db.get_mod_display_info(555)
+    created = create_steam_test_mod(db, external_id="555", title="Only Steam")
+    pk = str(created.mod_id)
+    db.update_mod_user_metadata(pk, {"display_name": "  "})
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.display_name == "Only Steam"
     assert info.user_display_name == ""
 
 
 def test_batch_upsert_preserves_user_fields(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="666", title="A")
-    db.update_mod_user_metadata(666, {"display_name": "Nick", "user_notes": "n"})
+    created = create_steam_test_mod(db, external_id="666", title="A")
+    pk = str(created.mod_id)
+    db.update_mod_user_metadata(pk, {"display_name": "Nick", "user_notes": "n"})
     db.upsert_mods(
         [ModMetadata(published_file_id="666", title="B", description="d2")]
     )
-    info = db.get_mod_display_info(666)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.steam_name == "B"
     assert info.display_name == "Nick"

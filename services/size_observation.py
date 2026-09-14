@@ -604,6 +604,9 @@ def schedule_library_size_refresh(
     for row in rows:
         if not _is_dirty_row(row, force=force):
             continue
+        # MISS: no local folder — size walk cannot succeed; skip enqueue.
+        if not bool(int(row.get("folder_present") or 0)):
+            continue
         mid = str(row.get("mod_id") or "").strip()
         path = str(row.get("last_known_path") or "").strip() or None
         if enqueue_mod_size(mid, path, force=force):

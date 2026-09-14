@@ -33,6 +33,7 @@ WH3_APP_ID = next(iter(WARHAMMER3_APP_IDS))
 USED_MODS_FILENAME = "used_mods.txt"
 WH3_EXE_NAME = "Warhammer3.exe"
 WH3_LAUNCH_ARG = f"{USED_MODS_FILENAME};"
+WH3_CANONICAL_ORDER_FILENAME = "wh3.json"
 WH3_STATE_DIRNAME = "wh3"
 WH3_ORDER_FILENAME = "load_order.json"
 WH3_LEGACY_ORDER_FILENAME = "wh3_load_order.json"
@@ -59,15 +60,31 @@ def canon_internal_id(raw: object) -> str:
 
 
 def _order_path() -> Path:
+    from core.paths import load_order_dir
+
+    return load_order_dir() / WH3_CANONICAL_ORDER_FILENAME
+
+
+def _legacy_order_paths() -> list[Path]:
     from core.paths import data_dir
 
-    return data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
+    return [
+        data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME,
+        data_dir() / WH3_LEGACY_ORDER_FILENAME,
+    ]
 
 
-def _legacy_order_path() -> Path:
-    from core.paths import data_dir
+def _unlink_quietly(path: Path) -> None:
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        logger.debug("could not remove leftover WH3 load-order file %s", path, exc_info=True)
 
-    return data_dir() / WH3_LEGACY_ORDER_FILENAME
+
+def _remove_legacy_order_files() -> None:
+    for legacy in _legacy_order_paths():
+        _unlink_quietly(legacy)
 
 
 def _parse_order_payload(raw: object) -> list[str]:
@@ -88,26 +105,30 @@ def _parse_order_payload(raw: object) -> list[str]:
     return out
 
 
+def _read_order_file(path: Path) -> list[str] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    return _parse_order_payload(raw)
+
+
 def load_saved_order() -> list[str]:
     """Persisted load-order of ``internal_id`` values (may include stale ids)."""
     path = _order_path()
-    legacy = _legacy_order_path()
-    source = path if path.is_file() else (legacy if legacy.is_file() else None)
-    if source is None:
-        return []
-    try:
-        raw = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return []
-    out = _parse_order_payload(raw)
-    if source == legacy:
-        save_saved_order(out)
-    elif legacy.is_file():
-        try:
-            legacy.unlink()
-        except OSError:
-            logger.debug("could not remove leftover legacy WH3 load-order file", exc_info=True)
-    return out
+    if path.is_file():
+        parsed = _read_order_file(path)
+        _remove_legacy_order_files()
+        return parsed if parsed is not None else []
+    for legacy in _legacy_order_paths():
+        if not legacy.is_file():
+            continue
+        parsed = _read_order_file(legacy)
+        if parsed is None:
+            continue
+        save_saved_order(parsed)
+        return parsed
+    return []
 
 
 def save_saved_order(internal_ids: list[str]) -> None:
@@ -125,12 +146,7 @@ def save_saved_order(internal_ids: list[str]) -> None:
         json.dumps({"order": ordered}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    legacy = _legacy_order_path()
-    if legacy.is_file():
-        try:
-            legacy.unlink()
-        except OSError:
-            logger.debug("could not remove legacy WH3 load-order file", exc_info=True)
+    _remove_legacy_order_files()
 
 
 def merge_deployed_order(saved: list[str], deployed_ids: list[str]) -> list[str]:

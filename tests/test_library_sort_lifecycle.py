@@ -20,13 +20,12 @@ from core.db_manager import (
     DatabaseManager,
     updated_at_to_mtime,
 )
-from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_library_cache import (
     list_item_to_card_data,
     mod_list_item_from_row,
     reset_library_cache,
 )
+from tests.helpers.identity import prove_managed_folder, create_steam_test_mod
 from ui.library_query import (
     SORT_MTIME,
     SORT_NAME,
@@ -36,7 +35,6 @@ from ui.library_query import (
     sort_key,
 )
 from ui.library_viewport import compute_viewport_window
-from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -62,39 +60,45 @@ def _seed_mod(
     db: DatabaseManager,
     library: Path,
     *,
-    mid: str,
+    workshop_id: str,
     title: str,
     updated_at: str,
     display_name: str = "",
-) -> Path:
-    folder = library / "GameX" / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (folder / "a.txt").write_text("x", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "internal_id": "{mid}",\n'
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{title}",\n'
-        '  "app_id": 42,\n'
-        '  "game_name": "GameX"\n'
-        "}\n",
-        encoding="utf-8",
+) -> str:
+    """Create Steam entity + folder proof. Returns mods.mod_id PK."""
+    created = create_steam_test_mod(
+        db, external_id=workshop_id, title=title, app_id=42, game_name="GameX"
     )
-    create_steam_test_mod(db, external_id=mid, title=title, app_id=42)
+    pk = str(created.mod_id)
+    folder = library / "GameX" / title
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "a.txt").write_text("x", encoding="utf-8")
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=title,
+        app_id=42,
+        game_name="GameX",
+    )
     db._conn.execute(
         "UPDATE mods SET last_known_path = ?, folder_present = 1, "
         "display_name = ?, updated_at = ? WHERE mod_id = ?",
-        (str(folder), display_name, updated_at, int(mid)),
+        (str(folder), display_name, updated_at, int(pk)),
     )
     db._conn.commit()
-    return folder
+    return pk
+
+
+def _row_id(row: dict) -> str:
+    """Layer-1 session key is SQLite PK (projection field still named internal_id)."""
+    return str(row.get("internal_id") or "")
 
 
 def _index_from_row(row: dict) -> ModFilterIndex:
     name = str(row.get("name") or "")
     return ModFilterIndex(
-        internal_id=str(row.get("internal_id") or ""),
+        mod_id=_row_id(row),
         display_name=name,
         steam_name=str(row.get("steam_name") or name),
         notes=str(row.get("notes_preview") or ""),
@@ -104,6 +108,7 @@ def _index_from_row(row: dict) -> ModFilterIndex:
         has_offline=bool(row.get("has_offline")),
         mtime=float(row.get("mtime") or 0.0),
         sort_name=name,
+        workspace_id=str(row.get("workspace_id") or ""),
     )
 
 
@@ -114,20 +119,25 @@ def _entries(db: DatabaseManager) -> list[tuple[ModFilterIndex, dict]]:
 def test_name_asc_and_desc_change_order(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    # Identical mtime — previously made name==mtime; ASC/DESC must still differ.
     stamp = _iso(50)
-    _seed_mod(db, library, mid="8001", title="Charlie", updated_at=stamp)
-    _seed_mod(db, library, mid="8002", title="Alpha", updated_at=stamp)
-    _seed_mod(db, library, mid="8003", title="Bravo", updated_at=stamp)
+    pk_charlie = _seed_mod(
+        db, library, workshop_id="8001", title="Charlie", updated_at=stamp
+    )
+    pk_alpha = _seed_mod(
+        db, library, workshop_id="8002", title="Alpha", updated_at=stamp
+    )
+    pk_bravo = _seed_mod(
+        db, library, workshop_id="8003", title="Bravo", updated_at=stamp
+    )
 
     entries = _entries(db)
-    asc = [p["internal_id"] for _i, p in filter_sort_entries(entries, sort_mode=SORT_NAME)]
+    asc = [_row_id(p) for _i, p in filter_sort_entries(entries, sort_mode=SORT_NAME)]
     desc = [
-        p["internal_id"]
+        _row_id(p)
         for _i, p in filter_sort_entries(entries, sort_mode=SORT_NAME_DESC)
     ]
-    assert asc == ["8002", "8003", "8001"]
-    assert desc == ["8001", "8003", "8002"]
+    assert asc == [pk_alpha, pk_bravo, pk_charlie]
+    assert desc == [pk_charlie, pk_bravo, pk_alpha]
     assert asc != desc
 
 
@@ -138,21 +148,27 @@ def test_mtime_sort_differs_from_name_when_times_equal(
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
     stamp = _iso(10)
-    _seed_mod(db, library, mid="8101", title="Zulu", updated_at=stamp)
-    _seed_mod(db, library, mid="8102", title="Alpha", updated_at=stamp)
-    _seed_mod(db, library, mid="8103", title="Mike", updated_at=stamp)
+    pk_zulu = _seed_mod(
+        db, library, workshop_id="8101", title="Zulu", updated_at=stamp
+    )
+    pk_alpha = _seed_mod(
+        db, library, workshop_id="8102", title="Alpha", updated_at=stamp
+    )
+    pk_mike = _seed_mod(
+        db, library, workshop_id="8103", title="Mike", updated_at=stamp
+    )
 
     entries = _entries(db)
     by_name = [
-        p["internal_id"] for _i, p in filter_sort_entries(entries, sort_mode=SORT_NAME)
+        _row_id(p) for _i, p in filter_sort_entries(entries, sort_mode=SORT_NAME)
     ]
     by_mtime = [
-        p["internal_id"] for _i, p in filter_sort_entries(entries, sort_mode=SORT_MTIME)
+        _row_id(p) for _i, p in filter_sort_entries(entries, sort_mode=SORT_MTIME)
     ]
-    assert by_name == ["8102", "8103", "8101"]
+    assert by_name == [pk_alpha, pk_mike, pk_zulu]
     # Tie-break is mod_id DESC, not name — so modes differ.
     assert by_mtime != by_name
-    assert by_mtime == ["8103", "8102", "8101"]
+    assert by_mtime == [pk_mike, pk_alpha, pk_zulu]
 
 
 def test_recent_modified_orders_by_updated_at(
@@ -160,12 +176,18 @@ def test_recent_modified_orders_by_updated_at(
 ) -> None:
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    _seed_mod(db, library, mid="8201", title="Old", updated_at=_iso(10))
-    _seed_mod(db, library, mid="8202", title="Mid", updated_at=_iso(20))
-    _seed_mod(db, library, mid="8203", title="New", updated_at=_iso(99))
+    pk_old = _seed_mod(
+        db, library, workshop_id="8201", title="Old", updated_at=_iso(10)
+    )
+    pk_mid = _seed_mod(
+        db, library, workshop_id="8202", title="Mid", updated_at=_iso(20)
+    )
+    pk_new = _seed_mod(
+        db, library, workshop_id="8203", title="New", updated_at=_iso(99)
+    )
 
     ordered = filter_sort_entries(_entries(db), sort_mode=SORT_MTIME)
-    assert [p["internal_id"] for _i, p in ordered] == ["8203", "8202", "8201"]
+    assert [_row_id(p) for _i, p in ordered] == [pk_new, pk_mid, pk_old]
 
 
 def test_sort_does_not_scan_filesystem_or_reconcile(
@@ -173,8 +195,8 @@ def test_sort_does_not_scan_filesystem_or_reconcile(
 ) -> None:
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    _seed_mod(db, library, mid="8301", title="A", updated_at=_iso(1))
-    _seed_mod(db, library, mid="8302", title="B", updated_at=_iso(2))
+    _seed_mod(db, library, workshop_id="8301", title="A", updated_at=_iso(1))
+    _seed_mod(db, library, workshop_id="8302", title="B", updated_at=_iso(2))
 
     fs_calls: list[str] = []
     real_stat = Path.stat
@@ -207,7 +229,7 @@ def test_sort_10k_performance(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
     # Lightweight inserts — skip full folder tree for scale.
-    now = _utc_now_bulk = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 2, 1, tzinfo=timezone.utc)
     with db._lock:
         for i in range(10_000):
             mid = 700_000 + i
@@ -243,10 +265,9 @@ def test_sort_10k_performance(db: DatabaseManager, tmp_path: Path) -> None:
     t_query = time.perf_counter() - t1
 
     assert len(name_order) == 10_000
-    assert [p["internal_id"] for _i, p in name_order] != [
-        p["internal_id"] for _i, p in mtime_order
+    assert [_row_id(p) for _i, p in name_order] != [
+        _row_id(p) for _i, p in mtime_order
     ]
-    # Budget: Query sort of 10k must stay interactive; repo load similarly.
     assert t_query < 1.5, f"query sort too slow: {t_query:.3f}s"
     assert t_repo < 3.0, f"repo list too slow: {t_repo:.3f}s"
 
@@ -263,17 +284,19 @@ def test_viewport_preserves_query_order_after_resort(
         ("8404", "Bravo", 40),
         ("8405", "Delta", 50),
     ):
-        _seed_mod(db, library, mid=mid, title=title, updated_at=_iso(bump))
+        _seed_mod(
+            db, library, workshop_id=mid, title=title, updated_at=_iso(bump)
+        )
 
     entries = _entries(db)
     name_rows = filter_sort_entries(entries, sort_mode=SORT_NAME)
     mtime_rows = filter_sort_entries(entries, sort_mode=SORT_MTIME)
-    assert [p["internal_id"] for _i, p in name_rows] != [
-        p["internal_id"] for _i, p in mtime_rows
+    assert [_row_id(p) for _i, p in name_rows] != [
+        _row_id(p) for _i, p in mtime_rows
     ]
 
     for sorted_rows in (name_rows, mtime_rows):
-        query_ids = [p["internal_id"] for _i, p in sorted_rows]
+        query_ids = [_row_id(p) for _i, p in sorted_rows]
         window = compute_viewport_window(
             item_count=len(sorted_rows),
             scroll_y=0,
@@ -281,7 +304,7 @@ def test_viewport_preserves_query_order_after_resort(
             viewport_width=1200,
         )
         slice_ids = [
-            sorted_rows[i][1]["internal_id"]
+            _row_id(sorted_rows[i][1])
             for i in range(window.first_index, window.last_index)
         ]
         assert slice_ids == query_ids[window.first_index : window.last_index]
@@ -292,20 +315,24 @@ def test_status_recovery_does_not_bump_sort_mtime(
 ) -> None:
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    _seed_mod(db, library, mid="8501", title="Keep", updated_at=_iso(40))
+    pk = _seed_mod(
+        db, library, workshop_id="8501", title="Keep", updated_at=_iso(40)
+    )
     before = db._conn.execute(
-        "SELECT updated_at FROM mods WHERE mod_id = 8501"
+        "SELECT updated_at FROM mods WHERE mod_id = ?",
+        (int(pk),),
     ).fetchone()["updated_at"]
 
     db.update_mod_content_status(
-        8501,
+        pk,
         content_status="healthy",
         touch_updated_at=False,
     )
-    db.update_mod_identity_fields(8501, identity_status="identity_conflict")
+    db.update_mod_identity_fields(pk, identity_status="identity_conflict")
 
     after = db._conn.execute(
-        "SELECT updated_at, identity_status FROM mods WHERE mod_id = 8501"
+        "SELECT updated_at, identity_status FROM mods WHERE mod_id = ?",
+        (int(pk),),
     ).fetchone()
     assert after["updated_at"] == before
     assert after["identity_status"] == "identity_conflict"
@@ -316,7 +343,7 @@ def test_list_item_projection_feeds_query_mtime(
 ) -> None:
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    _seed_mod(db, library, mid="8601", title="Snap", updated_at=_iso(77))
+    _seed_mod(db, library, workshop_id="8601", title="Snap", updated_at=_iso(77))
     row = db.list_mod_list_items(game_id=42)[0]
     item = mod_list_item_from_row(row)
     card = list_item_to_card_data(item)

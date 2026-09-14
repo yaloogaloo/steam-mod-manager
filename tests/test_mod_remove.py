@@ -16,7 +16,7 @@ from tests.helpers.identity import bind_managed_path, create_steam_test_mod, wri
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "remove.db")
+    manager = DatabaseManager.instance(tmp_path / "remove.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -25,13 +25,8 @@ def db(tmp_path: Path) -> DatabaseManager:
 def test_remove_mod_deletes_library_and_db(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     folder = library / "Game" / "9901"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
+    folder.mkdir(parents=True)
     (folder / "file.txt").write_text("x", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"9901","title":"R","app_id":1,"game_name":"Game"}',
-        encoding="utf-8",
-    )
     other = library / "Game" / "9902"
     other.mkdir(parents=True)
     (other / "keep.txt").write_text("keep", encoding="utf-8")
@@ -40,22 +35,24 @@ def test_remove_mod_deletes_library_and_db(tmp_path: Path, db: DatabaseManager) 
         1, name="Game", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
     created = create_steam_test_mod(db, external_id="9901", title="R", app_id=1)
+    pk = str(created.mod_id)
     write_info_sidecar(
         folder,
-        internal_id=str(created.mod_id),
+        internal_id=str(created.internal_id),
         title="R",
         external_id="9901",
         workspace_id=str(created.workspace_id or "9901"),
         app_id=1,
         game_name="Game",
     )
-    bind_managed_path(db, created.mod_id, folder, title="R", game_name="Game")
+    bind_managed_path(db, pk, folder, title="R", game_name="Game")
 
-    db.add_category_tag(9901, "Fix")
+    db.add_category_tag(pk, "Fix")
 
-    out = ModRemover(library, db=db).remove_mod(9901)
+    out = ModRemover(library, db=db).remove_mod(pk)
     assert out["success"] is True
+    assert out.get("deleted_path"), out
     assert not folder.exists()
     assert other.exists()
-    assert db.get_mod(9901) is None
-    assert db.get_mod_tags(9901) == []
+    assert db.get_mod(pk) is None
+    assert db.get_mod_tags(pk) == []

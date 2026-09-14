@@ -19,10 +19,8 @@ ALLOWED_TOP_LEVEL = frozenset(
         "mod_manager.db-shm",
         "mod_backup",
         "deploy_backup",
-        "asset_cache",
+        "asset_store",
         "identity_repair_quarantine",
-        "headers",
-        "import_cache",
         "collection_covers",
         # Benign / gitignored runtime scratch (not user Mod payload).
         ".gitkeep",
@@ -34,7 +32,11 @@ ALLOWED_TOP_LEVEL = frozenset(
     }
 )
 
-_FORBIDDEN_DIR_NAMES = frozenset({"browser_profile"})
+# Retired — must never reappear under data/ (canonical: cache/).
+_FORBIDDEN_RETIRED_DIRS = frozenset(
+    {"offline_view", "asset_cache", "import_cache", "headers"}
+)
+_FORBIDDEN_DIR_NAMES = frozenset({"browser_profile"}) | _FORBIDDEN_RETIRED_DIRS
 _FORBIDDEN_TOP_PREFIXES = (
     "p0_",
 )

@@ -231,9 +231,7 @@ class CollectionCardWidget(QFrame):
         row.addStretch(1)
         layout.addWidget(self.action_row)
         self.setFixedHeight(collection_card_height(title_font))
-        from services.cover_loader import CoverLoaderManager
-
-        CoverLoaderManager.instance().image_ready.connect(self._on_cover_image_ready)
+        # Cover delivery via request(on_ready=) — never broadcast image_ready.
         self.destroyed.connect(self._on_card_destroyed)
         self.bind(data)
 
@@ -335,6 +333,7 @@ class CollectionCardWidget(QFrame):
             cover_ref=str(abs_file),
             width=COVER_WIDTH,
             height=COVER_HEIGHT,
+            on_ready=self._on_cover_image_ready,
         )
 
     def _on_cover_image_ready(self, token: str, image: object) -> None:

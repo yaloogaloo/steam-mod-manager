@@ -8,7 +8,6 @@ Correct lifecycle:
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -20,9 +19,9 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
+from services.file_ops import ModFileManager
 from services.mod_library_cache import reset_library_cache
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from ui.library_query import (
     FILTER_CATEGORY_ALL,
     FILTER_DEPLOYMENT_RECORD,
@@ -76,38 +75,37 @@ def _seed(
     app_id: int,
     title_prefix: str | None = None,
     hit_count: int = 0,
-) -> None:
+) -> list[str]:
+    """Create n Steam entities. Returns list of mods.mod_id PKs."""
     db.upsert_game(GameInfo(app_id=app_id, name=game, folder_name=game))
+    pks: list[str] = []
     for i in range(n):
-        mid = str(app_id * 1000 + i)
+        workshop = str(app_id * 1000 + i)
         title = (
             f"{title_prefix}{i:03d}"
             if title_prefix and i < hit_count
             else f"Mod{i:03d}"
         )
-        folder = lib / game / f"Mod{i:03d}"
-        info = folder / INFO_DIR_NAME
-        info.mkdir(parents=True)
-        (info / METADATA_FILENAME).write_text(
-            json.dumps(
-                {
-                    "internal_id": mid,
-                    "published_file_id": mid,
-                    "title": title,
-                    "game_name": game,
-                    "app_id": app_id,
-                }
-            ),
-            encoding="utf-8",
-        )
-        create_steam_test_mod(
+        created = create_steam_test_mod(
             db,
-            external_id=mid,
+            external_id=workshop,
             title=title,
             app_id=app_id,
             game_name=game,
         )
-        bind_managed_path(db, mid, folder, game_name=game, title=title)
+        pk = str(created.mod_id)
+        folder = lib / game / f"Mod{i:03d}"
+        folder.mkdir(parents=True, exist_ok=True)
+        prove_managed_folder(
+            db,
+            folder,
+            handle=pk,
+            title=title,
+            app_id=app_id,
+            game_name=game,
+        )
+        pks.append(pk)
+    return pks
 
 
 def _cards_on_first_row(view: ModLibraryView) -> list[ModCardWidget]:
@@ -410,8 +408,8 @@ def test_filter_shrink_100_to_7_binds_first_screen_not_tail(
     lib = tmp_path / "mod"
     game = "ShrinkGame"
     app_id = 601
-    _seed(lib, db, game, 100, app_id=app_id)
-    tagged_ids = [str(app_id * 1000 + i) for i in range(7)]
+    pks = _seed(lib, db, game, 100, app_id=app_id)
+    tagged_ids = pks[:7]
     created = _bind_type_filter(db, app_id, "综合", tagged_ids)
     reset_library_cache()
 
@@ -444,10 +442,8 @@ def test_sync_viewport_cards_sanitizes_stale_scroll_y(
     lib = tmp_path / "mod"
     game = "SanitizeGame"
     app_id = 602
-    _seed(lib, db, game, 100, app_id=app_id)
-    created = _bind_type_filter(
-        db, app_id, "综合", [str(app_id * 1000 + i) for i in range(7)]
-    )
+    pks = _seed(lib, db, game, 100, app_id=app_id)
+    created = _bind_type_filter(db, app_id, "综合", pks[:7])
     reset_library_cache()
 
     view = _open_game(qapp, lib, game, app_id)
@@ -487,10 +483,10 @@ def test_favorite_shrink_100_to_7_binds_first_screen(
     lib = tmp_path / "mod"
     game = "FavGame"
     app_id = 604
-    _seed(lib, db, game, 100, app_id=app_id)
-    for i in range(7):
+    pks = _seed(lib, db, game, 100, app_id=app_id)
+    for pk in pks[:7]:
         db.update_mod_user_metadata(
-            str(app_id * 1000 + i),
+            pk,
             {
                 "display_name": "",
                 "custom_description": "",
@@ -558,8 +554,8 @@ def test_deployment_record_shrink_binds_first_screen(
     lib = tmp_path / "mod"
     game = "RecordGame"
     app_id = 608
-    _seed(lib, db, game, 100, app_id=app_id)
-    rec_ids = [str(app_id * 1000 + i) for i in range(7)]
+    pks = _seed(lib, db, game, 100, app_id=app_id)
+    rec_ids = pks[:7]
     record = db.create_deployment_record(app_id, "seven", rec_ids)
     reset_library_cache()
     view = _open_game(qapp, lib, game, app_id)
@@ -579,10 +575,8 @@ def test_restore_and_resize_clamp_stale_scroll(
     lib = tmp_path / "mod"
     game = "RestoreGame"
     app_id = 609
-    _seed(lib, db, game, 100, app_id=app_id)
-    created = _bind_type_filter(
-        db, app_id, "综合", [str(app_id * 1000 + i) for i in range(7)]
-    )
+    pks = _seed(lib, db, game, 100, app_id=app_id)
+    created = _bind_type_filter(db, app_id, "综合", pks[:7])
     reset_library_cache()
     view = _open_game(qapp, lib, game, app_id)
     _scroll_to_bottom(qapp, view)

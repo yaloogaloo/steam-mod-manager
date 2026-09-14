@@ -308,65 +308,69 @@ def test_summary_ready_and_empty() -> None:
 
 
 def test_enabled_save_via_manager(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="9401", title="Nexus")
+    created = create_steam_test_mod(db, external_id="9401", title="Nexus")
+    mid = str(created.mod_id)
     mgr = ModFileManager(db)
-    mgr.replace_all("9401", _nexus_pack())
-    updated = mgr.set_file_selection("9401", "opt", False)
+    mgr.replace_all(mid, _nexus_pack())
+    updated = mgr.set_file_selection(mid, "opt", False)
     assert updated is not None
     assert updated.enabled is False
     assert updated.selected_for_deploy is False
-    again = {f.id: f for f in mgr.get_files("9401")}
+    again = {f.id: f for f in mgr.get_files(mid)}
     assert again["opt"].enabled is False
     assert again["opt"].selected_for_deploy is False
 
 
 def test_batch_select_all_main_only_clear_reset(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="9402", title="Nexus")
+    created = create_steam_test_mod(db, external_id="9402", title="Nexus")
+    mid = str(created.mod_id)
     mgr = ModFileManager(db)
-    mgr.replace_all("9402", _nexus_pack())
+    mgr.replace_all(mid, _nexus_pack())
 
-    mgr.set_all_selection("9402", True)
-    assert all(f.selected_for_deploy and f.enabled for f in mgr.get_files("9402"))
+    mgr.set_all_selection(mid, True)
+    assert all(f.selected_for_deploy and f.enabled for f in mgr.get_files(mid))
 
-    mgr.select_main_only("9402")
-    files = {f.id: f for f in mgr.get_files("9402")}
+    mgr.select_main_only(mid)
+    files = {f.id: f for f in mgr.get_files(mid)}
     assert files["main"].selected_for_deploy is True
     assert files["opt"].selected_for_deploy is False
     assert files["misc"].selected_for_deploy is False
     assert files["old"].selected_for_deploy is False
     assert files["patch"].selected_for_deploy is False
 
-    mgr.set_all_selection("9402", True)
-    mgr.clear_optional_selection("9402")
-    files = {f.id: f for f in mgr.get_files("9402")}
+    mgr.set_all_selection(mid, True)
+    mgr.clear_optional_selection(mid)
+    files = {f.id: f for f in mgr.get_files(mid)}
     assert files["main"].selected_for_deploy is True
     assert files["opt"].selected_for_deploy is False
     assert files["misc"].selected_for_deploy is False
     assert files["patch"].selected_for_deploy is False
 
     # Flip selection then reset to importer defaults (main on, optional off).
-    mgr.set_all_selection("9402", False)
-    mgr.reset_default_selection("9402")
-    files = {f.id: f for f in mgr.get_files("9402")}
+    mgr.set_all_selection(mid, False)
+    mgr.reset_default_selection(mid)
+    files = {f.id: f for f in mgr.get_files(mid)}
     assert files["main"].selected_for_deploy is True
     assert files["opt"].selected_for_deploy is False
     assert files["misc"].selected_for_deploy is False
 
 
 def test_legacy_empty_bundle_deploy_whole_mod(db: DatabaseManager, tmp_path: Path) -> None:
-    create_steam_test_mod(db, external_id="9403", title="Steam")
+    created = create_steam_test_mod(db, external_id="9403", title="Steam")
+    mid = str(created.mod_id)
     source = tmp_path / "steam_mod"
     source.mkdir()
     (source / "content.pak").write_bytes(b"x")
-    assert db.get_mod_files("9403").files == []
-    assert resolve_deploy_sources("9403", source, db=db) is None
+    assert db.get_mod_files(mid).files == []
+    assert resolve_deploy_sources(mid, source, db=db) is None
 
 
 def test_github_main_only_keeps_type_main(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="9404", title="GH")
+    created = create_steam_test_mod(db, external_id="9404", title="GH")
+    mid = str(created.mod_id)
     mgr = ModFileManager(db)
     mgr.replace_all(
-        "9404",
+        mid,
         [
             ModFileEntry(
                 id="r1",
@@ -399,8 +403,8 @@ def test_github_main_only_keeps_type_main(db: DatabaseManager) -> None:
             ),
         ],
     )
-    mgr.select_main_only("9404")
-    files = {f.id: f for f in mgr.get_files("9404")}
+    mgr.select_main_only(mid)
+    files = {f.id: f for f in mgr.get_files(mid)}
     assert files["r1"].selected_for_deploy is True
     assert files["r2"].selected_for_deploy is False
     assert files["dev"].selected_for_deploy is False

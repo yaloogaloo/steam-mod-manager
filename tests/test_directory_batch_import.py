@@ -104,13 +104,15 @@ def test_nexus_batch_parent_imports_each_subdir(
 
     from services.importers.directory_batch import discover_mod_directories
 
+    # Official numeric Nexus Mod IDs (folder names are titles only).
+    nexus_ids = {"AlphaMod": "111", "BetaMod": "222"}
     results = []
     for folder in discover_mod_directories(parent):
         results.append(
             importer.import_mod(
                 source_folder=folder,
                 title=folder.name,
-                nexus_id=folder.name,
+                nexus_id=nexus_ids[folder.name],
                 library_root=library,
                 context=ctx,
                 is_batch_mode=True,

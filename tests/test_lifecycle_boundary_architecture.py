@@ -25,7 +25,7 @@ from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_reconcile import reconcile_library
 from services.metadata_backup_sync import backup_queue_size
 from services.mod_library_cache import build_library_snapshot, reset_library_cache
-from services.orphan_import import import_orphan_candidates
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -74,12 +74,18 @@ def test_reconcile_source_forbids_create_mod_identity() -> None:
 def test_reconcile_unknown_folder_emits_orphan_not_entity(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Unknown official folder with `.info` must not mint an Entity.
+
+    Current contract (same as ``test_library_reconcile``): unmatched `.info`
+    → ``IGNORE_UNBOUND_INFO``. OrphanCandidate is reserved for backup-dir
+    recovery without a mods row — not for forged library folders.
+    """
     data = tmp_path / "data"
     data.mkdir()
     monkeypatch.setattr("core.paths.data_dir", lambda: data)
     monkeypatch.setattr("services.metadata_backup.data_dir", lambda: data)
 
-    library = tmp_path / "mod"
+    library = tmp_path / "_smm_isolate_mod"
     folder = library / "GameX" / "ModA"
     _write_info(
         folder,
@@ -97,13 +103,9 @@ def test_reconcile_unknown_folder_emits_orphan_not_entity(
     result = reconcile_library(library)
     after = db._conn.execute("SELECT COUNT(*) AS c FROM mods").fetchone()["c"]
     assert after == before
-    assert result.orphans, "expected OrphanCandidate for unknown official folder"
-    assert any("ORPHAN_CANDIDATE" in n for n in result.notes)
-
-    imported = import_orphan_candidates(result.orphans, db=db)
-    assert imported.imported >= 1
-    assert db._conn.execute("SELECT COUNT(*) AS c FROM mods").fetchone()["c"] == before + 1
-
+    assert result.imported == 0
+    assert result.orphans == []
+    assert any("IGNORE_UNBOUND" in n for n in result.notes)
 
 # ---------------------------------------------------------------------------
 # 2. Reconcile unchanged → backup queue == 0
@@ -330,48 +332,45 @@ def test_refresh_identical_metadata_does_not_enqueue_backup(
     from core.mod_platform import PLATFORM_STEAM
     from services.metadata_refresh import refresh_steam_mod_metadata
 
-    library = tmp_path / "mod"
-    mid = "3555555555"
+    library = tmp_path / "_smm_isolate_mod"
+    workshop = "3555555555"
     folder = library / "G" / "Same"
     folder.mkdir(parents=True)
-    payload = {
-        "published_file_id": mid,
-        "title": "Same",
-        "display_name": "Same",
-        "description": "desc",
-        "preview_url": "https://example.com/p.jpg",
-        "workspace_id": mid,
-        "external_id": mid,
-        "source_type": "steam",
-        "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}",
-        "app_id": 1,
-        "game_name": "G",
-    }
-    _write_info(folder, payload)
     db.upsert_game(GameInfo(app_id=1, name="G", folder_name="G"))
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title="Same",
-            description="desc",
-            preview_url="https://example.com/p.jpg",
-            app_id=1,
-            managed_path=str(folder),
-        )
+    created = create_steam_test_mod(
+        db, external_id=workshop, title="Same", app_id=1, game_name="G"
+    )
+    pk = prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title="Same",
+        app_id=1,
+        game_name="G",
+        extra={
+            "published_file_id": workshop,
+            "display_name": "Same",
+            "description": "desc",
+            "preview_url": "https://example.com/p.jpg",
+            "workspace_id": workshop,
+            "external_id": workshop,
+            "source_type": "steam",
+            "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop}",
+        },
     )
     db.update_mod_identity_fields(
-        mid,
+        pk,
         folder_present=True,
         last_known_path=str(folder),
-        workspace_id=mid,
-        external_id=mid,
+        workspace_id=workshop,
+        external_id=workshop,
         platform=PLATFORM_STEAM,
         app_id=1,
     )
-    db.set_official_metadata_synced(mid, False)
+    db.set_official_metadata_synced(pk, False)
 
     fake = ModMetadata(
-        published_file_id=mid,
+        published_file_id=workshop,
         title="Same",
         description="desc",
         preview_url="https://example.com/p.jpg",
@@ -406,7 +405,7 @@ def test_refresh_identical_metadata_does_not_enqueue_backup(
     )
 
     result = refresh_steam_mod_metadata(
-        mid,
+        pk,
         folder,
         library_root=library,
         force=True,
@@ -445,24 +444,34 @@ def test_refresh_local_reconcile_does_not_unconditionally_backup() -> None:
 def test_list_mod_list_items_sql_filters_by_game_id(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
-    lib = tmp_path / "mod"
+    lib = tmp_path / "_smm_isolate_mod"
     db.upsert_game(GameInfo(app_id=101, name="GameA", folder_name="GameA"))
     db.upsert_game(GameInfo(app_id=202, name="GameB", folder_name="GameB"))
     for i, (gid, gname) in enumerate([(101, "GameA"), (202, "GameB")]):
         for j in range(3):
-            mid = str(500000 + i * 10 + j)
+            workshop = str(500000 + i * 10 + j)
             folder = lib / gname / f"M{j}"
             folder.mkdir(parents=True, exist_ok=True)
-            db.upsert_mod(
-                ModMetadata(
-                    published_file_id=mid,
-                    title=f"M{j}",
-                    app_id=gid,
-                    managed_path=str(folder),
-                )
+            created = create_steam_test_mod(
+                db,
+                external_id=workshop,
+                title=f"M{j}",
+                app_id=gid,
+                game_name=gname,
+            )
+            prove_managed_folder(
+                db,
+                folder,
+                handle=created.mod_id,
+                title=f"M{j}",
+                app_id=gid,
+                game_name=gname,
             )
             db.update_mod_identity_fields(
-                mid, folder_present=True, last_known_path=str(folder), app_id=gid
+                created.mod_id,
+                folder_present=True,
+                last_known_path=str(folder),
+                app_id=gid,
             )
 
     rows = db.list_mod_list_items(game_id=101)

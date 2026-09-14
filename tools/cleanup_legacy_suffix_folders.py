@@ -221,7 +221,9 @@ def scan_legacy_suffix_folders(
                 continue
 
             info, info_path = _read_info(child)
-            meta_iid = _text((info or {}).get("internal_id")) if info else ""
+            from services.mod_identity import read_entity_key
+
+            meta_iid = read_entity_key(info) if info else ""
             meta_wid = _text((info or {}).get("workspace_id")) if info else ""
             db_hits = find_db_rows_for_path(rows, child)
 

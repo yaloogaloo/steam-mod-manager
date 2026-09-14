@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,33 +10,26 @@ import pytest
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
     DEPLOY_STATUS_FAILED,
-    DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.mod_platform import PLATFORM_STEAM
 from services.backup_manager import (
-    BACKUPS_DIRNAME,
     TRANSACTION_FILENAME,
     TXN_BACKUP_DONE,
     TXN_FAILED,
     TXN_PREPARED,
     BackupIntegrityError,
     BackupManager,
-    BackupRestoreError,
     transaction_path_for,
 )
 from services.deploy import ModDeployer
-from services.deploy_rules.base import StrategyResult
-from services.deploy_rules.generic import FolderCopyStrategy
 from services.deploy_rules.manifest import load_manifest
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from services.identity_service import create_mod_identity, identity_create_scope
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "txn_consistency.db")
+    manager = DatabaseManager.instance(tmp_path / "txn_consistency.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -45,30 +37,23 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _make_mod(
     library: Path,
+    db: DatabaseManager,
     *,
     mid: str = "95001",
     folder: str = "TxnMod",
     app_id: int = 424242,
-) -> Path:
+) -> tuple[Path, str]:
     mod_dir = library / "Game" / folder
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True)
+    mod_dir.mkdir(parents=True, exist_ok=True)
     (mod_dir / "file1.txt").write_text("NEW", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": str(mid),
-                "published_file_id": str(mid),
-                "title": folder,
-                "app_id": app_id,
-                "game_name": "Game",
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mid, title=folder, app_id=app_id, game_name="Game"
     )
-    return mod_dir
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db, mod_dir, handle=pk, title=folder, app_id=app_id, game_name="Game"
+    )
+    return mod_dir, pk
 
 
 def _setup_game(db: DatabaseManager, tmp_path: Path, *, app_id: int = 424242) -> Path:
@@ -85,41 +70,8 @@ def _setup_game(db: DatabaseManager, tmp_path: Path, *, app_id: int = 424242) ->
     return mods
 
 
-def _register(db: DatabaseManager, *, mid: str, path: str, app_id: int = 424242) -> None:
-    with identity_create_scope():
-        created = create_mod_identity(
-            db,
-            platform=PLATFORM_STEAM,
-            external_id=str(mid),
-            workshop_id=str(mid),
-            title="TxnMod",
-            app_id=app_id,
-            game_name="Game",
-        )
-    entity_id = str(created.mod_id)
-    assert entity_id == str(mid)
-    db.update_mod_identity_fields(
-        entity_id,
-        folder_present=True,
-        last_known_path=path,
-    )
-    # Keep sidecar aligned for path resolution.
-    meta_path = Path(path) / INFO_DIR_NAME / METADATA_FILENAME
-    if meta_path.is_file():
-        raw = json.loads(meta_path.read_text(encoding="utf-8"))
-        raw["internal_id"] = entity_id
-        meta_path.write_text(
-            json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-
 def _backup_files(managed: Path) -> list[Path]:
     return BackupManager(managed).listed_backup_files()
-
-
-# ---------------------------------------------------------------------------
-# Case 1 — deploy fail, rollback ok → clean slate
-# ---------------------------------------------------------------------------
 
 
 def test_case1_deploy_fail_rollback_ok_cleans_state(
@@ -127,8 +79,7 @@ def test_case1_deploy_fail_rollback_ok_cleans_state(
 ) -> None:
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mid="95001")
-    _register(db, mid="95001", path=str(mod_dir))
+    mod_dir, pk = _make_mod(library, db, mid="95001")
 
     prior = mods / "TxnMod" / "file1.txt"
     prior.parent.mkdir(parents=True)
@@ -140,22 +91,17 @@ def test_case1_deploy_fail_rollback_ok_cleans_state(
         return ApplyResult(success=False, error="simulated strategy failure")
 
     with patch("services.deploy_apply.apply_file_plan", _fail_apply):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("95001")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     assert load_manifest(mod_dir) is None
     assert _backup_files(mod_dir) == []
     assert not transaction_path_for(mod_dir).exists()
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"
-    info = db.get_mod_deploy_info("95001")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
     assert str(info.deploy_error or "").strip()
-
-
-# ---------------------------------------------------------------------------
-# Case 2 — deploy fail, rollback fail → keep recovery data
-# ---------------------------------------------------------------------------
 
 
 def test_case2_deploy_fail_rollback_fail_keeps_recovery(
@@ -163,15 +109,14 @@ def test_case2_deploy_fail_rollback_fail_keeps_recovery(
 ) -> None:
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mid="95002", folder="KeepMod")
-    _register(db, mid="95002", path=str(mod_dir))
+    mod_dir, pk = _make_mod(library, db, mid="95002", folder="KeepMod")
 
     prior = mods / "KeepMod" / "file1.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     # First successful deploy establishes manifest + backups.
-    first = ModDeployer(library_root=library, db=db).deploy_mod("95002")
+    first = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert first["success"] is True
     assert load_manifest(mod_dir) is not None
     backups_after_first = _backup_files(mod_dir)
@@ -187,7 +132,7 @@ def test_case2_deploy_fail_rollback_fail_keeps_recovery(
         "restore_one",
         side_effect=BackupIntegrityError("simulated restore failure"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("95002")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     # Recovery data must survive.
@@ -198,14 +143,9 @@ def test_case2_deploy_fail_rollback_fail_keeps_recovery(
     txn = BackupManager(mod_dir).load_transaction()
     assert txn is not None
     assert str(txn.get("status") or "") == TXN_FAILED
-    info = db.get_mod_deploy_info("95002")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
-
-
-# ---------------------------------------------------------------------------
-# Case 3 — filesystem ok, DB update fails → success + warning
-# ---------------------------------------------------------------------------
 
 
 def test_case3_db_update_fail_still_success_with_warning(
@@ -213,8 +153,7 @@ def test_case3_db_update_fail_still_success_with_warning(
 ) -> None:
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mid="95003", folder="DbWarn")
-    _register(db, mid="95003", path=str(mod_dir))
+    mod_dir, pk = _make_mod(library, db, mid="95003", folder="DbWarn")
 
     real_update = db.update_mod_deploy_status
 
@@ -224,7 +163,7 @@ def test_case3_db_update_fail_still_success_with_warning(
         return real_update(mod_id, **kwargs)
 
     with patch.object(db, "update_mod_deploy_status", side_effect=_update_fail):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("95003")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is True
     assert out.get("warning") == "database_update_failed"
@@ -232,18 +171,12 @@ def test_case3_db_update_fail_still_success_with_warning(
     assert load_manifest(mod_dir) is not None
 
 
-# ---------------------------------------------------------------------------
-# Case 4 — prepare_overwrite backup error → not stuck in prepared
-# ---------------------------------------------------------------------------
-
-
 def test_case4_prepare_overwrite_error_marks_txn_failed(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mid="95004", folder="PrepFail")
-    _register(db, mid="95004", path=str(mod_dir))
+    mod_dir, pk = _make_mod(library, db, mid="95004", folder="PrepFail")
 
     prior = mods / "PrepFail" / "file1.txt"
     prior.parent.mkdir(parents=True)
@@ -254,7 +187,7 @@ def test_case4_prepare_overwrite_error_marks_txn_failed(
         "_backup_one",
         side_effect=BackupIntegrityError("backup write broken"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("95004")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     txn = BackupManager(mod_dir).load_transaction()
@@ -262,14 +195,9 @@ def test_case4_prepare_overwrite_error_marks_txn_failed(
     status = str(txn.get("status") or "")
     assert status == TXN_FAILED
     assert status not in (TXN_PREPARED, TXN_BACKUP_DONE)
-    info = db.get_mod_deploy_info("95004")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
-
-
-# ---------------------------------------------------------------------------
-# Case 5 — redeploy reuses backup; undeploy restores original
-# ---------------------------------------------------------------------------
 
 
 def test_case5_redeploy_reuses_backup_undeploy_restores(
@@ -277,15 +205,14 @@ def test_case5_redeploy_reuses_backup_undeploy_restores(
 ) -> None:
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mid="95005", folder="ReuseMod")
-    _register(db, mid="95005", path=str(mod_dir))
+    mod_dir, pk = _make_mod(library, db, mid="95005", folder="ReuseMod")
 
     prior = mods / "ReuseMod" / "file1.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("95005")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     man1 = load_manifest(mod_dir)
     assert man1 is not None
     assert man1.files and man1.files[0].backup is not None
@@ -294,7 +221,7 @@ def test_case5_redeploy_reuses_backup_undeploy_restores(
 
     # Change source and deploy again (overwrite without undeploy).
     (mod_dir / "file1.txt").write_text("NEWER", encoding="utf-8")
-    assert deployer.deploy_mod("95005")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     man2 = load_manifest(mod_dir)
     assert man2 is not None
     assert man2.files and man2.files[0].backup is not None
@@ -303,6 +230,6 @@ def test_case5_redeploy_reuses_backup_undeploy_restores(
     assert man2.files[0].backup.hash == man1.files[0].backup.hash
     assert prior.read_text(encoding="utf-8") == "NEWER"
 
-    und = deployer.undeploy_mod("95005")
+    und = deployer.undeploy_mod(pk)
     assert und["success"] is True
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"

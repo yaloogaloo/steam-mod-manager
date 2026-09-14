@@ -2,7 +2,7 @@
 """Human-confirmed repair for historical Mod path / identity conflicts.
 
 Only rebinds an *existing* DB entity onto a disk folder by rewriting
-``.info.internal_id`` to match the DB entity. Never:
+``.info/entity_key`` to match the DB entity (value = Entity.internal_id). Never:
 
 - auto-binds by workspace_id
 - changes DB ``internal_id`` / creates / deletes Mods
@@ -102,7 +102,9 @@ def validate_repair_target(
         if not info or info.get("_read_error"):
             raise ValueError(f"unreadable or missing .info under {folder}")
 
-        info_iid = _text(info.get("internal_id"))
+        from services.mod_identity import read_entity_key
+
+        info_iid = read_entity_key(info)
         info_wid = _text(info.get("workspace_id"))
         info_title = (
             _text(info.get("title"))
@@ -168,7 +170,7 @@ def validate_repair_target(
             "will_set_folder_present": 1,
             "mod_id": entity.mod_id,
             "notes": [
-                "rewrite .info.internal_id only (preserve workspace_id / metadata / "
+                "rewrite .info/entity_key only (preserve workspace_id / metadata / "
                 "cover / offline / deploy sidecar fields)",
                 "update mods.last_known_path + folder_present",
                 "re-evaluate content_status + refresh projection",
@@ -236,7 +238,10 @@ def apply_repair(
         raise RuntimeError(f"failed to re-read .info after backup at {folder}")
 
     # Preserve all sidecar fields; only rewrite identity proof + managed path.
-    data["internal_id"] = target_iid
+    # entity_key is filesystem binding (value == Entity.internal_id), not a third ID.
+    from services.mod_identity import set_entity_key
+
+    data = set_entity_key(data, target_iid)
     data["managed_path"] = str(folder)
     data["local_path"] = str(folder)
     # Do not invent / clear workspace_id.
@@ -264,13 +269,14 @@ def apply_repair(
     row = database.get_mod_backup_row(mid) or {}
     after_info = _read_info_dict(folder) or {}
     db_iid_after = _text(row.get("internal_id")) or mid
+    from services.mod_identity import read_entity_key
 
     return {
         "executed": True,
         "backup_metadata": str(backup_path),
         "mod_id": mid,
         "info_internal_id_before": before_iid,
-        "info_internal_id_after": _text(after_info.get("internal_id")),
+        "info_internal_id_after": read_entity_key(after_info),
         "info_workspace_id": _text(after_info.get("workspace_id")),
         "last_known_path": _text(row.get("last_known_path")),
         "folder_present": int(row.get("folder_present") or 0),
@@ -285,8 +291,8 @@ def apply_repair(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Human-confirmed repair: rewrite folder .info.internal_id to an "
-            "existing DB entity and rebind last_known_path."
+            "Human-confirmed repair: rewrite folder .info/entity_key to match "
+            "an existing DB entity and rebind last_known_path."
         )
     )
     parser.add_argument(

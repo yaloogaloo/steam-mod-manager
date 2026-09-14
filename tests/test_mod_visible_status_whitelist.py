@@ -86,7 +86,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _idx(**kwargs) -> ModFilterIndex:
     base = dict(
-        internal_id="1",
+        mod_id="1",
         display_name="A",
         steam_name="A",
         notes="",
@@ -253,7 +253,8 @@ def test_historical_cleanup_clears_user_status_pollution(
     db = DatabaseManager(tmp_path / "cleanup.db")
     try:
         db.update_game_deploy_config(1, name="Game")
-        create_steam_test_mod(db, external_id="93001", title="P", app_id=1)
+        created = create_steam_test_mod(db, external_id="93001", title="P", app_id=1)
+        pk = int(created.mod_id)
 
         # Force pollution as if an old build wrote it after schema init.
         db._conn.execute(
@@ -267,14 +268,16 @@ def test_historical_cleanup_clears_user_status_pollution(
                 library_status = 'conflict',
                 identity_status = 'identity_conflict',
                 conflict_status = 'none'
-            WHERE mod_id = 93001
-            """
+            WHERE mod_id = ?
+            """,
+            (pk,),
         )
         db._conn.commit()
         db._clear_identity_pollution_from_user_status()
         row = db._conn.execute(
             "SELECT content_status, library_status, identity_status, conflict_status "
-            "FROM mods WHERE mod_id = 93001"
+            "FROM mods WHERE mod_id = ?",
+            (pk,),
         ).fetchone()
         assert str(row["content_status"]) == "healthy"
         assert str(row["library_status"]) == "normal"

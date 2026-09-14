@@ -87,7 +87,7 @@ def resolve_deploy_managed_path(
     if not token:
         return None
 
-    # Prefer entity-proof discovery (``.info.internal_id``), not raw path binding.
+    # Prefer entity-proof discovery (``.info/entity_key``), not raw path binding.
     found = resolve_mod_folder_by_internal_id(
         token,
         library_root=library_root,

@@ -72,34 +72,33 @@ def test_migration_adds_status_columns(tmp_path: Path) -> None:
 
 
 def test_mark_invalid_and_restore(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="100", title="X")
+    pk = create_steam_test_mod(db, external_id="100", title="X").mod_id
 
     st = db.update_mod_status(
-        100, invalid=True, invalid_reason="作者已删除", touch_check_time=True
+        pk, invalid=True, invalid_reason="作者已删除", touch_check_time=True
     )
     assert st.invalid is True
     assert st.invalid_reason == "作者已删除"
     assert st.last_check_time
 
-    st2 = db.update_mod_status(100, invalid=False)
+    st2 = db.update_mod_status(pk, invalid=False)
     assert st2.invalid is False
     assert st2.invalid_reason == ""
-    assert db.get_mod_status(100).to_dict()["invalid"] is False
+    assert db.get_mod_status(pk).to_dict()["invalid"] is False
 
 
 def test_conflict_status_persist(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="200", title="Y")
+    pk = create_steam_test_mod(db, external_id="200", title="Y").mod_id
 
-    st = db.update_mod_status(
-        200,
-        conflict_status=CONFLICT_STATUS_CONFLICT,
-        conflict_note="与BetterGraphics冲突",
-        touch_check_time=True,
+    st = db.update_mod_conflict_annotation(
+        pk,
+        conflict=True,
+        note="与BetterGraphics冲突",
     )
     assert st.conflict_status == CONFLICT_STATUS_CONFLICT
     assert "BetterGraphics" in st.conflict_note
 
-    cleared = db.update_mod_status(200, conflict_status=CONFLICT_STATUS_NONE)
+    cleared = db.update_mod_conflict_annotation(pk, conflict=False, note="")
     assert cleared.conflict_status == CONFLICT_STATUS_NONE
     assert cleared.conflict_note == ""
 

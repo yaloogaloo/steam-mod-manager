@@ -169,14 +169,36 @@ def _isolate_production_data(
 ) -> None:
     data = tmp_path / "_smm_isolate_data"
     library = tmp_path / "_smm_isolate_mod"
+    config = tmp_path / "_smm_isolate_config"
+    cache = tmp_path / "_smm_isolate_cache"
+    logs = tmp_path / "_smm_isolate_logs"
     data.mkdir(parents=True, exist_ok=True)
     library.mkdir(parents=True, exist_ok=True)
+    config.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
     db_file = data / "mod_manager.db"
 
     monkeypatch.setenv("SMM_TEST_DB", str(db_file))
 
     def _data_dir() -> Path:
         return data
+
+    def _cache_dir() -> Path:
+        cache.mkdir(parents=True, exist_ok=True)
+        return cache
+
+    def _logs_dir() -> Path:
+        logs.mkdir(parents=True, exist_ok=True)
+        return logs
+
+    def _config_dir() -> Path:
+        return config
+
+    def _load_order_dir() -> Path:
+        path = config / "load_order"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _default_mod_library() -> Path:
         library.mkdir(parents=True, exist_ok=True)
@@ -187,10 +209,29 @@ def _isolate_production_data(
 
     # Patch both the defining module and common re-import sites.
     monkeypatch.setattr("core.paths.data_dir", _data_dir)
+    monkeypatch.setattr("core.paths.get_cache_dir", _cache_dir)
+    monkeypatch.setattr("core.paths.logs_dir", _logs_dir)
+    monkeypatch.setattr("core.paths.config_dir", _config_dir)
+    monkeypatch.setattr("core.paths.load_order_dir", _load_order_dir)
     monkeypatch.setattr("core.paths.default_mod_library", _default_mod_library)
     monkeypatch.setattr("core.paths.database_path", _database_path)
     monkeypatch.setattr("core.db_manager.database_path", _database_path)
     monkeypatch.setattr("services.metadata_backup.data_dir", _data_dir)
+    monkeypatch.setattr(
+        "services.mod_path_validation.default_mod_library",
+        _default_mod_library,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "services.mod_path_validation.data_dir",
+        _data_dir,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "services.legacy_workspace_backup.data_dir",
+        _data_dir,
+        raising=False,
+    )
     monkeypatch.setattr(
         "services.metadata_backup_sync.default_mod_library",
         _default_mod_library,
@@ -272,3 +313,172 @@ def _isolate_production_data(
         pass
     DatabaseManager.reset_instance()
     monkeypatch.delenv("SMM_TEST_DB", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _resolve_workspace_handles_to_mod_pk(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Test-only lookup remapping for mutating/deploy APIs that still pass Workshop digits.
+
+    Production ``resolve_mod_pk`` never resolves ``workspace_id``. This wrapper is
+    lookup-only in the pytest process — it never invents rows.
+
+    Does **not** soft-resolve read APIs (``get_mod`` / ``get_mod_display_info`` /
+    ``get_mod_backup_row`` / ``get_mod_status``) so identity-contract tests keep
+    observing ``workspace_id != mods.mod_id``.
+
+    Skipped for dedicated identity-architecture / steam-refresh-identity tests.
+    """
+    nodeid = getattr(request.node, "nodeid", "") or ""
+    if any(
+        key in nodeid
+        for key in (
+            "test_steam_refresh_identity",
+            "test_id_architecture_contract",
+            "test_identity_governance",
+            "test_identity_write_boundary",
+            "test_identity_lifecycle",
+            "test_identity_minimal",
+            "test_identity_boundary",
+            "test_lifecycle_boundary",
+            "test_published_id_index",
+        )
+    ):
+        return
+
+    from tests.helpers.identity import soft_resolve_test_mod_pk
+
+    def _wrap_db_method(name: str) -> None:
+        if not hasattr(DatabaseManager, name):
+            return
+        original = getattr(DatabaseManager, name)
+
+        def _bound(self, handle, *args, **kwargs):  # noqa: ANN001
+            pk = soft_resolve_test_mod_pk(self, handle)
+            return original(self, pk, *args, **kwargs)
+
+        monkeypatch.setattr(DatabaseManager, name, _bound)
+
+    # Mutating APIs only — never wrap get_mod / get_mod_display_info / get_mod_status.
+    for method in (
+        "update_mod_identity_fields",
+        "update_mod_user_metadata",
+        "set_mod_files",
+        "get_mod_files",
+        "update_mod_backup_snapshot",
+        "update_mod_status",
+        "update_mod_content_status",
+        "update_mod_identity_status",
+        "touch_mod_updated_at",
+        "update_mod_deploy_status",
+        "set_official_metadata_synced",
+        "update_mod_platform_info",
+        "enable_mod",
+        "disable_mod",
+        "update_mod_version",
+        "add_mod_tag",
+        "add_category_tag",
+        "remove_category_tag",
+        "update_mod_conflict_annotation",
+    ):
+        _wrap_db_method(method)
+
+    if hasattr(DatabaseManager, "batch_update_platform"):
+        _orig_batch_plat = DatabaseManager.batch_update_platform
+
+        def _batch_update_platform(self, mod_ids, platform, *args, **kwargs):  # noqa: ANN001
+            resolved = [soft_resolve_test_mod_pk(self, mid) for mid in mod_ids]
+            return _orig_batch_plat(self, resolved, platform, *args, **kwargs)
+
+        monkeypatch.setattr(DatabaseManager, "batch_update_platform", _batch_update_platform)
+
+    try:
+        from services.deploy import ModDeployer
+    except Exception:  # noqa: BLE001
+        ModDeployer = None  # type: ignore[misc, assignment]
+
+    if ModDeployer is not None:
+
+        def _wrap_deploy(method_name: str) -> None:
+            if not hasattr(ModDeployer, method_name):
+                return
+            original = getattr(ModDeployer, method_name)
+
+            def _bound(self, handle, *args, **kwargs):  # noqa: ANN001
+                db = getattr(self, "db", None) or getattr(self, "_db", None)
+                if db is None:
+                    try:
+                        from core.db_manager import get_db
+
+                        db = get_db()
+                    except Exception:  # noqa: BLE001
+                        db = None
+                pk = soft_resolve_test_mod_pk(db, handle) if db is not None else handle
+                return original(self, pk, *args, **kwargs)
+
+            monkeypatch.setattr(ModDeployer, method_name, _bound)
+
+        for method in ("deploy_mod", "undeploy_mod", "redeploy_mod"):
+            _wrap_deploy(method)
+
+    try:
+        import services.metadata_backup as mb
+    except Exception:  # noqa: BLE001
+        return
+
+    if hasattr(mb, "backup_root"):
+        _orig_backup_root = mb.backup_root
+
+        def _backup_root(handle, *args, **kwargs):  # noqa: ANN001
+            try:
+                from core.db_manager import get_db
+
+                pk = soft_resolve_test_mod_pk(get_db(), handle)
+            except Exception:  # noqa: BLE001
+                pk = handle
+            return _orig_backup_root(pk, *args, **kwargs)
+
+        monkeypatch.setattr(mb, "backup_root", _backup_root)
+
+    if hasattr(mb, "load_backup"):
+        _orig_load = mb.load_backup
+
+        def _load_backup(handle, *args, **kwargs):  # noqa: ANN001
+            try:
+                from core.db_manager import get_db
+
+                pk = soft_resolve_test_mod_pk(get_db(), handle)
+            except Exception:  # noqa: BLE001
+                pk = handle
+            return _orig_load(pk, *args, **kwargs)
+
+        monkeypatch.setattr(mb, "load_backup", _load_backup)
+
+    if hasattr(mb, "mark_missing"):
+        _orig_missing = mb.mark_missing
+
+        def _mark_missing(handle, *args, **kwargs):  # noqa: ANN001
+            try:
+                from core.db_manager import get_db
+
+                pk = soft_resolve_test_mod_pk(get_db(), handle)
+            except Exception:  # noqa: BLE001
+                pk = handle
+            return _orig_missing(pk, *args, **kwargs)
+
+        monkeypatch.setattr(mb, "mark_missing", _mark_missing)
+
+    if hasattr(mb, "sync_metadata_backup"):
+        _orig_sync = mb.sync_metadata_backup
+
+        def _sync_metadata_backup(folder, *args, mod_id="", **kwargs):  # noqa: ANN001
+            try:
+                from core.db_manager import get_db
+
+                pk = soft_resolve_test_mod_pk(get_db(), mod_id) if mod_id else mod_id
+            except Exception:  # noqa: BLE001
+                pk = mod_id
+            return _orig_sync(folder, *args, mod_id=pk, **kwargs)
+
+        monkeypatch.setattr(mb, "sync_metadata_backup", _sync_metadata_backup)

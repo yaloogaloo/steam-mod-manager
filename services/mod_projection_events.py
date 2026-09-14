@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,39 @@ def reset_mod_changed_listeners() -> None:
     """Test helper — clear all projection listeners."""
     with _LOCK:
         _LISTENERS.clear()
+
+
+def notify_mods_changed(internal_ids: Iterable[str | int]) -> None:
+    """Batch projection refresh + UI notify. One coalesced Library pass."""
+    seen: list[str] = []
+    for raw in internal_ids:
+        mid = str(raw or "").strip()
+        if mid and mid not in seen:
+            seen.append(mid)
+    if not seen:
+        return
+    try:
+        from services.mod_library_cache import get_library_cache
+
+        cache = get_library_cache()
+        for mid in seen:
+            try:
+                cache.refresh_projection(mid)
+            except Exception:  # noqa: BLE001
+                logger.debug("refresh_projection failed internal_id=%s", mid, exc_info=True)
+    except Exception:  # noqa: BLE001
+        from services.crash_trace import log_exception
+
+        log_exception("notify_mods_changed.refresh_projection")
+    if _should_marshal_to_gui():
+        bridge = _gui_bridge()
+        if bridge is None:
+            return
+        for mid in seen:
+            bridge.changed.emit(mid)
+        return
+    for mid in seen:
+        _invoke_listeners(mid)
 
 
 def notify_mod_changed(internal_id: str | int) -> None:

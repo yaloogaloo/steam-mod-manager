@@ -52,19 +52,20 @@ def _index(
 
 def test_full_list_helpers_source_forbid_card_entries() -> None:
     """Static guard: aggregation helpers must read projection, not viewport."""
-    # Docstrings may mention ``_card_entries`` as forbidden; check code bodies.
     for fn in (
-        ModLibraryView._merged_category_options,
         ModLibraryView._sync_peer_mods_to_panel,
         ModLibraryView._current_library_deployed_mod_ids,
     ):
         body = inspect.getsource(fn)
-        # Strip docstring block before asserting.
         if '"""' in body:
             parts = body.split('"""', 2)
             body = parts[0] + (parts[2] if len(parts) > 2 else "")
         assert "_card_entries" not in body
         assert "_game_row_entries" in inspect.getsource(fn)
+
+    merged = inspect.getsource(ModLibraryView._merged_category_options)
+    assert "_card_entries" not in merged
+    assert "_current_game_type_catalog" in merged
 
 
 def test_platform_category_peers_use_game_rows_not_viewport(
@@ -94,9 +95,10 @@ def test_platform_category_peers_use_game_rows_not_viewport(
     assert FILTER_PLATFORM_STEAM.startswith("platform") or FILTER_PLATFORM_STEAM
     assert FILTER_PLATFORM_NEXUS.startswith("platform") or FILTER_PLATFORM_NEXUS
 
+    view._current_game_type_catalog = lambda: [(1, "美化"), (2, "地图")]
     cats = view._merged_category_options()
-    assert "美化" in cats
-    assert "地图" in cats
+    assert "美化" in [name for _tid, name in cats]
+    assert "地图" in [name for _tid, name in cats]
 
     view._sync_peer_mods_to_panel(exclude="880000")
     peers = list(view.detail_panel._peer_mods)

@@ -14,8 +14,7 @@ from services.deploy_rules.manifest import (
     ManifestFileEntry,
     save_manifest,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -27,36 +26,41 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(library: Path, mid: str) -> Path:
-    folder = library / "G" / mid
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"internal_id":"{mid}","published_file_id":"{mid}","title":"M{mid}"}}',
-        encoding="utf-8",
+def _seed(
+    library: Path,
+    db: DatabaseManager,
+    *,
+    external_id: str,
+    title: str = "",
+) -> tuple[Path, str]:
+    folder = library / "G" / external_id
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title or external_id
     )
-    return folder
+    pk = str(created.mod_id)
+    prove_managed_folder(db, folder, handle=pk, title=title or f"M{external_id}")
+    return folder, pk
 
 
 def test_same_target_file_overwrite(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "Paks" / "a.pak").resolve())
-    a = _seed(library, "1")
-    b = _seed(library, "2")
-    for folder, mid in ((a, "1"), (b, "2")):
+    a, pk_a = _seed(library, db, external_id="1")
+    b, pk_b = _seed(library, db, external_id="2")
+    for folder, pk in ((a, pk_a), (b, pk_b)):
         save_manifest(
             folder,
             DeployManifest(
-                mod_id=mid,
+                mod_id=pk,
                 deploy_time="t",
                 deploy_type="folder_copy",
                 files=[ManifestFileEntry(source="x", target=shared)],
             ),
         )
-        create_steam_test_mod(db, external_id=mid, title=mid)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["1"].status == CONFLICT_STATUS_NONE
-    assert reports["1"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
 
 def test_same_dir_different_pak_is_not_conflict(
@@ -67,12 +71,12 @@ def test_same_dir_different_pak_is_not_conflict(
     mods_dir = tmp_path / "Paks" / "~mods"
     t1 = str((mods_dir / "A.pak").resolve())
     t2 = str((mods_dir / "B.pak").resolve())
-    a = _seed(library, "11")
-    b = _seed(library, "12")
+    a, pk_a = _seed(library, db, external_id="11", title="A")
+    b, pk_b = _seed(library, db, external_id="12", title="B")
     save_manifest(
         a,
         DeployManifest(
-            mod_id="11",
+            mod_id=pk_a,
             deploy_time="t",
             deploy_type="palworld_pak",
             files=[ManifestFileEntry(source="A.pak", target=t1)],
@@ -81,48 +85,45 @@ def test_same_dir_different_pak_is_not_conflict(
     save_manifest(
         b,
         DeployManifest(
-            mod_id="12",
+            mod_id=pk_b,
             deploy_time="t",
             deploy_type="palworld_pak",
             files=[ManifestFileEntry(source="B.pak", target=t2)],
         ),
     )
-    create_steam_test_mod(db, external_id="11", title="A")
-    create_steam_test_mod(db, external_id="12", title="B")
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["11"].status == CONFLICT_STATUS_NONE
-    assert reports["12"].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_b].status == CONFLICT_STATUS_NONE
     assert not any(
         c.conflict_type == ConflictType.PAK_OVERLAP.value
-        for c in reports["11"].conflicts
+        for c in reports[pk_a].conflicts
     )
-    assert db.get_mod_status(11).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
 
 
 def test_disabled_skipped(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "x.pak").resolve())
-    a = _seed(library, "21")
-    b = _seed(library, "22")
-    for folder, mid in ((a, "21"), (b, "22")):
+    a, pk_a = _seed(library, db, external_id="21")
+    b, pk_b = _seed(library, db, external_id="22")
+    for folder, pk in ((a, pk_a), (b, pk_b)):
         save_manifest(
             folder,
             DeployManifest(
-                mod_id=mid,
+                mod_id=pk,
                 deploy_time="t",
                 deploy_type="folder_copy",
                 files=[ManifestFileEntry(source="x", target=shared)],
             ),
         )
-        create_steam_test_mod(db, external_id=mid, title=mid)
-    db.disable_mod(22)
+    db.disable_mod(pk_b)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     # Only one enabled owner → no conflict
-    assert "21" in reports
-    assert reports["21"].status != CONFLICT_STATUS_CONFLICT or not reports["21"].conflicts
-    assert reports["21"].conflicts == [] or all(
-        "22" not in c.mods for c in reports["21"].conflicts
+    assert pk_a in reports
+    assert reports[pk_a].status != CONFLICT_STATUS_CONFLICT or not reports[pk_a].conflicts
+    assert reports[pk_a].conflicts == [] or all(
+        pk_b not in c.mods for c in reports[pk_a].conflicts
     )
     # Disabled mod cleared / not conflicting
-    r22 = ConflictDetector(library, db=db).check_mod(22, persist=True)
+    r22 = ConflictDetector(library, db=db).check_mod(pk_b, persist=True)
     assert r22.status != CONFLICT_STATUS_CONFLICT or not r22.conflicts

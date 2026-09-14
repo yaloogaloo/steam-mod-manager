@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import DEPLOY_TYPE_ANNO_1800, resolve_deploy_type
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 ANNO_APP = 916440
 
@@ -23,6 +20,26 @@ def db(tmp_path: Path) -> DatabaseManager:
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
+
+
+def _register(
+    db: DatabaseManager,
+    mod: Path,
+    *,
+    external_id: str,
+    title: str,
+) -> str:
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title, app_id=ANNO_APP, game_name="Anno 1800"
+    )
+    return prove_managed_folder(
+        db,
+        mod,
+        handle=created.mod_id,
+        title=title,
+        app_id=ANNO_APP,
+        game_name="Anno 1800",
+    )
 
 
 def test_resolve_anno_deploy_type() -> None:
@@ -41,18 +58,6 @@ def test_anno_deploy_creates_mods_and_copies(tmp_path: Path, db: DatabaseManager
     mod.mkdir(parents=True)
     (mod / "data").mkdir()
     (mod / "data" / "config.xml").write_text("<ok/>", encoding="utf-8")
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        '  "internal_id": "91601",\n'
-        '  "published_file_id": "91601",\n'
-        '  "title": "BiggerHarbour",\n'
-        f'  "app_id": {ANNO_APP},\n'
-        '  "game_name": "Anno 1800"\n'
-        "}\n",
-        encoding="utf-8",
-    )
 
     db.update_game_deploy_config(
         ANNO_APP,
@@ -60,10 +65,9 @@ def test_anno_deploy_creates_mods_and_copies(tmp_path: Path, db: DatabaseManager
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    create_steam_test_mod(db, external_id="91601", title="BiggerHarbour", app_id=ANNO_APP)
-    bind_managed_path(db, "91601", mod, title="BiggerHarbour")
+    pk = _register(db, mod, external_id="91601", title="BiggerHarbour")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("91601")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_ANNO_1800
     target = Path(result["target"])
@@ -84,20 +88,6 @@ def test_anno_deploy_directory_mod_with_stale_unselected_files(
     mod.mkdir(parents=True)
     (mod / "data").mkdir()
     (mod / "data" / "mod.json").write_text("{}", encoding="utf-8")
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": "91602",
-                "published_file_id": "91602",
-                "title": "LooseMod",
-                "app_id": ANNO_APP,
-                "game_name": "Anno 1800",
-            }
-        ),
-        encoding="utf-8",
-    )
 
     db.update_game_deploy_config(
         ANNO_APP,
@@ -105,13 +95,12 @@ def test_anno_deploy_directory_mod_with_stale_unselected_files(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    create_steam_test_mod(db, external_id="91602", title="LooseMod", app_id=ANNO_APP)
-    bind_managed_path(db, "91602", mod, title="LooseMod")
+    pk = _register(db, mod, external_id="91602", title="LooseMod")
     # Stale entries from old scanner — none selected for deploy.
     from core.mod_platform import ModFileEntry, ModFilesBundle
 
     db.set_mod_files(
-        "91602",
+        pk,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -132,7 +121,7 @@ def test_anno_deploy_directory_mod_with_stale_unselected_files(
 
     from services.deploy_rules import load_manifest
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("91602")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     target = Path(result["target"])
     assert (target / "data" / "mod.json").is_file()
@@ -159,23 +148,9 @@ def test_anno_deploy_extracts_zip_preserves_inner_folder(
     managed_name = "仓库装卸坡道（2个）"
     mod = library / "Anno 1800" / managed_name
     mod.mkdir(parents=True)
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
     inner = "[Addon] 仓库坡道"
     with zipfile.ZipFile(mod / "mod.zip", "w") as zf:
         zf.writestr(f"{inner}/modinfo.json", "{}", compress_type=zipfile.ZIP_STORED)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": "91603",
-                "published_file_id": "91603",
-                "title": managed_name,
-                "app_id": ANNO_APP,
-                "game_name": "Anno 1800",
-            }
-        ),
-        encoding="utf-8",
-    )
 
     db.update_game_deploy_config(
         ANNO_APP,
@@ -183,10 +158,9 @@ def test_anno_deploy_extracts_zip_preserves_inner_folder(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    create_steam_test_mod(db, external_id="91603", title=managed_name, app_id=ANNO_APP)
-    bind_managed_path(db, "91603", mod, title=managed_name)
+    pk = _register(db, mod, external_id="91603", title=managed_name)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("91603")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     mods_root = (install / "mods").resolve()
     assert Path(result["target"]).resolve() == mods_root
@@ -222,24 +196,9 @@ def test_anno_stamps_zip_merges_into_documents(
 
     mod = library / "Anno 1800" / "LayoutStamp"
     mod.mkdir(parents=True)
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
     with zipfile.ZipFile(mod / "stamp.zip", "w") as zf:
         zf.writestr("stamps/my_layout/stamp.json", '{"ok":1}')
         zf.writestr("stamps/my_layout/preview.png", b"PNG")
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": "91610",
-                "published_file_id": "91610",
-                "title": "LayoutStamp",
-                "app_id": ANNO_APP,
-                "game_name": "Anno 1800",
-                "category": "蓝图",
-            }
-        ),
-        encoding="utf-8",
-    )
 
     db.update_game_deploy_config(
         ANNO_APP,
@@ -247,10 +206,20 @@ def test_anno_stamps_zip_merges_into_documents(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    create_steam_test_mod(db, external_id="91610", title="LayoutStamp", app_id=ANNO_APP)
-    bind_managed_path(db, "91610", mod, title="LayoutStamp")
+    created = create_steam_test_mod(
+        db, external_id="91610", title="LayoutStamp", app_id=ANNO_APP, game_name="Anno 1800"
+    )
+    pk = prove_managed_folder(
+        db,
+        mod,
+        handle=created.mod_id,
+        title="LayoutStamp",
+        app_id=ANNO_APP,
+        game_name="Anno 1800",
+        extra={"category": "蓝图"},
+    )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("91610")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
 
     stamps = resolve_anno_stamps_dir()
@@ -283,20 +252,6 @@ def test_anno_stamps_loose_folder_by_structure(
     stamps_src = mod / "stamps" / "pack_a"
     stamps_src.mkdir(parents=True)
     (stamps_src / "a.a7s").write_text("stamp", encoding="utf-8")
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": "91611",
-                "published_file_id": "91611",
-                "title": "LooseStamp",
-                "app_id": ANNO_APP,
-                "game_name": "Anno 1800",
-            }
-        ),
-        encoding="utf-8",
-    )
 
     db.update_game_deploy_config(
         ANNO_APP,
@@ -304,10 +259,9 @@ def test_anno_stamps_loose_folder_by_structure(
         install_path=str(install),
         deploy_type="folder_copy",
     )
-    create_steam_test_mod(db, external_id="91611", title="LooseStamp", app_id=ANNO_APP)
-    bind_managed_path(db, "91611", mod, title="LooseStamp")
+    pk = _register(db, mod, external_id="91611", title="LooseStamp")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("91611")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     stamps = resolve_anno_stamps_dir()
     assert (stamps / "pack_a" / "a.a7s").is_file()

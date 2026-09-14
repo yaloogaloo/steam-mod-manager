@@ -9,10 +9,9 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
 from services.metadata_backup import backup_root, reconcile_folder_presence, sync_metadata_backup
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder, write_info_sidecar
 from services.mod_metadata_resolver import (
     ModMetadataResolver,
     resolve_cover_path,
@@ -37,11 +36,6 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _write_info(folder: Path, payload: dict) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
-    persist_unified_metadata_dict(folder, payload)
-
-
 def _write_backup_files(
     mod_id: str,
     payload: dict,
@@ -64,32 +58,52 @@ def _write_backup_files(
     return dest
 
 
+def _seed_folder(
+    db: DatabaseManager,
+    folder: Path,
+    *,
+    workshop: str,
+    title: str,
+    extra: dict | None = None,
+) -> tuple[str, str]:
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(db, external_id=workshop, title=title)
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=title,
+        extra=extra or {},
+    )
+    return pk, frozen
+
+
 def test_existing_folder_prefers_info_over_backup_and_sqlite(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModA"
-    _write_info(
+    pk, frozen = _seed_folder(
+        db,
         folder,
+        workshop="910101",
+        title="A",
+        extra={"display_name": "A", "description": "info-desc"},
+    )
+
+    db.update_mod_user_metadata(pk, {"display_name": "C"})
+    _write_backup_files(
+        pk,
         {
-            "internal_id": "910101",
+            "internal_id": frozen,
             "published_file_id": "910101",
-            "title": "A",
-            "display_name": "A",
-            "description": "info-desc",
+            "title": "B",
+            "display_name": "B",
         },
     )
-    create_steam_test_mod(db, external_id="910101", title="C")
-    bind_managed_path(db, "910101", folder, title="C")
 
-    db.update_mod_user_metadata("910101", {"display_name": "C"})
-    _write_backup_files(
-        "910101",
-        {
-            "internal_id": "910101",
-            "published_file_id": "910101", "title": "B", "display_name": "B"},
-    )
-
-    resolved = resolve_mod_metadata("910101", folder)
+    resolved = resolve_mod_metadata(pk, folder)
     assert resolved is not None
     assert resolved.display_name == "A"
     assert resolved.folder_present is True
@@ -99,24 +113,20 @@ def test_missing_folder_prefers_backup_over_sqlite(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModB"
-    _write_info(
+    pk, frozen = _seed_folder(
+        db,
         folder,
-        {
-            "internal_id": "910102",
-            "published_file_id": "910102",
-            "title": "FromInfo",
-            "display_name": "FromInfo",
-        },
+        workshop="910102",
+        title="FromInfo",
+        extra={"display_name": "FromInfo"},
     )
-    create_steam_test_mod(db, external_id="910102", title="C")
-    bind_managed_path(db, "910102", folder, title="C")
 
-    db.update_mod_user_metadata("910102", {"display_name": "C"})
+    db.update_mod_user_metadata(pk, {"display_name": "C"})
     sync_metadata_backup(folder)
     _write_backup_files(
-        "910102",
+        pk,
         {
-            "internal_id": "910102",
+            "internal_id": frozen,
             "published_file_id": "910102",
             "title": "B",
             "display_name": "B",
@@ -124,9 +134,9 @@ def test_missing_folder_prefers_backup_over_sqlite(
         },
     )
     shutil.rmtree(folder)
-    db.set_mod_folder_present("910102", present=False)
+    db.set_mod_folder_present(pk, present=False)
 
-    resolved = resolve_mod_metadata("910102", folder)
+    resolved = resolve_mod_metadata(pk, folder)
     assert resolved is not None
     assert resolved.folder_present is False
     assert resolved.display_name == "B"
@@ -138,37 +148,39 @@ def test_restored_folder_info_wins_without_resolver_write(
 ) -> None:
     """Resolver prefers .info and must not rewrite backup (Phase 3-B)."""
     folder = tmp_path / "mod" / "Game" / "ModC"
-    _write_info(
+    pk, frozen = _seed_folder(
+        db,
         folder,
-        {
-            "internal_id": "910103",
-            "published_file_id": "910103", "title": "A", "display_name": "A"},
+        workshop="910103",
+        title="A",
+        extra={"display_name": "A"},
     )
-    create_steam_test_mod(db, external_id="910103", title="A")
-    bind_managed_path(db, "910103", folder, title="A")
 
     sync_metadata_backup(folder)
     _write_backup_files(
-        "910103",
+        pk,
         {
-            "internal_id": "910103",
-            "published_file_id": "910103", "title": "B", "display_name": "B"},
+            "internal_id": frozen,
+            "published_file_id": "910103",
+            "title": "B",
+            "display_name": "B",
+        },
     )
 
-    resolved = resolve_mod_metadata("910103", folder)
+    resolved = resolve_mod_metadata(pk, folder)
     assert resolved is not None
     assert resolved.display_name == "A"
     saved = json.loads(
-        (backup_root("910103") / "metadata.json").read_text(encoding="utf-8")
+        (backup_root(pk) / "metadata.json").read_text(encoding="utf-8")
     )
     # Pure-read: polluted backup remains until an explicit write-path sync.
     assert saved.get("title") == "B" or saved.get("display_name") == "B"
 
     from services.metadata_backup_sync import sync_after_metadata_change
 
-    sync_after_metadata_change("910103", folder, "repair")
+    sync_after_metadata_change(pk, folder, "repair")
     saved2 = json.loads(
-        (backup_root("910103") / "metadata.json").read_text(encoding="utf-8")
+        (backup_root(pk) / "metadata.json").read_text(encoding="utf-8")
     )
     assert saved2.get("title") == "A" or saved2.get("display_name") == "A"
 
@@ -177,26 +189,21 @@ def test_missing_folder_uses_backup_cover_not_sqlite_path(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModD"
-    _write_info(
+    pk, frozen = _seed_folder(
+        db,
         folder,
-        {
-            "internal_id": "910104",
-            "published_file_id": "910104",
-            "title": "CoverMod",
-            "display_name": "CoverMod",
-            "cover_path": ".info/cover.jpg",
-        },
+        workshop="910104",
+        title="CoverMod",
+        extra={"display_name": "CoverMod", "cover_path": ".info/cover.jpg"},
     )
     (folder / INFO_DIR_NAME / "cover.jpg").write_bytes(b"info-cover")
-    create_steam_test_mod(db, external_id="910104", title="CoverMod")
-    bind_managed_path(db, "910104", folder, title="CoverMod")
 
-    db.update_mod_cover_path("910104", str(folder / INFO_DIR_NAME / "cover.jpg"))
+    db.update_mod_cover_path(pk, str(folder / INFO_DIR_NAME / "cover.jpg"))
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
-    db.set_mod_folder_present("910104", present=False)
+    db.set_mod_folder_present(pk, present=False)
 
-    cover = resolve_cover_path("910104", folder)
+    cover = resolve_cover_path(pk, folder)
     assert cover is not None
     assert cover.is_file()
     assert "mod_backup" in str(cover).replace("\\", "/")
@@ -208,29 +215,37 @@ def test_missing_folder_opens_backup_offline(
     folder = tmp_path / "mod" / "Game" / "ModE"
     info = folder / INFO_DIR_NAME / "offline"
     info.mkdir(parents=True)
-    (folder / INFO_DIR_NAME / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-            "internal_id": "910105",
-            "published_file_id": "910105",
-                "title": "OffMod",
-                "display_name": "OffMod",
-            }
-        ),
-        encoding="utf-8",
+    created = create_steam_test_mod(db, external_id="910105", title="OffMod")
+    pk = str(created.mod_id)
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.internal_id),
+        title="OffMod",
+        external_id="910105",
+        workspace_id=str(created.workspace_id or "910105"),
+        extra={"display_name": "OffMod"},
     )
+    from tests.helpers.identity import bind_managed_path
+
+    bind_managed_path(db, pk, folder, title="OffMod")
     (info / "index.html").write_text("<html>info</html>", encoding="utf-8")
-    create_steam_test_mod(db, external_id="910105", title="OffMod")
-    bind_managed_path(db, "910105", folder, title="OffMod")
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
-    db.set_mod_folder_present("910105", present=False)
+    db.set_mod_folder_present(pk, present=False)
 
-    page = resolve_offline_page("910105", folder)
+    page = resolve_offline_page(pk, folder)
     assert page is not None
     assert page.is_file()
-    assert "mod_backup" in str(page).replace("\\", "/")
+    assert "offline_view" in str(page).replace("\\", "/")
+    assert "mod_backup" not in str(page).replace("\\", "/")
     assert page.read_text(encoding="utf-8") == "<html>info</html>"
 
 
@@ -238,32 +253,42 @@ def test_resolver_does_not_read_missing_info_path(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "Gone"
-    create_steam_test_mod(db, external_id="910106", title="C")
-    bind_managed_path(db, "910106", folder, title="C")
+    created = create_steam_test_mod(db, external_id="910106", title="C")
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
+    from tests.helpers.identity import bind_managed_path
 
-    db.update_mod_user_metadata("910106", {"display_name": "C"})
+    bind_managed_path(db, pk, folder, title="C")
+
+    db.update_mod_user_metadata(pk, {"display_name": "C"})
     _write_backup_files(
-        "910106",
+        pk,
         {
-            "internal_id": "910106",
-            "published_file_id": "910106", "title": "B", "display_name": "B"},
+            "internal_id": frozen,
+            "published_file_id": "910106",
+            "title": "B",
+            "display_name": "B",
+        },
         cover=True,
         offline=True,
     )
     db.update_mod_backup_snapshot(
-        "910106",
+        pk,
         last_known_path=str(folder),
         folder_present=False,
         backup_metadata_json=json.dumps(
             {
-            "internal_id": "910106",
-            "published_file_id": "910106", "title": "B", "display_name": "B"}
+                "internal_id": frozen,
+                "published_file_id": "910106",
+                "title": "B",
+                "display_name": "B",
+            }
         ),
-        backup_cover_path=str(backup_root("910106") / "cover.jpg"),
-        backup_offline_path=str(backup_root("910106") / "offline" / "index.html"),
+        backup_cover_path=str(backup_root(pk) / "cover.jpg"),
+        backup_offline_path=str(backup_root(pk) / "offline" / "index.html"),
     )
     assert not folder.exists()
-    resolved = ModMetadataResolver().resolve_missing_folder("910106", folder)
+    resolved = ModMetadataResolver().resolve_missing_folder(pk, folder)
     assert resolved is not None
     assert resolved.display_name == "B"
     assert resolved.cover_path
@@ -276,18 +301,17 @@ def test_reconcile_marks_deleted_folder_missing(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModF"
-    _write_info(
+    pk, _frozen = _seed_folder(
+        db,
         folder,
-        {
-            "internal_id": "910107",
-            "published_file_id": "910107", "title": "F", "display_name": "F"},
+        workshop="910107",
+        title="F",
+        extra={"display_name": "F"},
     )
-    create_steam_test_mod(db, external_id="910107", title="F")
-    bind_managed_path(db, "910107", folder, title="F")
 
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
     reconcile_folder_presence(tmp_path / "mod")
-    row = db.get_mod_backup_row("910107")
+    row = db.get_mod_backup_row(pk)
     assert row is not None
     assert int(row["folder_present"]) == 0

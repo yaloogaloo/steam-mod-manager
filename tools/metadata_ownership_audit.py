@@ -176,7 +176,10 @@ def audit_info(rows: list[dict[str, Any]], mod_root: Path) -> list[dict[str, Any
             payload, info_path = read_info(folder)
             if not payload or payload.get("_read_error"):
                 continue
-            info_mid = text(payload.get("internal_id") or payload.get("mod_id"))
+            from services.mod_identity import read_entity_key
+
+            # Prefer entity_key; legacy sidecar key / historical mod_id field accepted.
+            info_mid = text(read_entity_key(payload) or payload.get("mod_id"))
             ent = by_mid.get(info_mid) or by_uuid.get(info_mid)
             if not ent:
                 continue
@@ -282,8 +285,10 @@ def audit_backup(rows: list[dict[str, Any]], data_root: Path) -> list[dict[str, 
                     conflict_reason="entity.app_id != backup metadata app_id/url",
                 )
             )
-        # Backup internal_id must match entity when present
-        b_mid = text(payload.get("internal_id") or payload.get("mod_id"))
+        # Backup entity_key / legacy sidecar key must match entity when present
+        from services.mod_identity import read_entity_key
+
+        b_mid = text(read_entity_key(payload) or payload.get("mod_id"))
         if b_mid and b_mid not in (ent["mod_id"], ent["internal_id"]):
             findings.append(
                 _finding(

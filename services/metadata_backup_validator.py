@@ -7,7 +7,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from core.mod_platform import OFFLINE_STATUS_GENERATED, normalize_offline_status
+from core.mod_platform import (
+    OFFLINE_STATUS_ARCHIVED,
+    OFFLINE_STATUS_GENERATED,
+    normalize_offline_status,
+)
 from services.metadata_backup import (
     BACKUP_COVER_BASENAME,
     BACKUP_METADATA_NAME,
@@ -89,7 +93,13 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
         issues.append("missing source_type")
 
     source_url = str(data.get("source_url") or data.get("url") or "").strip()
-    if not source_url:
+    from core.mod_platform import PLATFORM_NEXUS, PLATFORM_OTHER, normalize_platform
+
+    plat = normalize_platform(source_type) if source_type else ""
+    # 「其它」and Nexus batch import may legally omit a URL. Steam / GitHub / mod.io
+    # still require one for a complete Backup.
+    require_url = bool(plat) and plat not in {PLATFORM_OTHER, PLATFORM_NEXUS}
+    if require_url and not source_url:
         issues.append("missing source_url")
 
     workspace_id = str(data.get("workspace_id") or "").strip()
@@ -99,13 +109,14 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
     if not workspace_id and not external_id:
         issues.append("missing workspace_id/external_id")
 
-    metadata_ok = bool(
-        title and source_type and source_url and (workspace_id or external_id)
-    )
+    metadata_ok = bool(title and source_type and (workspace_id or external_id))
+    if require_url:
+        metadata_ok = bool(metadata_ok and source_url)
 
     db_cover = ""
     db_offline = ""
     db_offline_status = ""
+    db_lkp = ""
     try:
         from core.db_manager import get_db
 
@@ -114,6 +125,7 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
             db_cover = str(row.get("backup_cover_path") or "").strip()
             db_offline = str(row.get("backup_offline_path") or "").strip()
             db_offline_status = str(row.get("offline_status") or "").strip()
+            db_lkp = str(row.get("last_known_path") or "").strip()
     except Exception:  # noqa: BLE001
         logger.debug("validate_backup DB peek failed for %s", mid, exc_info=True)
 
@@ -135,12 +147,37 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
     offline_status = normalize_offline_status(
         str(data.get("offline_status") or db_offline_status or "")
     )
-    if offline_status == OFFLINE_STATUS_GENERATED:
-        idx = dest / BACKUP_OFFLINE_DIR / BACKUP_OFFLINE_INDEX
-        target = Path(db_offline) if db_offline else idx
-        if not target.is_file() and not idx.is_file():
+    live_source = None
+    if db_lkp:
+        try:
+            from services.offline.paths import resolve_offline_page
+
+            live_source = resolve_offline_page(db_lkp)
+        except Exception:  # noqa: BLE001
+            live_source = None
+    dest_offline = dest / BACKUP_OFFLINE_DIR
+    idx = dest_offline / BACKUP_OFFLINE_INDEX
+    require_snapshot = bool(live_source is not None and live_source.is_file())
+    if not require_snapshot:
+        require_snapshot = offline_status in {
+            OFFLINE_STATUS_GENERATED,
+            OFFLINE_STATUS_ARCHIVED,
+        }
+    try:
+        index_present = idx.is_file() or (
+            bool(db_offline) and Path(db_offline).is_file()
+        )
+    except OSError:
+        index_present = False
+    if require_snapshot or index_present:
+        from services.offline.backup_closure import validate_offline_snapshot
+
+        closure_issues = validate_offline_snapshot(
+            dest_offline, source_index=live_source
+        )
+        if closure_issues:
             offline_ok = False
-            issues.append("offline_status=generated but offline index missing")
+            issues.extend(closure_issues)
 
     return {
         "metadata_ok": metadata_ok,

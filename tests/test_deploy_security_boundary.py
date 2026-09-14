@@ -11,11 +11,7 @@ from services.backup_manager import BACKUPS_DIRNAME, BackupIntegrityError, Backu
 from services.deploy import ModDeployer
 from services.deploy_rules import load_manifest, save_manifest
 from services.deploy_rules.base import DeployContext
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestBackupInfo,
@@ -37,7 +33,7 @@ from services.file_ops import INFO_DIR_NAME
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "deploy_security.db")
+    manager = DatabaseManager.instance(tmp_path / "deploy_security.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -65,7 +61,7 @@ def _add_mod(
     title: str,
     files: dict[str, str] | None = None,
     app_id: int = 4242,
-) -> Path:
+) -> tuple[Path, str]:
     mod = library / "SomeGame" / title
     mod.mkdir(parents=True)
     for rel, text in (files or {"a.txt": "MOD"}).items():
@@ -73,17 +69,15 @@ def _add_mod(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     created = create_steam_test_mod(db, external_id=mid, title=title, app_id=app_id)
-    write_info_sidecar(
+    pk = prove_managed_folder(
+        db,
         mod,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title=title,
-        external_id=mid,
-        workspace_id=str(created.workspace_id or mid),
         app_id=app_id,
         game_name="SomeGame",
     )
-    bind_managed_path(db, created.mod_id, mod, title=title, game_name="SomeGame")
-    return mod
+    return mod, pk
 
 
 def _ctx(
@@ -113,7 +107,7 @@ def _ctx(
 def test_case1_malicious_manifest_target_traversal(tmp_path: Path, db: DatabaseManager) -> None:
     mods_root = _setup(db, tmp_path)
     library = tmp_path / "library"
-    mod = _add_mod(library, db, mid="91001", title="SecModA")
+    mod, pk = _add_mod(library, db, mid="91001", title="SecModA")
     outside = tmp_path / "outside_secret.txt"
     outside.write_text("KEEP", encoding="utf-8")
 
@@ -121,7 +115,7 @@ def test_case1_malicious_manifest_target_traversal(tmp_path: Path, db: DatabaseM
     assert evil_target == outside.resolve()
 
     man = DeployManifest(
-        mod_id="91001",
+        mod_id=pk,
         deploy_time="t",
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
         files=[
@@ -133,14 +127,14 @@ def test_case1_malicious_manifest_target_traversal(tmp_path: Path, db: DatabaseM
     )
     save_manifest(mod, man)
 
-    ctx = _ctx(mid="91001", mod=mod, db=db)
+    ctx = _ctx(mid=pk, mod=mod, db=db)
     with pytest.raises(ManifestSecurityError, match="outside allowed"):
         validate_manifest_targets(
             man, allowed_roots=collect_allowed_target_roots(ctx)
         )
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.undeploy_mod("91001")
+    out = deployer.undeploy_mod(pk)
     assert out["success"] is False
     assert outside.read_text(encoding="utf-8") == "KEEP"
     err = str(out.get("error") or "")
@@ -148,6 +142,8 @@ def test_case1_malicious_manifest_target_traversal(tmp_path: Path, db: DatabaseM
         "安全校验" in err
         or "mismatch" in err.lower()
         or "outside allowed" in err.lower()
+        or "不匹配" in err
+        or "pollution" in err.lower()
     )
 
 
@@ -183,13 +179,13 @@ def test_case2_illegal_backup_path(tmp_path: Path) -> None:
 def test_case3_mod_a_cannot_read_mod_b_manifest(tmp_path: Path, db: DatabaseManager) -> None:
     _setup(db, tmp_path)
     library = tmp_path / "library"
-    mod_a = _add_mod(library, db, mid="91003", title="ModA")
-    mod_b = _add_mod(library, db, mid="91004", title="ModB", files={"b.txt": "B"})
+    mod_a, pk_a = _add_mod(library, db, mid="91003", title="ModA")
+    mod_b, pk_b = _add_mod(library, db, mid="91004", title="ModB", files={"b.txt": "B"})
 
     save_manifest(
         mod_a,
         DeployManifest(
-            mod_id="91004",  # pollution: claims B
+            mod_id=pk_b,  # pollution: claims B
             deploy_time="t",
             deploy_type=DEPLOY_TYPE_FOLDER_COPY,
             files=[
@@ -201,14 +197,14 @@ def test_case3_mod_a_cannot_read_mod_b_manifest(tmp_path: Path, db: DatabaseMana
         ),
     )
 
-    assert load_manifest(mod_a, expected_mod_id="91003") is None
+    assert load_manifest(mod_a, expected_mod_id=pk_a) is None
     loaded = load_manifest(mod_a)
     assert loaded is not None
     with pytest.raises(ManifestSecurityError, match="mismatch"):
-        validate_manifest_mod_id(loaded, "91003")
+        validate_manifest_mod_id(loaded, pk_a)
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.undeploy_mod("91003")
+    out = deployer.undeploy_mod(pk_a)
     assert out["success"] is False
 
 
@@ -227,8 +223,8 @@ def test_case4_remove_empty_parent_protection(tmp_path: Path, db: DatabaseManage
     leaf.unlink()
 
     library = tmp_path / "library"
-    mod = _add_mod(library, db, mid="91005", title="PruneMod")
-    ctx = _ctx(mid="91005", mod=mod, db=db)
+    mod, pk = _add_mod(library, db, mid="91005", title="PruneMod")
+    ctx = _ctx(mid=pk, mod=mod, db=db)
     protected = collect_protected_roots(ctx)
 
     with prune_protection(protected):
@@ -253,7 +249,7 @@ def test_case4_remove_empty_parent_protection(tmp_path: Path, db: DatabaseManage
 def test_case5_source_outside_workspace(tmp_path: Path, db: DatabaseManager) -> None:
     _setup(db, tmp_path)
     library = tmp_path / "library"
-    mod = _add_mod(library, db, mid="91006", title="SrcMod")
+    mod, pk = _add_mod(library, db, mid="91006", title="SrcMod")
     external = tmp_path / "evil_payload.dll"
     external.write_text("BAD", encoding="utf-8")
 
@@ -283,7 +279,7 @@ def test_case5_source_outside_workspace(tmp_path: Path, db: DatabaseManager) -> 
         "services.deploy_rules.generic.FolderCopyStrategy.plan",
         return_value=planned,
     ):
-        out = deployer.deploy_mod("91006")
+        out = deployer.deploy_mod(pk)
     assert out["success"] is False
     err = str(out.get("error") or "")
     assert "安全校验" in err or "outside mod workspace" in err.lower()
@@ -297,8 +293,8 @@ def test_case5_source_outside_workspace(tmp_path: Path, db: DatabaseManager) -> 
 def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseManager) -> None:
     mods_root = _setup(db, tmp_path)
     library = tmp_path / "library"
-    mod_a = _add_mod(library, db, mid="91007", title="ShareA", files={"a.txt": "A"})
-    mod_b = _add_mod(library, db, mid="91008", title="ShareB", files={"a.txt": "B"})
+    mod_a, pk_a = _add_mod(library, db, mid="91007", title="ShareA", files={"a.txt": "A"})
+    mod_b, pk_b = _add_mod(library, db, mid="91008", title="ShareB", files={"a.txt": "B"})
 
     # Seed a shared game file so both create backups on deploy
     shared = mods_root / "ShareA" / "a.txt"
@@ -309,17 +305,17 @@ def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseMa
     shared_b.write_text("GAME", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("91007")["success"] is True
-    assert deployer.deploy_mod("91008")["success"] is True
+    assert deployer.deploy_mod(pk_a)["success"] is True
+    assert deployer.deploy_mod(pk_b)["success"] is True
 
     man_a = load_manifest(mod_a)
     man_b = load_manifest(mod_b)
     assert man_a and man_a.files and man_a.files[0].backup
     assert man_b and man_b.files and man_b.files[0].backup
-    bak_a = BackupManager(mod_a, internal_id="91007").resolve_backup_file(
+    bak_a = BackupManager(mod_a, internal_id=pk_a).resolve_backup_file(
         man_a.files[0].backup
     )
-    bak_b = BackupManager(mod_b, internal_id="91008").resolve_backup_file(
+    bak_b = BackupManager(mod_b, internal_id=pk_b).resolve_backup_file(
         man_b.files[0].backup
     )
     assert bak_a.is_file()
@@ -343,7 +339,7 @@ def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseMa
     assert bak_a.is_file()
 
     # Cross-mod: undeploy A must not touch B's backup
-    assert deployer.undeploy_mod("91007")["success"] is True
+    assert deployer.undeploy_mod(pk_a)["success"] is True
     assert bak_b.is_file()
     assert load_manifest(mod_b) is not None
 
@@ -356,7 +352,7 @@ def test_case6_shared_backup_reference_protection(tmp_path: Path, db: DatabaseMa
 def test_case7_illegal_manifest_refuses_undeploy(tmp_path: Path, db: DatabaseManager) -> None:
     mods_root = _setup(db, tmp_path)
     library = tmp_path / "library"
-    mod = _add_mod(library, db, mid="91009", title="GuardMod")
+    mod, pk = _add_mod(library, db, mid="91009", title="GuardMod")
     deployed = mods_root / "GuardMod" / "a.txt"
     deployed.parent.mkdir(parents=True)
     deployed.write_text("DEPLOYED", encoding="utf-8")
@@ -367,7 +363,7 @@ def test_case7_illegal_manifest_refuses_undeploy(tmp_path: Path, db: DatabaseMan
     save_manifest(
         mod,
         DeployManifest(
-            mod_id="91009",
+            mod_id=pk,
             deploy_time="t",
             deploy_type=DEPLOY_TYPE_FOLDER_COPY,
             files=[
@@ -384,7 +380,7 @@ def test_case7_illegal_manifest_refuses_undeploy(tmp_path: Path, db: DatabaseMan
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.undeploy_mod("91009")
+    out = deployer.undeploy_mod(pk)
     assert out["success"] is False
     assert victim.read_text(encoding="utf-8") == "SAFE"
     assert deployed.read_text(encoding="utf-8") == "DEPLOYED"

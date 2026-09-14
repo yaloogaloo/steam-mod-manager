@@ -8,7 +8,6 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.mod_status import CONFLICT_STATUS_NONE
-from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy import ModDeployer
 from services.deploy_rules.manifest import (
@@ -16,8 +15,7 @@ from services.deploy_rules.manifest import (
     ManifestFileEntry,
     save_manifest,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -29,15 +27,21 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(library: Path, mid: str) -> Path:
-    folder = library / "BG3" / mid
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"published_file_id":"{mid}","title":"M{mid}"}}',
-        encoding="utf-8",
+def _seed(
+    library: Path,
+    db: DatabaseManager,
+    *,
+    external_id: str,
+    title: str = "",
+) -> tuple[Path, str]:
+    folder = library / "BG3" / external_id
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title or f"M{external_id}"
     )
-    return folder
+    pk = str(created.mod_id)
+    prove_managed_folder(db, folder, handle=pk, title=title or f"M{external_id}")
+    return folder, pk
 
 
 def _write(folder: Path, mid: str, target: str) -> None:
@@ -57,19 +61,17 @@ def test_case1_identical_dll_persists_conflict(
 ) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "BG3" / "bin" / "foo.dll").resolve())
-    a = _seed(library, "801")
-    b = _seed(library, "802")
-    _write(a, "801", shared)
-    _write(b, "802", shared)
-    create_steam_test_mod(db, external_id="801", title="A")
-    create_steam_test_mod(db, external_id="802", title="B")
+    a, pk_a = _seed(library, db, external_id="801", title="A")
+    b, pk_b = _seed(library, db, external_id="802", title="B")
+    _write(a, pk_a, shared)
+    _write(b, pk_b, shared)
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["801"].status == CONFLICT_STATUS_NONE
-    assert reports["802"].status == CONFLICT_STATUS_NONE
-    assert reports["801"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
-    assert db.get_mod_status(801).conflict_status == "none"
-    assert db.get_mod_status(802).conflict_status == "none"
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_b].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
+    assert db.get_mod_status(pk_a).conflict_status == "none"
+    assert db.get_mod_status(pk_b).conflict_status == "none"
 
 
 def test_case2_preview_reports_overwrite_not_relationship(
@@ -77,17 +79,18 @@ def test_case2_preview_reports_overwrite_not_relationship(
 ) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "BG3" / "Mods" / "a.pak").resolve())
-    a = _seed(library, "811")
-    _write(a, "811", shared)
-    create_steam_test_mod(db, external_id="811", title="A")
+    a, pk_a = _seed(library, db, external_id="811", title="A")
+    _write(a, pk_a, shared)
+    # Preview a different (non-existent) candidate claiming the same target.
+    candidate_pk = "812"
 
     det = ConflictDetector(library, db=db)
-    preview = det.preview_targets("812", [shared])
+    preview = det.preview_targets(candidate_pk, [shared])
     assert preview.status == CONFLICT_STATUS_NONE
     assert preview.conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
 
     payload = ModDeployer(library_root=library, db=db).check_conflict_preview(
-        "812", [shared]
+        candidate_pk, [shared]
     )
     assert payload is not None
     assert payload["overwrite"] is True
@@ -103,20 +106,18 @@ def test_case3_distinct_targets_no_conflict(
     mods = tmp_path / "BG3" / "Mods"
     t_a = str((mods / "A.pak").resolve())
     t_b = str((mods / "B.pak").resolve())
-    a = _seed(library, "821")
-    b = _seed(library, "822")
-    _write(a, "821", t_a)
-    _write(b, "822", t_b)
-    create_steam_test_mod(db, external_id="821", title="A")
-    create_steam_test_mod(db, external_id="822", title="B")
+    a, pk_a = _seed(library, db, external_id="821", title="A")
+    b, pk_b = _seed(library, db, external_id="822", title="B")
+    _write(a, pk_a, t_a)
+    _write(b, pk_b, t_b)
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
-    assert reports["821"].status == CONFLICT_STATUS_NONE
-    assert reports["822"].status == CONFLICT_STATUS_NONE
-    assert db.get_mod_status(821).conflict_status == "none"
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_b].status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_a).conflict_status == "none"
 
-    preview = det.preview_targets("822", [t_b])
+    preview = det.preview_targets(pk_b, [t_b])
     assert preview.status == CONFLICT_STATUS_NONE
     assert preview.conflicts == []
 
@@ -128,12 +129,10 @@ def test_case4_same_dir_distinct_paks_no_pak_overlap(
     mods = tmp_path / "Mods"
     t_a = str((mods / "A.pak").resolve())
     t_b = str((mods / "B.pak").resolve())
-    a = _seed(library, "831")
-    b = _seed(library, "832")
-    _write(a, "831", t_a)
-    _write(b, "832", t_b)
-    create_steam_test_mod(db, external_id="831", title="A")
-    create_steam_test_mod(db, external_id="832", title="B")
+    a, pk_a = _seed(library, db, external_id="831", title="A")
+    b, pk_b = _seed(library, db, external_id="832", title="B")
+    _write(a, pk_a, t_a)
+    _write(b, pk_b, t_b)
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     assert not any(
@@ -141,5 +140,5 @@ def test_case4_same_dir_distinct_paks_no_pak_overlap(
         for r in reports.values()
         for c in r.conflicts
     )
-    assert reports["831"].status == CONFLICT_STATUS_NONE
-    assert reports["832"].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_b].status == CONFLICT_STATUS_NONE

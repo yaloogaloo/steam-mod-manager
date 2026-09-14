@@ -230,10 +230,11 @@ def build_audit(*, db_path: Path, library: Path) -> dict[str, Any]:
         "primary_resolver": "services.path_lifecycle.resolve_managed_folder",
         "deploy_entry": "services.deploy_paths.resolve_deploy_managed_path",
         "discovery_by_info": "services.path_lifecycle.discover_folder_by_internal_id",
-        "last_known_path_role": "cache/hint — must be proven by .info.internal_id",
+        "last_known_path_role": "cache/hint — must be proven by .info/entity_key",
         "risk": (
             "Deploy/Library still pass integer mods.mod_id as runtime token; "
-            "UUID lives in mods.internal_id + .info.internal_id. "
+            "UUID lives in mods.internal_id; filesystem proof is .info/entity_key "
+            "(same value — not a third Mod ID). "
             "Stale last_known_path without successful .info scan fails resolution."
         ),
     }

@@ -240,7 +240,10 @@ def plan_field_scrubs(db: Any, library_root: str | Path) -> list[FieldRepairActi
         ext = str(row["external_id"] or "").strip()
         ws = str(row["workspace_id"] or "").strip()
         url = normalize_source_url(str(row["source_url"] or ""))
-        if is_internal_mod_id(mid) and (ext == mid or is_internal_mod_id(ext)):
+        external_polluted = ext == mid and (
+            is_internal_mod_id(mid) or plat != PLATFORM_STEAM
+        )
+        if external_polluted or (is_internal_mod_id(mid) and is_internal_mod_id(ext)):
             recovered = _platform_id_from_url(plat, url)
             actions.append(
                 FieldRepairAction(
@@ -255,7 +258,10 @@ def plan_field_scrubs(db: Any, library_root: str | Path) -> list[FieldRepairActi
                     },
                 )
             )
-        if is_internal_mod_id(mid) and plat != PLATFORM_STEAM and ws == mid:
+        workspace_polluted = ws == mid and (
+            is_internal_mod_id(mid) or plat != PLATFORM_STEAM
+        )
+        if workspace_polluted:
             actions.append(
                 FieldRepairAction(
                     action="scrub_polluted_workspace_id",

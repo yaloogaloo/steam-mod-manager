@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from core.db_manager import DatabaseManager
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
     PLATFORM_GITHUB,
@@ -18,9 +17,7 @@ from core.mod_platform import (
     PROVIDER_NEXUS_MANUAL_IMPORT,
     PROVIDER_STEAM_ARCHIVE,
 )
-from core.models import ModMetadata
 from services.archive import OfflinePageArchiver
-from services.file_ops import INFO_DIR_NAME
 from services.offline.base import OfflineProvider
 from services.offline.github import GithubOfflineProvider
 from services.offline.layout_snapshot import LayoutSnapshotResult
@@ -37,20 +34,9 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(lib: Path, *, mid: str, title: str) -> Path:
+def _folder(lib: Path, *, title: str) -> Path:
     folder = lib / "Game" / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": title,
-                "game_name": "Game",
-            }
-        ),
-        encoding="utf-8",
-    )
+    folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
@@ -83,12 +69,14 @@ def test_steam_provider_calls_ensure_offline_page(
 ) -> None:
     lib = tmp_path / "mod"
     lib.mkdir()
-    folder = _seed(lib, mid="3761838546", title="SteamMod")
-    create_steam_test_mod(db, external_id="3761838546", title="SteamMod")
-    bind_managed_path(db, "3761838546", folder, title="SteamMod")
+    folder = _folder(lib, title="SteamMod")
+    created = create_steam_test_mod(db, external_id="3761838546", title="SteamMod")
+    prove_managed_folder(
+        db, folder, handle=created.mod_id, title="SteamMod", game_name="Game"
+    )
 
     db.update_mod_platform_info(
-        "3761838546",
+        created.mod_id,
         platform=PLATFORM_STEAM,
         external_id="3761838546",
     )
@@ -109,7 +97,7 @@ def test_steam_provider_calls_ensure_offline_page(
 
     provider = SteamOfflineProvider()
     result = provider.update_offline_page(
-        "3761838546",
+        created.mod_id,
         managed_path=folder,
         library_root=lib,
     )
@@ -121,7 +109,7 @@ def test_steam_provider_calls_ensure_offline_page(
     assert result.index_path.is_file()
     assert "smm-offline-banner" in result.index_path.read_text(encoding="utf-8")
 
-    info = db.get_mod_display_info("3761838546")
+    info = db.get_mod_display_info(created.mod_id)
     assert info is not None
     assert info.offline_status == OFFLINE_STATUS_ARCHIVED
     assert info.offline_provider == PROVIDER_STEAM_ARCHIVE
@@ -143,7 +131,15 @@ def test_nexus_manual_and_github_snapshot(
         app_id=1623730,
         game_name="Palworld",
     )
-    nexus_folder = _seed(lib, mid=nexus.mod_id, title="NexusMod")
+    nexus_folder = _folder(lib, title="NexusMod")
+    prove_managed_folder(
+        db,
+        nexus_folder,
+        handle=nexus.mod_id,
+        title="NexusMod",
+        app_id=1623730,
+        game_name="Palworld",
+    )
 
     github = db.register_external_mod(
         platform=PLATFORM_GITHUB,
@@ -153,8 +149,15 @@ def test_nexus_manual_and_github_snapshot(
         app_id=1623730,
         game_name="Palworld",
     )
-    github_folder = _seed(lib, mid=github.mod_id, title="GithubMod")
-
+    github_folder = _folder(lib, title="GithubMod")
+    prove_managed_folder(
+        db,
+        github_folder,
+        handle=github.mod_id,
+        title="GithubMod",
+        app_id=1623730,
+        game_name="Palworld",
+    )
     html = tmp_path / "nexus.html"
     html.write_text("<html><body>nexus-local</body></html>", encoding="utf-8")
 

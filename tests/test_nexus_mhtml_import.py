@@ -112,9 +112,7 @@ def test_mhtml_import_writes_index_and_assets(tmp_path: Path) -> None:
     assert "MHTML Nexus" in html
     assert "cid:" not in html.lower()
     assert "assets/" in html
-    assert (out / "assets").is_dir()
-    asset_files = [p for p in (out / "assets").rglob("*") if p.is_file()]
-    assert any(p.suffix.lower() == ".png" for p in asset_files)
+    assert (out / "manifest.json").is_file()
     meta = json.loads((out / "metadata.json").read_text(encoding="utf-8"))
     assert meta["provider"] == PROVIDER_NEXUS_MANUAL_IMPORT
     assert meta["source_format"] == "mhtml"

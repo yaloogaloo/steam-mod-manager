@@ -158,7 +158,9 @@ def test_preview_actions_and_no_db_mutation(tmp_path: Path) -> None:
 
     restore = by_id["db_entity_without_valid_info:1"]
     assert restore["after_preview"]["diff"]["unchanged_db"] is True
-    assert restore["after_preview"]["info_record"]["internal_id"] == "uuid-1"
+    from services.mod_identity import read_entity_key
+
+    assert read_entity_key(restore["after_preview"]["info_record"]) == "uuid-1"
     assert restore["after_preview"]["info_record"]["external_id"] == "1333"
 
 

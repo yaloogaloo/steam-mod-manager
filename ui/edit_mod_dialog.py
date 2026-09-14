@@ -27,7 +27,6 @@ from core.mod_platform import (
     normalize_platform,
     platform_requires_source_url,
 )
-from core.models import MOD_TYPE_EXTENSION
 from core.witcher3_game_version import (
     WITCHER3_DEFAULT_VERSION,
     WITCHER3_GAME_VERSION_CHOICES,
@@ -336,7 +335,11 @@ class EditModDialog(QDialog):
     def _on_mod_type_changed(self, *_args) -> None:
         if self._batch_mode:
             return
-        show = self.selected_mod_type() == MOD_TYPE_EXTENSION
+        from services.mod_type_catalog import get_mod_type_catalog
+
+        ext_id = get_mod_type_catalog().extension_type_id(self._game_id)
+        selected = self.selected_type_id()
+        show = ext_id is not None and selected is not None and selected == ext_id
         self._set_form_row_visible(self.category_edit, show)
 
     def selected_platform(self) -> str:

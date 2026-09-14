@@ -96,15 +96,22 @@ def _read_info(folder: Path) -> tuple[dict[str, Any] | None, str]:
     return None, ""
 
 
-def _write_info_internal_id(meta_path: Path, internal_id: str) -> None:
+def _write_info_entity_key(meta_path: Path, internal_id: str) -> None:
+    """Write ``.info/entity_key`` (value = Entity.internal_id). Never dual-write legacy."""
+    from services.mod_identity import set_entity_key
+
     data = json.loads(meta_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"invalid metadata JSON: {meta_path}")
-    data["internal_id"] = _text(internal_id)
+    data = set_entity_key(data, _text(internal_id))
     meta_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+# Legacy alias — canonical name is :func:`_write_info_entity_key`.
+_write_info_internal_id = _write_info_entity_key
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -144,10 +151,13 @@ def load_mod_rows(db_path: Path) -> list[dict[str, Any]]:
 def _entity_snapshot(
     row: dict[str, Any], *, info: dict[str, Any] | None = None
 ) -> dict[str, Any]:
+    from services.mod_identity import read_entity_key
+
     path = _text(row.get("last_known_path"))
     folder = Path(path) if path else None
     pollution = bool(folder and is_pollution_dirname(folder.name))
-    info_iid = _text((info or {}).get("internal_id")) if info else ""
+    # info_internal_id report field = filesystem binding (entity_key / legacy).
+    info_iid = read_entity_key(info) if info else ""
     info_wid = _text((info or {}).get("workspace_id")) if info else ""
     eid = _entity_internal_id(row)
     return {
@@ -173,7 +183,9 @@ def _entity_snapshot(
 def _info_matches_entity(row: dict[str, Any], info: dict[str, Any] | None) -> bool:
     if not info or info.get("_read_error"):
         return False
-    info_iid = _text(info.get("internal_id"))
+    from services.mod_identity import read_entity_key
+
+    info_iid = read_entity_key(info)
     if not info_iid:
         return False
     eid = _entity_internal_id(row)
@@ -201,7 +213,7 @@ def select_keeper(
     """
     Keep strategy (ordered):
     1. Prefer normal directory name (not ``*_9000…``)
-    2. Prefer ``.info.internal_id`` matching the DB entity
+    2. Prefer ``.info/entity_key`` matching the DB entity
     3. Prefer a valid on-disk path binding
     4. Otherwise → no keeper (manual_review)
     """
@@ -353,9 +365,12 @@ def build_cleanup_plan(
             and _text(keep_info.get("workspace_id"))
             and not _info_matches_entity(keeper, keep_info)
         ):
+            from services.mod_identity import read_entity_key
+
             before_info = {
                 "path": keep_info_path,
-                "internal_id": _text(keep_info.get("internal_id")),
+                # Report snapshot of filesystem binding (entity_key / legacy).
+                "internal_id": read_entity_key(keep_info),
                 "workspace_id": _text(keep_info.get("workspace_id")),
             }
             actions.append(
@@ -603,8 +618,10 @@ def apply_cleanup_plan(
                 continue
             before_iid = ""
             try:
+                from services.mod_identity import read_entity_key
+
                 before = json.loads(info_path.read_text(encoding="utf-8"))
-                before_iid = _text(before.get("internal_id"))
+                before_iid = read_entity_key(before) if isinstance(before, dict) else ""
             except Exception:  # noqa: BLE001
                 before = {}
             _write_info_internal_id(info_path, kept)

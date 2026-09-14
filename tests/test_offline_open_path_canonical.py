@@ -27,6 +27,24 @@ from ui.mod_detail_dialog import ModDetailDialog
 from ui.mod_detail_panel import ModDetailPanel
 
 
+def _wait_open_worker(widget, qapp: QApplication, timeout_ms: int = 8000) -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    qapp.processEvents()
+    worker = getattr(widget, "_offline_open_worker", None)
+    if worker is None or not worker.isRunning():
+        qapp.processEvents()
+        return
+    loop = QEventLoop()
+    worker.finished.connect(loop.quit)
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    timer.start(timeout_ms)
+    loop.exec()
+    qapp.processEvents()
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QApplication:
     app = QApplication.instance()
@@ -153,6 +171,14 @@ def test_detail_panel_open_uses_canonical_resolver(
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>correct offline</html>", encoding="utf-8")
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+    from services.offline_view_cache import is_offline_view_path
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=mid)
@@ -164,9 +190,12 @@ def test_detail_panel_open_uses_canonical_resolver(
         lambda url: opened.append(url.toLocalFile()) or True,
     )
     panel._open_offline()
+    _wait_open_worker(panel, qapp)
     assert len(opened) == 1
-    assert Path(opened[0]).resolve() == preferred.resolve()
-    assert panel._metadata.offline_page_path == str(preferred.resolve())
+    opened_path = Path(opened[0]).resolve()
+    assert is_offline_view_path(opened_path)
+    assert opened_path != steam.resolve()
+    assert panel._metadata.offline_page_path == str(opened_path)
 
 
 def test_detail_dialog_open_uses_canonical_resolver(
@@ -178,6 +207,14 @@ def test_detail_dialog_open_uses_canonical_resolver(
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>ok</html>", encoding="utf-8")
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+    from services.offline_view_cache import is_offline_view_path
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     dialog = ModDetailDialog(folder, mod_id=mid)
     dialog.metadata.offline_page_path = str(steam)
@@ -187,8 +224,10 @@ def test_detail_dialog_open_uses_canonical_resolver(
         lambda url: opened.append(url.toLocalFile()) or True,
     )
     dialog._open_offline()
+    _wait_open_worker(dialog, qapp)
     assert len(opened) == 1
-    assert Path(opened[0]).resolve() == preferred.resolve()
+    assert is_offline_view_path(Path(opened[0]))
+    assert Path(opened[0]).resolve() != steam.resolve()
 
 
 def test_detail_panel_missing_shows_tooltip(

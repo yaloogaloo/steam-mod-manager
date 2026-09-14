@@ -308,8 +308,6 @@ class GitHubBrowserSnapshot:
             tmp.write_text(saved, encoding="utf-8")
             tmp.replace(index_path)
             _write_metadata(target, source_url=page_url, title=self.title)
-            # Empty assets dir for directory contract only (no downloads).
-            (target / "assets").mkdir(parents=True, exist_ok=True)
             return GitHubBrowserSnapshotResult(
                 success=True,
                 html_path=index_path,

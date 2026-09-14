@@ -116,11 +116,14 @@ def _read_info(folder: Path) -> tuple[dict[str, Any] | None, str]:
 
 
 def _info_summary(payload: dict[str, Any], folder: Path, info_path: str) -> dict[str, Any]:
+    from services.mod_identity import read_entity_key
+
     url = _text(payload.get("url") or payload.get("source_url"))
     return {
         "folder": str(folder),
         "info_path": info_path,
-        "internal_id": _text(payload.get("internal_id")),
+        # Report: filesystem binding (entity_key / legacy sidecar key).
+        "internal_id": read_entity_key(payload),
         "title": _text(payload.get("title") or payload.get("display_name")),
         "display_name": _text(payload.get("display_name")),
         "source_url": url,
@@ -576,6 +579,9 @@ def build_plan(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_info_metadata(info_path: Path, updates: dict[str, Any]) -> dict[str, Any]:
+    """Write ``.info/metadata.json``; filesystem proof is ``entity_key`` only."""
+    from services.mod_identity import normalize_info_entity_key_payload
+
     payload: dict[str, Any] = {}
     if info_path.is_file():
         try:
@@ -588,6 +594,7 @@ def _write_info_metadata(info_path: Path, updates: dict[str, Any]) -> dict[str, 
         if value is None:
             continue
         payload[key] = value
+    payload, _ = normalize_info_entity_key_payload(payload)
     info_path.parent.mkdir(parents=True, exist_ok=True)
     info_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

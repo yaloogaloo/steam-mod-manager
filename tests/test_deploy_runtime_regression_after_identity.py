@@ -43,15 +43,16 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _write_mod(folder: Path, mid: str, *, title: str = "DeployReg") -> None:
+def _write_mod(folder: Path, *, entity_internal_id: str, workshop_id: str, title: str = "DeployReg") -> None:
     folder.mkdir(parents=True, exist_ok=True)
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(
         json.dumps(
             {
-                "internal_id": mid,
-                "published_file_id": mid,
+                "internal_id": entity_internal_id,
+                "published_file_id": workshop_id,
+                "workspace_id": workshop_id,
                 "title": title,
                 "display_name": title,
             },
@@ -66,41 +67,47 @@ def test_deployment_refresh_keeps_deployment_records_visible(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     """Deploy mutation → notify → projection reload keeps deploy + record ids."""
-    mid = "7101"
+    workshop = "7101"
     lib = tmp_path / "library"
-    folder = lib / "Game" / f"Mod_{mid}"
-    _write_mod(folder, mid, title="RecordVisible")
+    folder = lib / "Game" / f"Mod_{workshop}"
     db.upsert_game(GameInfo(app_id=99, name="Game", folder_name="Game"))
-    create_steam_test_mod(db, external_id=mid, title="RecordVisible", app_id=99)
+    created = create_steam_test_mod(
+        db, external_id=workshop, title="RecordVisible", app_id=99
+    )
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id or "")
+    _write_mod(
+        folder, entity_internal_id=frozen, workshop_id=workshop, title="RecordVisible"
+    )
 
     db.update_mod_identity_fields(
-        mid, folder_present=True, last_known_path=str(folder), app_id=99
+        pk, folder_present=True, last_known_path=str(folder), app_id=99
     )
     db.update_mod_deploy_status(
-        mid,
+        pk,
         deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
         deploy_path="",
         app_id=99,
     )
-    record = db.create_deployment_record(99, "pack-a", [mid])
-    assert mid in {str(x) for x in db.get_deployment_record_mod_ids(record.id)}
+    record = db.create_deployment_record(99, "pack-a", [pk])
+    assert pk in {str(x) for x in db.get_deployment_record_mod_ids(record.id)}
 
     db.update_mod_deploy_status(
-        mid,
+        pk,
         deploy_status=DEPLOY_STATUS_DEPLOYED,
         deploy_path=str(tmp_path / "game" / "mods"),
         app_id=99,
     )
-    notify_mod_changed(mid)
+    notify_mod_changed(pk)
 
     cache = get_library_cache()
-    card = cache.refresh_projection(mid)
+    card = cache.refresh_projection(pk)
     assert card is not None
     assert card.deploy_status == DEPLOY_STATUS_DEPLOYED
     assert card.deployed is True
     # Deployment records remain queryable (not cleared by projection reload).
-    assert mid in {str(x) for x in db.get_deployment_record_mod_ids(record.id)}
-    info = db.get_mod_deploy_info(mid)
+    assert pk in {str(x) for x in db.get_deployment_record_mod_ids(record.id)}
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
 

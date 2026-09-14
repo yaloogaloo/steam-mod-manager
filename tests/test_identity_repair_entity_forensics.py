@@ -12,7 +12,7 @@ from core.game_info import GameInfo
 from core.models import ModMetadata
 from core.mod_platform import PLATFORM_NEXUS, PLATFORM_STEAM
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from services.identity_service import identity_create_scope
+from services.identity_service import create_mod_identity, identity_create_scope
 from services.identity_repair import (
     ACTION_CONFLICT,
     ACTION_MERGE,
@@ -68,16 +68,29 @@ def _plant_internal(
     return str(mid)
 
 
-def _canonical_steam(db: DatabaseManager, folder: Path, steam_id: str) -> None:
-    db.upsert_mod(ModMetadata(published_file_id=steam_id, title="Live", app_id=3167020))
+def _canonical_steam(db: DatabaseManager, folder: Path, steam_id: str) -> str:
+    """Create canonical Steam Entity; return ``mods.mod_id`` PK (not Workshop id)."""
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=steam_id,
+            workshop_id=steam_id,
+            title="Live",
+            app_id=3167020,
+            game_name="Duckov",
+            source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={steam_id}",
+        )
+    pk = str(created.mod_id)
     db.update_mod_identity_fields(
-        int(steam_id),
+        int(pk),
         last_known_path=str(folder.resolve()),
         app_id=3167020,
         platform=PLATFORM_STEAM,
         external_id=steam_id,
         source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={steam_id}",
     )
+    return pk
 
 
 def _plant_ghost(db: DatabaseManager, folder: Path, ghost_id: str) -> None:
@@ -107,14 +120,14 @@ def test_1_steam_ghost_is_remove_not_merge(db: DatabaseManager, tmp_path: Path) 
     steam = "3591453758"
     live = _folder(library, "Duckov", "Collectibles")
     leftover = _folder(library, "Duckov", f"Unknown Mod {steam}", payload=False)
-    _canonical_steam(db, live, steam)
+    pk = _canonical_steam(db, live, steam)
     _plant_ghost(db, leftover, "9000000000003438")
     plan = plan_identity_repair(db, library)
     ghost = next(c for c in plan.candidates if c.ghost_mod_id == "9000000000003438")
     assert ghost.proposed_action == ACTION_REMOVE_INVALID
     assert ghost.proposed_action != ACTION_MERGE
     assert ghost.proposed_action != ACTION_CONFLICT
-    assert ghost.candidate_mod_id == steam
+    assert ghost.candidate_mod_id == pk
 
 
 def test_2_unknown_mod_placeholder_removed(db: DatabaseManager, tmp_path: Path) -> None:
@@ -257,27 +270,32 @@ def test_apply_deletes_ghosts_keeps_canonical(
     library = tmp_path / "mod"
     ghosts = [str(9000000000003438 + i) for i in range(13)]
     steams = [str(3591453758 + i) for i in range(13)]
-    before_canon = {}
-    for ghost_id, steam in zip(ghosts, steams, strict=True):
+    before_canon: dict[str, object] = {}
+    pk_by_steam: dict[str, str] = {}
+    pairs = list(zip(ghosts, steams, strict=True))
+    for _ghost_id, steam in pairs:
         live = _folder(library, "Duckov", f"Live {steam}")
-        leftover = _folder(library, "Duckov", f"Unknown Mod {steam}")
-        _canonical_steam(db, live, steam)
-        _plant_ghost(db, leftover, ghost_id)
-        before_canon[steam] = db._conn.execute(
+        pk = _canonical_steam(db, live, steam)
+        pk_by_steam[steam] = pk
+        before_canon[pk] = db._conn.execute(
             "SELECT platform, external_id, workspace_id, source_url, display_name, last_known_path FROM mods WHERE mod_id=?",
-            (int(steam),),
+            (int(pk),),
         ).fetchone()
+    for ghost_id, steam in pairs:
+        leftover = _folder(library, "Duckov", f"Unknown Mod {steam}")
+        _plant_ghost(db, leftover, ghost_id)
     result = apply_identity_repair(db, library, apply=True, quarantine_root=tmp_path / "q")
     assert result.success
     for ghost_id, steam in zip(ghosts, steams, strict=True):
         assert db.get_mod(ghost_id) is None
+        pk = pk_by_steam[steam]
         row = db._conn.execute(
             "SELECT platform, external_id, workspace_id, source_url, display_name, last_known_path FROM mods WHERE mod_id=?",
-            (int(steam),),
+            (int(pk),),
         ).fetchone()
         for col in ("platform", "external_id", "workspace_id", "source_url", "display_name", "last_known_path"):
-            assert str(row[col] or "") == str(before_canon[steam][col] or "")
-        assert Path(str(before_canon[steam]["last_known_path"])).is_dir()
+            assert str(row[col] or "") == str(before_canon[pk][col] or "")
+        assert Path(str(before_canon[pk]["last_known_path"])).is_dir()
     after = summarize_sqlite_findings(db)
     assert after.get("CRITICAL") == 0
     assert after.get("HIGH") == 0

@@ -48,20 +48,20 @@ def _game(db: DatabaseManager, app_id: int, name: str) -> None:
 
 def _mod(
     db: DatabaseManager,
-    mod_id: int,
+    workshop_id: int,
     *,
     app_id: int,
     deployed: bool = False,
-) -> None:
+) -> int:
     game = db.get_game(app_id)
     game_name = game.name if game is not None else ""
     with identity_create_scope():
         created = create_mod_identity(
             db,
             platform=PLATFORM_STEAM,
-            external_id=str(mod_id),
-            workshop_id=str(mod_id),
-            title=f"Mod {mod_id}",
+            external_id=str(workshop_id),
+            workshop_id=str(workshop_id),
+            title=f"Mod {workshop_id}",
             app_id=app_id,
             game_name=game_name,
         )
@@ -73,6 +73,7 @@ def _mod(
         ),
         deploy_path="" if not deployed else f"/fake/{entity_id}",
     )
+    return entity_id
 
 
 def _index(mod_id: str, *, deployed: bool, favorite: bool = False) -> ModFilterIndex:
@@ -190,11 +191,11 @@ def test_case5_rename(db: DatabaseManager) -> None:
 
 def test_case6_delete_does_not_touch_mods(db: DatabaseManager) -> None:
     _game(db, STARDEW, "Stardew Valley")
-    _mod(db, 10, app_id=STARDEW, deployed=True)
+    pk = _mod(db, 10, app_id=STARDEW, deployed=True)
     record = dr.create_or_update_record(STARDEW, "del-me", db=db)
     assert dr.delete_record(record.id, db=db) is True
-    assert db.get_mod(10) is not None
-    assert db.get_mod_deploy_info(10).deploy_status == DEPLOY_STATUS_DEPLOYED
+    assert db.get_mod(pk) is not None
+    assert db.get_mod_deploy_info(pk).deploy_status == DEPLOY_STATUS_DEPLOYED
 
 
 def test_record_and_status_chips_are_mutex() -> None:

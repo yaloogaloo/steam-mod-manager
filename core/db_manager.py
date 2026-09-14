@@ -901,12 +901,11 @@ class DatabaseManager:
 
     def _backfill_steam_platform_fields(self) -> None:
         """
-        Existing Steam-range rows: PK historically *is* Workshop ID.
+        Normalize empty ``mod_files`` only.
 
-        Recover platform identity from that PK scheme:
-        ``Workshop ID → external_id → source_url``.
-        This is Steam PK coincidence recovery, not Internal ID generating
-        platform identity for non-Steam rows.
+        Historical recovery that copied ``mod_id`` digits into ``external_id`` /
+        ``source_url`` is forbidden after contiguous PK remapping —
+        ``mods.mod_id`` is never Workshop identity.
         """
         cols = {
             str(row[1])
@@ -917,35 +916,11 @@ class DatabaseManager:
         self._conn.execute(
             """
             UPDATE mods SET
-                platform = CASE
-                    WHEN (platform IS NULL OR TRIM(platform) = '')
-                         AND mod_id > 0 AND mod_id < ?
-                    THEN 'steam'
-                    ELSE platform
-                END,
-                external_id = CASE
-                    WHEN (external_id IS NULL OR TRIM(external_id) = '')
-                         AND (platform IS NULL OR TRIM(platform) = ''
-                              OR platform = 'steam')
-                         AND mod_id > 0 AND mod_id < ?
-                    THEN CAST(mod_id AS TEXT)
-                    ELSE external_id
-                END,
-                source_url = CASE
-                    WHEN (source_url IS NULL OR TRIM(source_url) = '')
-                         AND (platform IS NULL OR TRIM(platform) = ''
-                              OR platform = 'steam')
-                         AND mod_id > 0 AND mod_id < ?
-                    THEN 'https://steamcommunity.com/sharedfiles/filedetails/?id='
-                         || CAST(mod_id AS TEXT)
-                    ELSE source_url
-                END,
                 mod_files = CASE
                     WHEN mod_files IS NULL OR TRIM(mod_files) = '' THEN '{}'
                     ELSE mod_files
                 END
-            """,
-            (NON_STEAM_MOD_ID_BASE, NON_STEAM_MOD_ID_BASE, NON_STEAM_MOD_ID_BASE),
+            """
         )
 
     def _backfill_workspace_ids(self) -> None:
@@ -1811,17 +1786,21 @@ class DatabaseManager:
                     if len(matched) == 1:
                         return matched[0]
 
-            # Legacy Steam PK == Workshop digits (historical scheme).
+            # Legacy Steam PK == Workshop digits — only when platform identity
+            # on that row also agrees (post-continuity PK is never Workshop).
             legacy = self._conn.execute(
                 """
-                SELECT mod_id, platform FROM mods WHERE mod_id = ?
+                SELECT mod_id, platform, external_id, workspace_id FROM mods
+                WHERE mod_id = ?
                 """,
                 (int(wid),),
             ).fetchone()
             if legacy is not None:
                 plat = normalize_platform_if_known(str(legacy["platform"] or ""))
-                if plat in ("", PLATFORM_STEAM):
-                    return wid
+                ext = str(legacy["external_id"] or "").strip()
+                ws = str(legacy["workspace_id"] or "").strip()
+                if plat in ("", PLATFORM_STEAM) and (ext == wid or ws == wid):
+                    return str(legacy["mod_id"])
         return None
 
     def upsert_mod(self, meta: ModMetadata, *, allow_insert: bool | None = None) -> None:
@@ -1836,8 +1815,9 @@ class DatabaseManager:
         Flow: resolve existing entity → UPDATE by ``mods.mod_id``.
         Catalog / Steam API paths must not INSERT. INSERT is allowed only when
         ``allow_insert=True`` or an IdentityService create scope is active
-        (Sync/Import ``create_mod_identity``), using the historical Steam PK
-        scheme where Internal ID digits may equal Workshop ID.
+        (Sync/Import ``create_mod_identity``). New rows receive a contiguous
+        local ``mods.mod_id``; Workshop ID is stored only on
+        ``external_id`` / ``workspace_id``.
         """
         workshop = str(meta.published_file_id or "").strip()
         if not workshop.isdigit():
@@ -1933,36 +1913,26 @@ class DatabaseManager:
             )
             return
 
-        # IdentityService create only — historical Steam PK may equal Workshop.
-        mid = int(workshop)
+        # IdentityService create only — allocate contiguous local PK.
+        # Workshop ID binds to external_id / workspace_id only.
+        mid = int(self.allocate_mod_id())
         source = steam_workshop_url(workshop)
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO mods (
-                    mod_id, app_id, title, preview_url, description,
-                    display_name, custom_description, user_notes, favorite,
-                    platform, source_url, external_id, workspace_id, mod_files, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, ?, '{}', ?)
-                ON CONFLICT(mod_id) DO UPDATE SET
-                    app_id = excluded.app_id,
-                    title = excluded.title,
-                    preview_url = excluded.preview_url,
-                    description = excluded.description,
-                    workspace_id = CASE
-                        WHEN mods.workspace_id = '' OR mods.workspace_id IS NULL
-                        THEN excluded.workspace_id
-                        ELSE mods.workspace_id
-                    END,
-                    source_url = CASE
-                        WHEN mods.source_url IS NULL OR TRIM(mods.source_url) = ''
-                        THEN excluded.source_url
-                        ELSE mods.source_url
-                    END
+                UPDATE mods SET
+                    app_id = ?,
+                    title = ?,
+                    preview_url = ?,
+                    description = ?,
+                    platform = ?,
+                    source_url = ?,
+                    external_id = ?,
+                    workspace_id = ?,
+                    updated_at = ?
+                WHERE mod_id = ?
                 """,
                 (
-                    mid,
                     int(meta.app_id or 0),
                     meta.title,
                     meta.preview_url or "",
@@ -1972,6 +1942,7 @@ class DatabaseManager:
                     workshop,
                     workshop,
                     _utc_now(),
+                    mid,
                 ),
             )
             self._ensure_witcher3_game_version_default_locked(
@@ -2099,13 +2070,10 @@ class DatabaseManager:
 
     def allocate_mod_id(self) -> int:
         """
-        Allocate an Internal ID (SQLite PK) for non-Steam Mods.
+        Allocate the next local SQLite ``mods.mod_id`` PK.
 
-        Uses a high positive range so values never collide with Workshop IDs.
-        This value is database-only. It MUST NEVER be used as Workspace ID
-        or external_id.
-
-        Steam Mods continue to use Workshop ID as the SQLite PK (historical).
+        Contiguous handle only: ``MAX(mod_id) + 1``. Never derived from
+        Workshop ID, Nexus ID, workspace_id, or correlation_id.
 
         Inserts a provisional stub row immediately so consecutive allocations
         never return the same id before the caller persists identity fields.
@@ -2118,17 +2086,10 @@ class DatabaseManager:
         assert_lifecycle_may_allocate()
         with identity_create_scope(), self._lock:
             row = self._conn.execute(
-                """
-                SELECT MAX(mod_id) AS mx FROM mods
-                WHERE mod_id >= ?
-                """,
-                (NON_STEAM_MOD_ID_BASE,),
+                "SELECT MAX(mod_id) AS mx FROM mods"
             ).fetchone()
             mx = int(row["mx"] or 0) if row is not None else 0
-            if mx < NON_STEAM_MOD_ID_BASE:
-                next_id = int(NON_STEAM_MOD_ID_BASE)
-            else:
-                next_id = mx + 1
+            next_id = mx + 1 if mx > 0 else 1
             self._ensure_mod_stub(next_id)
             self._conn.commit()
             return next_id
@@ -2875,6 +2836,27 @@ class DatabaseManager:
             )
             self._conn.commit()
 
+    def update_mod_backup_offline_path(
+        self,
+        mod_id: int | str,
+        backup_offline_path: str = "",
+    ) -> None:
+        """Update Backup offline path only. Never rewrites identity or metadata."""
+        mid = int(str(mod_id).strip())
+        now = _utc_now()
+        with self._lock:
+            self._ensure_mod_stub(mid)
+            self._conn.execute(
+                """
+                UPDATE mods SET
+                    backup_updated_at = ?,
+                    backup_offline_path = ?
+                WHERE mod_id = ?
+                """,
+                (now, str(backup_offline_path or "").strip(), mid),
+            )
+            self._conn.commit()
+
     def update_mod_backup_status(
         self,
         mod_id: int | str,
@@ -2908,6 +2890,26 @@ class DatabaseManager:
                     (value, mid),
                 )
             self._conn.commit()
+
+    def set_mods_folder_present(
+        self, mod_ids: Iterable[int | str], *, present: bool
+    ) -> int:
+        """Batch ``folder_present`` write. Never allocates stubs."""
+        ids: list[int] = []
+        for raw in mod_ids:
+            text = str(raw or "").strip()
+            if text.isdigit():
+                ids.append(int(text))
+        if not ids:
+            return 0
+        flag = 1 if present else 0
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE mods SET folder_present = ? WHERE mod_id = ?",
+                [(flag, mid) for mid in ids],
+            )
+            self._conn.commit()
+        return len(ids)
 
     def set_mod_folder_present(self, mod_id: int | str, *, present: bool) -> None:
         mid = int(str(mod_id).strip())
@@ -3220,14 +3222,20 @@ class DatabaseManager:
             display = str(row["display_name"] or "").strip()
             steam = str(row["title"] or "").strip()
             name = display or steam or ( _Path(path).name if path else mid)
-            cover = str(row["cover_path"] or "").strip() or str(
-                row["backup_cover_path"] or ""
-            ).strip()
             deploy_status = str(row["deploy_status"] or "not_deployed")
             conflict_status = str(row["conflict_status"] or "none")
             offline_status = str(row["offline_status"] or "none")
             backup_offline = str(row["backup_offline_path"] or "").strip()
             folder_present = bool(int(row["folder_present"] or 0))
+            # LIVE → local cover; MISS → Backup cover. Never emit a dead
+            # relative live path when folder_present=0 (Card would miss Detail).
+            from services.cover_projection import projection_cover_ref
+
+            cover = projection_cover_ref(
+                folder_present=folder_present,
+                cover_path=str(row["cover_path"] or ""),
+                backup_cover_path=str(row["backup_cover_path"] or ""),
+            )
             notes = str(row["user_notes"] or "")
             # Keep search light — truncate notes preview.
             notes_preview = notes[:120] if notes else ""
@@ -3369,6 +3377,39 @@ class DatabaseManager:
             ).fetchall()
         return [{str(k): row[k] for k in row.keys()} for row in rows]
 
+    def iter_mod_backup_key_rows(self) -> list[dict[str, str]]:
+        """All entity storage keys for backup census (includes MISS rows).
+
+        Returns ``mod_id``, Frozen ``internal_id``, ``workspace_id``, and
+        ``last_known_path``. Folder name of ``data/mod_backup/<mod_id>/`` is
+        the current storage key — never ``workspace_id``.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT mod_id, internal_id, workspace_id, last_known_path,
+                       folder_present, app_id, content_status
+                FROM mods
+                """
+            ).fetchall()
+        out: list[dict[str, str]] = []
+        for row in rows:
+            mid = str(row["mod_id"] or "").strip()
+            if not mid.isdigit():
+                continue
+            out.append(
+                {
+                    "mod_id": mid,
+                    "internal_id": str(row["internal_id"] or "").strip(),
+                    "workspace_id": str(row["workspace_id"] or "").strip(),
+                    "last_known_path": str(row["last_known_path"] or "").strip(),
+                    "folder_present": str(int(row["folder_present"] or 0)),
+                    "app_id": str(int(row["app_id"] or 0)),
+                    "content_status": str(row["content_status"] or "").strip(),
+                }
+            )
+        return out
+
     def list_folder_missing_mods(
         self,
         *,
@@ -3468,11 +3509,8 @@ class DatabaseManager:
                     raise ValueError(MISSING_GAME_CONTEXT)
             if mod_id is not None:
                 requested = int(mod_id)
-                if requested < int(NON_STEAM_MOD_ID_BASE):
-                    raise ValueError(
-                        "non-Steam mod_id must be >= NON_STEAM_MOD_ID_BASE "
-                        f"({NON_STEAM_MOD_ID_BASE})"
-                    )
+                if requested <= 0:
+                    raise ValueError(f"invalid mod_id: {mod_id!r}")
             if resolved_game:
                 self.upsert_game(
                     GameInfo(
@@ -3491,13 +3529,27 @@ class DatabaseManager:
                 ),
                 allow_insert=True,
             )
-            info = self.get_mod_display_info(ext)
+            resolved = self.resolve_steam_entity_mod_id(
+                ext, app_id=resolved_app
+            )
+            if resolved is None:
+                raise RuntimeError(
+                    f"Steam register failed to resolve workshop={ext}"
+                )
+            info = self.get_mod_display_info(resolved)
             assert info is not None
+            from services.identity_service import ensure_durable_internal_id
+
+            ensure_durable_internal_id(self, resolved)
             if source_url:
                 return self.update_mod_platform_info(
-                    ext, platform=PLATFORM_STEAM, source_url=source_url, external_id=ext
+                    resolved,
+                    platform=PLATFORM_STEAM,
+                    source_url=source_url,
+                    external_id=ext,
                 )
-            return info
+            refreshed = self.get_mod_display_info(resolved)
+            return refreshed if refreshed is not None else info
 
         existing = self.find_mod_by_external(plat, ext, app_id=resolved_app)
         if existing is not None:
@@ -3555,17 +3607,24 @@ class DatabaseManager:
             refreshed = self.get_mod_display_info(mid)
             if refreshed is not None:
                 from core.witcher3_game_version import ensure_witcher3_game_version_default
+                from services.identity_service import ensure_durable_internal_id
 
                 ensure_witcher3_game_version_default(
                     self, mid, app_id=resolved_app, game_name=resolved_game
                 )
-                return refreshed
+                ensure_durable_internal_id(self, mid)
+                again = self.get_mod_display_info(mid)
+                return again if again is not None else refreshed
         from core.witcher3_game_version import ensure_witcher3_game_version_default
 
         ensure_witcher3_game_version_default(
             self, mid, app_id=resolved_app, game_name=resolved_game
         )
-        return info
+        from services.identity_service import ensure_durable_internal_id
+
+        ensure_durable_internal_id(self, mid)
+        refreshed = self.get_mod_display_info(mid)
+        return refreshed if refreshed is not None else info
 
     # ------------------------------------------------------------------
     # Mods — lifecycle status (invalid / conflict)
@@ -6379,19 +6438,8 @@ class DatabaseManager:
         from services.identity_service import refuse_unauthorized_mod_insert
 
         refuse_unauthorized_mod_insert(mid)
-        is_steam_range = mid > 0 and mid < NON_STEAM_MOD_ID_BASE
-        # Steam-range argument IS the Workshop ID (historical PK scheme):
-        # Workshop ID → external_id → workspace_id. URL from Workshop ID.
-        # Non-Steam: stub external only; Workspace ID is assigned after bind.
-        stub_external_id = str(mid) if is_steam_range else f"stub:{mid}"
-        stub_platform = PLATFORM_STEAM if is_steam_range else ""
-        workshop = str(mid) if is_steam_range else ""
-        stub_workspace = (
-            resolve_workspace_id(PLATFORM_STEAM, external_id=workshop, workshop_id=workshop)
-            if is_steam_range
-            else ""
-        )
-        stub_url = steam_workshop_url(workshop) if is_steam_range else ""
+        # PK is never Workshop / platform identity. Stub until create binds.
+        stub_external_id = f"stub:{mid}"
         self._conn.execute(
             """
             INSERT INTO mods (
@@ -6399,15 +6447,12 @@ class DatabaseManager:
                 display_name, custom_description, user_notes, favorite,
                 platform, source_url, external_id, workspace_id, mod_files, updated_at
             )
-            VALUES (?, 0, '', '', '', '', '', '', 0, ?, ?, ?, ?, '{}', ?)
+            VALUES (?, 0, '', '', '', '', '', '', 0, '', '', ?, '', '{}', ?)
             ON CONFLICT(mod_id) DO NOTHING
             """,
             (
                 mid,
-                stub_platform,
-                stub_url,
                 stub_external_id,
-                stub_workspace,
                 now,
             ),
         )

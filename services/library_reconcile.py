@@ -80,8 +80,12 @@ __all__ = [
     "LIBRARY_STATUS_IMPORTED",
     "OrphanCandidate",
     "ReconcileResult",
+    "ReconcilePacing",
     "reconcile_library",
     "start_reconcile_library_async",
+    "schedule_startup_library_reconcile",
+    "pause_reconcile",
+    "resume_reconcile",
     "resolve_library_games",
     "hold_library_load_until_reconcile_idle",
     "release_startup_library_hold",
@@ -96,6 +100,7 @@ __all__ = [
 _reconcile_lock = threading.Lock()
 _reconcile_running = False
 _reconcile_pending_root: str | None = None
+_reconcile_pending_pacing: "ReconcilePacing | None" = None
 # True after MainWindow schedules the startup reconcile QTimer, until that
 # run actually starts (or is released). Prevents LibraryLoadWorker from
 # racing the first QTimer.singleShot(0) reconcile.
@@ -104,6 +109,74 @@ _idle_listeners: list = []
 _shutdown_requested = False
 _reconcile_thread: threading.Thread | None = None
 _projection_touch_ids: list[str] = []
+# Cooperative pause: set = running; clear = paused (batch loops wait).
+_reconcile_run_gate = threading.Event()
+_reconcile_run_gate.set()
+_startup_timer: threading.Timer | None = None
+
+
+@dataclass(frozen=True)
+class ReconcilePacing:
+    """Optional IO pacing for background / startup reconcile.
+
+    Does not change Identity bind rules — only when the worker sleeps.
+    ``max_mods`` > 0 caps the bind pass and skips missing/orphan phases so
+    a partial run cannot false-mark unvisited folders as missing.
+    """
+
+    batch_size: int = 0
+    batch_pause_ms: int = 0
+    max_mods: int = 0
+    cooperative: bool = False
+    low_priority: bool = False
+
+
+def pause_reconcile() -> None:
+    """Pause cooperative reconcile batches (no-op if not cooperative)."""
+    _reconcile_run_gate.clear()
+    logger.info("reconcile paused")
+
+
+def resume_reconcile() -> None:
+    """Resume after :func:`pause_reconcile`."""
+    _reconcile_run_gate.set()
+    logger.info("reconcile resumed")
+
+
+def _set_current_thread_low_priority() -> None:
+    try:
+        import sys
+
+        if sys.platform != "win32":
+            return
+        import ctypes
+
+        # THREAD_PRIORITY_BELOW_NORMAL = -1
+        ctypes.windll.kernel32.SetThreadPriority(  # type: ignore[attr-defined]
+            ctypes.windll.kernel32.GetCurrentThread(),  # type: ignore[attr-defined]
+            -1,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _cooperative_wait(*, pause_ms: int = 0) -> bool:
+    """Wait while paused / yield between batches. False if shutdown."""
+    while True:
+        if _shutdown_requested:
+            return False
+        if _reconcile_run_gate.wait(0.05):
+            break
+    if pause_ms <= 0:
+        return not _shutdown_requested
+    end = time.monotonic() + (max(0, int(pause_ms)) / 1000.0)
+    while time.monotonic() < end:
+        if _shutdown_requested:
+            return False
+        if not _reconcile_run_gate.wait(0.02):
+            continue
+        time.sleep(min(0.02, max(0.0, end - time.monotonic())))
+    return not _shutdown_requested
 
 
 def take_projection_touch_ids() -> list[str]:
@@ -182,7 +255,11 @@ def _folder_missing_content(
     return not has_local_mod_payload(folder, mod_id=internal_id, db=db)
 
 
-def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult:
+def reconcile_library(
+    library_root: str | Path | None = None,
+    *,
+    pacing: ReconcilePacing | None = None,
+) -> ReconcileResult:
     """
     Unify disk / SQLite path facts for **existing** entities.
 
@@ -202,9 +279,13 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
 
     ARCHITECTURE RULE: consistency scan ≠ user metadata change. Do not
     ``mark_backup_dirty`` when an existing entity is unchanged.
+
+    *pacing* only affects sleep / early-cap between mods. Identity rules are
+    unchanged. A capped run skips missing + orphan phases (safe partial).
     """
     root = Path(library_root) if library_root else Path(default_mod_library())
     result = ReconcileResult()
+    pace = pacing or ReconcilePacing()
     if not root.is_dir():
         root.mkdir(parents=True, exist_ok=True)
 
@@ -221,7 +302,7 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
 
     if current_lifecycle() != LIFECYCLE_RECONCILE:
         with lifecycle_scope(LIFECYCLE_RECONCILE):
-            return reconcile_library(library_root)
+            return reconcile_library(library_root, pacing=pacing)
 
     try:
         from services.mod_fs_observer import begin_projection_defer
@@ -279,9 +360,18 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
     managed_folders = manager.list_managed_mods()
     add_list_discover_ms((_time.perf_counter() - t_discover) * 1000.0)
 
+    incomplete = False
     # --- Step 1: disk mods (bind existing only) ---
     with ModTimingGuard(reason="reconcile") as _mod_timer:
-        for folder in managed_folders:
+        for folder_index, folder in enumerate(managed_folders):
+            if pace.cooperative and not _cooperative_wait():
+                incomplete = True
+                result.notes.append("RECONCILE_SHUTDOWN")
+                break
+            if pace.max_mods > 0 and result.scanned >= pace.max_mods:
+                incomplete = True
+                result.notes.append(f"STARTUP_RECONCILE_CAP: {pace.max_mods}")
+                break
             result.scanned += 1
             _mod_timer.begin(str(folder))
             t_scan = _time.perf_counter()
@@ -445,6 +535,16 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                     if had_row and renamed:
                         result.restored += 1
 
+            if (
+                pace.batch_size > 0
+                and pace.batch_pause_ms > 0
+                and (folder_index + 1) % pace.batch_size == 0
+            ):
+                if not _cooperative_wait(pause_ms=pace.batch_pause_ms):
+                    incomplete = True
+                    result.notes.append("RECONCILE_SHUTDOWN")
+                    break
+
     # Identity conflicts: same mod_id → multiple live folders
     for mid, paths in id_to_paths.items():
         live = [p for p in paths if p.is_dir()]
@@ -500,239 +600,239 @@ def reconcile_library(library_root: str | Path | None = None) -> ReconcileResult
                     )
 
     # --- Step 2: backup / DB rows without disk ---
-    try:
-        for row in db.iter_mod_backup_rows():
-            mid = str(row.get("mod_id") or "").strip()
-            if not mid.isdigit() or mid in seen_ids:
-                continue
-            lkp = str(row.get("last_known_path") or "").strip()
-            path = Path(lkp) if lkp else None
-            if path is not None and path.is_dir():
-                # Path still present but was not in list_managed_mods — bind path only.
-                # No backup enqueue: consistency scan ≠ metadata change.
-                try:
-                    from services.identity_service import persist_identity
+    # Incomplete (capped / shutdown) runs must not mark unvisited folders missing.
+    if incomplete:
+        result.notes.append('SKIP_MISSING_AND_ORPHAN_PHASES')
 
-                    persist_identity(
-                        db,
-                        mid,
-                        source="reconcile",
-                        reason="bind",
-                        last_known_path=str(path.resolve()),
-                        folder_present=True,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                seen_ids.add(mid)
-                continue
+    if not incomplete:
+        try:
+            from services.mod_presence import RediscoveryIndex, rediscover_entity_path
 
-            # Dead last_known_path: rebind when another folder proves the same
-            # .info.internal_id (never workspace / folder-name invent).
-            rebound = False
-            try:
-                from services.path_lifecycle import discover_folder_by_internal_id
-                from services.identity_service import persist_identity
-
-                iid = str(row.get("internal_id") or "").strip()
-                if not iid:
-                    iid = str(
-                        (db.get_mod_backup_row(mid) or {}).get("internal_id") or ""
-                    ).strip() or mid
-                alt = discover_folder_by_internal_id(
-                    iid,
-                    library_root=root,
-                    expected_mod_id=mid,
-                    db=db,
-                )
-                if alt is not None and alt.is_dir():
-                    persist_identity(
-                        db,
-                        mid,
-                        source="reconcile",
-                        reason="rebind_info_internal_id",
-                        last_known_path=str(alt.resolve()),
-                        folder_present=True,
-                    )
+            rediscovery = RediscoveryIndex()
+            for row in db.iter_mod_backup_rows():
+                mid = str(row.get('mod_id') or '').strip()
+                if not mid.isdigit() or mid in seen_ids:
+                    continue
+                lkp = str(row.get('last_known_path') or '').strip()
+                path = Path(lkp) if lkp else None
+                if path is not None and path.is_dir():
+                    # Path still present but was not in list_managed_mods — bind path only.
+                    # No backup enqueue: consistency scan ≠ metadata change.
                     try:
-                        from services.content_status_eval import (
-                            persist_evaluated_content_status,
-                        )
-
-                        persist_evaluated_content_status(
-                            mid,
-                            alt,
-                            db=db,
-                            folder_present=True,
-                            backup_status=str(row.get("backup_status") or ""),
-                            metadata_missing=not _folder_has_metadata(alt),
-                            sync_sticky_marker=True,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    seen_ids.add(mid)
-                    result.renamed += 1
-                    result.rebound_ids.append(mid)
-                    result.notes.append(f"PATH_REBOUND: {mid} -> {alt}")
-                    rebound = True
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "internal_id path rebind failed for %s", mid, exc_info=True
-                )
-            if rebound:
-                continue
-
-            mark_missing(mid)
-            try:
-                from services.content_status_eval import persist_evaluated_content_status
-
-                bstatus = str(row.get("backup_status") or "").strip()
-                existing_source = row_source_type(row)
-                if existing_source:
-                    db.update_mod_identity_fields(
-                        mid,
-                        source_type=existing_source,
-                        folder_present=False,
-                    )
-                else:
-                    db.update_mod_identity_fields(mid, folder_present=False)
-                persist_evaluated_content_status(
-                    mid,
-                    None,
-                    db=db,
-                    folder_present=False,
-                    backup_status=bstatus,
-                    sync_sticky_marker=False,
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            result.missing += 1
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("reconcile missing-pass failed: %s", exc)
-
-    # Orphan backup dirs on disk not yet in SQLite → OrphanCandidate (no create).
-    # Backup folder name is Internal/Steam PK storage — never Steam CREATE proof.
-    try:
-        from services.metadata_backup import load_backup
-
-        def _under_library(path_text: str) -> bool:
-            text = str(path_text or "").strip()
-            if not text:
-                return False
-            try:
-                resolved = Path(text).expanduser().resolve()
-                return resolved == root.resolve() or root.resolve() in resolved.parents
-            except OSError:
-                return False
-
-        backup_base = data_dir() / BACKUP_DIR_NAME
-        if backup_base.is_dir():
-            for child in backup_base.iterdir():
-                if not child.is_dir() or not child.name.isdigit():
-                    continue
-                mid = child.name
-                if mid in seen_ids:
-                    continue
-                if is_internal_mod_id(mid) and db.get_mod(mid) is None:
-                    result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
-                    continue
-                meta_file = child / "metadata.json"
-                if not meta_file.is_file():
-                    continue
-                try:
-                    snap = load_backup(mid)
-                    if snap is None:
-                        continue
-                    meta = snap.metadata
-                    lkp = str(snap.last_known_path or "").strip()
-                    if db.get_mod(mid) is None and lkp and not _under_library(lkp):
-                        continue
-                    if db.get_mod(mid) is None and not lkp:
-                        result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
-                        continue
-                    if db.get_mod(mid) is not None:
-                        # Existing entity — path/presence only; no backup enqueue.
-                        present = bool(lkp and Path(lkp).is_dir())
-                        from services.content_status_eval import (
-                            persist_evaluated_content_status,
-                        )
                         from services.identity_service import persist_identity
 
                         persist_identity(
                             db,
                             mid,
-                            source="reconcile",
-                            reason="backup_orphan",
-                            internal_id=read_internal_id(meta) or None,
-                            last_known_path=lkp,
-                            folder_present=present,
-                            sticky_source=True,
+                            source='reconcile',
+                            reason='bind',
+                            last_known_path=str(path.resolve()),
+                            folder_present=True,
                         )
-                        persist_evaluated_content_status(
-                            mid,
-                            Path(lkp) if present else None,
-                            db=db,
-                            folder_present=present,
-                            sync_sticky_marker=False,
-                        )
-                        if not present:
-                            result.missing += 1
-                        seen_ids.add(mid)
-                        continue
+                    except Exception:  # noqa: BLE001
+                        pass
+                    seen_ids.add(mid)
+                    continue
 
-                    # No mods row — emit OrphanCandidate for Import/Sync.
-                    title = str(
-                        meta.get("title")
-                        or meta.get("display_name")
-                        or f"Unknown_Mod_{mid}"
+                # Dead last_known_path: rediscover in the game managed root only
+                # (never workspace / folder-name invent; Evidence A + B required).
+                rebound = False
+                try:
+                    found = rediscover_entity_path(
+                        mid, db=db, library_root=root, index=rediscovery
                     )
-                    payload_source = str(
-                        meta.get("source_type") or meta.get("platform") or ""
-                    )
-                    store_platform = normalize_platform_if_known(payload_source) or (
-                        normalize_platform(payload_source) if payload_source else ""
-                    )
-                    url = str(meta.get("url") or meta.get("source_url") or "")
-                    ext = str(meta.get("external_id") or "")
-                    ws_meta = str(meta.get("workspace_id") or "").strip()
-                    from services.identity_service import has_official_platform_identity
+                    if found.success and found.path:
+                        alt = Path(found.path)
+                        if alt.is_dir():
+                            try:
+                                from services.content_status_eval import (
+                                    persist_evaluated_content_status,
+                                )
+                                from services.identity_service import persist_identity
 
-                    steam_wid = ""
-                    if store_platform == PLATFORM_STEAM:
-                        if ext.isdigit() and not is_internal_mod_id(ext):
-                            steam_wid = ext
-                        elif ws_meta.isdigit() and not is_internal_mod_id(ws_meta):
-                            steam_wid = ws_meta
-                    official = has_official_platform_identity(
-                        platform=store_platform,
-                        external_id=ext,
-                        source_url=url,
-                        workshop_id=steam_wid,
-                    )
-                    if not official or not store_platform:
-                        result.notes.append(f"IDENTITY_UNRESOLVED backup: {mid}")
-                        continue
-                    orphan_path = lkp if lkp else str(child)
-                    result.orphans.append(
-                        OrphanCandidate(
-                            path=orphan_path,
-                            platform=store_platform,
-                            external_id=ext or steam_wid,
-                            workspace_id=ws_meta or steam_wid or ext,
-                            source_url=url,
-                            title=title,
-                            app_id=int(meta.get("app_id") or 0),
-                            game_name=str(meta.get("game_name") or ""),
-                            origin="backup",
-                            payload=dict(meta),
-                        )
-                    )
-                    result.notes.append(f"ORPHAN_CANDIDATE backup: {mid}")
+                                persist_identity(
+                                    db,
+                                    mid,
+                                    source='reconcile',
+                                    reason='rebind_info_internal_id',
+                                    last_known_path=str(alt.resolve()),
+                                    folder_present=True,
+                                )
+                                persist_evaluated_content_status(
+                                    mid,
+                                    alt,
+                                    db=db,
+                                    folder_present=True,
+                                    backup_status=str(row.get('backup_status') or ''),
+                                    metadata_missing=not _folder_has_metadata(alt),
+                                    sync_sticky_marker=True,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                            seen_ids.add(mid)
+                            result.renamed += 1
+                            result.rebound_ids.append(mid)
+                            result.notes.append(f'PATH_REBOUND: {mid} -> {alt}')
+                            rebound = True
                 except Exception:  # noqa: BLE001
                     logger.debug(
-                        "orphan backup scan failed for %s", mid, exc_info=True
+                        'internal_id path rebind failed for %s', mid, exc_info=True
                     )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("orphan backup scan failed: %s", exc)
+                if rebound:
+                    continue
+
+                mark_missing(mid)
+                try:
+                    from services.content_status_eval import persist_evaluated_content_status
+
+                    bstatus = str(row.get('backup_status') or '').strip()
+                    existing_source = row_source_type(row)
+                    if existing_source:
+                        db.update_mod_identity_fields(
+                            mid,
+                            source_type=existing_source,
+                            folder_present=False,
+                        )
+                    else:
+                        db.update_mod_identity_fields(mid, folder_present=False)
+                    persist_evaluated_content_status(
+                        mid,
+                        None,
+                        db=db,
+                        folder_present=False,
+                        backup_status=bstatus,
+                        sync_sticky_marker=False,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                result.missing += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('reconcile missing-pass failed: %s', exc)
+
+        # Orphan backup dirs on disk not yet in SQLite → OrphanCandidate (no create).
+        # Backup folder name is Internal/Steam PK storage — never Steam CREATE proof.
+        try:
+            from services.metadata_backup import load_backup
+
+            def _under_library(path_text: str) -> bool:
+                text = str(path_text or '').strip()
+                if not text:
+                    return False
+                try:
+                    resolved = Path(text).expanduser().resolve()
+                    return resolved == root.resolve() or root.resolve() in resolved.parents
+                except OSError:
+                    return False
+
+            backup_base = data_dir() / BACKUP_DIR_NAME
+            if backup_base.is_dir():
+                for child in backup_base.iterdir():
+                    if not child.is_dir() or not child.name.isdigit():
+                        continue
+                    mid = child.name
+                    if mid in seen_ids:
+                        continue
+                    if is_internal_mod_id(mid) and db.get_mod(mid) is None:
+                        result.notes.append(f'IDENTITY_UNRESOLVED backup: {mid}')
+                        continue
+                    meta_file = child / 'metadata.json'
+                    if not meta_file.is_file():
+                        continue
+                    try:
+                        snap = load_backup(mid)
+                        if snap is None:
+                            continue
+                        meta = snap.metadata
+                        lkp = str(snap.last_known_path or '').strip()
+                        if db.get_mod(mid) is None and lkp and not _under_library(lkp):
+                            continue
+                        if db.get_mod(mid) is None and not lkp:
+                            result.notes.append(f'IDENTITY_UNRESOLVED backup: {mid}')
+                            continue
+                        if db.get_mod(mid) is not None:
+                            # Existing entity — path/presence only; no backup enqueue.
+                            present = bool(lkp and Path(lkp).is_dir())
+                            from services.content_status_eval import (
+                                persist_evaluated_content_status,
+                            )
+                            from services.identity_service import persist_identity
+
+                            persist_identity(
+                                db,
+                                mid,
+                                source='reconcile',
+                                reason='backup_orphan',
+                                internal_id=read_internal_id(meta) or None,
+                                last_known_path=lkp,
+                                folder_present=present,
+                                sticky_source=True,
+                            )
+                            persist_evaluated_content_status(
+                                mid,
+                                Path(lkp) if present else None,
+                                db=db,
+                                folder_present=present,
+                                sync_sticky_marker=False,
+                            )
+                            if not present:
+                                result.missing += 1
+                            seen_ids.add(mid)
+                            continue
+
+                        # No mods row — emit OrphanCandidate for Import/Sync.
+                        title = str(
+                            meta.get('title')
+                            or meta.get('display_name')
+                            or f'Unknown_Mod_{mid}'
+                        )
+                        payload_source = str(
+                            meta.get('source_type') or meta.get('platform') or ''
+                        )
+                        store_platform = normalize_platform_if_known(payload_source) or (
+                            normalize_platform(payload_source) if payload_source else ''
+                        )
+                        url = str(meta.get('url') or meta.get('source_url') or '')
+                        ext = str(meta.get('external_id') or '')
+                        ws_meta = str(meta.get('workspace_id') or '').strip()
+                        from services.identity_service import has_official_platform_identity
+
+                        steam_wid = ''
+                        if store_platform == PLATFORM_STEAM:
+                            if ext.isdigit() and not is_internal_mod_id(ext):
+                                steam_wid = ext
+                            elif ws_meta.isdigit() and not is_internal_mod_id(ws_meta):
+                                steam_wid = ws_meta
+                        official = has_official_platform_identity(
+                            platform=store_platform,
+                            external_id=ext,
+                            source_url=url,
+                            workshop_id=steam_wid,
+                        )
+                        if not official or not store_platform:
+                            result.notes.append(f'IDENTITY_UNRESOLVED backup: {mid}')
+                            continue
+                        orphan_path = lkp if lkp else str(child)
+                        result.orphans.append(
+                            OrphanCandidate(
+                                path=orphan_path,
+                                platform=store_platform,
+                                external_id=ext or steam_wid,
+                                workspace_id=ws_meta or steam_wid or ext,
+                                source_url=url,
+                                title=title,
+                                app_id=int(meta.get('app_id') or 0),
+                                game_name=str(meta.get('game_name') or ''),
+                                origin='backup',
+                                payload=dict(meta),
+                            )
+                        )
+                        result.notes.append(f'ORPHAN_CANDIDATE backup: {mid}')
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            'orphan backup scan failed for %s', mid, exc_info=True
+                        )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('orphan backup scan failed: %s', exc)
 
     # Recover interrupted deploy transactions (backup_done / prepared leftovers).
     try:
@@ -850,23 +950,41 @@ def library_load_must_wait() -> bool:
 
 def reset_reconcile_async_state() -> None:
     """Test helper. Does not stop an in-flight reconcile thread."""
-    global _reconcile_running, _reconcile_pending_root, _startup_hold
-    global _shutdown_requested, _reconcile_thread
+    global _reconcile_running, _reconcile_pending_root, _reconcile_pending_pacing
+    global _startup_hold, _shutdown_requested, _reconcile_thread, _startup_timer
     with _reconcile_lock:
         _reconcile_running = False
         _reconcile_pending_root = None
+        _reconcile_pending_pacing = None
         _startup_hold = False
         _shutdown_requested = False
         _reconcile_thread = None
         _idle_listeners.clear()
+    _reconcile_run_gate.set()
+    timer = _startup_timer
+    _startup_timer = None
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def request_reconcile_shutdown() -> None:
     """Refuse new / queued reconcile runs. Does not abort an in-flight pass."""
-    global _shutdown_requested, _reconcile_pending_root
+    global _shutdown_requested, _reconcile_pending_root, _startup_timer
     with _reconcile_lock:
         _shutdown_requested = True
         _reconcile_pending_root = None
+        _reconcile_pending_pacing = None
+    _reconcile_run_gate.set()  # unblock paused workers so they can exit
+    timer = _startup_timer
+    _startup_timer = None
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def join_reconcile_thread(timeout: float) -> bool:
@@ -891,14 +1009,96 @@ def _notify_reconcile_idle() -> None:
             logger.exception("reconcile idle listener failed")
 
 
-def start_reconcile_library_async(library_root: str | Path | None = None) -> bool:
+def schedule_startup_library_reconcile(
+    library_root: str | Path | None = None,
+) -> str:
+    """GUI startup entry for Identity Reconcile.
+
+    Default policy (``startup_reconcile_enabled=false``): skip folder walk /
+    Identity Reconcile entirely and release any library-load hold so Library
+    can open from DB state immediately.
+
+    When enabled: delay, then run a low-priority batched cooperative reconcile.
+    Explicit ``start_reconcile_library_async`` / ``reconcile_library`` callers
+    are unaffected.
+    """
+    global _startup_timer
+    from services.startup_reconcile_policy import load_startup_reconcile_policy
+
+    policy = load_startup_reconcile_policy()
+    root = str(library_root) if library_root else None
+    if not policy.enabled:
+        release_startup_library_hold()
+        logger.info(
+            "startup reconcile skipped "
+            "(startup_reconcile_enabled=false; DB projection only)"
+        )
+        return "skipped"
+
+    pacing = ReconcilePacing(
+        batch_size=int(policy.batch_size),
+        batch_pause_ms=int(policy.batch_pause_ms),
+        max_mods=int(policy.max_mods),
+        cooperative=True,
+        low_priority=True,
+    )
+    delay_s = max(0.0, float(policy.delay_ms) / 1000.0)
+
+    def _fire() -> None:
+        global _startup_timer
+        _startup_timer = None
+        if _shutdown_requested:
+            release_startup_library_hold()
+            return
+        start_reconcile_library_async(root, pacing=pacing)
+        logger.info(
+            "startup reconcile started after delay_ms=%s batch=%s pause_ms=%s "
+            "max_mods=%s",
+            policy.delay_ms,
+            policy.batch_size,
+            policy.batch_pause_ms,
+            policy.max_mods,
+        )
+
+    if delay_s <= 0:
+        _fire()
+        return "started"
+
+    with _reconcile_lock:
+        if _startup_timer is not None:
+            try:
+                _startup_timer.cancel()
+            except Exception:  # noqa: BLE001
+                pass
+        timer = threading.Timer(delay_s, _fire)
+        timer.daemon = True
+        _startup_timer = timer
+        timer.start()
+    # Do not hold Library load for delayed reconcile.
+    release_startup_library_hold()
+    logger.info(
+        "startup reconcile scheduled delay_ms=%s (library load not blocked)",
+        policy.delay_ms,
+    )
+    return "scheduled"
+
+
+def start_reconcile_library_async(
+    library_root: str | Path | None = None,
+    *,
+    pacing: ReconcilePacing | None = None,
+) -> bool:
     """Run :func:`reconcile_library` on a daemon thread (non-blocking).
 
     Concurrent callers are coalesced: if a run is in progress, the latest
-    *library_root* is queued and executed once after the current run finishes.
+    *library_root* (and pacing) is queued and executed once after the current
+    run finishes.
+
+    *pacing* is optional IO throttling for background/startup runs. User /
+    Repair / Import callers typically omit it for a full unpaced pass.
     """
-    global _reconcile_running, _reconcile_pending_root, _startup_hold
-    global _reconcile_thread
+    global _reconcile_running, _reconcile_pending_root, _reconcile_pending_pacing
+    global _startup_hold, _reconcile_thread
     root = str(library_root) if library_root else None
     with _reconcile_lock:
         if _shutdown_requested:
@@ -907,6 +1107,7 @@ def start_reconcile_library_async(library_root: str | Path | None = None) -> boo
         _startup_hold = False
         if _reconcile_running:
             _reconcile_pending_root = root
+            _reconcile_pending_pacing = pacing
             logger.info("reconcile_library already running; queued follow-up")
             try:
                 from services.startup_io_trace import note_reconcile_queued
@@ -917,23 +1118,36 @@ def start_reconcile_library_async(library_root: str | Path | None = None) -> boo
             return False
         _reconcile_running = True
         _reconcile_pending_root = None
+        _reconcile_pending_pacing = None
 
     def _worker() -> None:
-        global _reconcile_running, _reconcile_pending_root, _startup_hold
+        global _reconcile_running, _reconcile_pending_root, _reconcile_pending_pacing
+        global _startup_hold
         current = root
+        current_pacing = pacing
+        if current_pacing is not None and current_pacing.low_priority:
+            _set_current_thread_low_priority()
         while True:
             try:
-                reconcile_library(current)
+                if current_pacing is None:
+                    reconcile_library(current)
+                else:
+                    reconcile_library(current, pacing=current_pacing)
             except Exception:  # noqa: BLE001
                 logger.exception("reconcile_library crashed")
             with _reconcile_lock:
                 pending = _reconcile_pending_root
+                pending_pacing = _reconcile_pending_pacing
                 _reconcile_pending_root = None
+                _reconcile_pending_pacing = None
                 if pending is None or _shutdown_requested:
                     _reconcile_running = False
                     _startup_hold = False
                     break
                 current = pending
+                current_pacing = pending_pacing
+                if current_pacing is not None and current_pacing.low_priority:
+                    _set_current_thread_low_priority()
         _notify_reconcile_idle()
 
     thread = threading.Thread(

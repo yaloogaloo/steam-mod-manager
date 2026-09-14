@@ -169,7 +169,9 @@ def rewrite_imported_html(
     """
     html_dir = html_path.parent
     companion = companion_files_dir(html_path)
-    assets_root = Path(output_dir) / "assets"
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets_root = resolve_capture_assets_dir(output_dir)
     assets_root.mkdir(parents=True, exist_ok=True)
 
     copied = 0

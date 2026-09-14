@@ -108,6 +108,14 @@ def test_open_offline_opens_modio_offline_index(
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>modio</html>", encoding="utf-8")
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+    from services.offline_view_cache import is_offline_view_path
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=mid)
@@ -119,8 +127,21 @@ def test_open_offline_opens_modio_offline_index(
         lambda url: opened.append(url) or True,
     )
     panel._open_offline()
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    worker = getattr(panel, "_offline_open_worker", None)
+    if worker is not None and worker.isRunning():
+        loop = QEventLoop()
+        worker.finished.connect(loop.quit)
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        timer.start(8000)
+        loop.exec()
+    qapp.processEvents()
     assert len(opened) == 1
-    assert Path(opened[0].toLocalFile()).resolve() == preferred.resolve()
+    assert is_offline_view_path(Path(opened[0].toLocalFile()))
+    assert Path(opened[0].toLocalFile()).resolve() != preferred.resolve()
 
 
 def test_strip_modio_cookie_banner_removes_notice() -> None:

@@ -302,12 +302,12 @@ def test_log_mod_id_matches_url_id(
     with caplog.at_level(logging.INFO, logger=archive_mod.logger.name):
         with OfflinePageArchiver(session=session) as archiver:
             archiver._active_mod_id = "3761838546"
-            archive_mod._set_tls_mod_id("3761838546")
+            archive_mod._set_tls_published_file_id("3761838546")
             archiver._http_get(URL)
 
     steam_lines = [r.message for r in caplog.records if "[STEAM ARCHIVE]" in r.message]
     assert steam_lines
-    assert any("mod_id=3761838546" in line for line in steam_lines)
+    assert any("published_file_id=3761838546" in line for line in steam_lines)
     assert any("url_id=3761838546" in line for line in steam_lines)
 
 
@@ -341,7 +341,7 @@ def test_archive_sets_tls_mod_id_for_matching_logs(
         if "[STEAM ARCHIVE]" in r.message and "url_id=" in r.message
     ]
     assert main_logs
-    assert "mod_id=3664026608" in main_logs[0]
+    assert "published_file_id=3664026608" in main_logs[0]
     assert "url_id=3664026608" in main_logs[0]
 
 

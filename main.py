@@ -305,9 +305,22 @@ def _run_gui() -> int:
         install_syscommand_probe(app, window)
     log_startup("about to show()")
     _boot("before show")
+    try:
+        from services.perf_stage import reset_perf_stage, log_perf_stage
+
+        reset_perf_stage()
+        log_perf_stage("startup", 0.0, event="before_show")
+    except Exception:
+        pass
     window.show()
     _boot("after show")
     app.processEvents()
+    try:
+        from services.perf_stage import log_perf_stage, since_ms
+
+        log_perf_stage("startup", since_ms(), event="after_show_processEvents")
+    except Exception:
+        pass
     log_startup(
         f"show() returned visible={window.isVisible()} "
         f"size={window.width()}x{window.height()} state={window.windowState()!r}"

@@ -89,7 +89,14 @@ NON_STEAM_MOD_ID_BASE = 9_000_000_000_000_000
 
 
 def is_internal_mod_id(mod_id: int | str) -> bool:
-    """True when *mod_id* is an app-allocated non-Steam SQLite primary key (Internal ID)."""
+    """True when *value* looks like a legacy high-range app-allocated token.
+
+    Historically non-Steam ``mods.mod_id`` lived at ``>= NON_STEAM_MOD_ID_BASE``.
+    After contiguous PK remapping, **do not** use this to classify current
+    ``mods.mod_id`` / platform. Prefer ``platform`` / ``external_id`` /
+    ``workspace_id``. Still valid for detecting polluted external identity
+    strings that embed the old high-range scheme.
+    """
     text = str(mod_id or "").strip()
     if not text.isdigit():
         return False
@@ -342,6 +349,15 @@ CIVILIZATION_VI_NAME_ALIASES = frozenset(
     }
 )
 
+# Stellaris / 群星 — launcher enable + load order (AppID 281990).
+STELLARIS_APP_IDS = frozenset({281990})
+STELLARIS_NAME_ALIASES = frozenset(
+    {
+        "stellaris",
+        "群星",
+    }
+)
+
 # Total War: WARHAMMER III / 全面战争：战锤 III — pack-only deploy into mod_path.
 WARHAMMER3_APP_IDS = frozenset({1142710})
 WARHAMMER3_NAME_ALIASES = frozenset(
@@ -458,6 +474,21 @@ def is_civilization_vi_game(game_name: str = "", game_id: int | str = 0) -> bool
         return True
     # Avoid matching the "vi" inside the word "civilization" itself.
     return key in {"civilizationvi", "civvi", "civ6"} or key.endswith("civilizationvi")
+
+
+def is_stellaris_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Stellaris / 群星."""
+    gid = _coerce_game_id(game_id)
+    if gid in STELLARIS_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    if "群星" in raw:
+        return True
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in STELLARIS_NAME_ALIASES}
+    return key in aliases
 
 
 def is_warhammer3_game(game_name: str = "", game_id: int | str = 0) -> bool:

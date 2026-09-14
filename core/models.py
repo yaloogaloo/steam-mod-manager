@@ -6,15 +6,30 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-# User-facing Mod type label that unlocks the optional free-text「分类」field.
+# Canonical create / infer label for a game's extension Type.
+# Display text only — never the runtime unlock key for「分类」.
 MOD_TYPE_EXTENSION = "拓展"
 
 
-def visible_extension_category(mod_type: str | None, category: str | None) -> str:
-    """Category text shown in detail UI, or empty to hide the row entirely."""
-    if str(mod_type or "").strip() != MOD_TYPE_EXTENSION:
+def visible_extension_category(
+    category: str | None,
+    *,
+    app_id: int | str = 0,
+    type_id: int | str | None = None,
+) -> str:
+    """Category text shown in detail UI, or empty to hide the row entirely.
+
+    Unlock is ``mods.type_id == catalog.extension_type_id(app_id)``.
+    Type display names (拓展 / 扩展 / Expansion) must not change this.
+    """
+    text = str(category or "").strip()
+    if not text:
         return ""
-    return str(category or "").strip()
+    from services.mod_type_catalog import get_mod_type_catalog
+
+    if not get_mod_type_catalog().is_extension_type(app_id, type_id):
+        return ""
+    return text
 
 
 _UNKNOWN_TITLE_RE = re.compile(
@@ -134,12 +149,14 @@ class ModMetadata:
     internal_id: str = ""
 
     def entity_internal_id(self) -> str:
-        """DTO PK handle (``mods.mod_id``) — not Frozen TEXT ``internal_id``."""
-        mid = str(self.internal_id or "").strip()
-        if mid:
-            return mid
-        # Transitional: older adapters stuffed PK into published_file_id.
-        return str(self.published_file_id or "").strip()
+        """DTO PK handle (``mods.mod_id``) — not Frozen TEXT ``internal_id``.
+
+        Never falls back to ``published_file_id`` / Workspace ID. Unbound
+        Steam stubs leave this empty until the entity is bound. Backup
+        writers must prove ``internal_id → resolve_mod_pk() → mod_id``
+        and refuse to write when that proof fails.
+        """
+        return str(self.internal_id or "").strip()
 
     @property
     def game_display_name(self) -> str:

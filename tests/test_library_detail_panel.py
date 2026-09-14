@@ -56,11 +56,12 @@ def _seed_mod(
             app_id=APP_ID,
             game_name="Palworld",
         )
-    entity_id = str(created.mod_id)
+    pk = str(created.mod_id)
+    entity_uuid = str(created.internal_id or "")
     (info / "mod.json").write_text(
         json.dumps(
             {
-                "internal_id": entity_id,
+                "internal_id": entity_uuid,
                 "published_file_id": pub_id,
                 "title": title,
                 "game_name": "Palworld",
@@ -71,11 +72,11 @@ def _seed_mod(
         encoding="utf-8",
     )
     db.update_mod_identity_fields(
-        entity_id,
+        pk,
         last_known_path=str(folder),
         folder_present=True,
     )
-    return folder, entity_id
+    return folder, pk
 
 
 def test_click_card_shows_detail_panel_no_dialog(
@@ -141,6 +142,7 @@ def test_edit_save_updates_card_without_rescan(
     assert "NewNick" in panel.view_title.text()
     card = view._card_for_mod_id(entity_id)
     assert card is not None
+    qapp.processEvents()
     assert "NewNick" in card.title_label.text()
     assert folder.name == "Editable"
 

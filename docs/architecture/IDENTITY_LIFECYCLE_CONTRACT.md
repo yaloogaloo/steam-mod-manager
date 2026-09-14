@@ -50,7 +50,8 @@ Frozen `internal_id` is **not** INTEGER `mods.mod_id`.
 | Implementation PK / FK target | `mods.mod_id` INTEGER |
 
 Business callers resolve `internal_id → find_mod_by_internal_id / resolve_mod_pk → mods.mod_id → DB/FK`.
-`.info.internal_id` is filesystem registration proof of the same TEXT identity.
+`.info/entity_key` is filesystem registration proof of the same TEXT identity
+(value equals Entity `internal_id` — not a third Mod ID).
 
 ---
 
@@ -144,7 +145,9 @@ Do **not** add `platform_id` / `external_key` / `registration_id` or any third i
 Must contain: `internal_id`, `workspace_id`  
 Must not use for identity: `external_id`, `published_file_id`, `workshop_id`
 
-Match: read `.info.internal_id` → DB. Missing / forged ⇒ ignore (never create / merge).
+Match: read `.info/entity_key` (legacy `.info` key `internal_id` accepted) → DB.
+Missing / forged ⇒ ignore (never create / merge). `entity_key` value equals
+Entity `internal_id` — it is not a third Mod ID.
 
 ---
 

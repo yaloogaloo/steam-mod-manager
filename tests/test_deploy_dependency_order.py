@@ -33,24 +33,26 @@ def _seed_mod(
     mid: str,
     title: str,
     workspace_id: str | None = None,
-) -> Path:
+) -> tuple[Path, str]:
+    """Create Entity + proven folder. Returns (folder, mods.mod_id PK)."""
     folder = library / "Game" / title
     folder.mkdir(parents=True)
     (folder / "payload.txt").write_text(title, encoding="utf-8")
     created = create_steam_test_mod(db, external_id=mid, title=title, app_id=APP)
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id or "")
     wid = workspace_id or str(created.workspace_id or mid)
     write_info_sidecar(
         folder,
-        internal_id=str(created.mod_id),
+        internal_id=frozen,
         title=title,
         external_id=mid,
         workspace_id=wid,
         app_id=APP,
         game_name="Game",
-        extra={"workspace_id": wid},
     )
-    bind_managed_path(db, created.mod_id, folder, title=title, game_name="Game")
-    return folder
+    bind_managed_path(db, pk, folder, title=title, game_name="Game")
+    return folder, pk
 
 
 def test_deploy_runs_dependency_before_main(
@@ -62,10 +64,14 @@ def test_deploy_runs_dependency_before_main(
     db.update_game_deploy_config(
         APP, name="Game", mod_path=str(install), deploy_type="folder_copy"
     )
-    _seed_mod(db, library, mid="2001", title="DepMod", workspace_id="ws-dep")
-    _seed_mod(db, library, mid="2002", title="MainMod", workspace_id="ws-main")
+    _folder_dep, pk_dep = _seed_mod(
+        db, library, mid="2001", title="DepMod", workspace_id="ws-dep"
+    )
+    _folder_main, pk_main = _seed_mod(
+        db, library, mid="2002", title="MainMod", workspace_id="ws-main"
+    )
 
-    db.add_mod_relationship("2002", "2001", RELATIONSHIP_DEPENDENCY)
+    db.add_mod_relationship(pk_main, pk_dep, RELATIONSHIP_DEPENDENCY)
 
     order: list[str] = []
     real = ModDeployer._deploy_with_context
@@ -84,8 +90,9 @@ def test_deploy_runs_dependency_before_main(
 
     monkeypatch.setattr(ModDeployer, "_deploy_with_context", _track)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("2002")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk_main)
     assert result["success"] is True, result
-    assert order == ["2001", "2002"]
+    assert order == [pk_dep, pk_main]
     assert (install / "DepMod" / "payload.txt").is_file()
     assert (install / "MainMod" / "payload.txt").is_file()
+    _ = _folder_dep, _folder_main

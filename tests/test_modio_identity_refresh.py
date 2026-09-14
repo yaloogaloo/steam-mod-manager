@@ -27,6 +27,19 @@ BG3_GAME_ID = 6715
 MODIO_URL = "https://mod.io/g/baldursgate3/m/super-skip-ship-sss"
 
 
+@pytest.fixture(autouse=True)
+def _modio_library_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Align Path Lifecycle library root with folders under tmp_path/mod."""
+    lib = tmp_path / "mod"
+    lib.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("core.paths.default_mod_library", lambda: lib)
+    monkeypatch.setattr("services.mod_path_validation.default_mod_library", lambda: lib)
+    monkeypatch.setattr(
+        "services.path_lifecycle.default_mod_library", lambda: lib, raising=False
+    )
+    return lib
+
+
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
@@ -135,8 +148,12 @@ def test_ensure_mod_stub_non_steam_external_id_not_numeric(
 def test_update_mod_identity_clears_modio_external_pollution(
     db: DatabaseManager,
 ) -> None:
-    mid = db.allocate_mod_id()
-    db._ensure_mod_stub(mid)  # noqa: SLF001
+    from services.identity_service import identity_create_scope
+
+    # Forensic seed: pollution detector only matches legacy high-range PKs.
+    mid = INTERNAL_MOD_ID
+    with identity_create_scope():
+        db._ensure_mod_stub(mid)  # noqa: SLF001
     with db._lock:  # noqa: SLF001
         db._conn.execute(  # noqa: SLF001
             "UPDATE mods SET external_id = ? WHERE mod_id = ?",
@@ -160,11 +177,22 @@ def test_refresh_polluted_external_id_uses_name_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for mod 9000000000003410-style polluted DB rows."""
+    from services.identity_service import identity_create_scope
+    from tests.helpers.identity import prove_managed_folder
+
     lib = tmp_path / "mod"
     folder = lib / "Baldur's Gate 3" / "super-skip-ship-sss"
     info_dir = folder / INFO_DIR_NAME
     info_dir.mkdir(parents=True)
-    mid = str(db.allocate_mod_id())
+    mid = str(INTERNAL_MOD_ID)
+    with identity_create_scope():
+        db._ensure_mod_stub(int(mid))  # noqa: SLF001
+        with db._lock:  # noqa: SLF001
+            db._conn.execute(  # noqa: SLF001
+                "UPDATE mods SET internal_id = ? WHERE mod_id = ?",
+                (f"entity-polluted-{mid}", int(mid)),
+            )
+            db._conn.commit()  # noqa: SLF001
     (info_dir / "metadata.json").write_text(
         json.dumps(
             {
@@ -180,13 +208,22 @@ def test_refresh_polluted_external_id_uses_name_id(
     with zipfile.ZipFile(folder / "payload.zip", "w") as zf:
         zf.writestr("mod.txt", "x")
 
-    db._ensure_mod_stub(int(mid))  # noqa: SLF001
     db.update_mod_identity_fields(
         int(mid),
         platform=PLATFORM_MODIO,
         source_url=MODIO_URL,
         external_id=mid,
         last_known_path=str(folder.resolve()),
+    )
+    prove_managed_folder(
+        db,
+        folder,
+        handle=mid,
+        title="Super Skip Ship, SSS",
+        app_id=1086940,
+        game_name="Baldur's Gate 3",
+        platform=PLATFORM_MODIO,
+        extra={"url": MODIO_URL, "source_type": "modio"},
     )
 
     client = MagicMock()

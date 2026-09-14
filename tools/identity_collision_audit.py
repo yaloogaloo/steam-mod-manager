@@ -156,7 +156,7 @@ def run_audit(*, db_path: Path, library: Path) -> dict[str, Any]:
             continue
         info_by_iid[iid].append(summary)
 
-    # --- INTERNAL_ID_COLLISION: same .info.internal_id, divergent fingerprints ---
+    # --- INTERNAL_ID_COLLISION: same .info/entity_key, divergent fingerprints ---
     for iid, infos in info_by_iid.items():
         fps = {identity_fingerprint(i) for i in infos}
         if len(infos) < 2:

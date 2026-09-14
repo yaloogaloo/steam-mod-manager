@@ -20,8 +20,7 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import create_steam_test_mod, bind_managed_path
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from ui.library_query import (
     FILTER_CONFLICT,
     FILTER_INVALID,
@@ -73,41 +72,42 @@ def _idx(**kwargs) -> ModFilterIndex:
 
 
 def test_add_and_remove_invalid_tag(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="1001", title="Broken Mod")
-    tag = db.add_mod_tag("1001", TAG_TYPE_INVALID, tag_value="游戏更新后失效")
+    created = create_steam_test_mod(db, external_id="1001", title="Broken Mod")
+    pk = str(created.mod_id)
+    tag = db.add_mod_tag(pk, TAG_TYPE_INVALID, tag_value="游戏更新后失效")
     assert tag.tag_type == TAG_TYPE_INVALID
     assert tag.tag_value == "游戏更新后失效"
 
-    tags = db.get_mod_tags("1001")
+    tags = db.get_mod_tags(pk)
     assert len(tags) == 1
-    assert db.get_mods_by_tag(TAG_TYPE_INVALID) == ["1001"]
+    assert db.get_mods_by_tag(TAG_TYPE_INVALID) == [pk]
 
     # Upsert same type updates value
-    db.add_mod_tag("1001", TAG_TYPE_INVALID, tag_value="新原因")
-    assert db.get_mod_tags("1001")[0].tag_value == "新原因"
+    db.add_mod_tag(pk, TAG_TYPE_INVALID, tag_value="新原因")
+    assert db.get_mod_tags(pk)[0].tag_value == "新原因"
 
-    assert db.remove_mod_tag("1001", TAG_TYPE_INVALID) == 1
-    assert db.get_mod_tags("1001") == []
+    assert db.remove_mod_tag(pk, TAG_TYPE_INVALID) == 1
+    assert db.get_mod_tags(pk) == []
     assert db.get_mods_by_tag(TAG_TYPE_INVALID) == []
 
 
 def test_conflict_relation(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="2001", title="A")
-    create_steam_test_mod(db, external_id="2002", title="B")
-    create_steam_test_mod(db, external_id="2003", title="C")
+    a = str(create_steam_test_mod(db, external_id="2001", title="A").mod_id)
+    b = str(create_steam_test_mod(db, external_id="2002", title="B").mod_id)
+    c = str(create_steam_test_mod(db, external_id="2003", title="C").mod_id)
 
-    rels = db.set_mod_conflict_targets("2001", ["2002", "2003"], note="overlap")
+    rels = db.set_mod_conflict_targets(a, [b, c], note="overlap")
     assert len(rels) == 2
-    assert {r.target_mod_id for r in rels} == {"2002", "2003"}
-    assert any(t.tag_type == TAG_TYPE_CONFLICT for t in db.get_mod_tags("2001"))
+    assert {r.target_mod_id for r in rels} == {b, c}
+    assert any(t.tag_type == TAG_TYPE_CONFLICT for t in db.get_mod_tags(a))
 
-    flags = db.get_mods_tag_flags(["2001", "2002"])
-    assert flags["2001"].conflict is True
-    assert flags["2002"].conflict is False
+    flags = db.get_mods_tag_flags([a, b])
+    assert flags[a].conflict is True
+    assert flags[b].conflict is False
 
-    db.set_mod_conflict_targets("2001", [])
-    assert db.get_mod_relations("2001") == []
-    assert not any(t.tag_type == TAG_TYPE_CONFLICT for t in db.get_mod_tags("2001"))
+    db.set_mod_conflict_targets(a, [])
+    assert db.get_mod_relations(a) == []
+    assert not any(t.tag_type == TAG_TYPE_CONFLICT for t in db.get_mod_tags(a))
 
 
 def test_tables_created_on_open(tmp_path: Path) -> None:
@@ -152,18 +152,15 @@ def test_detail_panel_saves_tags(
 ) -> None:
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     mod = tmp_path / "Game" / "Tagged"
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        '{"internal_id":"3001","published_file_id":"3001","title":"Tagged","app_id":1}\n',
-        encoding="utf-8",
-    )
-    create_steam_test_mod(db, external_id="3001", title="Tagged")
-    create_steam_test_mod(db, external_id="3002", title="Other")
-    bind_managed_path(db, "3001", mod)
+    mod.mkdir(parents=True)
+    created = create_steam_test_mod(db, external_id="3001", title="Tagged")
+    other = create_steam_test_mod(db, external_id="3002", title="Other")
+    pk = str(created.mod_id)
+    other_pk = str(other.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Tagged")
     panel = ModDetailPanel()
-    panel.set_peer_mods([("3002", "Other")])
-    panel.show_mod(mod, mod_id="3001")
+    panel.set_peer_mods([(other_pk, "Other")])
+    panel.show_mod(mod, mod_id=pk)
 
     panel.tag_invalid_check.setChecked(True)
     panel.tag_invalid_reason.setText("crash on load")
@@ -173,21 +170,21 @@ def test_detail_panel_saves_tags(
     item.setCheckState(Qt.CheckState.Checked)
     panel._save_user_tags()
 
-    tags = {t.tag_type: t.tag_value for t in db.get_mod_tags("3001")}
+    tags = {t.tag_type: t.tag_value for t in db.get_mod_tags(pk)}
     assert TAG_TYPE_INVALID in tags
     assert tags[TAG_TYPE_INVALID] == "crash on load"
     assert TAG_TYPE_CONFLICT in tags
-    rels = db.get_mod_relations("3001")
+    rels = db.get_mod_relations(pk)
     assert len(rels) == 1
-    assert rels[0].target_mod_id == "3002"
+    assert rels[0].target_mod_id == other_pk
     assert rels[0].relation_type == RELATION_TYPE_CONFLICT
 
     # Remove tags
     panel.tag_invalid_check.setChecked(False)
     panel.tag_conflict_check.setChecked(False)
     panel._save_user_tags()
-    assert db.get_mod_tags("3001") == []
-    assert db.get_mod_relations("3001") == []
+    assert db.get_mod_tags(pk) == []
+    assert db.get_mod_relations(pk) == []
 
 
 def test_mod_card_badge_overlay(
@@ -197,17 +194,16 @@ def test_mod_card_badge_overlay(
     from services.user_annotation import set_conflict_annotation
 
     mod = tmp_path / "Game" / "BadgeMod"
-    (mod / INFO_DIR_NAME).mkdir(parents=True)
+    mod.mkdir(parents=True)
     (mod / "payload.bin").write_bytes(b"ok")
-    create_steam_test_mod(db, external_id="4001", title="Badge")
-    db.update_mod_identity_fields(
-        "4001", last_known_path=str(mod.resolve()), folder_present=True
-    )
-    db.update_mod_status("4001", invalid=True, invalid_reason="gone")
-    set_conflict_annotation("4001", note="user", db=db)
-    db.add_mod_tag("4001", TAG_TYPE_ABANDONED, tag_value="")
+    created = create_steam_test_mod(db, external_id="4001", title="Badge")
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Badge")
+    db.update_mod_status(pk, invalid=True, invalid_reason="gone")
+    set_conflict_annotation(pk, note="user", db=db)
+    db.add_mod_tag(pk, TAG_TYPE_ABANDONED, tag_value="")
 
-    rows = db.list_mod_list_items(mod_id="4001")
+    rows = db.list_mod_list_items(mod_id=pk)
     data = list_item_to_card_data(mod_list_item_from_row(rows[0]))
     card = ModCardWidget(
         mod,
@@ -225,7 +221,7 @@ def test_mod_card_badge_overlay(
     assert card.abandoned_badge.text() == "停更"
     # Layout height unchanged vs untagged card
     plain = tmp_path / "Game" / "Plain"
-    (plain / INFO_DIR_NAME).mkdir(parents=True)
+    plain.mkdir(parents=True)
     card_b = ModCardWidget(plain)
     assert card.height() == card_b.height()
 
@@ -238,19 +234,15 @@ def test_deploy_hint_does_not_block(
 
     library = tmp_path / "mod"
     mod = library / "Game" / "Warn"
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"5001","title":"Warn","app_id":1}\n',
-        encoding="utf-8",
-    )
-    create_steam_test_mod(db, external_id="5001", title="Warn")
-    bind_managed_path(db, "5001", mod)
-    db.add_mod_tag("5001", TAG_TYPE_INVALID, "broken")
+    mod.mkdir(parents=True)
+    created = create_steam_test_mod(db, external_id="5001", title="Warn")
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Warn")
+    db.add_mod_tag(pk, TAG_TYPE_INVALID, "broken")
     from services.user_annotation import set_conflict_annotation
 
-    set_conflict_annotation("5001", note="overlap", db=db)
-    db.add_mod_tag("5001", TAG_TYPE_CONFLICT, "")
+    set_conflict_annotation(pk, note="overlap", db=db)
+    db.add_mod_tag(pk, TAG_TYPE_CONFLICT, "")
 
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -271,7 +263,7 @@ def test_deploy_hint_does_not_block(
             started.append("yes")
 
     monkeypatch.setattr("ui.library_view.DeployWorker", FakeWorker)
-    view._on_deploy_action("5001", "deploy")
+    view._on_deploy_action(pk, "deploy")
     assert started == ["yes"]
     hint = view.detail_panel.view_tag_deploy_hint.text()
     assert "失效" in hint
@@ -288,28 +280,26 @@ def test_library_filter_index_includes_tags(
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     db.upsert_game(GameInfo(app_id=1, name="Game", folder_name="Game"))
     library = tmp_path / "mod"
-    for mid, title, tag in (
+    for workshop, title, tag in (
         ("6001", "Bad", TAG_TYPE_INVALID),
         ("6002", "Clash", TAG_TYPE_CONFLICT),
         ("6003", "Ok", None),
     ):
         mod = library / "Game" / title
-        info = mod / INFO_DIR_NAME
-        info.mkdir(parents=True)
-        (info / METADATA_FILENAME).write_text(
-            f'{{"internal_id":"{mid}","published_file_id":"{mid}","title":"{title}","app_id":1}}\n',
-            encoding="utf-8",
+        mod.mkdir(parents=True)
+        created = create_steam_test_mod(
+            db, external_id=workshop, title=title, app_id=1, game_name="Game"
         )
-        create_steam_test_mod(
-            db, external_id=mid, title=title, app_id=1, game_name="Game"
+        pk = str(created.mod_id)
+        prove_managed_folder(
+            db, mod, handle=pk, title=title, app_id=1, game_name="Game"
         )
-        bind_managed_path(db, mid, mod, game_name="Game", title=title)
         if tag == TAG_TYPE_INVALID:
-            db.add_mod_tag(mid, tag, "reason-xyz")
-            db.update_mod_status(mid, invalid=True, invalid_reason="reason-xyz")
+            db.add_mod_tag(pk, tag, "reason-xyz")
+            db.update_mod_status(pk, invalid=True, invalid_reason="reason-xyz")
         elif tag:
-            db.add_mod_tag(mid, tag, "")
-            set_conflict_annotation(mid, note="clash", db=db)
+            db.add_mod_tag(pk, tag, "")
+            set_conflict_annotation(pk, note="clash", db=db)
 
     view = ModLibraryView()
     view.set_target_root(str(library))

@@ -178,10 +178,13 @@ def test_registration_info_proof_matches_frozen_internal_id(
     folder.mkdir(parents=True)
     (folder / "content.bin").write_bytes(b"mod")
     ensure_registration_info_proof(folder, pk, db=db)
-    disk = read_internal_id(read_info_metadata_dict(folder) or {})
+    raw = read_info_metadata_dict(folder) or {}
+    disk = read_internal_id(raw)
     assert proof
     assert disk == proof
     assert disk != pk
+    assert raw.get("internal_id") == proof
+    assert "entity_key" not in raw
     uuid.UUID(disk)
 
 

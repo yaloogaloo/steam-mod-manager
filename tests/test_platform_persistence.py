@@ -45,11 +45,14 @@ def test_info_sidecar_from_dict_never_defaults_missing_platform_to_steam() -> No
 def test_upsert_mod_preserves_non_steam_platform(db: DatabaseManager) -> None:
     from core.game_info import GameInfo
 
-    mid = "4242"
+    workshop = "4242"
     db.upsert_game(GameInfo(app_id=100, name="Game", folder_name="Game"))
-    create_steam_test_mod(db, external_id=mid, title="Workshop Mod", app_id=100)
+    created = create_steam_test_mod(
+        db, external_id=workshop, title="Workshop Mod", app_id=100
+    )
+    pk = str(created.mod_id)
     db.update_mod_user_metadata(
-        mid,
+        pk,
         {
             "display_name": "GH Mod",
             "custom_description": "",
@@ -59,19 +62,19 @@ def test_upsert_mod_preserves_non_steam_platform(db: DatabaseManager) -> None:
             "source_url": "https://github.com/a/b",
         },
     )
-    before = db.get_mod_display_info(mid)
+    before = db.get_mod_display_info(pk)
     assert before is not None
     assert before.platform == PLATFORM_GITHUB
 
     db.upsert_mod(
         ModMetadata(
-            published_file_id=mid,
+            published_file_id=workshop,
             title="Updated Steam Title",
             app_id=100,
             preview_url="http://x",
         )
     )
-    after = db.get_mod_display_info(mid)
+    after = db.get_mod_display_info(pk)
     assert after is not None
     assert after.platform == PLATFORM_GITHUB
     assert after.source_url == "https://github.com/a/b"
@@ -93,9 +96,10 @@ def test_apply_sidecar_without_source_type_keeps_db_platform(
         ),
         encoding="utf-8",
     )
-    create_steam_test_mod(db, external_id="8801", title="Mod")
+    created = create_steam_test_mod(db, external_id="8801", title="Mod")
+    pk = str(created.mod_id)
     db.update_mod_user_metadata(
-        "8801",
+        pk,
         {
             "display_name": "Pretty",
             "custom_description": "",
@@ -105,8 +109,8 @@ def test_apply_sidecar_without_source_type_keeps_db_platform(
             "source_url": "https://www.nexusmods.com/x/mods/1",
         },
     )
-    assert apply_sidecar_to_db(folder, mod_id="8801", db=db)
-    info2 = db.get_mod_display_info("8801")
+    assert apply_sidecar_to_db(folder, mod_id=pk, db=db)
+    info2 = db.get_mod_display_info(pk)
     assert info2 is not None
     assert info2.platform == PLATFORM_NEXUS
 
@@ -137,9 +141,10 @@ def test_write_sidecar_roundtrip_source_type(
 ) -> None:
     folder = tmp_path / "Mod"
     folder.mkdir()
-    create_steam_test_mod(db, external_id="8803", title="Mod")
+    created = create_steam_test_mod(db, external_id="8803", title="Mod")
+    pk = str(created.mod_id)
     db.update_mod_user_metadata(
-        "8803",
+        pk,
         {
             "display_name": "X",
             "custom_description": "",
@@ -151,7 +156,7 @@ def test_write_sidecar_roundtrip_source_type(
     )
     from services.info_sidecar import write_sidecar_for_mod
 
-    write_sidecar_for_mod(folder, "8803", db=db)
+    write_sidecar_for_mod(folder, pk, db=db)
     raw = json.loads((folder / INFO_DIR_NAME / METADATA_FILENAME).read_text())
     assert raw.get(METADATA_SOURCE_TYPE_KEY) == PLATFORM_GITHUB
     loaded = load_info_sidecar(folder)

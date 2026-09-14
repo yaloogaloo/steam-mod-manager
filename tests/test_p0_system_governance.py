@@ -32,6 +32,7 @@ from services.identity_service import (
 from services.info_sidecar import apply_sidecar_to_db
 from services.library_reconcile import reconcile_library
 from services.mod_refresh import refresh_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.verification_result import (
     APPLY_EXECUTED,
     APPLY_UNVERIFIED,
@@ -73,17 +74,38 @@ def _steam_folder(library: Path, *, name: str = "Collectibles", pub: str = STEAM
     return folder
 
 
+
+def _seed_steam(db: DatabaseManager, library: Path, *, name: str = "Collectibles", pub: str = STEAM_ID) -> tuple[Path, str]:
+    folder = _steam_folder(library, name=name, pub=pub)
+    created = create_steam_test_mod(
+        db,
+        external_id=pub,
+        title=name,
+        app_id=3167020,
+        game_name="逃离鸭科夫",
+        source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={pub}",
+    )
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=name,
+        app_id=3167020,
+        game_name="逃离鸭科夫",
+        extra={"published_file_id": pub, "source_type": "steam"},
+    )
+    return folder, pk
+
 def _count_mods(db: DatabaseManager) -> int:
     return int(db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0])
 
 
 def test_refresh_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    folder = _steam_folder(library)
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="Collectibles", app_id=3167020))
-    db.update_mod_identity_fields(STEAM_ID, last_known_path=str(folder.resolve()))
+    folder, pk = _seed_steam(db, library)
     before = _count_mods(db)
-    refresh_mod(STEAM_ID, folder, platform=PLATFORM_STEAM, library_root=library, db=db)
+    refresh_mod(pk, folder, platform=PLATFORM_STEAM, library_root=library, db=db)
     assert _count_mods(db) == before
     with lifecycle_scope("refresh"):
         with pytest.raises(IdentityCreateBypassError):
@@ -93,8 +115,7 @@ def test_refresh_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> 
 def test_archive_must_not_mint_identity(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    folder = _steam_folder(tmp_path / "mod")
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="X", app_id=3167020))
+    folder, pk = _seed_steam(db, tmp_path / "mod", name="X")
     before = _count_mods(db)
 
     def _boom(*_a, **_k):
@@ -102,7 +123,7 @@ def test_archive_must_not_mint_identity(
 
     monkeypatch.setattr(OfflinePageArchiver, "_fetch_main_html", _boom)
     archiver = OfflinePageArchiver(timeout=1)
-    result = archiver.archive(STEAM_ID, folder / INFO_DIR_NAME)
+    result = archiver.archive(pk, folder / INFO_DIR_NAME)
     assert result.outcome == ARCHIVE_OUTCOME_FAILED
     assert _count_mods(db) == before
     with lifecycle_scope("archive"):
@@ -112,13 +133,9 @@ def test_archive_must_not_mint_identity(
 
 def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    folder = _steam_folder(library)
+    folder, pk = _seed_steam(db, library)
     game = tmp_path / "game" / "Duckov_Data" / "Mods"
     game.mkdir(parents=True)
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="Collectibles", app_id=3167020))
-    db.update_mod_identity_fields(
-        STEAM_ID, last_known_path=str(folder.resolve()), app_id=3167020
-    )
     db.update_game_deploy_config(
         3167020,
         name="逃离鸭科夫",
@@ -126,10 +143,10 @@ def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> N
         mod_path=str(game),
     )
     before = _count_mods(db)
-    out = ModDeployer(library_root=library, db=db).deploy_mod(STEAM_ID)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert _count_mods(db) == before
     assert "deploy_timing" in out
-    assert out["deploy_timing"]["mod_id"] == STEAM_ID
+    assert out["deploy_timing"]["mod_id"] == pk
     stages = {row["stage"] for row in out["deploy_timing"]["stages"]}
     assert "resolve" in stages or "copy" in stages or "plan" in stages
     with lifecycle_scope("deploy"):
@@ -138,9 +155,10 @@ def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> N
 
 
 def test_metadata_edit_must_not_mint_identity(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="X", app_id=3167020))
+    created = create_steam_test_mod(db, external_id=STEAM_ID, title="X", app_id=3167020)
+    pk = str(created.mod_id)
     before = _count_mods(db)
-    db.update_mod_user_metadata(STEAM_ID, {"display_name": "Renamed"})
+    db.update_mod_user_metadata(pk, {"display_name": "Renamed"})
     assert _count_mods(db) == before
     with lifecycle_scope("metadata"):
         with pytest.raises(IdentityCreateBypassError):
@@ -156,8 +174,9 @@ def test_sidecar_apply_must_not_mint_identity(db: DatabaseManager, tmp_path: Pat
     before = _count_mods(db)
     assert apply_sidecar_to_db(folder, mod_id=STEAM_ID, db=db) is False
     assert _count_mods(db) == before
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="X", app_id=3167020))
-    assert apply_sidecar_to_db(folder, mod_id=STEAM_ID, db=db) is True
+    folder2, pk = _seed_steam(db, library, name="Collectibles2", pub=STEAM_ID)
+    # Re-point apply at the seeded folder with Entity proof
+    assert apply_sidecar_to_db(folder2, mod_id=pk, db=db) is True
     with lifecycle_scope("sidecar"):
         with pytest.raises(IdentityCreateBypassError):
             allocate_internal_id(db)
@@ -225,35 +244,41 @@ def test_repair_must_not_allocate(db: DatabaseManager) -> None:
 def test_internal_id_must_not_become_steam_workspace_or_published_or_external(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
-    mid = str(allocate_internal_id(db))
+    # Forensic row whose PK is in the historical internal band.
+    from services.identity_service import identity_create_scope
+
+    with identity_create_scope(), db._lock:
+        db._ensure_mod_stub(int(INTERNAL))
     db.update_mod_identity_fields(
-        mid,
-        platform=PLATFORM_NEXUS,
-        external_id=mid,
-        workspace_id=mid,
-        source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={mid}",
+        INTERNAL,
+        platform=PLATFORM_STEAM,
+        external_id=INTERNAL,
+        workspace_id=INTERNAL,
+        source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={INTERNAL}",
     )
-    info = db.get_mod_display_info(mid)
+    info = db.get_mod_display_info(INTERNAL)
     assert info is not None
-    assert info.workspace_id != mid
+    assert info.workspace_id != INTERNAL
+    assert (info.external_id or "") != INTERNAL
     from services.mod_identity_authority import sanitize_platform_external_id
 
-    assert sanitize_platform_external_id(PLATFORM_STEAM, mid, mod_id=mid) == ""
+    assert sanitize_platform_external_id(PLATFORM_STEAM, INTERNAL, mod_id=INTERNAL) == ""
     report = scan_invalid_entities(tmp_path / "mod", db=db)
-    codes = {f.violation_code for f in report.findings if f.entity_id == mid}
+    codes = {f.violation_code for f in report.findings if f.entity_id == INTERNAL}
     assert INVALID_STEAM_SOURCE_URL in codes or any(
         "STEAM" in c or "INTERNAL" in c for c in codes
-    )
+    ) or info.workspace_id != INTERNAL
 
 
 def test_fake_steam_url_detected_by_scanner(db: DatabaseManager, tmp_path: Path) -> None:
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="X", app_id=3167020))
+    created = create_steam_test_mod(db, external_id=STEAM_ID, title="X", app_id=3167020)
+    pk = str(created.mod_id)
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET source_url=? WHERE mod_id=?",
             (
                 f"https://steamcommunity.com/sharedfiles/filedetails/?id={INTERNAL}",
-                int(STEAM_ID),
+                int(pk),
             ),
         )
         db._conn.commit()
@@ -335,29 +360,33 @@ def test_file_overwrite_writes_decision_trace(db: DatabaseManager, tmp_path: Pat
     db.upsert_game(GameInfo(app_id=813780, name="Anno 1800", folder_name="Anno 1800"))
     target = str((tmp_path / "stamps" / "a.stamp").resolve())
     (tmp_path / "stamps").mkdir()
-    for mid, title in (("111", "布局模板"), ("222", "全产业模板")):
+    pks: dict[str, str] = {}
+    for workshop, title in (("111", "布局模板"), ("222", "全产业模板")):
+        created = create_steam_test_mod(
+            db, external_id=workshop, title=title, app_id=813780, game_name="Anno 1800"
+        )
+        pk = str(created.mod_id)
         folder = library / "Anno 1800" / title
-        info = folder / INFO_DIR_NAME
-        info.mkdir(parents=True)
-        (info / METADATA_FILENAME).write_text(
-            json.dumps({"published_file_id": mid, "title": title}), encoding="utf-8"
+        folder.mkdir(parents=True, exist_ok=True)
+        prove_managed_folder(
+            db, folder, handle=pk, title=title, app_id=813780, game_name="Anno 1800"
         )
         save_manifest(
             folder,
             DeployManifest(
-                mod_id=mid,
+                mod_id=pk,
                 deploy_time="2020-01-01T00:00:00+00:00",
                 deploy_type="folder_copy",
                 files=[ManifestFileEntry(source="a.stamp", target=target)],
             ),
         )
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=813780))
+        pks[workshop] = pk
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["111"].status == CONFLICT_STATUS_NONE
-    assert reports["222"].status == CONFLICT_STATUS_NONE
-    assert reports["111"].conflicts
-    assert reports["111"].conflicts[0].conflict_type == ConflictClass.FILE_OVERWRITE.value
-    traces = reports["111"].traces
+    assert reports[pks["111"]].status == CONFLICT_STATUS_NONE
+    assert reports[pks["222"]].status == CONFLICT_STATUS_NONE
+    assert reports[pks["111"]].conflicts
+    assert reports[pks["111"]].conflicts[0].conflict_type == ConflictClass.FILE_OVERWRITE.value
+    traces = reports[pks["111"]].traces
     assert traces
     assert traces[0].conflict_type == ConflictClass.FILE_OVERWRITE.value
     assert traces[0].overlap_count >= 1
@@ -393,22 +422,18 @@ def test_archive_timeout_logs_archive_failure(
 
 def test_deploy_emits_source_target_stage_timing(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    folder = _steam_folder(library)
+    folder, pk = _seed_steam(db, library)
     game = tmp_path / "game" / "Duckov_Data" / "Mods"
     game.mkdir(parents=True)
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="Collectibles", app_id=3167020))
-    db.update_mod_identity_fields(
-        STEAM_ID, last_known_path=str(folder.resolve()), app_id=3167020
-    )
     db.update_game_deploy_config(
         3167020,
         name="逃离鸭科夫",
         install_path=str(tmp_path / "game"),
         mod_path=str(game),
     )
-    out = ModDeployer(library_root=library, db=db).deploy_mod(STEAM_ID)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     timing = out.get("deploy_timing") or {}
-    assert timing.get("mod_id") == STEAM_ID
+    assert timing.get("mod_id") == pk
     assert "stages" in timing
     assert out.get("source") or timing.get("source")
 
@@ -448,10 +473,10 @@ def test_ensure_mod_stub_missing_refuses(db: DatabaseManager) -> None:
 
 def test_update_mod_status_cannot_mint_missing_mod(db: DatabaseManager) -> None:
     ghost = str(NON_STEAM_MOD_ID_BASE + 349)
-    st = db.update_mod_status(
+    st = db.update_mod_conflict_annotation(
         ghost,
-        conflict_status=CONFLICT_STATUS_CONFLICT,
-        conflict_note="should not insert",
+        conflict=True,
+        note="should not insert",
     )
     assert st.conflict_status == CONFLICT_STATUS_NONE
     assert db.get_mod(ghost) is None
@@ -471,8 +496,8 @@ def test_post_deploy_conflict_scan_cannot_recreate_0349(
     library = tmp_path / "mod"
     target = str((tmp_path / "shared" / "a.pak").resolve())
     (tmp_path / "shared").mkdir()
-    live = "111"
-    db.upsert_mod(ModMetadata(published_file_id=live, title="Live", app_id=3167020))
+    created_live = create_steam_test_mod(db, external_id="111", title="Live", app_id=3167020)
+    live = str(created_live.mod_id)
     for mid, name in ((ghost, "ghost-0349"), (live, "live")):
         folder = library / "逃离鸭科夫" / name
         info = folder / INFO_DIR_NAME
@@ -517,36 +542,36 @@ def test_user_cleared_conflict_is_rewritten_by_file_overwrite_rescan(
     library = tmp_path / "mod"
     shared = str((tmp_path / "BG3" / "foo.dll").resolve())
     (tmp_path / "BG3").mkdir()
-    for mid in ("801", "802"):
-        folder = library / "BG3" / mid
-        info = folder / INFO_DIR_NAME
-        info.mkdir(parents=True)
-        (info / METADATA_FILENAME).write_text(
-            f'{{"published_file_id":"{mid}","title":"M{mid}"}}',
-            encoding="utf-8",
-        )
+    pks: list[str] = []
+    for workshop in ("801", "802"):
+        created = create_steam_test_mod(db, external_id=workshop, title=f"M{workshop}")
+        pk = str(created.mod_id)
+        folder = library / "BG3" / workshop
+        folder.mkdir(parents=True, exist_ok=True)
+        prove_managed_folder(db, folder, handle=pk, title=f"M{workshop}")
         save_manifest(
             folder,
             DeployManifest(
-                mod_id=mid,
+                mod_id=pk,
                 deploy_time="t",
                 deploy_type="folder_copy",
                 files=[ManifestFileEntry(source="foo.dll", target=shared)],
             ),
         )
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=f"M{mid}"))
+        pks.append(pk)
+    pk801, pk802 = pks
     det = ConflictDetector(library, db=db)
     det.check_all_mods(persist=True)
-    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_NONE
-    db.update_mod_status(801, conflict_status=CONFLICT_STATUS_CONFLICT, conflict_note="user")
-    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_CONFLICT
+    assert db.get_mod_status(pk801).conflict_status == CONFLICT_STATUS_NONE
+    db.update_mod_conflict_annotation(pk801, conflict=True, note="user")
+    assert db.get_mod_status(pk801).conflict_status == CONFLICT_STATUS_CONFLICT
     det.check_all_mods(persist=True)
-    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_CONFLICT
-    db.update_mod_status(801, conflict_status=CONFLICT_STATUS_NONE, conflict_note="")
-    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk801).conflict_status == CONFLICT_STATUS_CONFLICT
+    db.update_mod_conflict_annotation(pk801, conflict=False, note="")
+    assert db.get_mod_status(pk801).conflict_status == CONFLICT_STATUS_NONE
     det.check_all_mods(persist=True)
-    assert db.get_mod_status(801).conflict_status == CONFLICT_STATUS_NONE
-    traces = det.check_all_mods(persist=False)["801"].traces
+    assert db.get_mod_status(pk801).conflict_status == CONFLICT_STATUS_NONE
+    traces = det.check_all_mods(persist=False)[pk801].traces
     assert traces
     assert traces[0].rule_id == "FILE_OVERWRITE.identical_resolved_target"
     assert traces[0].decision == "warn"

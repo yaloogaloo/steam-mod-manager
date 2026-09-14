@@ -31,15 +31,14 @@ from services.deploy_rules.manifest import (
     save_manifest,
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "backup_integrity.db")
+    manager = DatabaseManager.instance(tmp_path / "backup_integrity.db")
     yield manager
-    manager.close()
     DatabaseManager.reset_instance()
 
 
@@ -180,29 +179,29 @@ def test_case4_repeat_deploy_reuses_original_backup(
     mod = library / "SomeGame" / "Repeat"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("MOD-V1", encoding="utf-8")
-    create_steam_test_mod(db, external_id="93001", title="Repeat", app_id=4242)
-    write_info_sidecar(mod, internal_id="93001", title="Repeat", external_id="93001", app_id=4242, game_name="SomeGame")
-    bind_managed_path(db, "93001", mod, title="Repeat", game_name="SomeGame")
+    created = create_steam_test_mod(db, external_id="93001", title="Repeat", app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Repeat", app_id=4242, game_name="SomeGame")
 
     prior = mods_root / "Repeat" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME-ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("93001")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     man1 = load_manifest(mod)
     assert man1 is not None
     b1 = man1.files[0].backup
     assert b1 is not None
     first_path = b1.path
     first_hash = b1.hash
-    mgr = BackupManager(mod, internal_id="93001")
+    mgr = BackupManager(mod, internal_id=pk)
     assert mgr.resolve_backup_file(b1).read_text(encoding="utf-8") == "GAME-ORIGINAL"
     assert not (mod / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
 
     # Second deploy without undeploy — payload changed, but backup must stay original
     (mod / "a.txt").write_text("MOD-V2", encoding="utf-8")
-    assert deployer.deploy_mod("93001")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     man2 = load_manifest(mod)
     assert man2 is not None
     b2 = man2.files[0].backup
@@ -212,7 +211,7 @@ def test_case4_repeat_deploy_reuses_original_backup(
     assert mgr.resolve_backup_file(b2).read_text(encoding="utf-8") == "GAME-ORIGINAL"
     assert prior.read_text(encoding="utf-8") == "MOD-V2"
 
-    assert deployer.undeploy_mod("93001")["success"] is True
+    assert deployer.undeploy_mod(pk)["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME-ORIGINAL"
 
 
@@ -244,18 +243,19 @@ def test_case5_multi_mod_overwrite_chain(tmp_path: Path, db: DatabaseManager) ->
     )
 
     mods: dict[str, Path] = {}
-    for mid, title, body in (
+    pks: dict[str, str] = {}
+    for workshop, title, body in (
         ("93010", "ModA", "A"),
         ("93011", "ModB", "B"),
     ):
         folder = library / "SomeGame" / title
         folder.mkdir(parents=True)
         (folder / "config.ini").write_text(body, encoding="utf-8")
-        create_steam_test_mod(db, external_id=mid, title=title, app_id=4242)
-        write_info_sidecar(folder, internal_id=mid, title=title, external_id=mid, app_id=4242, game_name="SomeGame")
-        bind_managed_path(db, mid, folder, title=title, game_name="SomeGame")
+        created = create_steam_test_mod(db, external_id=workshop, title=title, app_id=4242)
+        pk = str(created.mod_id)
+        prove_managed_folder(db, folder, handle=pk, title=title, app_id=4242, game_name="SomeGame")
         db.update_mod_user_metadata(
-            mid,
+            pk,
             {
                 "display_name": title,
                 "custom_description": "",
@@ -264,24 +264,25 @@ def test_case5_multi_mod_overwrite_chain(tmp_path: Path, db: DatabaseManager) ->
                 "custom_deploy_path": str(game),
             },
         )
-        mods[mid] = folder
+        mods[workshop] = folder
+        pks[workshop] = pk
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("93010")["success"] is True
+    assert deployer.deploy_mod(pks["93010"])["success"] is True
     assert shared.read_text(encoding="utf-8") == "A"
     man_a = load_manifest(mods["93010"])
     assert man_a is not None
     assert man_a.files[0].backup is not None
-    assert BackupManager(mods["93010"], internal_id="93010").resolve_backup_file(
+    assert BackupManager(mods["93010"], internal_id=pks["93010"]).resolve_backup_file(
         man_a.files[0].backup
     ).read_text(encoding="utf-8") == "GAME"
 
-    assert deployer.deploy_mod("93011")["success"] is True
+    assert deployer.deploy_mod(pks["93011"])["success"] is True
     assert shared.read_text(encoding="utf-8") == "B"
     man_b = load_manifest(mods["93011"])
     assert man_b is not None
     assert man_b.files[0].backup is not None
-    assert BackupManager(mods["93011"], internal_id="93011").resolve_backup_file(
+    assert BackupManager(mods["93011"], internal_id=pks["93011"]).resolve_backup_file(
         man_b.files[0].backup
     ).read_text(encoding="utf-8") == "A"
 
@@ -293,12 +294,12 @@ def test_case5_multi_mod_overwrite_chain(tmp_path: Path, db: DatabaseManager) ->
         if c.conflict_type == ConflictType.FILE_OVERWRITE.value
     ]
     assert overwrite
-    assert sorted(overwrite[0].mods) == ["93010", "93011"]
+    assert sorted(overwrite[0].mods) == sorted([pks["93010"], pks["93011"]])
 
-    assert deployer.undeploy_mod("93011")["success"] is True
+    assert deployer.undeploy_mod(pks["93011"])["success"] is True
     assert shared.read_text(encoding="utf-8") == "A"
 
-    assert deployer.undeploy_mod("93010")["success"] is True
+    assert deployer.undeploy_mod(pks["93010"])["success"] is True
     assert shared.read_text(encoding="utf-8") == "GAME"
 
 
@@ -384,9 +385,9 @@ def test_case6_deploy_exception_clears_transaction_on_clean_rollback(
     mod = library / "SomeGame" / "Boom"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("MOD", encoding="utf-8")
-    create_steam_test_mod(db, external_id="93021", title="Boom", app_id=4242)
-    write_info_sidecar(mod, internal_id="93021", title="Boom", external_id="93021", app_id=4242, game_name="SomeGame")
-    bind_managed_path(db, "93021", mod, title="Boom", game_name="SomeGame")
+    created = create_steam_test_mod(db, external_id="93021", title="Boom", app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Boom", app_id=4242, game_name="SomeGame")
 
     prior = mods_root / "Boom" / "a.txt"
     prior.parent.mkdir(parents=True)
@@ -397,7 +398,7 @@ def test_case6_deploy_exception_clears_transaction_on_clean_rollback(
         raise_after=RuntimeError("boom"),
     ):
         with pytest.raises(RuntimeError, match="boom"):
-            ModDeployer(library_root=library, db=db).deploy_mod("93021")
+            ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert prior.read_text(encoding="utf-8") == "KEEP"
     assert not transaction_path_for(mod).is_file()
@@ -412,19 +413,19 @@ def test_undeploy_survives_missing_target(
     mod = library / "SomeGame" / "Gone"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("MOD", encoding="utf-8")
-    create_steam_test_mod(db, external_id="93022", title="Gone", app_id=4242)
-    write_info_sidecar(mod, internal_id="93022", title="Gone", external_id="93022", app_id=4242, game_name="SomeGame")
-    bind_managed_path(db, "93022", mod, title="Gone", game_name="SomeGame")
+    created = create_steam_test_mod(db, external_id="93022", title="Gone", app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Gone", app_id=4242, game_name="SomeGame")
 
     prior = mods_root / "Gone" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("93022")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     # External deletion of deployed file
     prior.unlink()
     assert not prior.exists()
 
-    assert deployer.undeploy_mod("93022")["success"] is True
+    assert deployer.undeploy_mod(pk)["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME"

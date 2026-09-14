@@ -80,17 +80,19 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _seed_mod(db: DatabaseManager, root: Path, *, pub_id: str, title: str) -> Path:
     created = create_steam_test_mod(db, external_id=pub_id, title=title)
+    pk = str(created.mod_id)
+    entity_uuid = str(created.internal_id or "")
     folder = root / "Palworld" / title
     folder.mkdir(parents=True, exist_ok=True)
     write_info_sidecar(
         folder,
-        internal_id=str(created.mod_id),
+        internal_id=entity_uuid,
         title=title,
         external_id=pub_id,
         workspace_id=str(created.workspace_id or pub_id),
         game_name="Palworld",
     )
-    bind_managed_path(db, created.mod_id, folder, title=title)
+    bind_managed_path(db, pk, folder, title=title)
     return folder
 
 
@@ -221,7 +223,8 @@ def test_set_category_menu_hides_uncategorized_when_categories_exist(
 
     card = ModCardWidget(mod, parent=None)
 
-    card.set_category_options(["游戏增强", "美化", "工具"])
+    # Type catalog identity is (type_id, name) — not bare labels.
+    card.set_category_options([(1, "游戏增强"), (2, "美化"), (3, "工具")])
 
     menu = card._build_context_menu()
 

@@ -19,10 +19,8 @@ ALLOWED_DATA_TOP = frozenset(
         "mod_manager.db-shm",
         "mod_backup",
         "deploy_backup",
-        "asset_cache",
-        "headers",
+        "asset_store",
         "identity_repair_quarantine",
-        "import_cache",
         "collection_covers",
         ".gitkeep",
         "app_instance.lock",
@@ -33,6 +31,10 @@ ALLOWED_DATA_TOP = frozenset(
     }
 )
 
+# Retired under data/ — regenerable caches live under cache/ only.
+FORBIDDEN_RETIRED_DATA_DIRS = frozenset(
+    {"offline_view", "asset_cache", "import_cache", "headers"}
+)
 # Exact directory names forbidden outside ``_tmp/`` (and not in ALLOWED_DATA_TOP).
 FORBIDDEN_DIR_NAMES = frozenset(
     {
@@ -42,7 +44,7 @@ FORBIDDEN_DIR_NAMES = frozenset(
         "report",
         "snapshot",
     }
-)
+) | FORBIDDEN_RETIRED_DATA_DIRS
 
 # First-level trees scanned for forbidden dir names (not recursive into huge trees).
 _SCAN_TOP_LEVEL = (

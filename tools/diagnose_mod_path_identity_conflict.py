@@ -335,7 +335,9 @@ def build_disk_candidates(
     for folder in list_mod_dirs(game_dir):
         exists = _info_exists(folder)
         data = _read_info_dict(folder) if exists else None
-        info_iid = _text((data or {}).get("internal_id")) if data else ""
+        from services.mod_identity import read_entity_key
+
+        info_iid = read_entity_key(data) if data else ""
         info_wid = _text((data or {}).get("workspace_id")) if data else ""
         info_title = ""
         if data:
@@ -433,12 +435,12 @@ def diagnose_entity(
         decision = DECISION_CONFLICT
         notes.append(
             "historical conflict: same workspace_id + high title match, "
-            "but .info.internal_id differs from DB (and is not used for auto-bind)"
+            "but .info/entity_key differs from DB (and is not used for auto-bind)"
         )
         for c in conflicts:
             if c.info_internal_id_in_db is False:
                 notes.append(
-                    f"disk .info.internal_id {c.info_internal_id!r} is absent from DB"
+                    f"disk .info/entity_key {c.info_internal_id!r} is absent from DB"
                 )
     else:
         decision = DECISION_NONE

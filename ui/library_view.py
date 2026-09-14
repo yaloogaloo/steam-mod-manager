@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,6 +56,7 @@ from .library_query import (
     collect_category_labels,
     compute_record_relative_status,
     filter_sort_entries,
+    matches_search,
     projection_requires_view_recompute,
 )
 from .library_viewport import (
@@ -87,6 +89,9 @@ LIBRARY_ACTION_BTN_W = 118
 LIBRARY_ACTION_BTN_H = 28
 # FlowLayout wraps by width — reserve room for 4 cards + spacing + chrome
 LIBRARY_CARDS_PER_ROW = 4
+# Cap ModCardWidget retention. Scrolling must not keep one QWidget per Mod.
+LIBRARY_CARD_CACHE_BUDGET = 96
+LIBRARY_SCROLL_SYNC_MS = 16
 LIBRARY_CARD_H_SPACING = 8
 LIBRARY_FLOW_MARGIN = 2
 LIBRARY_CENTER_MIN_WIDTH = (
@@ -383,6 +388,11 @@ class ModLibraryView(QWidget):
         self._cover_sched.setSingleShot(True)
         self._cover_sched.setInterval(40)
         self._cover_sched.timeout.connect(self._load_viewport_covers)
+        self._scroll_sync_timer = QTimer(self)
+        self._scroll_sync_timer.setSingleShot(True)
+        self._scroll_sync_timer.setInterval(LIBRARY_SCROLL_SYNC_MS)
+        self._scroll_sync_timer.timeout.connect(self._on_library_scroll_covers)
+        self._viewport_live_cards: list[ModCardWidget] = []
         self._viewport_clamp_timer = QTimer(self)
         self._viewport_clamp_timer.setSingleShot(True)
         self._viewport_clamp_timer.setInterval(0)
@@ -667,7 +677,7 @@ class ModLibraryView(QWidget):
         )
         self.btn_wh3_sort_mode.setCheckable(True)
         self.btn_wh3_sort_mode.setToolTip(
-            "进入 WH3 已部署 Mod 的 Load Order 排序工作区"
+            "进入已安装 Mod 的 Load Order 排序工作区"
         )
         self.btn_wh3_sort_mode.toggled.connect(self._on_wh3_sort_mode_toggled)
         self.btn_wh3_sort_mode.hide()
@@ -740,7 +750,7 @@ class ModLibraryView(QWidget):
         self.library_layout.heightChanged.connect(self._on_library_flow_height)
         self.scroll.setWidget(self.library_host)
         self.scroll.verticalScrollBar().valueChanged.connect(
-            self._on_library_scroll_covers
+            self._on_library_scroll_value
         )
         center_layout.addWidget(self.scroll, stretch=1)
         self._shortcut_select_all = QShortcut(QKeySequence.StandardKey.SelectAll, self)
@@ -771,7 +781,6 @@ class ModLibraryView(QWidget):
             lambda mid: self._on_deploy_action(mid, "undeploy")
         )
         self.detail_panel.offline_page_updated.connect(self._on_offline_page_updated)
-        self.detail_panel.relocate_completed.connect(self._on_relocate_completed)
         from services.mod_projection_events import subscribe_mod_changed
         from services.size_observation import subscribe_size_projection
 
@@ -920,11 +929,13 @@ class ModLibraryView(QWidget):
             read projection and must not start Reconcile. Startup schedules
             Reconcile from main_window; Refresh only reloads the DB index.
 
-        Optional batch L0 filesystem observation may run in the background
-        after a forced refresh. Full-library L2 scan is never scheduled here.
+        Optional background Presence Reconcile may run after a forced refresh
+        so LIVE/MISS is computed without clicking a card. Identity Reconcile
+        is never scheduled here. Full-library L2 scan is never scheduled here.
         """
         del reconcile
         do_reconcile = False
+        self._refresh_t0 = time.perf_counter()
         scroll = self._capture_scroll()
         keep_mod_id = str(self._selected_mod_id or "").strip()
         if not keep_mod_id and self._selected_card is not None:
@@ -946,15 +957,19 @@ class ModLibraryView(QWidget):
             except Exception:  # noqa: BLE001
                 pass
             try:
-                from services.mod_fs_observer import (
-                    LEVEL_PROBE,
-                    schedule_observe_mods_fs_batch,
-                )
+                from services.presence_reconcile import schedule_presence_reconcile
 
-                # Optional cheap batch L0 — never full-library L2.
-                schedule_observe_mods_fs_batch(LEVEL_PROBE)
+                game_folder = ""
+                current = str(self._current_game_filter or "").strip()
+                if current and current != ALL_GAMES_LABEL:
+                    game_folder = current
+                # Presence Reconcile is not Identity Reconcile. Library may
+                # schedule it so MISS is computed without a card click.
+                schedule_presence_reconcile(
+                    root, game_folder=game_folder or None
+                )
             except Exception:  # noqa: BLE001
-                logger.debug("global refresh L0 schedule failed", exc_info=True)
+                logger.debug("presence reconcile schedule failed", exc_info=True)
             try:
                 from services.size_observation import schedule_library_size_refresh
 
@@ -976,6 +991,7 @@ class ModLibraryView(QWidget):
                     self._library_load_pending = False
                     self._apply_library_snapshot(snap)
                     self._finish_library_load()
+                    self._note_refresh_handler(force)
                     return
             except Exception:  # noqa: BLE001
                 log_exception("ModLibraryView.refresh.soft_cache")
@@ -990,6 +1006,7 @@ class ModLibraryView(QWidget):
             finally:
                 self._library_load_pending = False
                 self._finish_library_load()
+            self._note_refresh_handler(force)
             return
 
         self._library_load_pending = True
@@ -998,6 +1015,18 @@ class ModLibraryView(QWidget):
         # finishes. Snapshot load reads existing entities; reconcile is background
         # consistency only (scheduled outside Library).
         self._flush_pending_library_load()
+        self._note_refresh_handler(force)
+
+    def _note_refresh_handler(self, force: bool) -> None:
+        try:
+            from services.library_perf_metrics import get_library_perf_metrics
+
+            t0 = float(getattr(self, "_refresh_t0", 0.0) or 0.0)
+            ms = (time.perf_counter() - t0) * 1000.0 if t0 else 0.0
+            get_library_perf_metrics().note("refresh_handler_ms", round(ms, 2))
+            get_library_perf_metrics().note("refresh_handler_force", int(bool(force)))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _start_library_worker(self, root: Path, *, force: bool = True) -> None:
         from ui.library_load_thread import LibraryLoadWorker
@@ -1108,12 +1137,22 @@ class ModLibraryView(QWidget):
 
     @traced("ModLibraryView._on_library_loaded")
     def _on_library_loaded(self, snapshot, generation: int) -> None:
+        t0 = time.perf_counter()
         if int(generation) != self._load_gen:
             return
         try:
             self._apply_library_snapshot(snapshot)
         finally:
             self._finish_library_load()
+            try:
+                from services.library_perf_metrics import get_library_perf_metrics
+
+                get_library_perf_metrics().note(
+                    "apply_on_gui_ms",
+                    round((time.perf_counter() - t0) * 1000.0, 2),
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def _on_library_failed(self, message: str, generation: int) -> None:
         if int(generation) != self._load_gen:
@@ -1124,13 +1163,59 @@ class ModLibraryView(QWidget):
 
     @traced("ModLibraryView._apply_library_snapshot")
     def _apply_library_snapshot(self, snapshot) -> None:
+        from services.ui_block_trace import ui_block_phase
+
+        t0 = time.perf_counter()
         self._library_snapshot = snapshot
         self._snapshot_dirty = False
         manager = ModFileManager(self._target_root)
         previous = self._current_game_filter
         pending = self._pending_game_filter
-        self._rebuild_game_list(manager, prefer=pending or previous, snapshot=snapshot)
-        self._render_mod_cards(manager, force_reload=False)
+        with ui_block_phase(
+            "library_rebuild_game_list",
+            cards=int(getattr(snapshot, "total_count", 0) or 0),
+        ):
+            t_game = time.perf_counter()
+            self._rebuild_game_list(manager, prefer=pending or previous, snapshot=snapshot)
+            game_ms = (time.perf_counter() - t_game) * 1000.0
+        with ui_block_phase(
+            "library_render_mod_cards",
+            cards=int(getattr(snapshot, "total_count", 0) or 0),
+        ):
+            t_render = time.perf_counter()
+            self._render_mod_cards(manager, force_reload=False)
+            render_ms = (time.perf_counter() - t_render) * 1000.0
+        try:
+            from services.library_perf_metrics import get_library_perf_metrics
+            from services.ui_block_trace import log_ui_block
+            from services.perf_stage import log_perf_stage
+
+            total_ms = (time.perf_counter() - t0) * 1000.0
+            get_library_perf_metrics().note(
+                "apply_snapshot_ms",
+                round(total_ms, 2),
+            )
+            get_library_perf_metrics().note("apply_rebuild_game_list_ms", round(game_ms, 2))
+            get_library_perf_metrics().note("apply_render_mod_cards_ms", round(render_ms, 2))
+            log_ui_block(
+                "library_apply_snapshot",
+                total_ms,
+                game_ms=round(game_ms, 1),
+                render_ms=round(render_ms, 1),
+                cards=int(getattr(snapshot, "total_count", 0) or 0),
+            )
+            log_perf_stage(
+                "snapshot_apply",
+                total_ms,
+                game_ms=round(game_ms, 1),
+                render_ms=round(render_ms, 1),
+                card_data=int(getattr(snapshot, "total_count", 0) or 0),
+                widgets_created=int(getattr(self, "_card_create_count", 0) or 0),
+                widgets_cached=len(self._card_cache),
+                viewport_cards=len(self._cards),
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     @traced("ModLibraryView._finish_library_load")
     def _finish_library_load(self) -> None:
@@ -1212,6 +1297,7 @@ class ModLibraryView(QWidget):
             get_library_cache,
         )
 
+        t0 = time.perf_counter()
         cache = get_library_cache()
         needs_view = False
         any_full = False
@@ -1228,22 +1314,15 @@ class ModLibraryView(QWidget):
         recorded_ids = self._resolve_record_mod_ids()
         deployed_only = bool(
             getattr(self, "_wh3_sort_mode", False)
-        ) and self._is_wh3_current_game()
+        ) and self._is_load_order_sort_game()
 
-        def _patch_rows(
-            rows: list[tuple[ModFilterIndex, object]],
-            mid: str,
-            new_index: ModFilterIndex,
-            patched,
-        ) -> list[tuple[ModFilterIndex, object]]:
-            out: list[tuple[ModFilterIndex, object]] = []
-            for index, payload in rows:
-                if str(getattr(index, "mod_id", "") or "") != mid:
-                    out.append((index, payload))
-                    continue
-                out.append((new_index, patched))
-            return out
+        old_indexes: dict[str, ModFilterIndex] = {}
+        for index, _payload in self._game_row_entries:
+            mid = str(getattr(index, "mod_id", "") or "")
+            if mid:
+                old_indexes[mid] = index
 
+        patches: dict[str, tuple[str, object]] = {}
         for mid, kind in pending.items():
             if kind == "full":
                 any_full = True
@@ -1261,79 +1340,86 @@ class ModLibraryView(QWidget):
                 if kind == "full":
                     self._snapshot_dirty = True
                 continue
+            patches[mid] = (kind, patched)
 
+        peek = None
+        try:
+            peek = cache.peek_snapshot(self._target_root)
+        except Exception:  # noqa: BLE001
             peek = None
-            try:
-                peek = cache.peek_snapshot(self._target_root)
-            except Exception:  # noqa: BLE001
-                peek = None
-            if peek is not None:
-                self._library_snapshot = peek
-            elif self._library_snapshot is not None:
-                cards = [
-                    patched if str(c.id) == mid else c
-                    for c in self._library_snapshot.cards
-                ]
-                self._library_snapshot.cards[:] = cards
-                self._library_snapshot.total_count = len(cards)
+        if peek is not None:
+            self._library_snapshot = peek
+        elif self._library_snapshot is not None and patches:
+            replaced = {
+                mid: patched for mid, (_kind, patched) in patches.items()
+            }
+            cards = [
+                replaced.get(str(c.id), c) for c in self._library_snapshot.cards
+            ]
+            self._library_snapshot.cards[:] = cards
+            self._library_snapshot.total_count = len(cards)
 
-            new_index = self._filter_index_from_card_data(patched)
-            old_index = None
-            for index, _payload in self._game_row_entries:
-                if str(getattr(index, "mod_id", "") or "") == mid:
-                    old_index = index
-                    break
-            self._game_row_entries = _patch_rows(
-                self._game_row_entries, mid, new_index, patched
-            )
-            self._filtered_row_entries = _patch_rows(
-                self._filtered_row_entries, mid, new_index, patched
-            )
+        if patches:
+            new_indexes = {
+                mid: self._filter_index_from_card_data(patched)
+                for mid, (_kind, patched) in patches.items()
+            }
 
-            for i, (_index, card) in enumerate(list(self._card_entries)):
-                if card._mod_id() != mid:
-                    continue
-                meta = card_data_to_metadata(patched)
-                folder = card.managed_path
-                patched_path = str(patched.managed_path or "").strip()
-                if patched_path:
-                    folder = Path(patched_path)
-                card.rebind(folder, meta, card_data=patched)
-                if kind == "full":
-                    try:
-                        card.ensure_cover()
-                    except Exception:  # noqa: BLE001
-                        log_exception(
-                            "ModLibraryView._flush_projection_patches.ensure_cover",
-                            mod_id=mid,
-                        )
-                self._card_entries[i] = (new_index, card)
-                if self._selected_card is card:
-                    self._selected_path = card.managed_path
-                    self._selected_mod_id = mid
-                break
+            def _patch_all(rows: list[tuple[ModFilterIndex, object]]):
+                out: list[tuple[ModFilterIndex, object]] = []
+                for index, payload in rows:
+                    mid = str(getattr(index, "mod_id", "") or "")
+                    hit = patches.get(mid)
+                    if hit is None:
+                        out.append((index, payload))
+                        continue
+                    out.append((new_indexes[mid], hit[1]))
+                return out
 
-            if projection_requires_view_recompute(
-                old_index,
-                new_index,
-                query=query,
-                filter_key=filter_key,
-                platform_key=FILTER_PLATFORM_ALL,
-                category_key=category_key,
-                sort_mode=self._sort_mode,
-                record_mod_ids=recorded_ids,
-                deployed_only=deployed_only,
-            ):
-                needs_view = True
-            selected = self._selected_card
-            if (
-                kind == "full"
-                and selected is not None
-                and selected._mod_id() == mid
-                and not selected.isHidden()
-                and not getattr(self.detail_panel, "_deploy_busy", False)
-            ):
-                selected_refresh = mid
+            self._game_row_entries = _patch_all(self._game_row_entries)
+            self._filtered_row_entries = _patch_all(self._filtered_row_entries)
+
+            bound = {
+                card._mod_id(): (i, card)
+                for i, (_index, card) in enumerate(self._card_entries)
+            }
+            for mid, (kind, patched) in patches.items():
+                new_index = new_indexes[mid]
+                old_index = old_indexes.get(mid)
+                hit = bound.get(mid)
+                if hit is not None:
+                    i, card = hit
+                    meta = card_data_to_metadata(patched)
+                    folder = card.managed_path
+                    patched_path = str(patched.managed_path or "").strip()
+                    if patched_path:
+                        folder = Path(patched_path)
+                    card.rebind(folder, meta, card_data=patched)
+                    self._card_entries[i] = (new_index, card)
+                    if self._selected_card is card:
+                        self._selected_path = card.managed_path
+                        self._selected_mod_id = mid
+                if projection_requires_view_recompute(
+                    old_index,
+                    new_index,
+                    query=query,
+                    filter_key=filter_key,
+                    platform_key=FILTER_PLATFORM_ALL,
+                    category_key=category_key,
+                    sort_mode=self._sort_mode,
+                    record_mod_ids=recorded_ids,
+                    deployed_only=deployed_only,
+                ):
+                    needs_view = True
+                selected = self._selected_card
+                if (
+                    kind == "full"
+                    and selected is not None
+                    and selected._mod_id() == mid
+                    and not selected.isHidden()
+                    and not getattr(self.detail_panel, "_deploy_busy", False)
+                ):
+                    selected_refresh = mid
 
         if needs_view:
             self._last_filter_sig = None
@@ -1360,6 +1446,16 @@ class ModLibraryView(QWidget):
                     game_id=int(self.current_game_id or 0),
                     game_name=str(self.current_game_name or "").strip(),
                 )
+        try:
+            from services.library_perf_metrics import get_library_perf_metrics
+
+            get_library_perf_metrics().note(
+                "projection_flush_ms",
+                round((time.perf_counter() - t0) * 1000.0, 2),
+            )
+            get_library_perf_metrics().note("projection_patched", len(patches))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _sync_projection_content_status(self, mod_id: str) -> None:
         """Refresh full projection after content_status persistence."""
@@ -1987,23 +2083,6 @@ class ModLibraryView(QWidget):
         scroll = self._capture_scroll()
         self._restore_scroll_after_layout(scroll, focus_mod_id=mid)
 
-    def _on_relocate_completed(self, mod_id: str) -> None:
-        """Projection rebind after relocate — never a full Library refresh."""
-        mid = str(mod_id or "").strip()
-        if not mid:
-            return
-        from services.mod_projection_events import notify_mod_changed
-
-        notify_mod_changed(mid)
-        QTimer.singleShot(0, lambda: self._focus_mod_after_relocate(mid))
-
-    def _focus_mod_after_relocate(self, mod_id: str) -> None:
-        mid = str(mod_id or "").strip()
-        for card in self._cards:
-            if card._mod_id() == mid:
-                self.on_mod_selected(card)
-                return
-
     def _set_loading(self, loading: bool) -> None:
         self._loading = bool(loading)
         self.refresh_btn.setEnabled(not loading)
@@ -2118,6 +2197,32 @@ class ModLibraryView(QWidget):
             return False
         return any(is_wh3_activation_app(app) for app in app_ids.values())
 
+    def _is_stellaris_current_game(self) -> bool:
+        from services.stellaris_activation import is_stellaris_activation_app
+
+        if is_stellaris_activation_app(
+            self.current_game_id or 0,
+            self.current_game_name or "",
+        ):
+            return True
+        if not self._current_game_filter:
+            return False
+        ids = [
+            str(getattr(index, "mod_id", "") or "")
+            for index, _payload in self._game_row_entries
+            if str(getattr(index, "mod_id", "") or "").isdigit()
+        ]
+        if not ids:
+            return False
+        try:
+            app_ids = get_db().get_mods_app_ids(ids)
+        except Exception:  # noqa: BLE001
+            return False
+        return any(is_stellaris_activation_app(app) for app in app_ids.values())
+
+    def _is_load_order_sort_game(self) -> bool:
+        return self._is_wh3_current_game() or self._is_stellaris_current_game()
+
     def _wh3_library_root(self) -> Path:
         return Path(self._target_root)
 
@@ -2126,6 +2231,22 @@ class ModLibraryView(QWidget):
 
         Never copies ``.pack`` files.
         """
+        if self._is_stellaris_current_game():
+            from services.stellaris_activation import (
+                load_saved_order,
+                persist_load_order,
+                sync_stellaris_launcher,
+            )
+
+            try:
+                persist_load_order(load_saved_order())
+                sync_stellaris_launcher()
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Stellaris activation persist after inventory change failed",
+                    exc_info=True,
+                )
+            return
         if not self._is_wh3_current_game():
             return
         from services.wh3_activation import (
@@ -2165,8 +2286,17 @@ class ModLibraryView(QWidget):
     def _sync_wh3_activation_bar(self) -> None:
         if not hasattr(self, "btn_wh3_sort_mode"):
             return
-        visible = self._is_wh3_current_game()
+        visible = self._is_load_order_sort_game()
         self.btn_wh3_sort_mode.setVisible(visible)
+        stellaris = self._is_stellaris_current_game()
+        if visible and stellaris:
+            self.btn_wh3_sort_mode.setToolTip(
+                "进入 Stellaris 已启用 Mod 的 Load Order 排序工作区"
+            )
+        elif visible:
+            self.btn_wh3_sort_mode.setToolTip(
+                "进入 WH3 已部署 Mod 的 Load Order 排序工作区"
+            )
         if getattr(self, "_record_actions", None) is not None:
             self._record_actions.updateGeometry()
         if not visible and getattr(self, "_wh3_sort_mode", False):
@@ -2177,7 +2307,7 @@ class ModLibraryView(QWidget):
             return
         if checked and self._is_collection_workspace():
             self._exit_collection_mode(apply_filter=False, restore_chips=True)
-        if checked and not self._is_wh3_current_game():
+        if checked and not self._is_load_order_sort_game():
             self._exit_wh3_sort_mode(apply_filter=False)
             return
         self._wh3_sort_mode = bool(checked)
@@ -2369,6 +2499,14 @@ class ModLibraryView(QWidget):
     def _wh3_order_fingerprint(self) -> tuple[str, ...]:
         if not getattr(self, "_wh3_sort_mode", False):
             return ()
+        if self._is_stellaris_current_game():
+            from services.stellaris_activation import resolved_load_order
+
+            try:
+                return tuple(resolved_load_order())
+            except Exception:  # noqa: BLE001
+                logger.debug("Stellaris load-order fingerprint failed", exc_info=True)
+                return ()
         from services.wh3_activation import resolved_load_order
 
         try:
@@ -2381,6 +2519,28 @@ class ModLibraryView(QWidget):
 
     def _apply_wh3_sort_order(self) -> None:
         if not getattr(self, "_wh3_sort_mode", False):
+            return
+        if self._is_stellaris_current_game():
+            from services.stellaris_activation import (
+                canon_internal_id,
+                display_numbers,
+                load_saved_order,
+                persist_load_order,
+            )
+
+            order = persist_load_order(load_saved_order())
+            rank = {mid: i for i, mid in enumerate(order)}
+            self._filtered_row_entries.sort(
+                key=lambda pair: rank.get(
+                    canon_internal_id(getattr(pair[0], "mod_id", "") or ""),
+                    10**9,
+                )
+            )
+            visible = [
+                canon_internal_id(getattr(pair[0], "mod_id", "") or "")
+                for pair in self._filtered_row_entries
+            ]
+            self._wh3_display_numbers = display_numbers(visible)
             return
         if not self._is_wh3_current_game():
             return
@@ -2406,7 +2566,9 @@ class ModLibraryView(QWidget):
     def _bind_wh3_sort_card(self, card, data) -> None:
         from services.wh3_activation import canon_internal_id
 
-        sort_mode = bool(getattr(self, "_wh3_sort_mode", False)) and self._is_wh3_current_game()
+        sort_mode = bool(getattr(self, "_wh3_sort_mode", False)) and (
+            self._is_wh3_current_game() or self._is_stellaris_current_game()
+        )
         number = 0
         if sort_mode:
             mid = canon_internal_id(getattr(data, "id", "") or "")
@@ -2416,6 +2578,17 @@ class ModLibraryView(QWidget):
 
     def _on_wh3_sort_drop(self, source_id: str, target_id: str) -> None:
         if not getattr(self, "_wh3_sort_mode", False):
+            return
+        if self._is_stellaris_current_game():
+            from services.stellaris_activation import apply_card_drop, sync_stellaris_launcher
+
+            apply_card_drop(source_id, target_id)
+            try:
+                sync_stellaris_launcher()
+            except Exception:  # noqa: BLE001
+                logger.debug("Stellaris launcher sync after sort failed", exc_info=True)
+            self._last_filter_sig = None
+            self._apply_view_filter()
             return
         from services.wh3_activation import apply_card_drop, sync_used_mods_txt
 
@@ -2826,7 +2999,12 @@ class ModLibraryView(QWidget):
         self._sync_type_manage_buttons()
         self._apply_view_filter()
 
-    def _reload_type_catalog(self) -> None:
+    def _reload_type_catalog(self, *, reconcile: bool = False) -> None:
+        """Refresh in-memory type labels for the Library UI.
+
+        Refresh / render must not run orphan reconcile or legacy migrate reports
+        on the GUI thread (those are startup / type-CRUD concerns).
+        """
         from services.mod_type_catalog import (
             ModTypeCatalogError,
             get_mod_type_catalog,
@@ -2834,7 +3012,7 @@ class ModLibraryView(QWidget):
 
         catalog = get_mod_type_catalog()
         try:
-            catalog.reload(db=get_db(), reconcile=True)
+            catalog.reload(db=None if not reconcile else get_db(), reconcile=reconcile)
         except ModTypeCatalogError:
             logger.warning("mod type catalog reload refused", exc_info=True)
 
@@ -2975,163 +3153,6 @@ class ModLibraryView(QWidget):
         self._sort_mode = str(self.sort_combo.currentData() or SORT_MTIME)
         self._apply_view_filter()
 
-    def _build_filter_index(
-        self,
-        folder: Path,
-        meta: ModMetadata,
-        manager: ModFileManager,
-        db_fields,
-        tag_flags=None,
-    ) -> ModFilterIndex:
-        mid = str(meta.entity_internal_id() or "").strip()
-        game_fs = manager.game_name_for_path(folder)
-        if db_fields is not None:
-            steam = db_fields.steam_name
-            # Prefer raw user override when available; else resolved display_name.
-            db_display = str(
-                getattr(db_fields, "user_display_name", None)
-                or db_fields.display_name
-                or ""
-            ).strip()
-            notes = db_fields.user_notes
-            favorite = db_fields.favorite
-            deployed = db_fields.deploy_status == DEPLOY_STATUS_DEPLOYED
-            game_db = db_fields.game_name or ""
-        else:
-            steam = (meta.title or "").strip() if meta else ""
-            db_display = ""
-            notes = ""
-            favorite = False
-            deployed = False
-            game_db = ""
-        from ui.library_query import resolve_mod_library_title
-
-        display = resolve_mod_library_title(
-            metadata_display_name=(meta.json_display_name if meta else "") or "",
-            metadata_title=(meta.title if meta else "") or "",
-            db_display_name=db_display if folder.is_dir() else "",
-            db_steam_name=steam if folder.is_dir() else "",
-            folder_name=folder.name,
-        )
-        game_name = game_db or game_fs or (meta.game_name if meta else "") or ""
-        # Include both DB game name and folder name in searchable text
-        game_search = " ".join(p for p in (game_db, game_fs) if p)
-        invalid = bool(getattr(tag_flags, "invalid", False)) if tag_flags else False
-        tag_values = ""
-        if tag_flags is not None:
-            values = getattr(tag_flags, "tag_values", ()) or ()
-            reason = getattr(tag_flags, "invalid_reason", "") or ""
-            tag_values = " ".join(
-                p for p in (*values, reason) if str(p).strip()
-            )
-        platform = "steam"
-        source_url = ""
-        external_id = ""
-        workspace_id = ""
-        is_invalid = False
-        conflict_status = "none"
-        enabled = True
-        category_tags = ""
-        type_id = None
-        if db_fields is not None:
-            platform = getattr(db_fields, "platform", "steam") or "steam"
-            source_url = getattr(db_fields, "source_url", "") or ""
-            external_id = getattr(db_fields, "external_id", "") or ""
-            workspace_id = getattr(db_fields, "workspace_id", "") or ""
-            is_invalid = bool(getattr(db_fields, "is_invalid", False))
-            conflict_status = getattr(db_fields, "conflict_status", "none") or "none"
-            enabled = bool(getattr(db_fields, "enabled", True))
-            category_tags = getattr(db_fields, "category_tags", "") or ""
-            type_id = getattr(db_fields, "type_id", None)
-        # Prefer SQLite lifecycle flags; fall back to legacy tag flags for invalid only.
-        # User conflict annotation is conflict_status only — never tag_flags / identity.
-        invalid = is_invalid or (
-            bool(getattr(tag_flags, "invalid", False)) if tag_flags else False
-        )
-        conflict = conflict_status == "conflict"
-        from services.platform_identity import resolve_display_platform
-
-        meta_plat = ""
-        if meta is not None:
-            meta_plat = str(getattr(meta, "source_type", "") or "").strip()
-        db_plat = ""
-        if db_fields is not None:
-            db_plat = str(getattr(db_fields, "platform", "") or "").strip()
-        else:
-            db_plat = str(platform or "").strip()
-        platform = resolve_display_platform(
-            db_platform=db_plat,
-            metadata_platform=meta_plat,
-        )
-        if meta is not None and str(getattr(meta, "url", "") or "").strip():
-            source_url = str(meta.url).strip()
-        has_offline = False
-        from services.mod_metadata_resolver import resolve_offline_page
-
-        found = resolve_offline_page(mid or None, folder)
-        if found is not None:
-            has_offline = True
-        else:
-            off_ref = (
-                str(getattr(meta, "offline_page_path", "") or "").strip() if meta else ""
-            )
-            if off_ref:
-                try:
-                    has_offline = Path(off_ref).is_file()
-                except OSError:
-                    has_offline = False
-        content_status = ""
-        identity_status = "ok"
-        source_type = ""
-        try:
-            from services.library_status import (
-                row_content_status,
-                row_identity_status,
-                row_source_type,
-            )
-
-            if mid:
-                brow = get_db().get_mod_backup_row(mid)
-                if brow is not None:
-                    content_status = row_content_status(brow)
-                    identity_status = row_identity_status(brow)
-                    sticky = row_source_type(brow)
-                    if sticky and sticky != "unknown":
-                        source_type = sticky
-        except Exception:  # noqa: BLE001
-            pass
-        return ModFilterIndex(
-            mod_id=mid,
-            display_name=display,
-            steam_name=steam,
-            notes=notes,
-            game_name=game_search or game_name,
-            favorite=favorite,
-            deployed=deployed,
-            has_offline=has_offline,
-            mtime=(
-                updated_at_to_mtime(str(getattr(db_fields, "updated_at", "") or ""))
-                if db_fields is not None
-                else 0.0
-            ),
-            sort_name=display or steam or folder.name,
-            invalid=invalid,
-            conflict=conflict,
-            tag_values=tag_values,
-            platform=platform,
-            source_url=source_url,
-            external_id=external_id,
-            workspace_id=workspace_id,
-            is_invalid=is_invalid or invalid,
-            conflict_status=conflict_status,
-            enabled=enabled,
-            category_tags=category_tags,
-            type_id=type_id,
-            content_status=content_status,
-            identity_status=identity_status,
-            source_type=source_type,
-        )
-
     def _apply_view_filter(self) -> None:
         """Reorder / show-hide cards only — never recreates DetailPanel."""
         detail_id = id(self.detail_panel)
@@ -3152,6 +3173,15 @@ class ModLibraryView(QWidget):
                     if index.deployed
                 )
             )
+        sort_member_fp = None
+        if getattr(self, "_wh3_sort_mode", False) and self._is_load_order_sort_game():
+            sort_member_fp = tuple(
+                sorted(
+                    str(index.mod_id)
+                    for index, _payload in self._game_row_entries
+                    if bool(getattr(index, "deployed", False))
+                )
+            )
         if self._is_collection_list_mode():
             self._prepare_collection_list_entries()
         filter_sig = (
@@ -3167,6 +3197,7 @@ class ModLibraryView(QWidget):
             deployed_fp,
             bool(getattr(self, "_wh3_sort_mode", False)),
             tuple(self._wh3_order_fingerprint()),
+            sort_member_fp,
             str(getattr(self, "_collection_mode", COLLECTION_MODE_NORMAL)),
             int(getattr(self, "_current_collection_id", 0) or 0),
             self._collection_list_fingerprint(),
@@ -3253,6 +3284,19 @@ class ModLibraryView(QWidget):
                     restore_scroll = self._legalize_viewport_scroll(stale_scroll, n_vis)
                     self._sync_viewport_cards(scroll_y=restore_scroll)
                     assert id(self.detail_panel) == detail_id
+            elif getattr(self, "_wh3_sort_mode", False) and self._is_stellaris_current_game():
+                self._filtered_row_entries = [
+                    (index, payload)
+                    for index, payload in self._game_row_entries
+                    if bool(getattr(index, "deployed", False))
+                ]
+                if str(query or "").strip():
+                    self._filtered_row_entries = [
+                        pair
+                        for pair in self._filtered_row_entries
+                        if matches_search(pair[0], query)
+                    ]
+                self._apply_wh3_sort_order()
             elif getattr(self, "_wh3_sort_mode", False) and self._is_wh3_current_game():
                 self._filtered_row_entries = [
                     (index, payload)
@@ -3364,8 +3408,19 @@ class ModLibraryView(QWidget):
             return
         card.show()
 
+    def _on_library_scroll_value(self, *_args) -> None:
+        """Debounce scroll → viewport rebind (avoid per-pixel main-thread storms)."""
+        timer = getattr(self, "_scroll_sync_timer", None)
+        if timer is None:
+            self._on_library_scroll_covers()
+            return
+        timer.start()
+
     def _on_library_scroll_covers(self, *_args) -> None:
-        self._sync_viewport_cards()
+        from services.ui_block_trace import ui_block_phase
+
+        with ui_block_phase("viewport_scroll_sync"):
+            self._sync_viewport_cards()
         if not self._is_collection_list_mode():
             self._schedule_visible_covers()
 
@@ -3399,9 +3454,14 @@ class ModLibraryView(QWidget):
         return hit
 
     def _load_viewport_covers(self) -> None:
+        from services.ui_block_trace import log_ui_block
+
+        t0 = time.perf_counter()
         visible = self.iter_viewport_cover_cards()
         visible_set = set(visible)
         submitted = 0
+        # Only touch the current viewport pool (``self._cards``), never the
+        # whole ``_card_cache``.
         for card in self._cards:
             if not isinstance(card, ModCardWidget) or card.isHidden():
                 continue
@@ -3410,6 +3470,28 @@ class ModLibraryView(QWidget):
                     submitted += 1
             else:
                 card.cancel_pending_cover(keep_pixmap=True)
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        try:
+            from services.library_perf_metrics import get_library_perf_metrics
+
+            get_library_perf_metrics().note(
+                "cover_schedule_ms",
+                round(elapsed, 2),
+            )
+            get_library_perf_metrics().note("cover_visible", len(visible))
+            get_library_perf_metrics().note("cover_submitted", submitted)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            log_ui_block(
+                "cover_viewport_schedule",
+                elapsed,
+                visible=len(visible),
+                submitted=submitted,
+                cache=len(self._card_cache),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from services.startup_io_trace import log_io_event
 
@@ -4365,8 +4447,11 @@ class ModLibraryView(QWidget):
         )
         from services.ui_perf_log import PerfScope
 
-        self._reload_type_catalog()
+        self._reload_type_catalog(reconcile=False)
         perf = PerfScope("RENDER_MOD_CARDS")
+        t_catalog = time.perf_counter()
+        # catalog already reloaded above; note wall for diagnostics
+        catalog_ms = (time.perf_counter() - t_catalog) * 1000.0
         snapshot = None
         if not force_reload and self._library_snapshot is not None:
             try:
@@ -4387,6 +4472,7 @@ class ModLibraryView(QWidget):
             self._library_snapshot = snapshot
         perf.phase("snapshot")
 
+        t_index = time.perf_counter()
         self._detach_active_cards()
         self._last_filter_sig = None
         game = self._current_game_filter
@@ -4412,6 +4498,15 @@ class ModLibraryView(QWidget):
         self._card_reuse_count = 0
         self._cards = []
         self._card_entries = []
+        index_ms = (time.perf_counter() - t_index) * 1000.0
+        try:
+            from services.library_perf_metrics import get_library_perf_metrics
+
+            get_library_perf_metrics().note("render_catalog_ms", round(catalog_ms, 2))
+            get_library_perf_metrics().note("render_index_build_ms", round(index_ms, 2))
+            get_library_perf_metrics().note("render_row_count", len(self._game_row_entries))
+        except Exception:  # noqa: BLE001
+            pass
 
         if not self._game_row_entries:
             self._filtered_row_entries = []
@@ -4488,6 +4583,7 @@ class ModLibraryView(QWidget):
         """
         if getattr(self, "_viewport_syncing", False):
             return
+        t0 = time.perf_counter()
         self._viewport_syncing = True
         try:
             raw = self._capture_scroll() if scroll_y is None else int(scroll_y)
@@ -4500,6 +4596,15 @@ class ModLibraryView(QWidget):
                 self._bind_viewport_cards(scroll_y=legal)
         finally:
             self._viewport_syncing = False
+            try:
+                from services.library_perf_metrics import get_library_perf_metrics
+
+                get_library_perf_metrics().note(
+                    "viewport_bind_ms",
+                    round((time.perf_counter() - t0) * 1000.0, 2),
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     def _viewport_item_count(self) -> int:
         if self._is_collection_list_mode():
@@ -4875,7 +4980,9 @@ class ModLibraryView(QWidget):
     @traced("ModLibraryView._bind_viewport_cards")
     def _bind_viewport_cards(self, *, scroll_y: int) -> None:
         from services.mod_library_cache import card_data_to_metadata
+        from services.ui_block_trace import log_ui_block
 
+        t_bind = time.perf_counter()
         rows = list(self._filtered_row_entries)
         viewport_w, viewport_h = self._viewport_metrics()
         legal = clamp_scroll_y(
@@ -4934,8 +5041,28 @@ class ModLibraryView(QWidget):
                 self._card_cache[key] = card
                 created += 1
             else:
-                card.rebind(folder, meta, card_data=data)
-                reused += 1
+                prev = getattr(card, "_card_data", None)
+                same_proj = (
+                    prev is data
+                    or (
+                        prev is not None
+                        and str(getattr(prev, "id", "") or "") == mid
+                        and str(getattr(prev, "cover", "") or "")
+                        == str(getattr(data, "cover", "") or "")
+                        and bool(getattr(prev, "folder_absent", False))
+                        == bool(getattr(data, "folder_absent", False))
+                        and str(getattr(prev, "title", "") or "")
+                        == str(getattr(data, "title", "") or "")
+                        and str(getattr(prev, "deploy_status", "") or "")
+                        == str(getattr(data, "deploy_status", "") or "")
+                        and Path(str(getattr(prev, "managed_path", "") or "")) == folder
+                    )
+                )
+                if same_proj:
+                    reused += 1
+                else:
+                    card.rebind(folder, meta, card_data=data)
+                    reused += 1
             if cats:
                 card.set_category_options(cats)
             self._bind_wh3_sort_card(card, data)
@@ -4943,11 +5070,33 @@ class ModLibraryView(QWidget):
             cards.append(card)
             entries.append((index, card))
 
+        shown = {id(card) for card in cards}
+        del shown  # selection uses card objects; ids used only for clarity above
+        prev_live = list(getattr(self, "_viewport_live_cards", []) or [])
+        live_set = set(cards)
+        # Only hide cards that left this window — never walk the full cache.
+        for old in prev_live:
+            if old is not None and old not in live_set:
+                old.hide()
+        self._viewport_live_cards = list(cards)
+
         self._cards = cards
         self._card_entries = entries
         self._card_create_count = created
         self._card_reuse_count = reused
         self._viewport_last_width = viewport_w
+        live_keys = {
+            self._card_cache_key(
+                Path(getattr(data, "managed_path", "") or ""),
+                mod_id=str(
+                    getattr(data, "id", "") or getattr(index, "mod_id", "") or ""
+                ),
+            )
+            for index, data in slice_rows
+        }
+        live_keys.discard("")
+        self._trim_card_cache_budget(live_keys=live_keys)
+        bind_ms = (time.perf_counter() - t_bind) * 1000.0
         try:
             from services.library_perf_metrics import get_library_perf_metrics
 
@@ -4955,6 +5104,31 @@ class ModLibraryView(QWidget):
                 cards_created=created,
                 cards_reused=reused,
                 visible_cards=len(cards),
+            )
+            log_ui_block(
+                "modcard_viewport_bind",
+                bind_ms,
+                created=created,
+                reused=reused,
+                visible=len(cards),
+                cache=len(self._card_cache),
+                window=f"{window.first_index}:{window.last_index}",
+            )
+            from services.perf_stage import log_perf_stage
+
+            log_perf_stage(
+                "viewport_bind",
+                bind_ms,
+                created=created,
+                reused=reused,
+                visible=len(cards),
+                cache=len(self._card_cache),
+            )
+            log_perf_stage(
+                "widget_create",
+                bind_ms if created else 0.0,
+                created=created,
+                reused=reused,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -4972,6 +5146,18 @@ class ModLibraryView(QWidget):
         self._sync_record_overlays()
         # Selection authority is mod_id; restore viewport styles after rebind.
         self._rematerialize_selection_from_ids()
+
+    def _trim_card_cache_budget(self, *, live_keys: set[str]) -> None:
+        """Drop off-viewport cached cards when the pool exceeds the budget."""
+        budget = max(LIBRARY_CARD_CACHE_BUDGET, len(live_keys) * 2)
+        if len(self._card_cache) <= budget:
+            return
+        for key in list(self._card_cache.keys()):
+            if key in live_keys:
+                continue
+            self._drop_cache_key(key)
+            if len(self._card_cache) <= budget:
+                return
 
     def _filter_index_from_card_data(self, data) -> ModFilterIndex:
         folder_name = Path(data.managed_path).name

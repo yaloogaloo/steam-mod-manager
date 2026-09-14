@@ -39,21 +39,21 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _mod(
     db: DatabaseManager,
-    mod_id: int,
+    workshop_id: int,
     *,
     app_id: int,
     deployed: bool,
     last_known_path: str = "",
-) -> None:
+) -> int:
     game = db.get_game(app_id) if app_id else None
     game_name = game.name if game is not None else GAME_FOLDER
     with identity_create_scope():
         created = create_mod_identity(
             db,
             platform=PLATFORM_STEAM,
-            external_id=str(mod_id),
-            workshop_id=str(mod_id),
-            title=f"Mod {mod_id}",
+            external_id=str(workshop_id),
+            workshop_id=str(workshop_id),
+            title=f"Mod {workshop_id}",
             app_id=app_id,
             game_name=game_name,
         )
@@ -72,6 +72,7 @@ def _mod(
             folder_present=True,
             backup_metadata_json="{}",
         )
+    return entity_id
 
 
 def _index(mod_id: str, *, deployed: bool) -> ModFilterIndex:
@@ -104,9 +105,9 @@ def test_save_record_includes_app_id_zero_under_game_folder(
     path_b.mkdir(parents=True)
 
     # A: correct Steam app_id, path optional (legacy)
-    _mod(db, 1001, app_id=ANNO, deployed=True)
+    pk_a = _mod(db, 1001, app_id=ANNO, deployed=True)
     # B: app_id=0 but lives under the game folder — Library shows it for Anno
-    _mod(
+    pk_b = _mod(
         db,
         1002,
         app_id=0,
@@ -115,10 +116,10 @@ def test_save_record_includes_app_id_zero_under_game_folder(
     )
 
     # Old app_id-only query would miss B.
-    assert "1002" not in db.list_deployed_mod_ids_for_app(ANNO)
+    assert str(pk_b) not in db.list_deployed_mod_ids_for_app(ANNO)
     assert set(db.list_deployed_mod_ids_for_library_game(ANNO, game_folder=GAME_FOLDER)) >= {
-        "1001",
-        "1002",
+        str(pk_a),
+        str(pk_b),
     }
 
     record = dr.create_or_update_record(
@@ -129,11 +130,11 @@ def test_save_record_includes_app_id_zero_under_game_folder(
         db=db,
     )
     recorded = dr.get_record_mod_ids(record.id, db=db)
-    assert recorded == {"1001", "1002"}
+    assert recorded == {str(pk_a), str(pk_b)}
 
     # Re-enter Record Filter relative calc: B must not be extra.
     recorded_fs = frozenset(recorded)
-    for mid in ("1001", "1002"):
+    for mid in (str(pk_a), str(pk_b)):
         status = compute_record_relative_status(
             _index(mid, deployed=True), recorded_fs
         )
@@ -153,15 +154,15 @@ def test_create_or_update_accepts_explicit_library_mod_ids(
 ) -> None:
     """UI may pass deployed ids from the Library entity layer (``_game_row_entries``)."""
     db.upsert_game(GameInfo(app_id=ANNO, name=GAME_FOLDER, folder_name=GAME_FOLDER))
-    _mod(db, 2001, app_id=ANNO, deployed=True)
-    _mod(db, 2002, app_id=0, deployed=True)
+    pk_a = _mod(db, 2001, app_id=ANNO, deployed=True)
+    pk_b = _mod(db, 2002, app_id=0, deployed=True)
     record = dr.create_or_update_record(
-        ANNO, "手动集合", mod_ids=["2001", "2002"], db=db
+        ANNO, "手动集合", mod_ids=[str(pk_a), str(pk_b)], db=db
     )
-    assert dr.get_record_mod_ids(record.id, db=db) == {"2001", "2002"}
+    assert dr.get_record_mod_ids(record.id, db=db) == {str(pk_a), str(pk_b)}
     # Relative under FILTER_DEPLOYMENT_RECORD would treat both as recorded.
     recorded = frozenset(dr.get_record_mod_ids(record.id, db=db))
     assert FILTER_DEPLOYMENT_RECORD  # architecture peer still exists
     assert record_relative_badge_label(
-        compute_record_relative_status(_index("2002", deployed=True), recorded)
+        compute_record_relative_status(_index(str(pk_b), deployed=True), recorded)
     ) is None

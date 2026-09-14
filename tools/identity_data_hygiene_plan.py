@@ -248,7 +248,7 @@ def build_plan(audit: dict[str, Any]) -> dict[str, Any]:
             "conditions": [
                 "internal_id unchanged",
                 "app_id unchanged",
-                ".info.internal_id matches DB",
+                ".info/entity_key matches DB Entity.internal_id",
                 "source_url verifiable when deciding fill/overwrite",
             ],
         },

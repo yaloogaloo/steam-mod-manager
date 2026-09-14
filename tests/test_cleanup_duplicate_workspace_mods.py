@@ -374,7 +374,7 @@ def test_info_internal_id_fix_correct(tmp_path: Path) -> None:
         title="Destroyable Bushes",
         external_id="pollution-6304",
     )
-    # Keeper path: workspace matches DB, but .info.internal_id is stale/wrong.
+    # Keeper path: workspace matches DB, but .info/entity_key (or legacy) is stale/wrong.
     _info(
         keep_dir,
         {
@@ -411,7 +411,11 @@ def test_info_internal_id_fix_correct(tmp_path: Path) -> None:
     )
     assert result["applied"] is True
     meta = json.loads((keep_dir / ".info" / "metadata.json").read_text(encoding="utf-8"))
-    assert meta["internal_id"] == keep_iid
+    from services.mod_identity import read_entity_key
+
+    assert read_entity_key(meta) == keep_iid
+    assert meta.get("internal_id") == keep_iid
+    assert "entity_key" not in meta
     assert meta["workspace_id"] == "6304"
     assert not poll_dir.exists()
 

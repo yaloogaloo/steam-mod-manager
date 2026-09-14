@@ -23,11 +23,7 @@ from services.local_file_index import has_local_mod_payload
 from services.metadata_refresh import MetadataRefreshResult
 from services.mod_refresh import refresh_mod, reconcile_local_state
 from services.mod_source_integrity import has_deployable_source, validate_source
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -49,19 +45,18 @@ def _modio_folder(
     *,
     mid: str,
     folder: str = "IsoMod",
-) -> Path:
+) -> tuple[Path, str]:
     library = tmp_path / "library"
     mod = library / "BG3" / folder
     mod.mkdir(parents=True)
     created = create_steam_test_mod(
         db, external_id=mid, title=folder, app_id=1086940, game_name="BG3"
     )
-    write_info_sidecar(
+    pk = prove_managed_folder(
+        db,
         mod,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title=folder,
-        external_id=mid,
-        workspace_id=str(created.workspace_id or mid),
         app_id=1086940,
         game_name="BG3",
         platform=PLATFORM_STEAM,
@@ -70,18 +65,17 @@ def _modio_folder(
             "url": "https://mod.io/g/baldursgate3/m/example-mod",
         },
     )
-    bind_managed_path(db, created.mod_id, mod, title=folder, game_name="BG3")
-    db.update_mod_identity_fields(mid, platform=PLATFORM_MODIO)
-    return mod
+    db.update_mod_identity_fields(pk, platform=PLATFORM_MODIO)
+    return mod, pk
 
 
 def test_case1_metadata_refresh_without_local_files_succeeds(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     """Metadata-only folder: refresh must succeed; content_status may be missing."""
-    mod = _modio_folder(tmp_path, db, mid="98001")
+    mod, pk = _modio_folder(tmp_path, db, mid="98001")
     provider_ok = MetadataRefreshResult(
-        mod_id="98001",
+        mod_id=pk,
         success=True,
         skipped=False,
         managed_path=mod,
@@ -94,7 +88,7 @@ def test_case1_metadata_refresh_without_local_files_succeeds(
         return_value=provider_ok,
     ):
         out = refresh_mod(
-            "98001",
+            pk,
             mod,
             platform=PLATFORM_MODIO,
             library_root=tmp_path / "library",
@@ -103,16 +97,16 @@ def test_case1_metadata_refresh_without_local_files_succeeds(
 
     assert out.success is True
     assert out.official_success is True
-    local = reconcile_local_state("98001", mod, db=db)
+    local = reconcile_local_state(pk, mod, db=db)
     assert local.content_status == CONTENT_CONTENT_MISSING
-    assert has_local_mod_payload(mod, mod_id="98001", db=db) is False
+    assert has_local_mod_payload(mod, mod_id=pk, db=db) is False
 
 
 def test_case2_invalid_zip_refresh_succeeds(tmp_path: Path, db: DatabaseManager) -> None:
-    mod = _modio_folder(tmp_path, db, mid="98002")
+    mod, pk = _modio_folder(tmp_path, db, mid="98002")
     (mod / "broken.zip").write_bytes(b"not-a-zip")
     db.set_mod_files(
-        "98002",
+        pk,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -127,7 +121,7 @@ def test_case2_invalid_zip_refresh_succeeds(tmp_path: Path, db: DatabaseManager)
     )
 
     provider_ok = MetadataRefreshResult(
-        mod_id="98002",
+        mod_id=pk,
         success=True,
         skipped=False,
         managed_path=mod,
@@ -139,7 +133,7 @@ def test_case2_invalid_zip_refresh_succeeds(tmp_path: Path, db: DatabaseManager)
         return_value=provider_ok,
     ):
         out = refresh_mod(
-            "98002",
+            pk,
             mod,
             platform=PLATFORM_MODIO,
             library_root=tmp_path / "library",
@@ -147,17 +141,17 @@ def test_case2_invalid_zip_refresh_succeeds(tmp_path: Path, db: DatabaseManager)
         )
 
     assert out.success is True
-    local = reconcile_local_state("98002", mod, db=db)
+    local = reconcile_local_state(pk, mod, db=db)
     assert local.content_status == CONTENT_HEALTHY
-    assert has_local_mod_payload(mod, mod_id="98002", db=db) is True
-    assert has_deployable_source(mod, mod_id="98002", db=db) is False
+    assert has_local_mod_payload(mod, mod_id=pk, db=db) is True
+    assert has_deployable_source(mod, mod_id=pk, db=db) is False
 
 
 def test_case3_invalid_zip_deploy_fails(tmp_path: Path, db: DatabaseManager) -> None:
-    mod = _modio_folder(tmp_path, db, mid="98003")
+    mod, pk = _modio_folder(tmp_path, db, mid="98003")
     (mod / "broken.zip").write_bytes(b"not-a-zip")
     db.set_mod_files(
-        "98003",
+        pk,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -173,11 +167,12 @@ def test_case3_invalid_zip_deploy_fails(tmp_path: Path, db: DatabaseManager) -> 
     db.update_game_deploy_config(100, name="Game", mod_path=str(tmp_path / "mods"))
     (tmp_path / "mods").mkdir()
 
+    # Workshop handle soft-resolves for deploy
     out = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod("98003")
     assert out["success"] is False
     assert out.get("reason") == "source_integrity"
 
-    info = db.get_mod_deploy_info("98003")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status in {DEPLOY_STATUS_FAILED, DEPLOY_STATUS_NOT_DEPLOYED}
 
@@ -185,9 +180,9 @@ def test_case3_invalid_zip_deploy_fails(tmp_path: Path, db: DatabaseManager) -> 
 def test_case4_deploy_source_error_does_not_enter_refresh_worker(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod = _modio_folder(tmp_path, db, mid="98004")
+    mod, pk = _modio_folder(tmp_path, db, mid="98004")
     provider_ok = MetadataRefreshResult(
-        mod_id="98004",
+        mod_id=pk,
         success=True,
         skipped=False,
         managed_path=mod,
@@ -199,7 +194,7 @@ def test_case4_deploy_source_error_does_not_enter_refresh_worker(
 
     worker = ModRefreshWorker(
         mod,
-        mod_id="98004",
+        mod_id=pk,
         library_root=tmp_path / "library",
         platform=PLATFORM_MODIO,
     )
@@ -222,9 +217,9 @@ def test_case4_deploy_source_error_does_not_enter_refresh_worker(
 def test_case5_local_file_exception_does_not_fail_metadata_refresh(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod = _modio_folder(tmp_path, db, mid="98005")
+    mod, pk = _modio_folder(tmp_path, db, mid="98005")
     provider_ok = MetadataRefreshResult(
-        mod_id="98005",
+        mod_id=pk,
         success=True,
         skipped=False,
         managed_path=mod,
@@ -241,7 +236,7 @@ def test_case5_local_file_exception_does_not_fail_metadata_refresh(
             return_value=provider_ok,
         ):
             out = refresh_mod(
-                "98005",
+                pk,
                 mod,
                 platform=PLATFORM_MODIO,
                 library_root=tmp_path / "library",

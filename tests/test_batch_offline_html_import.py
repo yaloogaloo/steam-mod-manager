@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.db_manager import DatabaseManager, GameInfo
-from core.mod_platform import PLATFORM_NEXUS
+from core.mod_platform import PLATFORM_NEXUS, PLATFORM_OTHER
 from services.importers.directory_batch import discover_mod_directories
 from services.importers.importer_base import ImportContext
 from services.importers.nexus import NexusImporter
@@ -156,6 +156,11 @@ def test_case3_bad_html_isolated(
 def test_case4_directory_batch_regression(
     tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Offline-HTML batch must not break bare-folder Multi import.
+
+    Folders without official Nexus ID/URL use PLATFORM_OTHER (Identity Contract:
+    Nexus must not invent external_id from folder names).
+    """
     parent = tmp_path / "batch"
     for name in ("modA", "modB"):
         d = parent / name
@@ -165,7 +170,7 @@ def test_case4_directory_batch_regression(
 
     monkeypatch.setattr("ui.import_thread.get_db", lambda: db)
     worker = ImportWorker(
-        platform=PLATFORM_NEXUS,
+        platform=PLATFORM_OTHER,
         library_root=tmp_path / "lib",
         params={
             "folder": str(parent),

@@ -105,6 +105,9 @@ def read_info(folder: Path) -> tuple[dict[str, Any] | None, str]:
 
 
 def write_info_patch(info_path: Path, updates: dict[str, Any]) -> None:
+    """Patch ``.info/metadata.json``; filesystem proof writes ``entity_key`` only."""
+    from services.mod_identity import normalize_info_entity_key_payload
+
     payload: dict[str, Any] = {}
     if info_path.is_file():
         try:
@@ -118,6 +121,8 @@ def write_info_patch(info_path: Path, updates: dict[str, Any]) -> None:
             payload.pop(key, None)
         else:
             payload[key] = value
+    # Canonical filesystem binding key is entity_key (never dual-write legacy).
+    payload, _ = normalize_info_entity_key_payload(payload)
     info_path.parent.mkdir(parents=True, exist_ok=True)
     info_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

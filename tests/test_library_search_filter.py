@@ -122,16 +122,23 @@ def test_filter_and_sort_order() -> None:
     assert by_mtime == ["A", "B"]
 
 
-def test_offline_page_exists_is_file_only(tmp_path: Path) -> None:
+def test_offline_page_exists_uses_manifest_probe(tmp_path: Path) -> None:
+    from services.info_asset_runtime import probe_live_offline_available
+
     mod = tmp_path / "G" / "M"
     info = mod / INFO_DIR_NAME
     info.mkdir(parents=True)
+    assert probe_live_offline_available(mod) is None
     assert offline_page_exists(mod) is False
     index = info / "index.html"
     index.write_text("x", encoding="utf-8")
-    assert offline_page_exists(mod) is True
-    # Non-empty stub still counts (offline path contract rejects empty files).
-    index.write_bytes(b"payload")
+    # HTML without manifest is not OPEN-capable.
+    assert probe_live_offline_available(mod) is None
+    assert offline_page_exists(mod) is False
+    (info / "manifest.json").write_text(
+        '{"schema_version": 1, "assets": []}', encoding="utf-8"
+    )
+    assert probe_live_offline_available(mod) is not None
     assert offline_page_exists(mod) is True
 
 
@@ -139,6 +146,7 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
     db.update_game_deploy_config(1623730, name="Palworld", mod_path="")
 
     paths: dict[str, Path] = {}
+    pks: dict[str, str] = {}
     specs = [
         ("1001", "Cool Mod", "Cool Mod", "", False, False, True),
         ("1002", "Other", "Other Steam", "note-xyz", True, True, False),
@@ -149,6 +157,7 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
             db, external_id=mid, title=title, app_id=1623730, game_name="Palworld"
         )
         internal_id = str(created.mod_id)
+        pks[mid] = internal_id
         mod = library / "Palworld" / folder
         mod.mkdir(parents=True, exist_ok=True)
         (mod / "file.txt").write_text("x", encoding="utf-8")
@@ -184,14 +193,14 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
                 deploy_path="/tmp/out",
             )
         paths[mid] = mod
-    return paths
+    return paths, pks
 
 
 def test_library_search_and_filters(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    _seed_library(library, db)
+    _paths, pks = _seed_library(library, db)
     patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
@@ -206,15 +215,15 @@ def test_library_search_and_filters(
     view.search_box.setText("note-xyz")
     flush_library_search(view)
     assert len(view._visible_cards()) == 1
-    assert view._visible_cards()[0]._mod_id() == "1002"
+    assert view._visible_cards()[0]._mod_id() == pks["1002"]
 
     view.search_box.clear()
     flush_library_search(view)
     view._filter_buttons[FILTER_FAVORITE].setChecked(True)
-    assert [c._mod_id() for c in view._visible_cards()] == ["1002"]
+    assert [c._mod_id() for c in view._visible_cards()] == [pks["1002"]]
 
     view._filter_buttons[FILTER_DEPLOYED].setChecked(True)
-    assert [c._mod_id() for c in view._visible_cards()] == ["1002"]
+    assert [c._mod_id() for c in view._visible_cards()] == [pks["1002"]]
 
     view._filter_buttons[FILTER_ALL].setChecked(True)
     view.search_box.setText("Palworld")
@@ -241,7 +250,7 @@ def test_filter_keeps_detail_panel_singleton(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    paths = _seed_library(library, db)
+    paths, pks = _seed_library(library, db)
     patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
@@ -250,7 +259,7 @@ def test_filter_keeps_detail_panel_singleton(
     view.set_target_root(str(library))
     view.refresh()
     panel_id = id(view.detail_panel)
-    view.detail_panel.show_mod(paths["1001"], mod_id="1001")
+    view.detail_panel.show_mod(paths["1001"], mod_id=pks["1001"])
 
     view.search_box.setText("Other")
     flush_library_search(view)
@@ -264,7 +273,7 @@ def test_filter_does_not_touch_archive_or_read_html(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    _seed_library(library, db)
+    _paths, pks = _seed_library(library, db)
     patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
 
@@ -307,21 +316,22 @@ def test_filter_does_not_touch_archive_or_read_html(
 
 def test_get_mods_search_fields_batch(db: DatabaseManager) -> None:
     db.update_game_deploy_config(1, name="TestGame", mod_path="")
-    create_steam_test_mod(db, external_id="501", title="Steam Title", app_id=1)
+    created = create_steam_test_mod(db, external_id="501", title="Steam Title", app_id=1)
+    pk = str(created.mod_id)
 
     db.update_mod_user_metadata(
-        "501",
+        pk,
         {"display_name": "Shown", "user_notes": "hello", "favorite": True},
     )
     db.update_mod_deploy_status(
-        "501",
+        pk,
         deploy_status=DEPLOY_STATUS_DEPLOYED,
         deploy_path="/x",
     )
-    fields = db.get_mods_search_fields(["501", "999", "not-an-id"])
-    assert "501" in fields
+    fields = db.get_mods_search_fields([pk, "999", "not-an-id"])
+    assert pk in fields
     assert "999" not in fields
-    row = fields["501"]
+    row = fields[pk]
     assert row.display_name == "Shown"
     assert row.steam_name == "Steam Title"
     assert row.user_notes == "hello"

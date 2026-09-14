@@ -275,19 +275,15 @@ def compute_record_relative_status(
 def offline_page_exists(
     managed_path: Path, *, mod_id: str | int | None = None
 ) -> bool:
-    """True when an offline page file exists under ``.info`` (or backup).
+    """True when a LIVE or Backup manifest exists (probe only — no materialize).
 
-    Prefer identity-aware resolver when ``mod_id`` / DB row is available; fall
-    back to the path-only offline contract so Library probes without a bound
-    entity still work.
+    Deprecated alias for :func:`services.info_asset_runtime.probe_offline_open`
+    ``can_materialize``. Do not use as an OPEN / browser path.
     """
-    from services.mod_metadata_resolver import resolve_offline_page
+    from services.info_asset_runtime import probe_offline_open
 
-    if resolve_offline_page(mod_id, managed_path) is not None:
-        return True
-    from services.offline.paths import resolve_offline_page as resolve_offline_fs
-
-    return resolve_offline_fs(managed_path) is not None
+    probe = probe_offline_open(managed_path, mod_id=str(mod_id or "").strip())
+    return bool(probe.cache_hit or probe.can_materialize)
 
 
 def folder_mtime(managed_path: Path) -> float:

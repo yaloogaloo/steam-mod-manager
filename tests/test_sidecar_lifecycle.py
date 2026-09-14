@@ -45,18 +45,21 @@ def test_import_materialize_still_writes_sidecar() -> None:
 def test_write_sidecar_for_mod_updates_json(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
+    created = create_steam_test_mod(db, external_id="92001", title="Old")
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id or "")
     folder = tmp_path / "Game" / "Mod"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps({"published_file_id": "92001", "title": "Old"}),
-        encoding="utf-8",
+    write_info_sidecar(
+        folder,
+        internal_id=frozen,
+        title="Old",
+        external_id="92001",
+        workspace_id="92001",
     )
-    create_steam_test_mod(db, external_id="92001", title="Old")
-    bind_managed_path(db, "92001", folder, title="Old")
+    bind_managed_path(db, pk, folder, title="Old")
 
     db.update_mod_user_metadata(
-        "92001",
+        pk,
         {
             "display_name": "Imported Name",
             "custom_description": "From import",
@@ -66,12 +69,16 @@ def test_write_sidecar_for_mod_updates_json(
             "source_url": "https://github.com/a/b",
         },
     )
-    path = write_sidecar_for_mod(folder, "92001", db=db)
+    path = write_sidecar_for_mod(folder, pk, db=db)
     assert path is not None
     side = load_info_sidecar(folder)
     assert side is not None
     assert side.display_name == "Imported Name"
     assert side.url == "https://github.com/a/b"
+    assert side.internal_id == frozen
+    disk = json.loads((folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8"))
+    assert disk.get("internal_id") == frozen
+    assert "entity_key" not in disk
 
 
 def test_detail_show_mod_is_readonly_no_sidecar_apply(

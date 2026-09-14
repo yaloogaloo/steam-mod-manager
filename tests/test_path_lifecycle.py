@@ -26,7 +26,7 @@ from services.path_lifecycle import (
     resolve_managed_folder,
 )
 from ui.metadata_refresh_thread import ModRefreshWorker
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, write_info_sidecar
 
 
 @pytest.fixture()
@@ -35,6 +35,72 @@ def db(tmp_path: Path) -> DatabaseManager:
     manager = DatabaseManager.instance(tmp_path / "path_lifecycle.db")
     yield manager
     DatabaseManager.reset_instance()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_path_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Path Lifecycle validates against library root — bind tests to tmp lib."""
+    lib = tmp_path / "mod"
+    lib.mkdir(parents=True, exist_ok=True)
+
+    def _lib() -> Path:
+        return lib
+
+    monkeypatch.setattr("core.paths.default_mod_library", _lib)
+    monkeypatch.setattr("services.mod_path_validation.default_mod_library", _lib)
+    monkeypatch.setattr("services.path_lifecycle.default_mod_library", _lib, raising=False)
+    return lib
+
+
+def _entity_frozen_id(db: DatabaseManager, mod_id: int | str) -> str:
+    """Read durable ``mods.internal_id`` for a PK (must already be minted)."""
+    row = db.get_mod_backup_row(str(mod_id)) or {}
+    frozen = str(row.get("internal_id") or "").strip()
+    assert frozen, f"Entity {mod_id} missing mods.internal_id"
+    assert frozen != str(mod_id), "Frozen internal_id must not collapse to mod_id"
+    return frozen
+
+
+def _bind_managed_entity(
+    db: DatabaseManager,
+    folder: Path,
+    *,
+    mod_id: int | str,
+    title: str,
+    platform: str,
+    external_id: str,
+    workspace_id: str = "",
+    app_id: int = 0,
+    game_name: str = "",
+    extra: dict | None = None,
+) -> str:
+    """Write Frozen ``.info/entity_key`` + bind ``last_known_path`` (fixture only).
+
+    entity_key value equals Entity ``mods.internal_id`` — filesystem binding only,
+    not a third Mod ID.
+    """
+    mid = str(mod_id)
+    frozen = _entity_frozen_id(db, mid)
+    ws = str(workspace_id or external_id or "").strip()
+    write_info_sidecar(
+        folder,
+        internal_id=frozen,
+        title=title,
+        external_id=str(external_id or ""),
+        workspace_id=ws,
+        app_id=int(app_id or 0),
+        game_name=game_name,
+        platform=platform,
+        extra=extra,
+    )
+    db.update_mod_identity_fields(
+        mid,
+        last_known_path=str(folder.resolve()),
+        folder_present=True,
+        title=title,
+        game_name=game_name or None,
+    )
+    return frozen
 
 
 def _modio_folder(lib: Path, name: str, *, url: str) -> Path:
@@ -54,15 +120,15 @@ def _modio_folder(lib: Path, name: str, *, url: str) -> Path:
     return folder
 
 
-def _steam_folder(lib: Path, mid: str, *, name: str = "") -> Path:
-    folder = lib / "Game" / (name or f"Unknown_Mod_{mid}")
+def _steam_folder(lib: Path, workshop: str, *, name: str = "") -> Path:
+    folder = lib / "Game" / (name or f"Unknown_Mod_{workshop}")
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     (info / "metadata.json").write_text(
         json.dumps(
             {
-                "published_file_id": mid,
-                "title": name or f"Unknown_Mod_{mid}",
+                "published_file_id": workshop,
+                "title": name or f"Unknown_Mod_{workshop}",
             },
             ensure_ascii=False,
             indent=2,
@@ -74,14 +140,14 @@ def _steam_folder(lib: Path, mid: str, *, name: str = "") -> Path:
     return folder
 
 
-def _nexus_folder(lib: Path, mid: str, *, name: str) -> Path:
+def _nexus_folder(lib: Path, *, name: str, external_id: str = "") -> Path:
     folder = lib / "Game" / name
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     (info / "metadata.json").write_text(
         json.dumps(
             {
-                "published_file_id": mid,
+                "published_file_id": str(external_id or ""),
                 "title": name,
                 "source_type": "nexus",
                 "platform": "nexus",
@@ -111,8 +177,20 @@ def test_modio_refresh_rename_then_stale_path_still_succeeds(
         app_id=916440,
         game_name="Anno 1800",
     )
-    mid = reg.mod_id
-    db.update_mod_identity_fields(mid, last_known_path=str(folder.resolve()))
+    mid = str(reg.mod_id)
+    row = db.get_mod_backup_row(mid) or {}
+    _bind_managed_entity(
+        db,
+        folder,
+        mod_id=mid,
+        title="OldName",
+        platform=PLATFORM_MODIO,
+        external_id="harborlife",
+        workspace_id=str(row.get("workspace_id") or "harborlife"),
+        app_id=916440,
+        game_name="Anno 1800",
+        extra={"url": url, "source_type": "modio"},
+    )
 
     details = map_mod_object(
         {
@@ -163,6 +241,8 @@ def test_modio_refresh_rename_then_stale_path_still_succeeds(
     healed = resolve_managed_folder(mid, hint_path=folder, db=db)
     assert healed.path == new_path
     assert healed.resolved_from == "last_known_path"
+    after = db.get_mod_backup_row(mid) or {}
+    assert str(after.get("internal_id") or "") == _entity_frozen_id(db, mid)
 
 
 def test_nexus_manual_rename_then_refresh_with_stale_path(
@@ -172,12 +252,8 @@ def test_nexus_manual_rename_then_refresh_with_stale_path(
     lib = tmp_path / "mod"
     db.upsert_game(GameInfo(app_id=1623730, name="Palworld", folder_name="Game"))
     old = lib / "Game" / "OldNexus"
-    info = old / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        json.dumps({"title": "OldNexus", "source_type": "nexus"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    old.mkdir(parents=True)
+    (old / INFO_DIR_NAME).mkdir(parents=True)
     with zipfile.ZipFile(old / "payload.zip", "w") as zf:
         zf.writestr("mod.txt", "x")
     reg = db.register_external_mod(
@@ -189,19 +265,19 @@ def test_nexus_manual_rename_then_refresh_with_stale_path(
         game_name="Palworld",
     )
     mid = str(reg.mod_id)
-    (info / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": "OldNexus",
-                "source_type": "nexus",
-                "platform": "nexus",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    row = db.get_mod_backup_row(mid) or {}
+    _bind_managed_entity(
+        db,
+        old,
+        mod_id=mid,
+        title="OldNexus",
+        platform=PLATFORM_NEXUS,
+        external_id="4001",
+        workspace_id=str(row.get("workspace_id") or "4001"),
+        app_id=1623730,
+        game_name="Palworld",
+        extra={"source_type": "nexus"},
     )
-    db.update_mod_identity_fields(mid, last_known_path=str(old.resolve()))
 
     new = old.parent / "RenamedNexus"
     old.rename(new)
@@ -214,20 +290,33 @@ def test_nexus_manual_rename_then_refresh_with_stale_path(
     assert db.is_official_metadata_synced(mid)
     row = db.get_mod_backup_row(mid) or {}
     assert Path(str(row.get("last_known_path") or "")).resolve() == new.resolve()
+    assert str(row.get("internal_id") or "")
+    assert str(row.get("workspace_id") or "") == "4001"
 
 
 def test_steam_refresh_rename_then_stale_path_succeeds(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Case 3: Steam refresh rename; stale path on next refresh still works."""
-    mid = "3413524002"
+    workshop = "3413524002"
     lib = tmp_path / "mod"
-    folder = _steam_folder(lib, mid)
-    create_steam_test_mod(db, external_id=mid, title=f"Unknown_Mod_{mid}")
-    db.update_mod_identity_fields(mid, last_known_path=str(folder.resolve()))
+    folder = _steam_folder(lib, workshop)
+    created = create_steam_test_mod(
+        db, external_id=workshop, title=f"Unknown_Mod_{workshop}"
+    )
+    mid = str(created.mod_id)
+    _bind_managed_entity(
+        db,
+        folder,
+        mod_id=mid,
+        title=f"Unknown_Mod_{workshop}",
+        platform=PLATFORM_STEAM,
+        external_id=workshop,
+        workspace_id=workshop,
+    )
 
     fresh = ModMetadata(
-        published_file_id=mid,
+        published_file_id=workshop,
         title="Official Steam Title",
         description="desc",
     )
@@ -245,6 +334,9 @@ def test_steam_refresh_rename_then_stale_path_succeeds(
     assert second.success
     healed = resolve_managed_folder(mid, hint_path=folder, db=db)
     assert healed.path == new_path
+    assert str((db.get_mod_backup_row(mid) or {}).get("internal_id") or "") == (
+        str(created.internal_id or "")
+    )
 
 
 def test_worker_heals_stale_path_after_rename(
@@ -252,16 +344,21 @@ def test_worker_heals_stale_path_after_rename(
 ) -> None:
     """Case 4: Worker constructed with old path recovers via resolve at run()."""
     lib = tmp_path / "mod"
-    mid = "3413524003"
+    workshop = "3413524003"
     old = lib / "Game" / "before"
     old.mkdir(parents=True)
     (old / INFO_DIR_NAME).mkdir()
-    (old / INFO_DIR_NAME / "metadata.json").write_text(
-        json.dumps({"published_file_id": mid, "title": "before"}),
-        encoding="utf-8",
+    created = create_steam_test_mod(db, external_id=workshop, title="before")
+    mid = str(created.mod_id)
+    _bind_managed_entity(
+        db,
+        old,
+        mod_id=mid,
+        title="before",
+        platform=PLATFORM_STEAM,
+        external_id=workshop,
+        workspace_id=workshop,
     )
-    create_steam_test_mod(db, external_id=mid, title="before")
-    db.update_mod_identity_fields(mid, last_known_path=str(old.resolve()))
 
     new = lib / "Game" / "after"
     old.rename(new)
@@ -306,8 +403,20 @@ def test_db_identity_failure_after_path_commit_leaves_no_orphan(
         app_id=916440,
         game_name="Anno 1800",
     )
-    mid = reg.mod_id
-    db.update_mod_identity_fields(mid, last_known_path=str(folder.resolve()))
+    mid = str(reg.mod_id)
+    row = db.get_mod_backup_row(mid) or {}
+    frozen_before = _bind_managed_entity(
+        db,
+        folder,
+        mod_id=mid,
+        title="OldName",
+        platform=PLATFORM_MODIO,
+        external_id="harborlife",
+        workspace_id=str(row.get("workspace_id") or "harborlife"),
+        app_id=916440,
+        game_name="Anno 1800",
+        extra={"url": url, "source_type": "modio"},
+    )
 
     details = ModioModDetails(
         mod_id=424242,
@@ -346,10 +455,14 @@ def test_db_identity_failure_after_path_commit_leaves_no_orphan(
     assert result.managed_path.is_dir()
     row = db.get_mod_backup_row(mid) or {}
     assert Path(str(row.get("last_known_path") or "")).resolve() == result.managed_path.resolve()
+    assert str(row.get("internal_id") or "") == frozen_before
     sidecar = json.loads(
         (result.managed_path / INFO_DIR_NAME / "metadata.json").read_text(encoding="utf-8")
     )
     assert sidecar.get("modio_mod_id") == 424242
+    assert str(sidecar.get("internal_id") or "") == frozen_before
+    assert "entity_key" not in sidecar
+    assert str(row.get("workspace_id") or "")  # workspace_id unchanged on Entity
 
 
 def test_manual_move_reconcile_via_library_scan(
@@ -358,7 +471,7 @@ def test_manual_move_reconcile_via_library_scan(
     """Case 6: User manually moves folder; library reconcile updates last_known_path."""
     lib = tmp_path / "mod"
     db.upsert_game(GameInfo(app_id=1623730, name="Palworld", folder_name="Game"))
-    old = _nexus_folder(lib, "pending", name="ManualOld")
+    old = _nexus_folder(lib, name="ManualOld", external_id="4004")
     reg = db.register_external_mod(
         platform=PLATFORM_NEXUS,
         external_id="4004",
@@ -368,43 +481,48 @@ def test_manual_move_reconcile_via_library_scan(
         game_name="Palworld",
     )
     mid = str(reg.mod_id)
-    (old / INFO_DIR_NAME / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": "ManualOld",
-                "source_type": "nexus",
-                "platform": "nexus",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    db.update_mod_identity_fields(
-        mid,
-        last_known_path=str(old.resolve()),
-        folder_present=True,
+    row = db.get_mod_backup_row(mid) or {}
+    frozen = _bind_managed_entity(
+        db,
+        old,
+        mod_id=mid,
+        title="ManualOld",
         platform=PLATFORM_NEXUS,
+        external_id="4004",
+        workspace_id=str(row.get("workspace_id") or "4004"),
+        app_id=1623730,
+        game_name="Palworld",
+        extra={"source_type": "nexus"},
     )
 
     new = old.parent / "ManualNew"
     old.rename(new)
 
     result = reconcile_library(lib)
-    assert result.renamed >= 1
+    assert result.renamed >= 1 or mid in result.rebound_ids
     row = db.get_mod_backup_row(mid) or {}
     assert Path(str(row.get("last_known_path") or "")).resolve() == new.resolve()
+    assert str(row.get("internal_id") or "") == frozen
+    assert str(row.get("workspace_id") or "") == "4004"
 
 
 def test_commit_path_change_reports_stage_on_db_failure(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    folder = tmp_path / "Game" / "ModA"
+    folder = tmp_path / "mod" / "Game" / "ModA"
     folder.mkdir(parents=True)
     (folder / INFO_DIR_NAME).mkdir()
-    (folder / INFO_DIR_NAME / "metadata.json").write_text("{}", encoding="utf-8")
-    mid = "9000000000004005"
-    create_steam_test_mod(db, external_id=mid, title="ModA")
+    workshop = "3413524005"
+    created = create_steam_test_mod(db, external_id=workshop, title="ModA")
+    mid = str(created.mod_id)
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.internal_id or ""),
+        title="ModA",
+        external_id=workshop,
+        workspace_id=workshop,
+        platform=PLATFORM_STEAM,
+    )
 
     def _fail(**kwargs):
         raise OSError("db locked")

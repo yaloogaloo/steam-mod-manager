@@ -27,17 +27,17 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 
 def test_add_remove_category_tags(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="901", title="T")
+    pk = create_steam_test_mod(db, external_id="901", title="T").mod_id
 
-    db.add_category_tag(901, "Gameplay")
-    db.add_category_tag(901, "Fix")
-    db.add_category_tag(901, "Gameplay")  # duplicate ignored
-    tags = db.get_category_tags(901)
+    db.add_category_tag(pk, "Gameplay")
+    db.add_category_tag(pk, "Fix")
+    db.add_category_tag(pk, "Gameplay")  # duplicate ignored
+    tags = db.get_category_tags(pk)
     assert tags == ["Gameplay", "Fix"]
     assert "Gameplay" in db.list_all_category_tags()
-    assert db.remove_category_tag(901, "Fix") == 1
-    assert db.get_category_tags(901) == ["Gameplay"]
-    raw = db.get_mod_tags(901)
+    assert db.remove_category_tag(pk, "Fix") == 1
+    assert db.get_category_tags(pk) == ["Gameplay"]
+    raw = db.get_mod_tags(pk)
     assert all(t.tag_type == TAG_TYPE_CATEGORY for t in raw)
 
 

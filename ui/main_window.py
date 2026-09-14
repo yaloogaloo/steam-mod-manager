@@ -47,42 +47,58 @@ _VALID_PAGES = (PAGE_SYNC, PAGE_LIBRARY, PAGE_DEPLOY)
 class MainWindow(StartupLifecycleMixin, QMainWindow):
     def __init__(self) -> None:
         log_startup("MainWindow __init__ start")
-        super().__init__()
-        # Flags before any geometry / UI / native HWND — show() must stay last.
-        apply_frameless_main_window_flags(self)
-        log_startup("setWindowFlags done (frameless)")
-        self.setWindowTitle("Steam 创意工坊 Mod 本地管理器")
-        # Room for nav(128) + game(140) + 4-card Mod grid(~852) + detail(350).
-        self.setMinimumSize(QSize(1520, 700))
-        self.resize(1600, 820)
-        log_startup(
-            f"resize done size={self.width()}x{self.height()} "
-            f"translucent={self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
-        )
+        try:
+            from services.ui_block_trace import reset_ui_block_trace, ui_block_phase
 
-        self.settings = QSettings(ORG_NAME, APP_NAME)
-        self.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
-        log_startup("stylesheet applied")
-        self._build_ui()
-        log_startup("setCentralWidget + layout built")
-        # Title strip only — flags already applied; no winId before show.
-        self._title_bar = install_frameless_main_window(
-            self, title=self.windowTitle(), flags_already_applied=True
-        )
-        log_startup("install_frameless_main_window done")
-        self._restore_settings()
-        self._native_chrome_ready = False
-        log_startup(
-            f"MainWindow __init__ end visible={self.isVisible()} "
-            f"size={self.width()}x{self.height()} state={self.windowState()!r} "
-            f"translucent={self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
-        )
+            reset_ui_block_trace()
+            _init_phase = ui_block_phase("mainwindow_init")
+        except Exception:  # noqa: BLE001
+            from contextlib import nullcontext
+
+            _init_phase = nullcontext()
+        with _init_phase:
+            super().__init__()
+            # Flags before any geometry / UI / native HWND — show() must stay last.
+            apply_frameless_main_window_flags(self)
+            log_startup("setWindowFlags done (frameless)")
+            self.setWindowTitle("Steam 创意工坊 Mod 本地管理器")
+            # Room for nav(128) + game(140) + 4-card Mod grid(~852) + detail(350).
+            self.setMinimumSize(QSize(1520, 700))
+            self.resize(1600, 820)
+            log_startup(
+                f"resize done size={self.width()}x{self.height()} "
+                f"translucent={self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
+            )
+
+            self.settings = QSettings(ORG_NAME, APP_NAME)
+            self.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
+            log_startup("stylesheet applied")
+            self._build_ui()
+            log_startup("setCentralWidget + layout built")
+            # Title strip only — flags already applied; no winId before show.
+            self._title_bar = install_frameless_main_window(
+                self, title=self.windowTitle(), flags_already_applied=True
+            )
+            log_startup("install_frameless_main_window done")
+            self._restore_settings()
+            self._native_chrome_ready = False
+            log_startup(
+                f"MainWindow __init__ end visible={self.isVisible()} "
+                f"size={self.width()}x{self.height()} state={self.windowState()!r} "
+                f"translucent={self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
+            )
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         StartupLifecycleMixin.showEvent(self, event)
         if not self._native_chrome_ready:
             self._native_chrome_ready = True
             on_frameless_main_window_shown(self)
+            try:
+                from services.ui_block_trace import log_ui_block
+
+                log_ui_block("first_paint_showEvent", 0.0)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -216,9 +232,9 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
                 f"state={self.windowState()!r}"
             )
 
-        # Backfill missing metadata backups off the UI thread
+        # Optional deferred Identity Reconcile (default off — DB projection only).
         QTimer.singleShot(0, self._refresh_system_proxy_on_startup)
-        QTimer.singleShot(0, self._run_startup_backup_rebuild)
+        QTimer.singleShot(0, self._run_startup_library_reconcile)
 
     def _refresh_system_proxy_on_startup(self) -> None:
         try:
@@ -243,30 +259,27 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
             )
             log_startup(f"system proxy refresh skip: {exc}")
 
-    def _run_startup_backup_rebuild(self) -> None:
+    def _run_startup_library_reconcile(self) -> None:
+        """Startup Identity Reconcile gate (default: skipped).
+
+        Loads Library from DB only. Full-library folder walk / Identity
+        Reconcile is opt-in via ``startup_reconcile_enabled`` (config/env).
+        Explicit Repair / tools still call ``reconcile_library`` directly.
+        """
         try:
-            from services.library_reconcile import start_reconcile_library_async
+            from services.library_reconcile import schedule_startup_library_reconcile
 
             root = getattr(self.library_view, "_target_root", None) or self.sync_view.target_path()
-            start_reconcile_library_async(root)
-            log_startup("reconcile_library scheduled")
+            action = schedule_startup_library_reconcile(root)
+            log_startup(f"startup_reconcile action={action}")
         except Exception as exc:  # noqa: BLE001
-            log_startup(f"reconcile_library skip: {exc}")
+            log_startup(f"startup_reconcile skip: {exc}")
             try:
                 from services.library_reconcile import release_startup_library_hold
 
                 release_startup_library_hold()
             except Exception:  # noqa: BLE001
                 pass
-            try:
-                from services.metadata_backup_sync import (
-                    start_rebuild_missing_metadata_backup_async,
-                )
-
-                start_rebuild_missing_metadata_backup_async(root)
-                log_startup("rebuild_missing_metadata_backup fallback scheduled")
-            except Exception as exc2:  # noqa: BLE001
-                log_startup(f"backup rebuild skip: {exc2}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.settings.setValue(SETTING_TARGET, self.sync_view.target_path())

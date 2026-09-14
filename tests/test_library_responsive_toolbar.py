@@ -48,25 +48,26 @@ def _pump() -> None:
     QCoreApplication.processEvents()
 
 
-def _seed(library: Path, db: DatabaseManager, *, mod_id: str, title: str) -> Path:
+def _seed(library: Path, db: DatabaseManager, *, mod_id: str, title: str) -> tuple[Path, str]:
     created = create_steam_test_mod(
         db, external_id=mod_id, title=title, app_id=99, game_name="TestGame"
     )
-    internal_id = str(created.mod_id)
+    pk = str(created.mod_id)
+    entity_uuid = str(created.internal_id or "")
     mod_dir = library / "TestGame" / title
     mod_dir.mkdir(parents=True, exist_ok=True)
     (mod_dir / "pak.txt").write_text("data", encoding="utf-8")
     write_info_sidecar(
         mod_dir,
-        internal_id=internal_id,
+        internal_id=entity_uuid,
         title=title,
         external_id=mod_id,
         workspace_id=mod_id,
         app_id=99,
         game_name="TestGame",
     )
-    bind_managed_path(db, internal_id, mod_dir, title=title)
-    return mod_dir
+    bind_managed_path(db, pk, mod_dir, title=title)
+    return mod_dir, pk
 
 
 def _assert_no_overlap(widgets: list[QPushButton]) -> None:
@@ -133,7 +134,7 @@ def test_detail_actions_visible_with_long_title_narrow_panel(
 ) -> None:
     long_name = "Very_Long_Mod_Name_Test_Test_Test_Test"
     library = tmp_path / "mod"
-    folder = _seed(library, db, mod_id="8002", title=long_name)
+    _folder, _pk = _seed(library, db, mod_id="8002", title=long_name)
     patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
@@ -182,7 +183,7 @@ def test_library_splitter_keeps_detail_actions(
 ) -> None:
     long_name = "Very_Long_Mod_Name_Test_Test_Test_Test"
     library = tmp_path / "mod"
-    folder = _seed(library, db, mod_id="8003", title=long_name)
+    folder, pk = _seed(library, db, mod_id="8003", title=long_name)
     patch_library_get_db(monkeypatch, db)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
@@ -195,7 +196,7 @@ def test_library_splitter_keeps_detail_actions(
 
     view.splitter.setSizes([160, 520, 260])
     _pump()
-    card = view._card_for_mod_id("8003")
+    card = view._card_for_mod_id(pk)
     assert card is not None
     view._select_card(card, show_panel=True)
     _pump()

@@ -3,14 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from tests.helpers.deploy import patch_apply_then_unlink_targets
 
 from core.db_manager import (
@@ -19,17 +14,15 @@ from core.db_manager import (
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer, build_deploy_result_files
 from services.deploy_rules.manifest import DeployManifest, ManifestFileEntry, load_manifest
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_status import CONTENT_HEALTHY
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "deploy_result_detail.db")
+    manager = DatabaseManager.instance(tmp_path / "deploy_result_detail.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -37,31 +30,32 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _make_mod(
     library: Path,
+    db: DatabaseManager,
     *,
     game: str = "Game",
     folder: str = "DetailMod",
     mod_id: str = "93001",
     app_id: int = 424242,
     files: dict[str, str] | None = None,
-) -> Path:
+) -> tuple[Path, str]:
     mod_dir = library / game / folder
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True)
+    mod_dir.mkdir(parents=True, exist_ok=True)
     payload = files if files is not None else {"file1.txt": "one"}
     for rel, text in payload.items():
         path = mod_dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mod_id}",\n'
-        f'  "title": "{folder}",\n'
-        f'  "app_id": {app_id},\n'
-        f'  "game_name": "{game}"\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mod_id, title=folder, app_id=app_id, game_name=game
     )
-    return mod_dir
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db, mod_dir, handle=pk, title=folder, app_id=app_id, game_name=game
+    )
+    db.update_mod_content_status(
+        pk, content_status=CONTENT_HEALTHY, library_status=CONTENT_HEALTHY
+    )
+    return mod_dir, pk
 
 
 def _setup_game(
@@ -83,41 +77,14 @@ def _setup_game(
     return install, mods
 
 
-def _register_mod(
-    db: DatabaseManager,
-    *,
-    mod_id: str,
-    path: str,
-    app_id: int = 424242,
-) -> None:
-    created = create_steam_test_mod(
-        db, external_id=mod_id, title="DetailMod", app_id=app_id, game_name="Game"
-    )
-    folder = Path(path)
-    write_info_sidecar(
-        folder,
-        internal_id=str(created.mod_id),
-        title="DetailMod",
-        external_id=str(mod_id),
-        workspace_id=str(created.workspace_id or mod_id),
-        app_id=app_id,
-        game_name="Game",
-    )
-    bind_managed_path(db, created.mod_id, folder, title="DetailMod", game_name="Game")
-    db.update_mod_content_status(
-        mod_id, content_status=CONTENT_HEALTHY, library_status=CONTENT_HEALTHY
-    )
-
-
 def test_case1_single_file_deploy_records_detail(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "library"
     _install, mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mod_id="93001", files={"only.txt": "hello"})
-    _register_mod(db, mod_id="93001", path=str(mod_dir))
+    _mod_dir, pk = _make_mod(library, db, mod_id="93001", files={"only.txt": "hello"})
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("93001")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True
     assert out["validated"] == 1
     files = out.get("files") or []
@@ -136,15 +103,15 @@ def test_case2_multi_file_deploy_records_all(
 ) -> None:
     library = tmp_path / "library"
     _install, mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(
+    _mod_dir, pk = _make_mod(
         library,
+        db,
         mod_id="93002",
         folder="MultiMod",
         files={"a.txt": "A", "sub/b.txt": "BB"},
     )
-    _register_mod(db, mod_id="93002", path=str(mod_dir))
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("93002")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True
     assert out["validated"] == 2
     files = out.get("files") or []
@@ -163,17 +130,16 @@ def test_case3_validation_failure_has_no_result_files(
 ) -> None:
     library = tmp_path / "library"
     _install, mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, mod_id="93003")
-    _register_mod(db, mod_id="93003", path=str(mod_dir))
+    mod_dir, pk = _make_mod(library, db, mod_id="93003")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod("93003")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
     assert "files" not in out
     assert load_manifest(mod_dir) is None
-    info = db.get_mod_deploy_info("93003")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
     assert str(info.deploy_error or "").strip()
@@ -184,30 +150,30 @@ def test_case4_backup_restore_unaffected_by_result_detail(
 ) -> None:
     library = tmp_path / "library"
     _install, mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(
+    _mod_dir, pk = _make_mod(
         library,
+        db,
         mod_id="93004",
         files={"file1.txt": "NEW"},
     )
-    _register_mod(db, mod_id="93004", path=str(mod_dir))
 
     prior = mods / "DetailMod" / "file1.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.deploy_mod("93004")
+    out = deployer.deploy_mod(pk)
     assert out["success"] is True
     assert len(out.get("files") or []) == 1
     assert prior.read_text(encoding="utf-8") == "NEW"
-    info = db.get_mod_deploy_info("93004")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
 
-    und = deployer.undeploy_mod("93004")
+    und = deployer.undeploy_mod(pk)
     assert und["success"] is True
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"
-    info2 = db.get_mod_deploy_info("93004")
+    info2 = db.get_mod_deploy_info(pk)
     assert info2 is not None
     assert info2.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
 

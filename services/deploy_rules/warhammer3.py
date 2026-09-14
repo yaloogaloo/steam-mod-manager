@@ -77,6 +77,30 @@ class Warhammer3Strategy(PakModPathStrategy):
 
     def plan(self, ctx: DeployContext) -> StrategyResult:
         library = ctx.library_folder().resolve()
+        try:
+            library_live = library.is_dir()
+        except OSError:
+            library_live = False
+        if not library_live:
+            from services.mod_presence import workshop_source_available
+
+            if workshop_source_available(
+                app_id=int(ctx.app_id or 0),
+                workspace_id=str(ctx.workspace_id or ""),
+                workshop_path=str(getattr(ctx.config, "workshop_path", "") or ""),
+            ):
+                return StrategyResult(
+                    success=True,
+                    target=str(library),
+                    copied_files=0,
+                    deploy_type=self.deploy_type,
+                    files=[],
+                )
+            return StrategyResult(
+                success=False,
+                error=_MISSING_PACK,
+                deploy_type=self.deploy_type,
+            )
         entries = _collect_library_pack_entries(ctx)
         if not entries and not _library_has_archives(ctx.content_root()):
             return StrategyResult(

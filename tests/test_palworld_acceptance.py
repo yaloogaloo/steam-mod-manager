@@ -9,11 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
@@ -74,17 +70,13 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     created = create_steam_test_mod(
         db, external_id=MOD_ID, title="Palworld_Test_Mod", app_id=APP_ID, game_name="Palworld"
     )
-    write_info_sidecar(
+    pk = prove_managed_folder(
+        db,
         mod,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title="Palworld_Test_Mod",
-        external_id=MOD_ID,
-        workspace_id=str(created.workspace_id or MOD_ID),
         app_id=APP_ID,
         game_name="Palworld",
-    )
-    bind_managed_path(
-        db, created.mod_id, mod, title="Palworld_Test_Mod", game_name="Palworld"
     )
 
     # Foreign file that must survive undeploy
@@ -95,7 +87,7 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
 
     deployer = ModDeployer(library_root=library, db=db)
 
-    # --- deploy_mod() ---
+    # --- deploy_mod() — workshop soft-resolve OK ---
     result = deployer.deploy_mod(MOD_ID)
     assert result["success"] is True, result
 
@@ -128,11 +120,11 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     assert logic_target.resolve() in targets
     assert len(man.files) == 2
 
-    info_row = db.get_mod_deploy_info(MOD_ID)
+    info_row = db.get_mod_deploy_info(pk)
     assert info_row is not None
     assert info_row.deploy_status == DEPLOY_STATUS_DEPLOYED
 
-    # --- undeploy_mod() ---
+    # --- undeploy_mod() — workshop soft-resolve OK ---
     und = deployer.undeploy_mod(MOD_ID)
     assert und["success"] is True, und
 
@@ -145,6 +137,6 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     assert foreign.is_file()
     assert foreign.read_bytes() == b"FOREIGN-KEEP"
 
-    cleared = db.get_mod_deploy_info(MOD_ID)
+    cleared = db.get_mod_deploy_info(pk)
     assert cleared is not None
     assert cleared.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED

@@ -42,6 +42,7 @@ def is_missing_mod_content(
     managed_path: str | Path,
     *,
     mod_id: int | str | None = None,
+    db: Any = None,
 ) -> bool:
     """
     True when the managed folder has no local Mod payload outside ``.info`` / ``info``.
@@ -56,7 +57,7 @@ def is_missing_mod_content(
     if mid is None and root.is_dir():
         data = read_info_metadata_dict(root) or {}
         mid = str(data.get("published_file_id") or "").strip() or None
-    return not has_local_mod_payload(root, mod_id=mid)
+    return not has_local_mod_payload(root, mod_id=mid, db=db)
 
 
 def set_is_missing_content(managed_path: str | Path, missing: bool) -> None:
@@ -462,10 +463,20 @@ class ModFileManager:
         written = _write_unified_metadata(info, merged)
         if sync_backup:
             try:
+                from services.metadata_backup import prove_backup_storage_key
                 from services.metadata_backup_sync import sync_after_metadata_change
 
-                mid = str(metadata.entity_internal_id() or "").strip() or None
-                sync_after_metadata_change(mid, path, sync_reason)
+                mid = prove_backup_storage_key(
+                    metadata.entity_internal_id(),
+                    managed_path=path,
+                )
+                if not mid.isdigit():
+                    logger.warning(
+                        "save_metadata backup skipped: entity unresolved path=%s",
+                        path,
+                    )
+                else:
+                    sync_after_metadata_change(mid, path, sync_reason)
             except Exception:  # noqa: BLE001
                 pass
         return written
@@ -566,13 +577,14 @@ class ModFileManager:
     def index_by_published_id(self) -> dict[str, Path]:
         """Deprecated alias of :meth:`index_by_internal_id`.
 
-        Despite the name, this indexes by ``mods.mod_id`` / ``.info.internal_id``
-        — never by Steam ``published_file_id``. Prefer :meth:`index_by_internal_id`.
+        Despite the name, this indexes by Frozen Entity ``internal_id`` via
+        ``.info/internal_id`` — never by Steam ``published_file_id``. Prefer
+        :meth:`index_by_internal_id`.
         """
         return self.index_by_internal_id()
 
     def find_by_internal_id(self, mod_id: str) -> Path | None:
-        """Locate managed folder by entity id (``mods.mod_id`` / ``.info.internal_id``)."""
+        """Locate managed folder by ``.info/internal_id`` (same Entity.internal_id)."""
         needle = str(mod_id or "").strip()
         if not needle:
             return None
@@ -657,8 +669,13 @@ def _remove_legacy_mod_json(info_dir: Path) -> None:
 def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
     info_dir.mkdir(parents=True, exist_ok=True)
     meta_file = info_dir / METADATA_FILENAME
+    # Canonical filesystem Entity proof: ``.info/internal_id`` == Entity.internal_id.
+    # Temporary legacy ``entity_key`` is migrated in and stripped — never written.
+    from services.mod_identity import normalize_info_identity_payload
+
+    normalized, _changed = normalize_info_identity_payload(dict(payload))
     meta_file.write_text(
-        json.dumps(dict(payload), ensure_ascii=False, indent=2),
+        json.dumps(normalized, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     _remove_legacy_mod_json(info_dir)
@@ -756,15 +773,23 @@ def persist_unified_metadata_dict(
     written = _write_unified_metadata(info, payload)
     if sync_backup:
         try:
+            from services.metadata_backup import prove_backup_storage_key
             from services.metadata_backup_sync import sync_after_metadata_change
             from services.metadata_owner_guard import resolve_owner_mod_id_from_info
 
-            mid = resolve_owner_mod_id_from_info(dict(payload)) or None
-            if not mid:
-                # Caller may already stamp numeric internal_id in the payload.
-                candidate = str(payload.get("internal_id") or "").strip()
-                mid = candidate if candidate.isdigit() else None
-            sync_after_metadata_change(mid, root, sync_reason)
+            mid = prove_backup_storage_key(
+                resolve_owner_mod_id_from_info(dict(payload)),
+                managed_path=root,
+                info=dict(payload),
+            )
+            if not mid.isdigit():
+                logger.warning(
+                    "persist_unified_metadata_dict backup skipped: "
+                    "entity unresolved path=%s",
+                    root,
+                )
+            else:
+                sync_after_metadata_change(mid, root, sync_reason)
         except Exception:  # noqa: BLE001
             pass
     return written
@@ -772,6 +797,7 @@ def persist_unified_metadata_dict(
 
 def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
     from core.mod_platform import parse_metadata_platform
+    from services.mod_identity import read_internal_id
 
     path_str = str(Path(managed_path).expanduser().resolve())
     title = str(data.get("title") or "")
@@ -805,6 +831,7 @@ def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
         author=str(data.get("author") or "").strip(),
         source_type=parse_metadata_platform(data),
         json_display_name=display_name,
-        internal_id=str(data.get("internal_id") or "").strip(),
+        # Disk proof: ``.info/internal_id`` == Entity.internal_id (not a third Mod ID).
+        internal_id=read_internal_id(data),
     )
     return meta

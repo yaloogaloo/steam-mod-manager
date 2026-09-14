@@ -222,13 +222,13 @@ def _build_item(
             proposed = ACTION_RESTORE_INFO
             risk = "medium"
             # Preview restored .info shaped from DB authority + matching backup body
+            from services.mod_identity import set_entity_key
+
             restored = dict(backup_record or {})
             restored.pop("_backup_path", None)
-            # Stamp DB authority fields (preview only)
-            if _text(db_record.get("internal_id")):
-                restored["internal_id"] = _text(db_record.get("internal_id"))
-            elif mod_id:
-                restored["internal_id"] = mod_id
+            # Stamp DB authority fields (preview only) — entity_key not legacy key.
+            proof = _text(db_record.get("internal_id")) or mod_id
+            restored = set_entity_key(restored, proof)
             if _text(db_record.get("platform")):
                 restored["platform"] = _text(db_record.get("platform"))
                 restored["source_type"] = _text(db_record.get("platform"))
@@ -245,7 +245,7 @@ def _build_item(
                 "notes": [
                     "Preview only: would write .info from matched backup",
                     "DB identity fields unchanged",
-                    "internal_id / workspace_id not migrated",
+                    "entity_key value = Entity.internal_id (not a third Mod ID)",
                 ],
             }
         else:

@@ -66,6 +66,14 @@ def _ok_bytes(payload: bytes, *, content_type: str, status: int = 200) -> MagicM
     return resp
 
 
+def _opened_asset_dir(info_dir: Path, mod_id: str) -> Path:
+    from services.info_asset_runtime import ensure_live_offline_openable
+
+    opened = ensure_live_offline_openable(info_dir.parent, mod_id=mod_id)
+    assert opened is not None
+    return opened.parent / "assets"
+
+
 def _html_session(html: str) -> MagicMock:
     session = MagicMock()
     session.cookies = {}
@@ -193,15 +201,16 @@ def test_css_nested_url_localized_and_cache_hit_skips_http(
     assert after_a["fail"] == 0
     assert after_b["hit"] >= 3
 
-    css_files = list((info_a / "assets").glob("*.css"))
+    assets_a = _opened_asset_dir(info_a, "111")
+    css_files = list(assets_a.glob("*.css"))
     assert css_files
     rewritten = css_files[0].read_text(encoding="utf-8")
     assert _CSS_LOCALIZED_MARK in rewritten
     assert SHARED_PNG not in rewritten
     assert NESTED_WOFF not in rewritten
     assert "url(" in rewritten
-    woff_files = list((info_a / "assets").glob("*.woff2"))
-    png_files = list((info_a / "assets").glob("*.png"))
+    woff_files = list(assets_a.glob("*.woff2"))
+    png_files = list(assets_a.glob("*.png"))
     assert woff_files and png_files
     assert woff_files[0].name in rewritten
     assert png_files[0].name in rewritten
@@ -236,7 +245,7 @@ def test_css_self_url_does_not_deadlock(
     thread.start()
     assert done.wait(8), "CSS self-url localization deadlocked"
     assert not error, error[0]
-    css_files = list((info / "assets").glob("*.css"))
+    css_files = list(_opened_asset_dir(info, "111").glob("*.css"))
     assert css_files
     text = css_files[0].read_text(encoding="utf-8")
     assert _CSS_LOCALIZED_MARK in text

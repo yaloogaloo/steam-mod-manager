@@ -26,7 +26,7 @@ from core.witcher3_game_version import (
 )
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, prove_managed_folder
 from services.info_sidecar import apply_sidecar_to_db, write_sidecar_for_mod
 from services.library_reconcile import reconcile_library
 from services.metadata_refresh import refresh_steam_mod_metadata
@@ -119,9 +119,10 @@ def test_new_witcher3_mod_defaults_to_next_gen(db: DatabaseManager) -> None:
 
 
 def test_new_steam_witcher3_create_defaults_to_next_gen(db: DatabaseManager) -> None:
-    mid = "3591452801"
-    create_steam_test_mod(db, external_id=mid, title="Steam W3", app_id=W3)
-    info = db.get_mod_display_info(mid)
+    created = create_steam_test_mod(
+        db, external_id="3591452801", title="Steam W3", app_id=W3
+    )
+    info = db.get_mod_display_info(created.mod_id)
     assert info is not None
     assert info.game_version == WITCHER3_VERSION_NEXT_GEN
     assert info.app_id == W3
@@ -228,25 +229,21 @@ def test_steam_refresh_preserves_game_version(
     mid = "3591452802"
     lib = tmp_path / "mod"
     folder = lib / "巫师3" / "W3 Steam"
-    info_dir = folder / INFO_DIR_NAME
-    info_dir.mkdir(parents=True)
-    (info_dir / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": "W3 Steam",
-                "game_version": WITCHER3_VERSION_ORIGINAL,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    folder.mkdir(parents=True)
     (folder / "payload.zip").write_bytes(b"zip")
-    create_steam_test_mod(db, external_id=mid, title="W3 Steam", app_id=W3)
-    bind_managed_path(db, mid, folder, title="W3 Steam", game_name="巫师3")
-    db.set_mod_game_version(mid, WITCHER3_VERSION_ORIGINAL)
-    db.set_official_metadata_synced(mid, False)
+    created = create_steam_test_mod(db, external_id=mid, title="W3 Steam", app_id=W3)
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title="W3 Steam",
+        app_id=W3,
+        game_name="巫师3",
+        extra={"game_version": WITCHER3_VERSION_ORIGINAL},
+    )
+    db.set_mod_game_version(pk, WITCHER3_VERSION_ORIGINAL)
+    db.set_official_metadata_synced(pk, False)
 
     fresh = ModMetadata(
         published_file_id=mid,
@@ -258,20 +255,22 @@ def test_steam_refresh_preserves_game_version(
     monkeypatch.setattr(SteamWorkshopClient, "fetch_and_save_cover", lambda *a, **k: None)
 
     result = refresh_steam_mod_metadata(
-        mid, folder, library_root=lib, force=True, db=db, allow_official_sync=True
+        pk, folder, library_root=lib, force=True, db=db, allow_official_sync=True
     )
     assert result.success
-    info = db.get_mod_display_info(mid)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.game_version == WITCHER3_VERSION_ORIGINAL
-    assert info.mod_id == mid
+    assert info.mod_id == pk
     assert info.external_id == mid
 
 
 def test_modio_refresh_does_not_map_version_field(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lib = tmp_path / "mod"
+    from core.paths import default_mod_library
+
+    lib = default_mod_library()
     folder = lib / "巫师3" / "W3 Modio"
     info_dir = folder / INFO_DIR_NAME
     info_dir.mkdir(parents=True)
@@ -290,6 +289,7 @@ def test_modio_refresh_does_not_map_version_field(
         ),
         encoding="utf-8",
     )
+    (folder / "payload.zip").write_bytes(b"zip")
     created = create_mod_identity(
         db,
         platform=PLATFORM_MODIO,
@@ -300,7 +300,21 @@ def test_modio_refresh_does_not_map_version_field(
         game_name="巫师3",
         operation="import",
     )
-    bind_managed_path(db, created.mod_id, folder, title="W3 Modio", game_name="巫师3")
+    prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title="W3 Modio",
+        app_id=W3,
+        game_name="巫师3",
+        platform=PLATFORM_MODIO,
+        extra={
+            "url": url,
+            "source_type": "modio",
+            "game_version": WITCHER3_VERSION_REMAKE,
+            "version": "1.32",
+        },
+    )
     db.set_mod_game_version(created.mod_id, WITCHER3_VERSION_REMAKE)
     db.set_official_metadata_synced(created.mod_id, False)
 
@@ -399,31 +413,29 @@ def test_reconcile_preserves_game_version(db: DatabaseManager, tmp_path: Path) -
 
 
 def test_rename_move_preserves_game_version(db: DatabaseManager, tmp_path: Path) -> None:
-    lib = tmp_path / "mod"
+    from core.paths import default_mod_library
+
+    lib = default_mod_library()
     mid = "3591452803"
     old = lib / "巫师3" / "before"
     old.mkdir(parents=True)
-    (old / INFO_DIR_NAME).mkdir()
-    (old / INFO_DIR_NAME / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": "before",
-                "game_version": WITCHER3_VERSION_REMAKE,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    (old / "content.pak").write_bytes(b"pak")
+    created = create_steam_test_mod(db, external_id=mid, title="before", app_id=W3)
+    pk = prove_managed_folder(
+        db,
+        old,
+        handle=created.mod_id,
+        title="before",
+        app_id=W3,
+        game_name="巫师3",
+        extra={"game_version": WITCHER3_VERSION_REMAKE},
     )
-    create_steam_test_mod(db, external_id=mid, title="before", app_id=W3)
-    db.set_mod_game_version(mid, WITCHER3_VERSION_REMAKE)
-    bind_managed_path(db, mid, old, title="before", game_name="巫师3")
+    db.set_mod_game_version(pk, WITCHER3_VERSION_REMAKE)
     new = lib / "巫师3" / "after"
     old.rename(new)
-    result = record_filesystem_rename(mid, old, new, reason="refresh", db=db)
+    result = record_filesystem_rename(pk, old, new, reason="refresh", db=db)
     assert result.success
-    info = db.get_mod_display_info(mid)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.game_version == WITCHER3_VERSION_REMAKE
     disk = json.loads((new / INFO_DIR_NAME / "metadata.json").read_text(encoding="utf-8"))
@@ -665,8 +677,9 @@ def test_detail_panel_shows_witcher3_game_version_labels(
             "app_id": W3,
         },
     )
-    create_steam_test_mod(db, external_id=mid, title="YenneferLook", app_id=W3)
-    ident_before = db.get_mod_display_info(mid)
+    created = create_steam_test_mod(db, external_id=mid, title="YenneferLook", app_id=W3)
+    pk = str(created.mod_id)
+    ident_before = db.get_mod_display_info(pk)
     assert ident_before is not None
     snapshot = (
         ident_before.mod_id,
@@ -676,7 +689,7 @@ def test_detail_panel_shows_witcher3_game_version_labels(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id=mid, game_id=W3, game_name="巫师3")
+    panel.show_mod(folder, mod_id=pk, game_id=W3, game_name="巫师3")
     html = _meta_text(panel)
     assert "次世代版" in html
     assert "版本：次世代版" in html
@@ -688,8 +701,8 @@ def test_detail_panel_shows_witcher3_game_version_labels(
         (WITCHER3_VERSION_REMAKE, "重制版"),
         (WITCHER3_VERSION_NEXT_GEN, "次世代版"),
     ):
-        db.set_mod_game_version(mid, token)
-        panel.show_mod(folder, mod_id=mid, game_id=W3, game_name="巫师3")
+        db.set_mod_game_version(pk, token)
+        panel.show_mod(folder, mod_id=pk, game_id=W3, game_name="巫师3")
         html = _meta_text(panel)
         assert f"版本：{label}" in html
         assert token not in html.replace(label, "")
@@ -697,7 +710,7 @@ def test_detail_panel_shows_witcher3_game_version_labels(
             if other != label:
                 assert other not in html
 
-    after = db.get_mod_display_info(mid)
+    after = db.get_mod_display_info(pk)
     assert after is not None
     assert (
         after.mod_id,
@@ -727,9 +740,10 @@ def test_detail_panel_hides_game_version_for_other_games(
         "PlayablePals",
         {"published_file_id": mid, "title": "PlayablePals", "app_id": PALWORLD},
     )
-    create_steam_test_mod(db, external_id=mid, title="PlayablePals", app_id=PALWORLD)
+    created = create_steam_test_mod(db, external_id=mid, title="PlayablePals", app_id=PALWORLD)
+    pk = str(created.mod_id)
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id=mid, game_id=PALWORLD, game_name="Palworld")
+    panel.show_mod(folder, mod_id=pk, game_id=PALWORLD, game_name="Palworld")
     html = _meta_text(panel)
     assert "次世代版" not in html
     assert "原版" not in html
@@ -760,8 +774,9 @@ def test_detail_panel_refresh_after_edit_dialog_save(
         "CiriHair",
         {"published_file_id": mid, "title": "CiriHair", "app_id": W3},
     )
-    create_steam_test_mod(db, external_id=mid, title="CiriHair", app_id=W3)
-    before = db.get_mod_display_info(mid)
+    created = create_steam_test_mod(db, external_id=mid, title="CiriHair", app_id=W3)
+    pk = str(created.mod_id)
+    before = db.get_mod_display_info(pk)
     assert before is not None
     snapshot = (
         before.mod_id,
@@ -771,7 +786,7 @@ def test_detail_panel_refresh_after_edit_dialog_save(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id=mid, game_id=W3, game_name="巫师3")
+    panel.show_mod(folder, mod_id=pk, game_id=W3, game_name="巫师3")
     assert "次世代版" in _meta_text(panel)
 
     def _accept(self: EditModDialog) -> int:
@@ -784,7 +799,7 @@ def test_detail_panel_refresh_after_edit_dialog_save(
     html = _meta_text(panel)
     assert "版本：原版" in html
     assert "次世代版" not in html
-    info = db.get_mod_display_info(mid)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.game_version == WITCHER3_VERSION_ORIGINAL
     assert (
@@ -815,14 +830,15 @@ def test_detail_panel_does_not_show_illegal_game_version(
         "IllegalVer",
         {"published_file_id": mid, "title": "IllegalVer", "app_id": W3},
     )
-    create_steam_test_mod(db, external_id=mid, title="IllegalVer", app_id=W3)
+    created = create_steam_test_mod(db, external_id=mid, title="IllegalVer", app_id=W3)
+    pk = str(created.mod_id)
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET game_version = ? WHERE mod_id = ?",
-            ("1.32", int(mid)),
+            ("1.32", int(pk)),
         )
         db._conn.commit()
-    ident = db.get_mod_display_info(mid)
+    ident = db.get_mod_display_info(pk)
     assert ident is not None
     snapshot = (
         ident.mod_id,
@@ -831,12 +847,12 @@ def test_detail_panel_does_not_show_illegal_game_version(
         ident.source_url,
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id=mid, game_id=W3, game_name="巫师3")
+    panel.show_mod(folder, mod_id=pk, game_id=W3, game_name="巫师3")
     html = _meta_text(panel)
     assert "1.32" not in html
     assert "4.0" not in html
     assert "foo" not in html
-    after = db.get_mod_display_info(mid)
+    after = db.get_mod_display_info(pk)
     assert after is not None
     assert after.game_version == "1.32"
     assert (

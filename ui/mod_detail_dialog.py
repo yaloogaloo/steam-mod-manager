@@ -126,6 +126,8 @@ class ModDetailDialog(QDialog):
             self.metadata.internal_id = str(mod_id).strip()
         self._folder_absent = bool(resolved is None or not resolved.folder_present)
         self._offline_worker: OfflinePageWorker | None = None
+        self._offline_open_worker = None
+        self._offline_open_token = 0
         self._display_info = None
         try:
             from core.db_manager import get_db
@@ -297,10 +299,10 @@ class ModDetailDialog(QDialog):
             notes = meta.custom_notes
         self.notes_edit.setPlainText(notes)
 
-        folder_ok = not getattr(self, "_folder_absent", False) and self.managed_path.is_dir()
+        folder_ok = not getattr(self, "_folder_absent", False)
         self.btn_folder.setEnabled(folder_ok)
-        self.btn_edit.setEnabled(folder_ok)
-        self.btn_offline.setEnabled(self._index_path() is not None)
+        self.btn_edit.setEnabled(True)
+        self.btn_offline.setEnabled(self._offline_present())
         source = ""
         if resolved is not None:
             source = resolved.source_url
@@ -341,12 +343,25 @@ class ModDetailDialog(QDialog):
             self.setWindowTitle(f"Mod 详情 — {shown}")
             self._populate(refresh_offline=False)
 
-    def _index_path(self) -> Path | None:
-        from services.mod_metadata_resolver import resolve_offline_page
+    def _offline_present(self) -> bool:
+        from services.info_asset_runtime import probe_offline_open
 
-        # Entity PK only — never Workshop / published_file_id as a stand-in.
-        mid = str(self.metadata.entity_internal_id() or "").strip() or None
-        return resolve_offline_page(mid, self.managed_path)
+        mid = str(self.metadata.entity_internal_id() or "").strip()
+        probe = probe_offline_open(self.managed_path, mod_id=mid)
+        return bool(probe.cache_hit or probe.can_materialize)
+
+    def _index_path(self) -> Path | None:
+        """Presence / cache-hit probe only — never materialize."""
+        from services.info_asset_runtime import (
+            probe_live_offline_available,
+            probe_offline_open,
+        )
+
+        mid = str(self.metadata.entity_internal_id() or "").strip()
+        probe = probe_offline_open(self.managed_path, mod_id=mid)
+        if probe.cache_hit is not None:
+            return probe.cache_hit
+        return probe_live_offline_available(self.managed_path)
 
     def _show_cached_offline_state(self) -> None:
         index = self._index_path()
@@ -443,30 +458,38 @@ class ModDetailDialog(QDialog):
             self.cover_label.setPixmap(pix)
 
     def _open_offline(self) -> None:
-        # Strict guards — never hand an empty / missing path to the OS browser.
-        # Canonical resolver only — ignore stale metadata.offline_page_path.
-        index = self._index_path()
-        if index is None or not str(index).strip():
-            # No floating tip / white toast — refresh quietly if possible.
-            self._start_offline_refresh_if_needed()
-            return
-        try:
-            abs_path = str(Path(index).resolve())
-        except OSError:
-            abs_path = ""
-        if not abs_path or not Path(abs_path).exists():
-            self._start_offline_refresh_if_needed()
-            return
-        self.metadata.offline_page_path = abs_path
-        if is_stub_offline_page(abs_path):
-            QMessageBox.information(
-                self,
-                "离线页面",
-                "离线页面暂不可用，稍后自动重试。\n仍可打开当前占位页查看错误信息。",
-            )
-        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
-        if not ok:
-            return
+        from ui.offline_open import start_detail_offline_open
+
+        mid = str(self.metadata.entity_internal_id() or "").strip()
+
+        def _launch(index: Path) -> None:
+            try:
+                abs_path = str(Path(index).resolve())
+            except OSError:
+                abs_path = ""
+            if not abs_path or not Path(abs_path).exists():
+                self._start_offline_refresh_if_needed()
+                return
+            self.metadata.offline_page_path = abs_path
+            if is_stub_offline_page(abs_path):
+                QMessageBox.information(
+                    self,
+                    "离线页面",
+                    "离线页面暂不可用，稍后自动重试。\n仍可打开当前占位页查看错误信息。",
+                )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(abs_path))
+
+        def _status(msg: str) -> None:
+            if msg:
+                self.offline_status.setText(msg)
+
+        start_detail_offline_open(
+            self,
+            mod_id=mid,
+            managed_path=self.managed_path,
+            open_url=_launch,
+            set_status=_status,
+        )
 
     def _open_folder(self) -> None:
         folder = self.managed_path.resolve()

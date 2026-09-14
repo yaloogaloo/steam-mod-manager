@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from services.mod_path_validation import (
 from services.importers.directory_batch import discover_mod_directories
 from services.path_lifecycle import commit_path_change
 from services.registration_removal import ModRegistrationRemovalService
+from tests.helpers.identity import write_info_sidecar
 
 
 @pytest.fixture()
@@ -44,7 +46,7 @@ def _ensure_game(db: DatabaseManager, app_id: int, name: str) -> None:
     db.upsert_game(GameInfo(app_id=app_id, name=name, folder_name=name))
 
 
-def _insert_mod(
+def _insert_pollution_mod(
     db: DatabaseManager,
     *,
     mod_id: int,
@@ -52,26 +54,33 @@ def _insert_mod(
     title: str,
     last_known_path: str,
     workspace_id: str = "",
-) -> None:
+) -> str:
+    """Intentional forensic INSERT (bypass IdentityService) for removal-safety cases.
+
+    Returns the Entity ``internal_id`` UUID written on the row (never numeric PK).
+    """
     if app_id > 0:
         _ensure_game(db, app_id, f"Game_{app_id}")
+    entity = str(uuid.uuid4())
     with db._lock:
         db._conn.execute(
             """
             INSERT INTO mods (
-                mod_id, app_id, title, workspace_id, last_known_path,
+                mod_id, app_id, title, workspace_id, internal_id, last_known_path,
                 folder_present, platform, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 1, 'other', datetime('now'))
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, 'other', datetime('now'))
             """,
             (
                 mod_id,
                 app_id,
                 title,
                 workspace_id or str(mod_id),
+                entity,
                 last_known_path,
             ),
         )
         db._conn.commit()
+    return entity
 
 
 def test_remove_mod_registration_drops_db_keeps_project_files(
@@ -93,9 +102,10 @@ def test_remove_mod_registration_drops_db_keeps_project_files(
     library = tmp_path / "library"
     library.mkdir()
     _ensure_game(db, 916440, "Anno 1800")
-    _insert_mod(
+    # Forensic pollution: registration points at application root (no sidecar).
+    _insert_pollution_mod(
         db,
-        internal_id=9000000000000344,
+        mod_id=9000000000000344,
         app_id=916440,
         title="仓库运输更快",
         last_known_path=str(app_root),
@@ -105,13 +115,23 @@ def test_remove_mod_registration_drops_db_keeps_project_files(
     # Sentinel test Game (app_id=0 is schema-seeded) + pytest "Game" phantom.
     game_folder = library / "Game" / "ManualNew"
     game_folder.mkdir(parents=True)
-    _insert_mod(
+    archive_entity = _insert_pollution_mod(
         db,
-        internal_id=9000000000000000,
+        mod_id=9000000000000000,
         app_id=0,
         title="ArchiveMod",
         last_known_path=str(game_folder),
         workspace_id="17879973851919389",
+    )
+    write_info_sidecar(
+        game_folder,
+        internal_id=archive_entity,
+        title="ArchiveMod",
+        external_id="17879973851919389",
+        workspace_id="17879973851919389",
+        app_id=0,
+        game_name="Game",
+        platform="other",
     )
 
     # Extra bogus Game row (not the schema sentinel app_id=0).
@@ -171,12 +191,22 @@ def test_removal_service_never_imports_mod_remover(
     managed = library / "Anno 1800" / "SafeMod"
     managed.mkdir(parents=True)
     (managed / "payload.txt").write_text("safe", encoding="utf-8")
-    _insert_mod(
+    entity = _insert_pollution_mod(
         db,
-        internal_id=42,
+        mod_id=42,
         app_id=916440,
         title="SafeMod",
         last_known_path=str(managed),
+    )
+    write_info_sidecar(
+        managed,
+        internal_id=entity,
+        title="SafeMod",
+        external_id="42",
+        workspace_id="42",
+        app_id=916440,
+        game_name="Anno 1800",
+        platform="other",
     )
 
     called = {"remover": False}
@@ -247,21 +277,32 @@ def test_commit_path_change_rejects_application_root(
     monkeypatch.setattr("services.mod_path_validation.default_mod_library", lambda: lib)
     monkeypatch.setattr("services.mod_path_validation.data_dir", lambda: app / "data")
 
-    _insert_mod(
+    managed = lib / "G" / "X"
+    managed.mkdir(parents=True)
+    entity = _insert_pollution_mod(
         db,
-        internal_id=7,
+        mod_id=7,
         app_id=1,
         title="X",
-        last_known_path=str(lib / "G" / "X"),
+        last_known_path=str(managed),
     )
-    (lib / "G" / "X").mkdir(parents=True)
+    write_info_sidecar(
+        managed,
+        internal_id=entity,
+        title="X",
+        external_id="7",
+        workspace_id="7",
+        app_id=1,
+        game_name="G",
+        platform="other",
+    )
 
-    result = commit_path_change(7, old_path=lib / "G" / "X", new_path=app, db=db)
+    result = commit_path_change(7, old_path=managed, new_path=app, db=db)
     assert result.success is False
     assert "Mod root" in result.error or "工程目录" in result.error
     row = db.get_mod_backup_row("7") or {}
     # Path must remain the managed folder — not rebound to application root.
-    assert Path(str(row.get("last_known_path") or "")).resolve() == (lib / "G" / "X").resolve()
+    assert Path(str(row.get("last_known_path") or "")).resolve() == managed.resolve()
 
 
 def test_real_project_root_still_exists_after_path_helpers() -> None:

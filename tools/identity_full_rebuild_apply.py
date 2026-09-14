@@ -9,7 +9,7 @@ Apply steps
 2. Drop old Mod entity rows / identity pollution
 3. Each kept Mod gets a fresh UUID ``internal_id`` (never old mod_id / 9000…)
 4. Insert DB rows from disk ``.info`` + path
-5. Write back ``.info.internal_id``
+5. Write back ``.info/entity_key`` (value = Entity ``internal_id``)
 6. Set ``last_known_path``
 7. Quarantine ``DELETE_CANDIDATE`` directories
 8. Emit ``identity_rebuild_report.json`` with verification gates
@@ -473,7 +473,9 @@ def verify_rebuild(*, library: Path, db_path: Path) -> dict[str, Any]:
             )
             continue
         info, _ = read_info(Path(path))
-        info_iid = text((info or {}).get("internal_id"))
+        from services.mod_identity import read_entity_key
+
+        info_iid = text(read_entity_key(info or {}))
         if info_iid != iid:
             info_mismatches.append(
                 {

@@ -51,7 +51,7 @@ def evaluate_missing_content(
         return True
     mid = str(internal_id or "").strip() or None
     if mid is not None:
-        return bool(is_missing_mod_content(root, mod_id=mid))
+        return bool(is_missing_mod_content(root, mod_id=mid, db=db))
     return bool(read_is_missing_content(root))
 
 

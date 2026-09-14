@@ -14,11 +14,7 @@ from core.db_manager import (
     DatabaseManager,
 )
 from services.deploy import ModDeployer
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.runtime_identity import (
     get_archive_module_identity,
     log_archive_runtime_identity,
@@ -56,24 +52,22 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _make_managed_mod(
     db: DatabaseManager, library: Path, *, mod_id: str, app_id: int
-) -> Path:
+) -> tuple[Path, str]:
     mod_dir = library / "Game" / "RuntimeMod"
     mod_dir.mkdir(parents=True)
     (mod_dir / "mod.txt").write_text("payload", encoding="utf-8")
     created = create_steam_test_mod(
         db, external_id=mod_id, title="RuntimeMod", app_id=app_id, game_name="Game"
     )
-    write_info_sidecar(
+    pk = prove_managed_folder(
+        db,
         mod_dir,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title="RuntimeMod",
-        external_id=mod_id,
-        workspace_id=str(created.workspace_id or mod_id),
         app_id=app_id,
         game_name="Game",
     )
-    bind_managed_path(db, created.mod_id, mod_dir, title="RuntimeMod", game_name="Game")
-    return mod_dir
+    return mod_dir, pk
 
 
 def test_deploy_success_clears_deploy_error(
@@ -83,7 +77,7 @@ def test_deploy_success_clears_deploy_error(
     library = tmp_path / "mod"
     game_mods = tmp_path / "GameMods"
     game_mods.mkdir(parents=True)
-    mod_id = "99001"
+    workshop = "99001"
     app_id = 424242
 
     db.update_game_deploy_config(
@@ -92,9 +86,9 @@ def test_deploy_success_clears_deploy_error(
         install_path=str(tmp_path / "GameInstall"),
         mod_path=str(game_mods),
     )
-    _make_managed_mod(db, library, mod_id=mod_id, app_id=app_id)
+    _mod_dir, pk = _make_managed_mod(db, library, mod_id=workshop, app_id=app_id)
     db.update_mod_deploy_status(
-        mod_id,
+        pk,
         deploy_status=DEPLOY_STATUS_FAILED,
         deploy_error="部署失败: 缺少 RAR 解压组件 (unrar)",
         deploy_path="",
@@ -102,10 +96,10 @@ def test_deploy_success_clears_deploy_error(
     )
 
     caplog.set_level(logging.INFO)
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mod_id)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert result["success"] is True
-    info = db.get_mod_deploy_info(mod_id)
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
     assert info.deploy_error == ""

@@ -109,12 +109,32 @@ def backups_dir_for(managed: Path) -> Path:
 
 
 def _infer_internal_id(managed: Path) -> str:
+    """Return ``mods.mod_id`` PK for deploy-backup storage (never workspace_id).
+
+    ``.info/internal_id`` is Entity UUID proof. Resolve it to the SQLite PK so
+    ``data/deploy_backup/<mod_id>/`` stays aligned with Deploy's ``ctx.internal_id``.
+    """
     try:
         from services.file_ops import read_info_metadata_dict
         from services.mod_identity import read_internal_id
 
-        proof = read_internal_id(read_info_metadata_dict(managed) or {})
-        return str(proof or "").strip()
+        proof = str(read_internal_id(read_info_metadata_dict(managed) or {}) or "").strip()
+        if not proof:
+            return ""
+        try:
+            from core.db_manager import get_db
+
+            db = get_db()
+            found = db.find_mod_by_internal_id(proof)
+            if found is not None and str(found).strip():
+                return str(found).strip()
+            if proof.isdigit() and db.get_mod(proof) is not None:
+                return proof
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "infer deploy-backup storage key failed for %s", managed, exc_info=True
+            )
+        return proof
     except Exception:  # noqa: BLE001
         return ""
 

@@ -34,11 +34,14 @@ def _prove_managed_folder(
     *,
     extra: dict | None = None,
 ) -> None:
-    """Stamp ``.info.internal_id`` so Deploy path resolve accepts the folder."""
+    """Stamp ``.info/entity_key`` so Deploy path resolve accepts the folder."""
+    from services.mod_identity import set_entity_key
+
     proof = str(mid)
-    payload = {'internal_id': proof, 'published_file_id': mid}
+    payload = set_entity_key({'published_file_id': mid}, proof)
     if extra:
         payload.update(extra)
+        payload = set_entity_key(payload, proof)
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True, exist_ok=True)
     (info / METADATA_FILENAME).write_text(

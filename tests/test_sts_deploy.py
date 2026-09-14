@@ -8,11 +8,7 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from services.deploy import ModDeployer
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.deploy_rules import (
     DEPLOY_TYPE_SLAY_THE_SPIRE,
     load_manifest,
@@ -46,17 +42,15 @@ def _register(
     created = create_steam_test_mod(
         db, external_id=mid, title=title, app_id=STS_APP, game_name="杀戮尖塔"
     )
-    write_info_sidecar(
+    prove_managed_folder(
+        db,
         mod,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title=title,
-        external_id=mid,
-        workspace_id=str(created.workspace_id or mid),
         app_id=STS_APP,
         game_name="杀戮尖塔",
         extra=extra,
     )
-    bind_managed_path(db, created.mod_id, mod, title=title, game_name="杀戮尖塔")
 
 
 def test_resolve_sts_deploy_type() -> None:

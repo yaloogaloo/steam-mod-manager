@@ -59,25 +59,27 @@ def _game(db: DatabaseManager) -> None:
     )
 
 
-def _mod(db: DatabaseManager, mod_id: int, *, deployed: bool) -> None:
+def _mod(db: DatabaseManager, seed: int, *, deployed: bool) -> str:
+    """Create Steam Entity; return ``mods.mod_id`` PK (not Workshop seed)."""
     with identity_create_scope():
         created = create_mod_identity(
             db,
             platform=PLATFORM_STEAM,
-            external_id=str(mod_id),
-            workshop_id=str(mod_id),
-            title=f"Mod {mod_id}",
+            external_id=str(seed),
+            workshop_id=str(seed),
+            title=f"Mod {seed}",
             app_id=STARDEW,
             game_name="Stardew Valley",
         )
-    entity_id = int(created.mod_id)
+    pk = str(created.mod_id)
     db.update_mod_deploy_status(
-        entity_id,
+        pk,
         deploy_status=(
             DEPLOY_STATUS_DEPLOYED if deployed else DEPLOY_STATUS_NOT_DEPLOYED
         ),
-        deploy_path="" if not deployed else f"/fake/{entity_id}",
+        deploy_path="" if not deployed else f"/fake/{pk}",
     )
+    return pk
 
 
 def _index(mod_id: str, *, deployed: bool) -> ModFilterIndex:
@@ -99,7 +101,7 @@ def _card_data(mod_id: str, folder: Path, *, deployed: bool) -> ModCardData:
     return ModCardData(
         id=mod_id,
         title=f"Mod {mod_id}",
-        platform="steam",
+        platform=PLATFORM_STEAM,
         cover="",
         description="",
         tags="",
@@ -115,7 +117,6 @@ def _card_data(mod_id: str, folder: Path, *, deployed: bool) -> ModCardData:
 
 
 def _assert_no_relative_badge(card) -> None:
-    assert getattr(card, "_record_relative", None) is None
     assert card.record_badge.isHidden()
     assert not str(card.record_badge.text() or "").strip()
 
@@ -133,30 +134,29 @@ def test_missing_overlay_survives_viewport_rebind(
     from ui.mod_card import ModCardWidget
 
     _game(db)
-    _mod(db, 1, deployed=False)
-    record = dr.create_or_update_record(STARDEW, "SaveA", mod_ids=[1], db=db)
+    pk = _mod(db, 1, deployed=False)
+    record = dr.create_or_update_record(STARDEW, "SaveA", mod_ids=[int(pk)], db=db)
     monkeypatch.setattr("services.deployment_record.get_db", lambda: db)
 
     folder = tmp_path / "m1"
     folder.mkdir()
     card = ModCardWidget(folder, None)
-    data = _card_data("1", folder, deployed=False)
-    index = _index("1", deployed=False)
+    data = _card_data(pk, folder, deployed=False)
+    index = _index(pk, deployed=False)
 
     view = ModLibraryView()
     view._status_filter = FILTER_DEPLOYMENT_RECORD
     view._deployment_record_id = int(record.id)
     view._deployment_record_name = record.name
-    view._cached_record_mod_ids = frozenset({"1"})
+    view._cached_record_mod_ids = frozenset({pk})
     view._filtered_row_entries = [(index, data)]
-    view._card_cache = {view._card_cache_key(folder, mod_id="1"): card}
+    view._card_cache = {view._card_cache_key(folder, mod_id=pk): card}
     view._card_entries = [(index, card)]
 
     view._sync_record_overlays()
     assert card.record_badge.text() == RECORD_STATUS_LABEL_MISSING
     assert not card.record_badge.isHidden()
 
-    # Viewport rebind path (scroll / filter refresh) clears then restores.
     view._sync_viewport_cards()
     assert len(view._card_entries) == 1
     bound = view._card_entries[0][1]
@@ -174,24 +174,26 @@ def test_extra_overlay_survives_viewport_rebind(
     from ui.mod_card import ModCardWidget
 
     _game(db)
-    _mod(db, 1, deployed=True)
-    _mod(db, 9, deployed=True)
-    record = dr.create_or_update_record(STARDEW, "SaveB", mod_ids=[1], db=db)
+    pk_rec = _mod(db, 1, deployed=True)
+    pk_extra = _mod(db, 9, deployed=True)
+    record = dr.create_or_update_record(
+        STARDEW, "SaveB", mod_ids=[int(pk_rec)], db=db
+    )
     monkeypatch.setattr("services.deployment_record.get_db", lambda: db)
 
     folder = tmp_path / "m9"
     folder.mkdir()
     card = ModCardWidget(folder, None)
-    data = _card_data("9", folder, deployed=True)
-    index = _index("9", deployed=True)
+    data = _card_data(pk_extra, folder, deployed=True)
+    index = _index(pk_extra, deployed=True)
 
     view = ModLibraryView()
     view._status_filter = FILTER_DEPLOYMENT_RECORD
     view._deployment_record_id = int(record.id)
     view._deployment_record_name = record.name
-    view._cached_record_mod_ids = frozenset({"1"})
+    view._cached_record_mod_ids = frozenset({pk_rec})
     view._filtered_row_entries = [(index, data)]
-    view._card_cache = {view._card_cache_key(folder, mod_id="9"): card}
+    view._card_cache = {view._card_cache_key(folder, mod_id=pk_extra): card}
     view._card_entries = [(index, card)]
 
     view._sync_record_overlays()
@@ -211,33 +213,32 @@ def test_exit_record_filter_clears_overlay(
     from ui.mod_card import ModCardWidget
 
     _game(db)
-    _mod(db, 1, deployed=False)
-    record = dr.create_or_update_record(STARDEW, "SaveC", mod_ids=[1], db=db)
+    pk = _mod(db, 1, deployed=False)
+    record = dr.create_or_update_record(STARDEW, "SaveC", mod_ids=[int(pk)], db=db)
     monkeypatch.setattr("services.deployment_record.get_db", lambda: db)
 
     folder = tmp_path / "m1"
     folder.mkdir()
     card = ModCardWidget(folder, None)
-    data = _card_data("1", folder, deployed=False)
-    index = _index("1", deployed=False)
+    data = _card_data(pk, folder, deployed=False)
+    index = _index(pk, deployed=False)
 
     view = ModLibraryView()
     view._game_row_entries = [(index, data)]
     view._filtered_row_entries = [(index, data)]
     view._card_entries = [(index, card)]
-    view._card_cache = {view._card_cache_key(folder, mod_id="1"): card}
+    view._card_cache = {view._card_cache_key(folder, mod_id=pk): card}
     view._set_library_status_filter(
         FILTER_DEPLOYMENT_RECORD,
         record_id=int(record.id),
         record_name=record.name,
     )
-    view._cached_record_mod_ids = frozenset({"1"})
+    view._cached_record_mod_ids = frozenset({pk})
     view._filtered_row_entries = [(index, data)]
     view._sync_viewport_cards()
     assert view._card_entries[0][1].record_badge.text() == RECORD_STATUS_LABEL_MISSING
 
     view._set_library_status_filter(FILTER_ALL)
-    # Leaving record filter clears overlays even if cards are only in cache.
     for c in list(view._card_cache.values()):
         _assert_no_relative_badge(c)
     if view._card_entries:
@@ -254,20 +255,22 @@ def test_reenter_record_filter_recomputes_overlay(
     from ui.mod_card import ModCardWidget
 
     _game(db)
-    _mod(db, 1, deployed=True)
-    _mod(db, 2, deployed=True)
-    record = dr.create_or_update_record(STARDEW, "SaveD", mod_ids=[1], db=db)
+    pk_rec = _mod(db, 1, deployed=True)
+    pk_extra = _mod(db, 2, deployed=True)
+    record = dr.create_or_update_record(
+        STARDEW, "SaveD", mod_ids=[int(pk_rec)], db=db
+    )
     monkeypatch.setattr("services.deployment_record.get_db", lambda: db)
 
     folder = tmp_path / "m2"
     folder.mkdir()
     card = ModCardWidget(folder, None)
-    data = _card_data("2", folder, deployed=True)
-    index = _index("2", deployed=True)
+    data = _card_data(pk_extra, folder, deployed=True)
+    index = _index(pk_extra, deployed=True)
 
     view = ModLibraryView()
     view._filtered_row_entries = [(index, data)]
-    view._card_cache = {view._card_cache_key(folder, mod_id="2"): card}
+    view._card_cache = {view._card_cache_key(folder, mod_id=pk_extra): card}
     view._card_entries = [(index, card)]
     view._game_row_entries = [(index, data)]
 
@@ -276,9 +279,7 @@ def test_reenter_record_filter_recomputes_overlay(
         record_id=int(record.id),
         record_name=record.name,
     )
-    view._cached_record_mod_ids = frozenset({"1"})
-    # _set_library_status_filter → _apply_view_filter may empty viewport without
-    # real snapshot rows; drive the bind path explicitly.
+    view._cached_record_mod_ids = frozenset({pk_rec})
     view._filtered_row_entries = [(index, data)]
     view._sync_viewport_cards()
     assert card.record_badge.text() == RECORD_STATUS_LABEL_EXTRA
@@ -288,9 +289,9 @@ def test_reenter_record_filter_recomputes_overlay(
 
     view._status_filter = FILTER_DEPLOYMENT_RECORD
     view._deployment_record_id = int(record.id)
-    view._cached_record_mod_ids = frozenset({"1"})
+    view._cached_record_mod_ids = frozenset({pk_rec})
     view._filtered_row_entries = [(index, data)]
-    view._card_cache = {view._card_cache_key(folder, mod_id="2"): card}
+    view._card_cache = {view._card_cache_key(folder, mod_id=pk_extra): card}
     view._sync_viewport_cards()
     bound = view._card_entries[0][1]
     assert bound.record_badge.text() == RECORD_STATUS_LABEL_EXTRA
@@ -305,8 +306,11 @@ def test_card_reuse_does_not_leak_overlay_across_mods(
     from ui.mod_card import ModCardWidget
 
     _game(db)
-    _mod(db, 1, deployed=True)
-    record = dr.create_or_update_record(STARDEW, "SaveE", mod_ids=[1], db=db)
+    pk_rec = _mod(db, 1, deployed=True)
+    pk_extra = _mod(db, 9, deployed=True)
+    record = dr.create_or_update_record(
+        STARDEW, "SaveE", mod_ids=[int(pk_rec)], db=db
+    )
     monkeypatch.setattr("services.deployment_record.get_db", lambda: db)
 
     folder_extra = tmp_path / "extra"
@@ -315,28 +319,26 @@ def test_card_reuse_does_not_leak_overlay_across_mods(
     folder_match.mkdir()
 
     card = ModCardWidget(folder_extra, None)
-    extra_index = _index("9", deployed=True)
-    extra_data = _card_data("9", folder_extra, deployed=True)
-    match_index = _index("1", deployed=True)
-    match_data = _card_data("1", folder_match, deployed=True)
+    extra_index = _index(pk_extra, deployed=True)
+    extra_data = _card_data(pk_extra, folder_extra, deployed=True)
+    match_index = _index(pk_rec, deployed=True)
+    match_data = _card_data(pk_rec, folder_match, deployed=True)
 
     view = ModLibraryView()
     view._status_filter = FILTER_DEPLOYMENT_RECORD
     view._deployment_record_id = int(record.id)
-    view._cached_record_mod_ids = frozenset({"1"})
+    view._cached_record_mod_ids = frozenset({pk_rec})
     view._filtered_row_entries = [(extra_index, extra_data)]
-    view._card_cache = {view._card_cache_key(folder_extra, mod_id="9"): card}
+    view._card_cache = {view._card_cache_key(folder_extra, mod_id=pk_extra): card}
     view._sync_viewport_cards()
     assert view._card_entries[0][1].record_badge.text() == RECORD_STATUS_LABEL_EXTRA
 
-    # Rebind viewport to the recorded+deployed mod (no badge).
     view._filtered_row_entries = [(match_index, match_data)]
     view._card_cache = {
-        view._card_cache_key(folder_match, mod_id="1"): card,
+        view._card_cache_key(folder_match, mod_id=pk_rec): card,
     }
     view._sync_viewport_cards()
     bound = view._card_entries[0][1]
-    # Recorded + deployed → no temporary badge (matched).
     assert bound.record_badge.isHidden()
     assert not str(bound.record_badge.text() or "").strip()
     assert record_relative_badge_label(bound._record_relative) is None
@@ -356,29 +358,28 @@ def test_apply_view_filter_order_restores_after_viewport(
     from ui.mod_card import ModCardWidget
 
     _game(db)
-    _mod(db, 3, deployed=False)
-    record = dr.create_or_update_record(STARDEW, "SaveF", mod_ids=[3], db=db)
+    pk = _mod(db, 3, deployed=False)
+    record = dr.create_or_update_record(STARDEW, "SaveF", mod_ids=[int(pk)], db=db)
     monkeypatch.setattr("services.deployment_record.get_db", lambda: db)
 
     folder = tmp_path / "m3"
     folder.mkdir()
     card = ModCardWidget(folder, None)
-    data = _card_data("3", folder, deployed=False)
-    index = _index("3", deployed=False)
+    data = _card_data(pk, folder, deployed=False)
+    index = _index(pk, deployed=False)
 
     view = ModLibraryView()
     view._game_row_entries = [(index, data)]
     view._filtered_row_entries = [(index, data)]
-    view._card_cache = {view._card_cache_key(folder, mod_id="3"): card}
+    view._card_cache = {view._card_cache_key(folder, mod_id=pk): card}
     view._card_entries = [(index, card)]
     view._status_filter = FILTER_DEPLOYMENT_RECORD
     view._deployment_record_id = int(record.id)
     view._deployment_record_name = record.name
-    view._cached_record_mod_ids = frozenset({"3"})
+    view._cached_record_mod_ids = frozenset({pk})
     view._last_filter_sig = None
 
     view._apply_view_filter()
-    # After full filter+viewport path, missing badge must still be present.
     assert view._card_entries, "viewport should bind at least one card"
     bound = view._card_entries[0][1]
     assert bound.record_badge.text() == RECORD_STATUS_LABEL_MISSING

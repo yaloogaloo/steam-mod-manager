@@ -8,9 +8,8 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from services.deploy import ModDeployer, _normalize_deploy_error
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.deploy_path_lifecycle import (
     CUSTOM_DEPLOY_PATH_MISSING,
     DEPLOY_ERR_CUSTOM_PATH_MISSING_PREFIX,
@@ -24,7 +23,6 @@ from services.deploy_path_lifecycle import (
     resolve_entity_internal_id,
     validate_custom_deploy_target,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.mod_detail_panel import humanize_deploy_error
 
 ANNO = 916440
@@ -53,7 +51,7 @@ def _seed_mod(
     workspace_id: str = "",
     deploy_type: str = "folder_copy",
     create_source: bool = True,
-) -> Path:
+) -> tuple[Path, str]:
     install.mkdir(parents=True, exist_ok=True)
     mods.mkdir(parents=True, exist_ok=True)
     db.upsert_game(
@@ -67,28 +65,27 @@ def _seed_mod(
         deploy_type=deploy_type,
     )
     folder = library / game_name / title
-    if create_source:
-        folder.mkdir(parents=True)
-        (folder / "payload.bin").write_bytes(b"x")
-        info = folder / INFO_DIR_NAME
-        info.mkdir(parents=True)
-        (info / METADATA_FILENAME).write_text(
-            f'{{"internal_id": "{mid}", "app_id": {app_id}, "title": "{title}"}}',
-            encoding="utf-8",
-        )
-    create_steam_test_mod(db, external_id=mid, title=title, app_id=app_id, game_name=game_name)
-    bind_managed_path(db, mid, folder, title=title)
-
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=mid,
-        workspace_id=workspace_id or f"ws-{mid}",
-        last_known_path=str(folder.resolve()) if create_source else str(folder),
-        folder_present=bool(create_source),
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name=game_name
     )
+    pk = str(created.mod_id)
+    if create_source:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "payload.bin").write_bytes(b"x")
+        prove_managed_folder(
+            db, folder, handle=pk, title=title, app_id=app_id, game_name=game_name
+        )
+    else:
+        db.update_mod_identity_fields(
+            pk,
+            last_known_path=str(folder),
+            folder_present=False,
+        )
+    if workspace_id:
+        db.update_mod_identity_fields(pk, workspace_id=workspace_id)
     if custom:
-        db.update_mod_user_metadata(mid, {"custom_deploy_path": custom})
-    return folder
+        db.update_mod_user_metadata(pk, {"custom_deploy_path": custom})
+    return folder, pk
 
 
 def test_case1_game_mod_path_d_drive_missing_returns_game_config_code(
@@ -101,7 +98,7 @@ def test_case1_game_mod_path_d_drive_missing_returns_game_config_code(
         tmp_path / "D_SteamLibrary" / "steamapps" / "common" / "Baldurs Gate 3" / "Mods"
     )
     install_ok.mkdir(parents=True, exist_ok=True)
-    folder = _seed_mod(
+    folder, pk = _seed_mod(
         db,
         library,
         mid="1339",
@@ -124,7 +121,7 @@ def test_case1_game_mod_path_d_drive_missing_returns_game_config_code(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        "1339", require_target_exists=True, prepare_archives=False
+        pk, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -161,7 +158,7 @@ def test_case2_custom_deploy_path_d_drive_missing_returns_custom_code(
         / "Bin"
         / "Win64"
     )
-    folder = _seed_mod(
+    folder, pk = _seed_mod(
         db,
         library,
         mid="1238",
@@ -181,7 +178,7 @@ def test_case2_custom_deploy_path_d_drive_missing_returns_custom_code(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        "1238", require_target_exists=True, prepare_archives=False
+        pk, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -209,7 +206,6 @@ def test_case3_source_mod_missing_returns_source_code(
     mods = install / "Mods"
     install.mkdir(parents=True)
     mods.mkdir(parents=True)
-    # Register entity but do not create proven disk folder / .info.
     ghost = library / "Baldurs Gate 3" / "GhostMod"
     db.upsert_game(
         GameInfo(app_id=BG3, name="Baldurs Gate 3", folder_name="Baldurs Gate 3")
@@ -221,12 +217,12 @@ def test_case3_source_mod_missing_returns_source_code(
         mod_path=str(mods),
         deploy_type="folder_copy",
     )
-    create_steam_test_mod(db, external_id="7100", title="GhostMod", app_id=BG3, game_name="Baldurs Gate 3")
-    bind_managed_path(db, "7100", ghost, title="GhostMod")
-
+    created = create_steam_test_mod(
+        db, external_id="7100", title="GhostMod", app_id=BG3, game_name="Baldurs Gate 3"
+    )
+    pk = str(created.mod_id)
     db.update_mod_identity_fields(
-        "7100",
-        internal_id="7100",
+        pk,
         workspace_id="14717",
         last_known_path=str(ghost),
         folder_present=False,
@@ -235,7 +231,7 @@ def test_case3_source_mod_missing_returns_source_code(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        "7100", require_target_exists=True, prepare_archives=False
+        pk, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -244,7 +240,7 @@ def test_case3_source_mod_missing_returns_source_code(
     assert err.get("path_field") == "source"
     msg = str(err.get("error") or "")
     assert SOURCE_MOD_PATH_MISSING in msg
-    assert "internal_id=7100" in msg
+    assert f"internal_id={pk}" in msg
     assert FORBIDDEN_VAGUE_MOD_PATH_COPY not in msg
     assert GAME_CONFIG_PATH_MISSING not in msg
     assert CUSTOM_DEPLOY_PATH_MISSING not in msg
@@ -264,7 +260,7 @@ def test_game_install_missing_is_distinct_from_custom(
     library = tmp_path / "mod"
     install = tmp_path / "missing_install"
     mods = tmp_path / "missing_mods"
-    _seed_mod(
+    _folder, pk = _seed_mod(
         db,
         library,
         mid="9001",
@@ -280,17 +276,16 @@ def test_game_install_missing_is_distinct_from_custom(
         mod_path=str(mods),
         deploy_type="folder_copy",
     )
-    db.update_mod_user_metadata("9001", {"custom_deploy_path": ""})
+    db.update_mod_user_metadata(pk, {"custom_deploy_path": ""})
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        "9001", require_target_exists=True, prepare_archives=False
+        pk, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
     assert err.get("error_code") == GAME_CONFIG_PATH_MISSING
     msg = str(err.get("error") or "")
-    # Anno forces install_path validation when install is configured.
     assert msg.startswith(DEPLOY_ERR_GAME_INSTALL_MISSING_PREFIX)
     assert err.get("path_field") == "install_path"
     assert DEPLOY_ERR_CUSTOM_PATH_MISSING_PREFIX not in msg
@@ -312,16 +307,19 @@ def test_workspace_id_token_is_identity_failure_not_source(
         game_name="Anno 1800",
         install=install,
         mods=mods,
-        workspace_id="17864251756563492",
+        # Keep workspace non-digit so soft-resolve get_mod cannot treat a
+        # bare workspace digit token as a live PK handle.
+        workspace_id="ws-17864251756563492",
     )
-    mid, err = resolve_entity_internal_id("17864251756563492", db=db)
+    orphan_ws = "17864251756563492"
+    mid, err = resolve_entity_internal_id(orphan_ws, db=db)
     assert mid == ""
     assert err is not None
     assert err.startswith(DEPLOY_ERR_IDENTITY_PREFIX)
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, deploy_err, _ = deployer._resolve_context(
-        "17864251756563492",
+        orphan_ws,
         require_target_exists=True,
         prepare_archives=False,
     )

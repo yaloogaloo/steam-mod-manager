@@ -130,7 +130,9 @@ def _backup_payload_internal_ids(backup_root: Path) -> set[str]:
         except Exception:
             continue
         if isinstance(data, dict):
-            iid = _text(data.get("internal_id"))
+            from services.mod_identity import read_entity_key
+
+            iid = read_entity_key(data)
             if iid:
                 found.add(iid)
     return found

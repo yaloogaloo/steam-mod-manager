@@ -84,6 +84,18 @@ def run_browser_offline_snapshot(
         )
         raise RuntimeError(error)
 
+    try:
+        from services.info_asset_runtime import require_cas_finalize
+
+        require_cas_finalize(output_dir, mod_id=mid, context=f"provider:{mid}")
+    except Exception as exc:  # noqa: BLE001
+        get_db().update_mod_offline_status(
+            mid,
+            status=OFFLINE_STATUS_FAILED,
+            provider=provider_name,
+        )
+        raise RuntimeError(f"CAS finalize failed: {exc}") from exc
+
     get_db().update_mod_offline_status(
         mid,
         status=OFFLINE_STATUS_ARCHIVED,

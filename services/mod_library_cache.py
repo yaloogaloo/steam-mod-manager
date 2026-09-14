@@ -587,6 +587,7 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
     import time
 
     from services.library_perf_metrics import get_library_perf_metrics
+    from services.perf_stage import log_perf_stage, perf_stage
 
     root = Path(library_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -598,57 +599,72 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
     cards: list[ModCardData] = []
     try:
         db = get_db()
-        t_q = time.perf_counter()
-        rows = db.list_mod_list_items()
-        mod_ids = [
-            str(r.get("internal_id") or "")
-            for r in rows
-            if str(r.get("internal_id") or "").isdigit()
-        ]
-        cat_map: dict[str, str] = {}
-        type_map: dict[str, int | None] = {}
-        rel_counts: dict[str, tuple[int, int]] = {}
-        if mod_ids:
-            try:
-                fields_map = db.get_mods_search_fields(mod_ids)
-                for mid, fields in fields_map.items():
-                    cat_map[mid] = str(getattr(fields, "category_tags", "") or "")
-                    type_map[mid] = getattr(fields, "type_id", None)
-            except Exception:  # noqa: BLE001
-                logger.debug("category batch failed", exc_info=True)
-            try:
-                rel_counts = db.get_relationship_counts(mod_ids)
-            except Exception:  # noqa: BLE001
-                logger.debug("relationship batch failed", exc_info=True)
-        query_ms = (time.perf_counter() - t_q) * 1000.0
-        t_vm = time.perf_counter()
-        try:
-            from services.managed_path_cache import put_managed_path
-
-            warm_paths = True
-        except Exception:  # noqa: BLE001
-            warm_paths = False
-            put_managed_path = None  # type: ignore[assignment]
-        for row in rows:
-            mid = str(row.get("internal_id") or "")
-            row_out = dict(row)
-            if mid in cat_map and cat_map[mid]:
-                row_out["category_tags"] = cat_map[mid]
-            if mid in type_map:
-                row_out["type_id"] = type_map[mid]
-            if mid in rel_counts:
-                deps, confs = rel_counts[mid]
-                row_out["relation_deps"] = int(deps)
-                row_out["relation_conflicts"] = int(confs)
-            item = mod_list_item_from_row(row_out)
-            list_items.append(item)
-            cards.append(list_item_to_card_data(item))
-            if warm_paths and mid.isdigit() and str(item.managed_path or "").strip():
+        with perf_stage("library_query") as qbag:
+            t_q = time.perf_counter()
+            rows = db.list_mod_list_items()
+            qbag["rows"] = len(rows)
+            mod_ids = [
+                str(r.get("internal_id") or "")
+                for r in rows
+                if str(r.get("internal_id") or "").isdigit()
+            ]
+            cat_map: dict[str, str] = {}
+            type_map: dict[str, int | None] = {}
+            rel_counts: dict[str, tuple[int, int]] = {}
+            if mod_ids:
                 try:
-                    put_managed_path(mid, item.managed_path, library_root=root)
+                    t_tag = time.perf_counter()
+                    fields_map = db.get_mods_search_fields(mod_ids)
+                    for mid, fields in fields_map.items():
+                        cat_map[mid] = str(getattr(fields, "category_tags", "") or "")
+                        type_map[mid] = getattr(fields, "type_id", None)
+                    qbag["tag_join_ms"] = round(
+                        (time.perf_counter() - t_tag) * 1000.0, 1
+                    )
                 except Exception:  # noqa: BLE001
-                    pass
-        vm_ms = (time.perf_counter() - t_vm) * 1000.0
+                    logger.debug("category batch failed", exc_info=True)
+                try:
+                    t_rel = time.perf_counter()
+                    rel_counts = db.get_relationship_counts(mod_ids)
+                    qbag["relationship_join_ms"] = round(
+                        (time.perf_counter() - t_rel) * 1000.0, 1
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("relationship batch failed", exc_info=True)
+            query_ms = (time.perf_counter() - t_q) * 1000.0
+            qbag["sql_total_ms"] = round(query_ms, 1)
+
+        with perf_stage("snapshot_viewmodel", rows=len(rows)) as vbag:
+            t_vm = time.perf_counter()
+            try:
+                from services.managed_path_cache import put_managed_path
+
+                warm_paths = True
+            except Exception:  # noqa: BLE001
+                warm_paths = False
+                put_managed_path = None  # type: ignore[assignment]
+            for row in rows:
+                mid = str(row.get("internal_id") or "")
+                row_out = dict(row)
+                if mid in cat_map and cat_map[mid]:
+                    row_out["category_tags"] = cat_map[mid]
+                if mid in type_map:
+                    row_out["type_id"] = type_map[mid]
+                if mid in rel_counts:
+                    deps, confs = rel_counts[mid]
+                    row_out["relation_deps"] = int(deps)
+                    row_out["relation_conflicts"] = int(confs)
+                item = mod_list_item_from_row(row_out)
+                list_items.append(item)
+                cards.append(list_item_to_card_data(item))
+                if warm_paths and mid.isdigit() and str(item.managed_path or "").strip():
+                    try:
+                        put_managed_path(mid, item.managed_path, library_root=root)
+                    except Exception:  # noqa: BLE001
+                        pass
+            vm_ms = (time.perf_counter() - t_vm) * 1000.0
+            vbag["card_data_count"] = len(cards)
+            vbag["viewmodel_ms"] = round(vm_ms, 1)
     except Exception:  # noqa: BLE001
         logger.exception("DB-first library snapshot failed")
         list_items = []
@@ -668,6 +684,16 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
             database_query_ms=query_ms,
             viewmodel_create_ms=vm_ms,
             total_ms=total_ms,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        log_perf_stage(
+            "library_data_load",
+            total_ms,
+            cards=len(cards),
+            query_ms=round(query_ms, 1),
+            viewmodel_ms=round(vm_ms, 1),
         )
     except Exception:  # noqa: BLE001
         pass

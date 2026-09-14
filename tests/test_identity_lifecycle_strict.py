@@ -306,7 +306,7 @@ def test_projection_workspace_no_mid_fallback(db: DatabaseManager) -> None:
 def test_existing_entity_rebinds_to_new_info_path_after_old_path_deleted(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two folders share the same .info.internal_id; deleting the bound path
+    """Two folders share the same .info/entity_key; deleting the bound path
     must rebind the *existing* entity onto the remaining legal .info folder.
 
     Entity / internal_id / workspace_id must not change. No create.

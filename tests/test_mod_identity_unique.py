@@ -103,65 +103,53 @@ def test_same_nexus_id_different_games_coexist(db: DatabaseManager) -> None:
 
 
 def test_concurrent_double_insert_recovers(db: DatabaseManager) -> None:
-    """Simulate lost race: two allocated ids, second identity write hits UNIQUE."""
-    a = db.allocate_mod_id()
-    db.update_mod_platform_info(
-        a,
-        platform=PLATFORM_NEXUS,
-        external_id="998",
-        title="PlaceholderA",
-        app_id=1623730,
-    )
-    b = db.allocate_mod_id()
-    assert b == a + 1
+    """Second register with same (platform, app_id, external_id) reuses the winner row."""
+    from services.identity_service import identity_create_scope, lifecycle_scope
 
-    db.update_mod_platform_info(
-        a,
-        platform=PLATFORM_NEXUS,
-        external_id="999",
-        title="First",
-        app_id=1623730,
-    )
-    with pytest.raises(ValueError, match="already exists"):
-        db.update_mod_platform_info(
-            b,
+    with lifecycle_scope("import"), identity_create_scope():
+        first = db.register_external_mod(
             platform=PLATFORM_NEXUS,
             external_id="999",
-            title="Second",
-            app_id=1623730,
-        )
-
-    calls = {"n": 0}
-    real_find = db.find_mod_by_external
-
-    def flaky_find(platform: str, external_id: str, *, app_id: int = 0):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return None
-        return real_find(platform, external_id, app_id=app_id)
-
-    db.find_mod_by_external = flaky_find  # type: ignore[method-assign]
-    try:
-        result = db.register_external_mod(
-            platform=PLATFORM_NEXUS,
-            external_id="999",
-            title="Racer",
+            title="First",
             app_id=1623730,
             game_name="Palworld",
-            mod_id=b,
         )
-    finally:
-        db.find_mod_by_external = real_find  # type: ignore[method-assign]
+        # Pre-allocate a losing stub id as if a racer already claimed a PK.
+        loser = db.allocate_mod_id()
+        assert str(loser) != first.mod_id
 
-    assert result.mod_id == str(a)
-    count = db._conn.execute(
-        """
-        SELECT COUNT(*) AS c FROM mods
-        WHERE platform=? AND app_id=? AND external_id=?
-        """,
-        (PLATFORM_NEXUS, 1623730, "999"),
-    ).fetchone()["c"]
-    assert int(count) == 1
+        calls = {"n": 0}
+        real_find = db.find_mod_by_external
+
+        def flaky_find(platform: str, external_id: str, *, app_id: int = 0):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            return real_find(platform, external_id, app_id=app_id)
+
+        db.find_mod_by_external = flaky_find  # type: ignore[method-assign]
+        try:
+            result = db.register_external_mod(
+                platform=PLATFORM_NEXUS,
+                external_id="999",
+                title="Racer",
+                app_id=1623730,
+                game_name="Palworld",
+                mod_id=loser,
+            )
+        finally:
+            db.find_mod_by_external = real_find  # type: ignore[method-assign]
+
+        assert result.mod_id == first.mod_id
+        count = db._conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM mods
+            WHERE platform=? AND app_id=? AND external_id=?
+            """,
+            (PLATFORM_NEXUS, 1623730, "999"),
+        ).fetchone()["c"]
+        assert int(count) == 1
+        assert calls["n"] >= 2
 
 
 def test_same_external_id_different_platforms(db: DatabaseManager) -> None:
@@ -189,30 +177,40 @@ def test_same_external_id_different_platforms(db: DatabaseManager) -> None:
         external_id="42",
         title="Steam 42",
         app_id=1623730,
+        game_name="Palworld",
     )
-    assert steam.mod_id == "42"
+    # Steam Workshop digits are workspace/external only — never forced as mods.mod_id.
+    assert steam.mod_id != "42"
+    assert steam.mod_id != nexus.mod_id
+    assert steam.mod_id != github.mod_id
+    assert steam.external_id == "42"
+    assert steam.workspace_id == "42"
     assert steam.platform == PLATFORM_STEAM
 
 
 def test_forbid_non_steam_low_mod_id(db: DatabaseManager) -> None:
-    with pytest.raises(ValueError, match="NON_STEAM_MOD_ID_BASE"):
-        db.register_external_mod(
-            platform=PLATFORM_NEXUS,
-            external_id="77",
-            title="Bad",
-            app_id=1623730,
-            game_name="Palworld",
-            mod_id=12345,
-        )
+    """Non-Steam rows use auto PK; external_id digits must not become mods.mod_id."""
     ok = db.register_external_mod(
         platform=PLATFORM_NEXUS,
         external_id="78",
         title="Ok",
         app_id=1623730,
         game_name="Palworld",
+    )
+    assert ok.mod_id.isdigit()
+    assert ok.mod_id != "78"
+    assert ok.external_id == "78"
+    # Explicit mod_id hint is still accepted when unique, but is not required to
+    # sit above the historical NON_STEAM_MOD_ID_BASE fence.
+    hinted = db.register_external_mod(
+        platform=PLATFORM_NEXUS,
+        external_id="79",
+        title="Hinted",
+        app_id=1623730,
+        game_name="Palworld",
         mod_id=NON_STEAM_MOD_ID_BASE + 50,
     )
-    assert int(ok.mod_id) == NON_STEAM_MOD_ID_BASE + 50
+    assert int(hinted.mod_id) == NON_STEAM_MOD_ID_BASE + 50
 
 
 def test_update_platform_identity_conflict(db: DatabaseManager) -> None:

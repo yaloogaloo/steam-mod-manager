@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from core.db_manager import DatabaseManager
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from core.mod_platform import (
     PLATFORM_GITHUB,
     PLATFORM_NEXUS,
@@ -17,9 +16,7 @@ from core.mod_platform import (
     PROVIDER_NEXUS_MANUAL_IMPORT,
     PROVIDER_STEAM_ARCHIVE,
 )
-from core.models import ModMetadata
 from services.archive import OfflinePageArchiver
-from services.file_ops import INFO_DIR_NAME
 from services.offline.layout_snapshot import LayoutSnapshotResult
 from services.offline.manager import OfflineManager
 from services.offline.github import GithubOfflineProvider
@@ -35,14 +32,9 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(lib: Path, *, mid: str, title: str, game: str = "Game") -> Path:
+def _folder(lib: Path, *, title: str, game: str = "Game") -> Path:
     folder = lib / game / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps({"published_file_id": mid, "title": title, "game_name": game}),
-        encoding="utf-8",
-    )
+    folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
@@ -54,11 +46,13 @@ def test_manager_selects_steam_nexus_github(
     lib = tmp_path / "library"
     lib.mkdir()
 
-    steam_folder = _seed(lib, mid="111", title="S")
-    create_steam_test_mod(db, external_id="111", title="S")
-    bind_managed_path(db, "111", steam_folder, title="S")
+    steam_folder = _folder(lib, title="S")
+    steam = create_steam_test_mod(db, external_id="111", title="S")
+    prove_managed_folder(
+        db, steam_folder, handle=steam.mod_id, title="S", game_name="Game"
+    )
 
-    db.update_mod_platform_info("111", platform=PLATFORM_STEAM, external_id="111")
+    db.update_mod_platform_info(steam.mod_id, platform=PLATFORM_STEAM, external_id="111")
 
     nexus = db.register_external_mod(
         platform=PLATFORM_NEXUS,
@@ -68,7 +62,15 @@ def test_manager_selects_steam_nexus_github(
         app_id=1623730,
         game_name="Palworld",
     )
-    nexus_folder = _seed(lib, mid=nexus.mod_id, title="N", game="Palworld")
+    nexus_folder = _folder(lib, title="N", game="Palworld")
+    prove_managed_folder(
+        db,
+        nexus_folder,
+        handle=nexus.mod_id,
+        title="N",
+        app_id=1623730,
+        game_name="Palworld",
+    )
 
     github = db.register_external_mod(
         platform=PLATFORM_GITHUB,
@@ -78,8 +80,15 @@ def test_manager_selects_steam_nexus_github(
         app_id=1623730,
         game_name="Palworld",
     )
-    github_folder = _seed(lib, mid=github.mod_id, title="G", game="Palworld")
-
+    github_folder = _folder(lib, title="G", game="Palworld")
+    prove_managed_folder(
+        db,
+        github_folder,
+        handle=github.mod_id,
+        title="G",
+        app_id=1623730,
+        game_name="Palworld",
+    )
     def tracking_ensure(self, info_dir, published_file_id, **kwargs):
         path = Path(info_dir) / "index.html"
         path.write_text(
@@ -120,7 +129,7 @@ def test_manager_selects_steam_nexus_github(
         PROVIDER_GITHUB_SNAPSHOT
     )
 
-    r1 = mgr.update_mod_offline("111", managed_path=steam_folder)
+    r1 = mgr.update_mod_offline(steam.mod_id, managed_path=steam_folder)
     html = tmp_path / "n.html"
     html.write_text("<html><body>336</body></html>", encoding="utf-8")
     r2 = mgr.import_mod_offline_html(nexus.mod_id, html, managed_path=nexus_folder)

@@ -96,6 +96,9 @@ def read_info(folder: Path) -> tuple[dict[str, Any] | None, str]:
 
 
 def write_info_patch(info_path: Path, updates: dict[str, Any]) -> dict[str, Any]:
+    """Patch ``.info/metadata.json``; filesystem proof writes ``entity_key`` only."""
+    from services.mod_identity import normalize_info_entity_key_payload
+
     payload: dict[str, Any] = {}
     if info_path.is_file():
         try:
@@ -108,6 +111,8 @@ def write_info_patch(info_path: Path, updates: dict[str, Any]) -> dict[str, Any]
         if value is None:
             continue
         payload[key] = value
+    # Canonical filesystem binding key is entity_key (never dual-write legacy).
+    payload, _ = normalize_info_entity_key_payload(payload)
     info_path.parent.mkdir(parents=True, exist_ok=True)
     info_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -176,6 +181,8 @@ def db_summary(row: dict[str, Any]) -> dict[str, Any]:
 def info_summary(
     payload: dict[str, Any], folder: Path, info_path: str
 ) -> dict[str, Any]:
+    from services.mod_identity import read_entity_key
+
     url = text(payload.get("url") or payload.get("source_url"))
     try:
         app_id = int(payload.get("app_id") or 0)
@@ -187,7 +194,8 @@ def info_summary(
     return {
         "folder": str(folder),
         "info_path": info_path,
-        "internal_id": text(payload.get("internal_id")),
+        # Report field: filesystem binding value (entity_key / legacy sidecar key).
+        "internal_id": read_entity_key(payload),
         "title": text(payload.get("title") or payload.get("display_name")),
         "source_url": url,
         "external_id": text(

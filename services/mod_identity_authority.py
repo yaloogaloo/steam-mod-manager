@@ -91,9 +91,12 @@ def safe_workspace_id_for_deploy(
     plat = normalize_platform(platform)
     mid = str(mod_id or "").strip()
     if existing:
-        if mid and is_internal_mod_id(mid) and existing == mid:
-            existing = ""
-        else:
+        if mid and existing == mid:
+            # SQLite PK must never be reused as Workspace ID (non-Steam always;
+            # Steam only when the PK is legacy high-range internal pollution).
+            if plat != PLATFORM_STEAM or is_internal_mod_id(mid):
+                existing = ""
+        if existing:
             return existing
     steam_workshop = str(workshop_id or "").strip()
     resolved = resolve_workspace_id(

@@ -13,7 +13,7 @@ from core.db_manager import DatabaseManager
 from core.mod_platform import PLATFORM_MODIO, PLATFORM_STEAM
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder, seed_steam_managed_mod
 from services.modio_api import (
     ModioClient,
     ModioModDetails,
@@ -24,6 +24,19 @@ from services.modio_metadata_refresh import (
     refresh_modio_mod_metadata,
     rename_modio_folder_for_title,
 )
+
+
+@pytest.fixture(autouse=True)
+def _modio_library_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Align Path Lifecycle library root with folders under tmp_path/mod."""
+    lib = tmp_path / "mod"
+    lib.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("core.paths.default_mod_library", lambda: lib)
+    monkeypatch.setattr("services.mod_path_validation.default_mod_library", lambda: lib)
+    monkeypatch.setattr(
+        "services.path_lifecycle.default_mod_library", lambda: lib, raising=False
+    )
+    return lib
 
 
 @pytest.fixture()
@@ -388,7 +401,6 @@ def test_ui_routes_modio_to_modio_worker(
                 "title": "Harbor",
                 "url": "https://mod.io/g/anno-1800/m/harborlife",
                 "source_type": "modio",
-                "published_file_id": "9000000000000999",
             }
         ),
         encoding="utf-8",
@@ -400,17 +412,24 @@ def test_ui_routes_modio_to_modio_worker(
         title="Harbor",
         app_id=916440,
         game_name="Anno 1800",
-        mod_id=9000000000000999,
     )
-    # Align folder metadata id with registered row.
-    data = json.loads((info / "metadata.json").read_text(encoding="utf-8"))
-    data["published_file_id"] = str(display.mod_id)
-    (info / "metadata.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    pk = str(display.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title="Harbor",
+        app_id=916440,
+        game_name="Anno 1800",
+        platform=PLATFORM_MODIO,
+        extra={
+            "url": "https://mod.io/g/anno-1800/m/harborlife",
+            "source_type": "modio",
+        },
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=pk)
     app.processEvents()
     assert panel._current_platform == PLATFORM_MODIO
 
@@ -459,24 +478,24 @@ def test_steam_routing_unchanged(
     app = QApplication.instance() or QApplication([])
     lib = tmp_path / "mod"
     mid = "3413520661"
-    folder = lib / "Game" / f"Unknown_Mod_{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": f"Unknown_Mod_{mid}",
-                "fetch_error": "timeout",
-            }
-        ),
-        encoding="utf-8",
+    db.upsert_game(
+        __import__("core.game_info", fromlist=["GameInfo"]).GameInfo(
+            app_id=1, name="Game", folder_name="Game"
+        )
     )
-    create_steam_test_mod(db, external_id=mid, title=f"Unknown_Mod_{mid}")
-
+    seeded = seed_steam_managed_mod(
+        db,
+        lib,
+        external_id=mid,
+        title=f"Unknown_Mod_{mid}",
+        game_folder="Game",
+        app_id=1,
+        game_name="Game",
+        files={"payload.txt": "x"},
+    )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(seeded.folder, mod_id=seeded.mod_id)
     app.processEvents()
 
     steam_n = {"n": 0}

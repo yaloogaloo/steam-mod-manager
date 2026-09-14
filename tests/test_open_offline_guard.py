@@ -21,6 +21,24 @@ from services.importers.materialize import materialize_imported_mod
 from ui.mod_detail_panel import ModDetailPanel
 
 
+def _wait_open_worker(widget, qapp: QApplication, timeout_ms: int = 8000) -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    qapp.processEvents()
+    worker = getattr(widget, "_offline_open_worker", None)
+    if worker is None or not worker.isRunning():
+        qapp.processEvents()
+        return
+    loop = QEventLoop()
+    worker.finished.connect(loop.quit)
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    timer.start(timeout_ms)
+    loop.exec()
+    qapp.processEvents()
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QApplication:
     app = QApplication.instance()
@@ -105,6 +123,14 @@ def test_open_offline_uses_from_local_file(
             managed_path=str(folder),
         )
     )
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+    from services.offline_view_cache import is_offline_view_path
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=str(created.mod_id))
@@ -118,9 +144,12 @@ def test_open_offline_uses_from_local_file(
     )
 
     panel._open_offline()
+    _wait_open_worker(panel, qapp)
     assert len(opened) == 1
     assert opened[0].isLocalFile()
-    assert Path(opened[0].toLocalFile()).resolve() == index.resolve()
+    opened_path = Path(opened[0].toLocalFile()).resolve()
+    assert is_offline_view_path(opened_path)
+    assert opened_path != index.resolve()
 
 
 def test_materialize_does_not_import_offline_mhtml(

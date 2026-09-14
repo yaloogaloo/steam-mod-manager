@@ -18,7 +18,7 @@ from services.file_ops import (
     ModFileManager,
     read_info_metadata_dict,
 )
-from services.offline.paths import OFFLINE_SNAPSHOT_DIR
+from services.offline.paths import resolve_offline_page
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,56 @@ class BackupSnapshot:
 def backup_root(mod_id: int | str) -> Path:
     """``data/mod_backup/<mod_id>/``"""
     return data_dir() / BACKUP_DIR_NAME / str(mod_id).strip()
+
+
+def prove_backup_storage_key(
+    hint: str | int | None = None,
+    *,
+    managed_path: str | Path | None = None,
+    info: Mapping[str, Any] | None = None,
+) -> str:
+    """Prove the current Backup storage key (``mods.mod_id``).
+
+    Resolution order:
+
+    1. ``internal_id`` / PK handle via ``resolve_mod_pk`` (Frozen TEXT match
+       or an existing SQLite PK).
+    2. Frozen ``.info/internal_id`` → current ``mods.mod_id``
+       (same Entity ``internal_id``; not a third Mod ID).
+
+    Never uses ``published_file_id``, ``workspace_id``, folder name, or
+    ``external_id`` as the backup directory name. Unresolved → ``""``
+    (caller must not write).
+    """
+    token = str(hint or "").strip()
+    db = None
+    try:
+        from core.db_manager import get_db
+        from services.identity_service import resolve_mod_pk
+
+        db = get_db()
+        if token:
+            pk = resolve_mod_pk(token, db=db)
+            if pk.isdigit():
+                return pk
+    except Exception:  # noqa: BLE001
+        logger.debug("prove_backup_storage_key resolve_mod_pk failed", exc_info=True)
+
+    data = dict(info or {})
+    root = Path(managed_path) if managed_path else None
+    if not data and root is not None:
+        data = read_info_metadata_dict(root) or {}
+    if data or root is not None:
+        found = _resolve_mod_id(root or Path("."), data)
+        if found.isdigit():
+            return found
+
+    logger.warning(
+        "backup write refused: storage key unresolved hint=%s path=%s",
+        token or "?",
+        root,
+    )
+    return ""
 
 
 def _resolve_mod_id(mod_path: Path, data: dict[str, Any] | None) -> str:
@@ -203,47 +253,40 @@ def _clear_backup_offline(dest_offline: Path) -> None:
         logger.warning("Failed to clear backup offline %s: %s", dest_offline, exc)
 
 
-def _copy_offline_tree(src_offline: Path, dest_offline: Path) -> str:
+def _copy_offline_index(src_index: Path | None, dest_offline: Path) -> str:
     """
-    Mirror ``.info/offline/`` into backup (file copy only — no HTML processing).
+    Snapshot the canonical offline page plus its local dependency closure.
 
-    When source index is missing, remove backup offline tree.
-    Idempotent: skips copytree when index sha256 matches.
+    Source is whatever OPEN already accepts: ``.info/offline/index.html`` first,
+    then legacy Steam ``.info/index.html``. Never copytree ``.info`` or unused
+    ``assets/``. Missing live index clears backup offline so a later snapshot
+    cannot invent a page.
     """
-    index = src_offline / BACKUP_OFFLINE_INDEX
-    if not index.is_file():
+    index = src_index if src_index is not None and src_index.is_file() else None
+    if index is None:
         _clear_backup_offline(dest_offline)
         return ""
-    backup_index = dest_offline / BACKUP_OFFLINE_INDEX
-    try:
-        if backup_index.is_file() and _same_file_content(index, backup_index):
-            return str(backup_index.resolve())
-        t_copy = time.perf_counter()
-        if dest_offline.is_dir():
-            shutil.rmtree(dest_offline)
-        shutil.copytree(src_offline, dest_offline)
-        try:
-            from services.reconcile_observability import add_copy
+    from services.offline.backup_closure import snapshot_offline_closure
 
-            nbytes = 0
-            try:
-                if backup_index.is_file():
-                    nbytes = int((dest_offline / BACKUP_OFFLINE_INDEX).stat().st_size)
-            except OSError:
-                nbytes = 0
-            add_copy(
-                files=1,
-                nbytes=nbytes,
-                ms=(time.perf_counter() - t_copy) * 1000.0,
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        if backup_index.is_file():
-            return str(backup_index.resolve())
+    t_copy = time.perf_counter()
+    try:
+        copied = snapshot_offline_closure(index, dest_offline)
     except OSError as exc:
         logger.warning("Failed to copy offline backup %s: %s", dest_offline, exc)
         return ""
-    return ""
+    try:
+        from services.reconcile_observability import add_copy
+
+        backup_index = dest_offline / BACKUP_OFFLINE_INDEX
+        nbytes = int(backup_index.stat().st_size) if backup_index.is_file() else 0
+        add_copy(
+            files=1,
+            nbytes=nbytes,
+            ms=(time.perf_counter() - t_copy) * 1000.0,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return copied
 
 
 def snapshot_from_mod_folder(
@@ -252,13 +295,17 @@ def snapshot_from_mod_folder(
     owner_mod_id: str | int | None = None,
 ) -> BackupSnapshot | None:
     """
-    Read ``.info/metadata.json`` and mirror cover / offline into ``data/mod_backup/``.
+    Read ``.info/metadata.json`` and mirror cover / a usable offline snapshot
+    into ``data/mod_backup/``. Discovers the same files OPEN uses
+    (``.info/offline/index.html``, then legacy ``.info/index.html``) and stores
+    ``offline/index.html`` plus the local dependency closure. Never copytree
+    ``.info`` or unused ``assets/``.
 
     Never writes back to the Mod folder. Missing ``.info`` assets delete matching
     backup assets (folder-absent is handled by callers — not this function).
 
     ``owner_mod_id`` is the Internal Database ID (caller-proven). When omitted,
-    ownership is resolved from ``.info.internal_id`` only — never from
+    ownership is resolved from ``.info/internal_id`` only — never from
     published_file_id / workspace_id / folder name.
     """
     root = Path(mod_path)
@@ -267,9 +314,7 @@ def snapshot_from_mod_folder(
 
     t_scan = time.perf_counter()
     data = read_info_metadata_dict(root) or {}
-    mid = str(owner_mod_id or "").strip()
-    if not mid.isdigit():
-        mid = _resolve_mod_id(root, data)
+    mid = prove_backup_storage_key(owner_mod_id, managed_path=root, info=data)
     try:
         from services.reconcile_observability import add_scan_ms
 
@@ -329,7 +374,7 @@ def snapshot_from_mod_folder(
     info_dir = root / INFO_DIR_NAME
     t_assets = time.perf_counter()
     cover_src = _find_info_cover(info_dir)
-    offline_src = info_dir / OFFLINE_SNAPSHOT_DIR
+    offline_src = resolve_offline_page(root)
     try:
         from services.reconcile_observability import add_scan_ms
 
@@ -337,7 +382,7 @@ def snapshot_from_mod_folder(
     except Exception:  # noqa: BLE001
         pass
     cover_abs = _copy_cover(cover_src, dest)
-    offline_abs = _copy_offline_tree(offline_src, dest / BACKUP_OFFLINE_DIR)
+    offline_abs = _copy_offline_index(offline_src, dest / BACKUP_OFFLINE_DIR)
 
     return BackupSnapshot(
         mod_id=mid,
@@ -402,8 +447,16 @@ def mark_missing(mod_id: int | str) -> None:
         return
     try:
         from core.db_manager import get_db
+        from services.offline.backup_offline_repair import snapshot_live_offline_only
 
-        get_db().set_mod_folder_present(mid, present=False)
+        db = get_db()
+        row = db.get_mod_backup_row(mid)
+        lkp = str((row or {}).get("last_known_path") or "").strip()
+        if lkp:
+            live = Path(lkp)
+            if live.is_dir():
+                snapshot_live_offline_only(mid, live, db=db)
+        db.set_mod_folder_present(mid, present=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning("mark_missing failed for %s: %s", mid, exc)
 
@@ -414,40 +467,19 @@ def restore_check(
     library_root: str | Path | None = None,
 ) -> bool:
     """
-    If the Mod folder reappeared, run ``sync_metadata_backup`` and clear missing flag.
+    If ``last_known_path`` reappeared, run two-evidence recovery.
+    If it is gone, controlled rediscovery may rebind a renamed folder.
 
-    Returns True when the folder was found and synced.
+    Never scans the whole disk. Never mkdir.
     """
     mid = str(mod_id).strip()
     if not mid.isdigit():
         return False
     try:
-        from core.db_manager import get_db
+        from services.mod_presence import attempt_recovery
 
-        db = get_db()
-        row = db.get_mod_backup_row(mid)
-        if row is None:
-            return False
-        if bool(int(row.get("folder_present") or 0)):
-            return False
-
-        candidates: list[Path] = []
-        lkp = str(row.get("last_known_path") or "").strip()
-        if lkp:
-            candidates.append(Path(lkp))
-        if library_root is not None:
-            from services.importers.materialize import find_managed_mod_path
-
-            found = find_managed_mod_path(library_root, mid)
-            if found is not None:
-                candidates.append(found)
-
-        for path in candidates:
-            if path.is_dir():
-                from services.metadata_backup_sync import sync_after_metadata_change
-
-                sync_after_metadata_change(mid, path, "restore")
-                return True
+        result = attempt_recovery(mid, library_root=library_root)
+        return bool(result.success)
     except Exception as exc:  # noqa: BLE001
         logger.warning("restore_check failed for %s: %s", mid, exc)
     return False
@@ -502,7 +534,9 @@ def restore_info_sidecar_from_backup(
         def _t(v: Any) -> str:
             return str(v or "").strip()
 
-        bak_uuid = _t(payload.get("internal_id"))
+        from services.mod_identity import read_internal_id
+
+        bak_uuid = read_internal_id(payload)
         bak_ws = _t(payload.get("workspace_id"))
         bak_plat = _t(payload.get("source_type") or payload.get("platform")).lower()
         bak_app = int(payload.get("app_id") or 0)
@@ -534,7 +568,10 @@ def restore_info_sidecar_from_backup(
         _ = bak_ws, row_ws
 
         # Stamp DB authority onto restored sidecar. Never collapse to PK.
-        payload["internal_id"] = row_uuid or bak_uuid
+        # ``.info/internal_id`` must equal Entity.internal_id after restore.
+        from services.mod_identity import set_info_internal_id
+
+        payload = set_info_internal_id(payload, row_uuid or bak_uuid)
         if row_ws:
             payload["workspace_id"] = row_ws
         if row_plat:
@@ -595,8 +632,23 @@ def sync_metadata_backup(
             except Exception:  # noqa: BLE001
                 mid = ""
         if mid.isdigit():
-            mark_missing(mid)
-        return
+            rebound = False
+            try:
+                from services.mod_presence import rediscover_entity_path
+
+                found = rediscover_entity_path(mid)
+                if found.success and found.path:
+                    rebound_path = Path(found.path)
+                    if rebound_path.is_dir():
+                        root = rebound_path
+                        rebound = True
+            except Exception:  # noqa: BLE001
+                rebound = False
+            if not rebound:
+                mark_missing(mid)
+                return
+        else:
+            return
 
     snapshot = snapshot_from_mod_folder(root, owner_mod_id=mod_id)
     if snapshot is None:
@@ -631,30 +683,14 @@ def reconcile_folder_presence(library_root: str | Path | None = None) -> None:
     """
     Recompute ``folder_present`` from disk.
 
-    ``mods.folder_present`` is a cache. Real check is ``Path(last_known_path).exists()``.
+    Delegates to batched Presence Reconcile: one scan per game root,
+    rediscovery before MISS, no per-row filesystem walk.
     """
     logger.debug("reconcile_folder_presence enter")
-    root = Path(library_root) if library_root is not None else None
     try:
-        from core.db_manager import get_db
+        from services.presence_reconcile import reconcile_presence
 
-        db = get_db()
-        for row in db.iter_mod_backup_rows():
-            mid = str(row.get("mod_id") or "").strip()
-            if not mid.isdigit():
-                continue
-            lkp = str(row.get("last_known_path") or "").strip()
-            path = Path(lkp) if lkp else None
-            if path is not None and path.is_dir():
-                if not bool(int(row.get("folder_present") or 0)):
-                    restore_check(mid, library_root=root)
-                else:
-                    db.set_mod_folder_present(mid, present=True)
-                continue
-            if root is not None and restore_check(mid, library_root=root):
-                continue
-            if lkp or str(row.get("backup_metadata_json") or "").strip():
-                mark_missing(mid)
+        reconcile_presence(library_root, notify=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("reconcile_folder_presence failed: %s", exc)
     logger.debug("reconcile_folder_presence leave")
@@ -689,11 +725,12 @@ def resolve_backup_cover(mod_id: int | str) -> Path | None:
 
 
 def resolve_backup_offline(mod_id: int | str) -> Path | None:
-    snap = load_backup(mod_id)
-    if snap is None or not snap.offline_path:
+    mid = str(mod_id).strip()
+    if not mid.isdigit():
         return None
-    path = Path(snap.offline_path)
-    return path if path.is_file() else None
+    from services.offline.backup_closure import usable_backup_offline_index
+
+    return usable_backup_offline_index(backup_root(mid) / BACKUP_OFFLINE_DIR)
 
 
 def is_mod_folder_absent(mod_id: int | str, managed_path: str | Path | None = None) -> bool:

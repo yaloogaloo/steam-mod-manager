@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 pytest.importorskip("PySide6")
 
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 from core.db_manager import DatabaseManager
 from core.models import ModMetadata, is_unknown_mod_title
 from core.steam_api import SteamWorkshopClient
-from services.file_ops import INFO_DIR_NAME, ModFileManager
+from services.file_ops import INFO_DIR_NAME
 from services.metadata_refresh import refresh_steam_mod_metadata
 from ui.mod_detail_panel import ModDetailPanel
 
@@ -53,40 +53,37 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
     Live bug: mods.title updates to Workshop name, but mods.display_name stays
     Unknown_Mod_* and Detail header prefers display_name.
     """
-    mid = "3413520661"
+    workshop = "3413520661"
     lib = tmp_path / "library"
-    folder = lib / "Game" / f"Unknown_Mod_{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": f"Unknown_Mod_{mid}",
-                "display_name": f"Unknown_Mod_{mid}",
-                "fetch_error": "timeout",
-                "description": "old desc",
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+    folder = lib / "Game" / f"Unknown_Mod_{workshop}"
+    folder.mkdir(parents=True)
+
+    created = create_steam_test_mod(
+        db, external_id=workshop, title=f"Unknown_Mod_{workshop}"
+    )
+    pk = prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title=f"Unknown_Mod_{workshop}",
+        extra={
+            "display_name": f"Unknown_Mod_{workshop}",
+            "fetch_error": "timeout",
+            "description": "old desc",
+        },
     )
 
-    # Seed DB the same way the bug appears in production.
-    create_steam_test_mod(db, external_id=mid, title=f"Unknown_Mod_{mid}")
-
-    db.update_mod_user_metadata(mid, {"display_name": f"Unknown_Mod_{mid}"})
+    db.update_mod_user_metadata(pk, {"display_name": f"Unknown_Mod_{workshop}"})
 
     # Raw column still holds the placeholder (UI must not prefer it).
     raw = db._conn.execute(  # noqa: SLF001
         "SELECT title, display_name FROM mods WHERE mod_id = ?",
-        (int(mid),),
+        (int(pk),),
     ).fetchone()
-    assert raw["display_name"] == f"Unknown_Mod_{mid}"
+    assert raw["display_name"] == f"Unknown_Mod_{workshop}"
 
     fresh = ModMetadata(
-        published_file_id=mid,
+        published_file_id=workshop,
         title="Test Workshop Mod",
         description="Fresh workshop description",
         preview_url="https://example.com/preview.jpg",
@@ -110,7 +107,7 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
     )
 
     result = refresh_steam_mod_metadata(
-        mid, folder, library_root=lib, force=True, download_cover=False
+        pk, folder, library_root=lib, force=True, download_cover=False
     )
     assert result.success is True
     assert result.title == "Test Workshop Mod"
@@ -124,25 +121,25 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
     )
     assert disk["title"] == "Test Workshop Mod"
     dn = str(disk.get("display_name") or "").strip()
-    assert not dn or not is_unknown_mod_title(dn, published_file_id=mid)
+    assert not dn or not is_unknown_mod_title(dn, published_file_id=workshop)
 
-    info = db.get_mod_display_info(mid)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.steam_name == "Test Workshop Mod"
     assert info.display_name == "Test Workshop Mod"
 
     raw_after = db._conn.execute(  # noqa: SLF001
         "SELECT title, display_name FROM mods WHERE mod_id = ?",
-        (int(mid),),
+        (int(pk),),
     ).fetchone()
     assert raw_after["title"] == "Test Workshop Mod"
     assert not str(raw_after["display_name"] or "").strip() or not is_unknown_mod_title(
-        str(raw_after["display_name"]), published_file_id=mid
+        str(raw_after["display_name"]), published_file_id=workshop
     )
 
     # Detail panel must show the Workshop title, not Unknown Mod.
     panel = ModDetailPanel()
-    panel.show_mod(result.managed_path, mod_id=mid)
+    panel.show_mod(result.managed_path, mod_id=pk)
     qapp.processEvents()
     title_text = (panel.view_title.text() or "").replace("\u200b", "")
     assert "Test Workshop Mod" in title_text
@@ -152,11 +149,14 @@ def test_refresh_replaces_unknown_display_name_with_steam_title(
 def test_display_info_ignores_stale_unknown_override_without_refresh(
     db: DatabaseManager,
 ) -> None:
-    mid = "99"
-    create_steam_test_mod(db, external_id=mid, title="Already Fixed Title")
+    workshop = "99"
+    created = create_steam_test_mod(
+        db, external_id=workshop, title="Already Fixed Title"
+    )
+    pk = str(created.mod_id)
 
-    db.update_mod_user_metadata(mid, {"display_name": f"Unknown_Mod_{mid}"})
-    info = db.get_mod_display_info(mid)
+    db.update_mod_user_metadata(pk, {"display_name": f"Unknown_Mod_{workshop}"})
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.display_name == "Already Fixed Title"
     assert info.steam_name == "Already Fixed Title"

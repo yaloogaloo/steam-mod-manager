@@ -96,7 +96,9 @@ def _read_info(folder: Path) -> tuple[dict[str, Any] | None, str]:
 def _has_valid_info(info: dict[str, Any] | None) -> bool:
     if not info or info.get("_read_error"):
         return False
-    return bool(_text(info.get("workspace_id")) or _text(info.get("internal_id")))
+    from services.mod_identity import read_entity_key
+
+    return bool(_text(info.get("workspace_id")) or read_entity_key(info))
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -173,11 +175,14 @@ def _folder_entry(
     info_path: str,
     db_binding: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    from services.mod_identity import read_entity_key
+
     return {
         "path": str(folder.resolve()),
         "folder": folder.name,
         "pollution_dirname": is_pollution_dirname(folder.name),
-        "internal_id": _text((info or {}).get("internal_id")),
+        # Report: filesystem binding value (entity_key / legacy sidecar key).
+        "internal_id": read_entity_key(info) if info else "",
         "workspace_id": _text((info or {}).get("workspace_id")),
         "info_path": info_path,
         "valid_info": _has_valid_info(info),
@@ -380,14 +385,16 @@ def _update_db_path(
         con.close()
 
 
-def _fix_info_internal_id(folder: Path, internal_id: str) -> str:
+def _fix_info_entity_key(folder: Path, internal_id: str) -> str:
+    """Write ``.info/entity_key`` (value = Entity.internal_id). Never dual-write legacy."""
+    from services.mod_identity import set_entity_key
+
     info, info_path = _read_info(folder)
     if not info_path:
         # Create canonical sidecar if missing but keep exists.
         meta = folder / INFO_DIR / METADATA
         folder.joinpath(INFO_DIR).mkdir(parents=True, exist_ok=True)
-        payload = dict(info or {})
-        payload["internal_id"] = _text(internal_id)
+        payload = set_entity_key(dict(info or {}), _text(internal_id))
         meta.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -397,12 +404,16 @@ def _fix_info_internal_id(folder: Path, internal_id: str) -> str:
     data = json.loads(meta.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"invalid metadata: {meta}")
-    data["internal_id"] = _text(internal_id)
+    data = set_entity_key(data, _text(internal_id))
     meta.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return str(meta)
+
+
+# Legacy name — canonical writer is :func:`_fix_info_entity_key`.
+_fix_info_internal_id = _fix_info_entity_key
 
 
 def apply_stardew_workspace_cleanup(

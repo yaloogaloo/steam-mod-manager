@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from core.models import MOD_TYPE_EXTENSION
 from services.mod_type_catalog import (
     ModTypeCatalog,
     ModTypeCatalogError,
@@ -242,3 +243,76 @@ def test_filter_gone_after_delete(
     catalog.reload()
     assert catalog.get(42, created.type_id) is None
     assert [t.type_id for t in catalog.list_types(42)] == []
+
+
+def test_duplicate_type_name_rejected(catalog: ModTypeCatalog) -> None:
+    first = catalog.add_type(42, MOD_TYPE_EXTENSION)
+    with pytest.raises(ModTypeCatalogError, match="已存在"):
+        catalog.add_type(42, MOD_TYPE_EXTENSION)
+    with pytest.raises(ModTypeCatalogError, match="已存在"):
+        catalog.add_type(42, "拓展")
+    assert catalog.extension_type_id(42) == first.type_id
+    assert len(catalog.list_types(42)) == 1
+
+
+def test_extension_type_id_survives_display_rename(
+    catalog: ModTypeCatalog, db: DatabaseManager
+) -> None:
+    created = catalog.add_type(42, MOD_TYPE_EXTENSION)
+    mod = _seed_mod(db, external_id="801", app_id=42, title="Ext")
+    pk = str(mod.mod_id)
+    db.set_mod_type_id(pk, created.type_id)
+    assert catalog.extension_type_id(42) == created.type_id
+
+    payload = json.loads(catalog.path.read_text(encoding="utf-8"))
+    assert payload["games"]["42"]["extension_type_id"] == created.type_id
+    payload["games"]["42"]["types"][0]["name"] = "扩展"
+    catalog.path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    catalog.reload()
+
+    assert db.get_mod_type_id(pk) == created.type_id
+    assert catalog.resolve_name(42, created.type_id) == "扩展"
+    assert catalog.extension_type_id(42) == created.type_id
+    assert catalog.is_extension_type(42, created.type_id)
+    assert catalog.find_type_by_name(42, "拓展") is None
+
+
+def test_extension_type_id_is_per_game_not_global(catalog: ModTypeCatalog) -> None:
+    other = catalog.add_type(111, "美化")
+    ext_a = catalog.add_type(111, MOD_TYPE_EXTENSION)
+    ext_b = catalog.add_type(222, MOD_TYPE_EXTENSION)
+    assert catalog.extension_type_id(111) == ext_a.type_id
+    assert catalog.extension_type_id(222) == ext_b.type_id
+    assert ext_a.type_id != ext_b.type_id
+    assert not catalog.is_extension_type(111, other.type_id)
+    assert not catalog.is_extension_type(111, ext_b.type_id)
+    assert catalog.is_extension_type(222, ext_b.type_id)
+
+
+def test_extension_type_id_inferred_from_canonical_name(
+    catalog: ModTypeCatalog,
+) -> None:
+    catalog.path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "games": {
+                    "42": {
+                        "types": [
+                            {"id": 3, "name": "美化"},
+                            {"id": 7, "name": "拓展"},
+                        ]
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    catalog.reload()
+    assert catalog.extension_type_id(42) == 7
+    payload = json.loads(catalog.path.read_text(encoding="utf-8"))
+    assert payload["games"]["42"]["extension_type_id"] == 7
+    assert catalog.resolve_name(42, 7) == "拓展"

@@ -51,11 +51,12 @@ def test_steam_importer(db: DatabaseManager) -> None:
 
 
 def test_nexus_importer_multi_file(db: DatabaseManager, tmp_path: Path) -> None:
+    """Files list enrolls archives only (``.zip`` / ``.7z`` / ``.rar``)."""
     folder = tmp_path / "CharacterA"
     folder.mkdir()
-    (folder / "Main.pak").write_bytes(b"M")
-    (folder / "HatAddon.pak").write_bytes(b"H")
-    (folder / "ClothesAddon.pak").write_bytes(b"C")
+    (folder / "Main.zip").write_bytes(b"M")
+    (folder / "HatAddon.zip").write_bytes(b"H")
+    (folder / "ClothesAddon.zip").write_bytes(b"C")
 
     imp = NexusImporter(db=db)
     assert imp.detect("https://www.nexusmods.com/game/mods/999")
@@ -73,7 +74,7 @@ def test_nexus_importer_multi_file(db: DatabaseManager, tmp_path: Path) -> None:
     files = db.get_mod_files(result.mod_id).files
     enabled = [f for f in files if f.enabled]
     assert len(enabled) == 1
-    assert enabled[0].filename == "Main.pak"
+    assert enabled[0].filename == "Main.zip"
 
 
 def test_github_importer(db: DatabaseManager, tmp_path: Path) -> None:

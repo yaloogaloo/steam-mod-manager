@@ -17,7 +17,7 @@ from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.metadata_backup import BACKUP_METADATA_NAME, backup_root
 from services.metadata_backup_sync import drain_backup_queue, sync_after_metadata_change
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 FORBIDDEN_SUFFIXES = (
     ".pak",
@@ -48,13 +48,15 @@ def _assert_backup_tree_allowed(dest: Path) -> None:
         for frag in FORBIDDEN_NAME_FRAGMENTS:
             assert frag not in rel, f"forbidden backup path fragment {frag}: {rel}"
         for suf in FORBIDDEN_SUFFIXES:
+            if rel.startswith("offline/") and suf == ".bin":
+                continue
             assert not name.endswith(suf), f"forbidden backup suffix {suf}: {rel}"
         # Allowed roots: metadata.json, cover.*, offline/**
         if name == BACKUP_METADATA_NAME.lower():
             continue
         if name.startswith("cover."):
             continue
-        if rel.startswith("offline/"):
+        if rel == "offline/index.html" or rel.startswith("offline/"):
             continue
         raise AssertionError(
             f"unexpected backup file (not metadata/cover/offline): {rel}"
@@ -81,37 +83,45 @@ def test_backup_content_contract_allows_only_metadata_cover_offline(
 
     library = tmp_path / "mod"
     folder = library / "GameA" / "ContractMod"
+    folder.mkdir(parents=True)
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": "960001",
-                "title": "Contract Mod",
-                "user_notes": "keep me",
-            }
-        ),
-        encoding="utf-8",
-    )
     (info / "cover.jpg").write_bytes(b"\xff\xd8\xff" + b"cover" * 20)
     offline = info / "offline"
     offline.mkdir()
     (offline / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+    assets = offline / "assets"
+    assets.mkdir()
+    (assets / "all.css").write_text("body{}", encoding="utf-8")
+    (assets / "site.woff").write_bytes(b"WOFF")
+    (assets / "track.blink").write_bytes(b"blink")
+    (assets / "huge.gif").write_bytes(b"GIF89a" + b"x" * 64)
     # Payload that must NEVER be copied into backup.
     (folder / "mod.pak").write_bytes(b"FAKEPAK")
     (folder / "archive.zip").write_bytes(b"FAKEZIP")
     (folder / "payload.bin").write_bytes(b"x" * 64)
 
-    create_steam_test_mod(db, external_id="960001", title="Contract Mod", game_name="GameA")
-    bind_managed_path(db, "960001", folder, title="Contract Mod")
+    created = create_steam_test_mod(
+        db, external_id="960001", title="Contract Mod", game_name="GameA"
+    )
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title="Contract Mod",
+        game_name="GameA",
+        extra={"user_notes": "keep me"},
+    )
 
-    assert sync_after_metadata_change("960001", folder, "import")
+    assert sync_after_metadata_change(pk, folder, "import")
     drain_backup_queue(timeout=5.0)
 
-    dest = backup_root("960001")
+    dest = backup_root(pk)
     assert (dest / BACKUP_METADATA_NAME).is_file()
     assert list(dest.glob("cover.*"))
     assert (dest / "offline" / "index.html").is_file()
+    assert not (dest / "offline" / "assets").exists()
     assert not (dest / "mod.pak").exists()
     assert not (dest / "archive.zip").exists()
     assert not (dest / "payload.bin").exists()

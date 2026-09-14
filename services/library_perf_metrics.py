@@ -122,10 +122,10 @@ class LibraryPerfMetrics:
             self._snap.backup_queue_length = max(0, int(length))
             self._snap.last_event = "backup_queue"
 
-    def record_backup_worker_latency(self, latency_ms: float) -> None:
+    def note(self, key: str, value: Any) -> None:
         with self._lock:
-            self._snap.backup_worker_latency_ms = float(latency_ms)
-            self._snap.last_event = "backup_worker"
+            self._snap.extras[str(key)] = value
+            self._snap.last_event = str(key)
 
 
 _METRICS = LibraryPerfMetrics()

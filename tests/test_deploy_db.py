@@ -164,14 +164,14 @@ def test_steam_upsert_game_preserves_deploy_paths(db: DatabaseManager) -> None:
 
 def test_update_and_get_mod_deploy_status(db: DatabaseManager) -> None:
     db.update_game_deploy_config(50, name="Game", install_path="/g", mod_path="/g/m")
-    create_steam_test_mod(db, external_id="5001", title="Mod A", app_id=50)
+    pk = create_steam_test_mod(db, external_id="5001", title="Mod A", app_id=50).mod_id
 
-    before = db.get_mod_deploy_info(5001)
+    before = db.get_mod_deploy_info(pk)
     assert before is not None
     assert before.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
 
     after = db.update_mod_deploy_status(
-        5001,
+        pk,
         deploy_status=DEPLOY_STATUS_DEPLOYED,
         deploy_path=r"/g/m/ModA",
     )
@@ -179,15 +179,15 @@ def test_update_and_get_mod_deploy_status(db: DatabaseManager) -> None:
     assert after.deploy_path == r"/g/m/ModA"
     assert after.deploy_time
 
-    again = db.get_mod_deploy_info(5001)
+    again = db.get_mod_deploy_info(pk)
     assert again == after
 
 
 def test_steam_upsert_mod_preserves_deploy_status(db: DatabaseManager) -> None:
     db.update_game_deploy_config(77, name="G")
-    create_steam_test_mod(db, external_id="7001", title="T1", app_id=77)
+    pk = create_steam_test_mod(db, external_id="7001", title="T1", app_id=77).mod_id
     db.update_mod_deploy_status(
-        7001,
+        pk,
         deploy_status=DEPLOY_STATUS_DEPLOYED,
         deploy_path="/mods/T1",
         deploy_time="2024-01-01T00:00:00+00:00",
@@ -200,12 +200,12 @@ def test_steam_upsert_mod_preserves_deploy_status(db: DatabaseManager) -> None:
             app_id=77,
         )
     )
-    info = db.get_mod_deploy_info(7001)
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
     assert info.deploy_path == "/mods/T1"
     assert info.deploy_time == "2024-01-01T00:00:00+00:00"
-    meta = db.get_mod(7001)
+    meta = db.get_mod(pk)
     assert meta is not None
     assert meta.title == "T1 Updated"
 

@@ -24,7 +24,7 @@ from services.deploy_rules.manifest import DeployManifest, ManifestFileEntry, lo
 from services.deploy_rules.stardew_valley import STARDEW_VALLEY_APP_ID
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_status import CONTENT_HEALTHY
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 BG3_APP_ID = 1086940
@@ -33,7 +33,7 @@ BG3_APP_ID = 1086940
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "pipeline_integrity.db")
+    manager = DatabaseManager.instance(tmp_path / "pipeline_integrity.db")
     manager.upsert_game(GameInfo(app_id=100, name="SomeGame", folder_name="SomeGame"))
     manager.upsert_game(
         GameInfo(app_id=BG3_APP_ID, name="Baldur's Gate 3", folder_name="BG3")
@@ -48,20 +48,6 @@ def db(tmp_path: Path) -> DatabaseManager:
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
-
-
-def _write_meta(mod_dir: Path, *, mid: str, title: str, app_id: int) -> None:
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "internal_id": "{mid}",\n'
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{title}",\n'
-        f'  "app_id": {app_id}\n'
-        "}\n",
-        encoding="utf-8",
-    )
 
 
 def _make_zip(path: Path, mapping: dict[str, bytes]) -> Path:
@@ -79,14 +65,24 @@ def _register(
     path: str,
     app_id: int = 100,
     title: str = "PipeMod",
-) -> None:
-    create_steam_test_mod(
-        db, external_id=mid, title=title, app_id=app_id, game_name="SomeGame"
+    game_name: str = "SomeGame",
+) -> str:
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=app_id, game_name=game_name
     )
-    bind_managed_path(db, mid, Path(path), game_name="SomeGame", title=title)
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db,
+        Path(path),
+        handle=pk,
+        title=title,
+        app_id=app_id,
+        game_name=game_name,
+    )
     db.update_mod_content_status(
-        mid, content_status=CONTENT_HEALTHY, folder_present=True
+        pk, content_status=CONTENT_HEALTHY, folder_present=True
     )
+    return pk
 
 
 def _set_archive_entry(db: DatabaseManager, mid: str, filename: str) -> None:
@@ -125,11 +121,10 @@ def test_case1_zip_mod_extracts_and_deploys(
         managed / "pack.zip",
         {"mod.dll": b"MZ", "config.ini": b"a=1"},
     )
-    _write_meta(managed, mid="94001", title="ZipMod", app_id=100)
-    _register(db, mid="94001", path=str(managed), title="ZipMod")
-    _set_archive_entry(db, "94001", "pack.zip")
+    pk = _register(db, mid="94001", path=str(managed), title="ZipMod")
+    _set_archive_entry(db, pk, "pack.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("94001")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True, out
     dest = mods / "ZipMod"
     assert (dest / "mod.dll").is_file()
@@ -156,12 +151,11 @@ def test_case2_missing_archive_but_loose_content_allowed(
     managed.mkdir(parents=True)
     (managed / "logic.dll").write_bytes(b"MZDATA")
     (managed / "readme.txt").write_text("ok", encoding="utf-8")
-    _write_meta(managed, mid="94002", title="LooseMod", app_id=100)
-    _register(db, mid="94002", path=str(managed), title="LooseMod")
+    pk = _register(db, mid="94002", path=str(managed), title="LooseMod")
     # DB still lists a zip that is no longer on disk (already extracted).
-    _set_archive_entry(db, "94002", "WASD-781-1-9-8-1758653752.zip")
+    _set_archive_entry(db, pk, "WASD-781-1-9-8-1758653752.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("94002")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True, out
     assert (mods / "LooseMod" / "logic.dll").is_file()
     assert (mods / "LooseMod" / "readme.txt").is_file()
@@ -186,15 +180,14 @@ def test_case3_missing_archive_archives_only_rejected(
     managed.mkdir(parents=True)
     # Leftover unrelated archive; listed source zip is gone.
     _make_zip(managed / "leftover.zip", {"inside.dll": b"MZ"})
-    _write_meta(managed, mid="94003", title="ZipOnly", app_id=100)
-    _register(db, mid="94003", path=str(managed), title="ZipOnly")
-    _set_archive_entry(db, "94003", "WASD-781-1-9-8-1758653752.zip")
+    pk = _register(db, mid="94003", path=str(managed), title="ZipOnly")
+    _set_archive_entry(db, pk, "WASD-781-1-9-8-1758653752.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("94003")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is False, out
     assert "files" not in out or not out.get("files")
     assert load_manifest(managed) is None
-    info = db.get_mod_deploy_info("94003")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status != DEPLOY_STATUS_DEPLOYED
     # Must not copy leftover.zip into game mods as a "successful" deploy.
@@ -218,18 +211,17 @@ def test_case4_copy_failure_not_success(
     managed = library / "SomeGame" / "CopyFail"
     managed.mkdir(parents=True)
     (managed / "a.txt").write_text("a", encoding="utf-8")
-    _write_meta(managed, mid="94004", title="CopyFail", app_id=100)
-    _register(db, mid="94004", path=str(managed), title="CopyFail")
+    pk = _register(db, mid="94004", path=str(managed), title="CopyFail")
 
     with patch(
         "services.deploy_apply.shutil.copy2",
         side_effect=OSError("simulated copy failure"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("94004")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False, out
     assert load_manifest(managed) is None
-    info = db.get_mod_deploy_info("94004")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status != DEPLOY_STATUS_DEPLOYED
 
@@ -250,11 +242,10 @@ def test_case5_missing_manifest_target_not_success(
     managed = library / "SomeGame" / "Ghost"
     managed.mkdir(parents=True)
     (managed / "a.txt").write_text("a", encoding="utf-8")
-    _write_meta(managed, mid="94005", title="Ghost", app_id=100)
-    _register(db, mid="94005", path=str(managed), title="Ghost")
+    pk = _register(db, mid="94005", path=str(managed), title="Ghost")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod("94005")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
@@ -290,13 +281,12 @@ def test_case6_bg3_custom_path_preserves_bin(
             "bin/bink2w64_original.dll": b"DLL2",
         },
     )
-    _write_meta(managed, mid="94006", title="NativeLoader", app_id=BG3_APP_ID)
-    _register(
-        db, mid="94006", path=str(managed), app_id=BG3_APP_ID, title="NativeLoader"
+    pk = _register(
+        db, mid="94006", path=str(managed), app_id=BG3_APP_ID, title="NativeLoader", game_name="Baldur's Gate 3"
     )
-    _set_archive_entry(db, "94006", "loader.zip")
+    _set_archive_entry(db, pk, "loader.zip")
     db.update_mod_user_metadata(
-        94006,
+        pk,
         {
             "display_name": "NativeLoader",
             "custom_description": "",
@@ -306,7 +296,7 @@ def test_case6_bg3_custom_path_preserves_bin(
         },
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("94006")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True, out
     assert (game_root / "bin" / "bink2w64.dll").read_bytes() == b"DLL1"
     assert (game_root / "bin" / "bink2w64_original.dll").read_bytes() == b"DLL2"
@@ -343,19 +333,17 @@ def test_case7_stardew_zip_mod_not_regressed(
         },
     )
     mid = "94007"
-    _write_meta(
-        managed, mid=mid, title="CoolMod", app_id=STARDEW_VALLEY_APP_ID
-    )
-    _register(
+    pk = _register(
         db,
         mid=mid,
         path=str(managed),
         app_id=STARDEW_VALLEY_APP_ID,
         title="CoolMod",
+        game_name="Stardew Valley",
     )
-    _set_archive_entry(db, mid, "CoolMod.zip")
+    _set_archive_entry(db, pk, "CoolMod.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True, out
     assert (mods_dir / "CoolMod" / "manifest.json").is_file()
     assert (mods_dir / "CoolMod" / "CoolMod.dll").is_file()
@@ -377,20 +365,19 @@ def test_case8_failure_rolls_back_backup(
     managed = library / "SomeGame" / "Rollback"
     managed.mkdir(parents=True)
     (managed / "file1.txt").write_text("NEW", encoding="utf-8")
-    _write_meta(managed, mid="94008", title="Rollback", app_id=100)
-    _register(db, mid="94008", path=str(managed), title="Rollback")
+    pk = _register(db, mid="94008", path=str(managed), title="Rollback")
 
     prior = mods / "Rollback" / "file1.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod("94008")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"
     assert load_manifest(managed) is None
-    info = db.get_mod_deploy_info("94008")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
     assert str(info.deploy_error or "").strip()

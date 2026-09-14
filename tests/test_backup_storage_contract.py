@@ -42,7 +42,7 @@ def _bucket_relative_ok(rel_posix: str, name: str) -> bool:
         return True
     if lower_name.startswith("cover.") and "/" not in lower_rel:
         return True
-    if lower_rel.startswith("offline/"):
+    if lower_rel == "offline/index.html" or lower_rel.startswith("offline/"):
         return True
     return False
 
@@ -72,11 +72,28 @@ def test_mod_backup_synthetic_tree_enforces_layout(tmp_path: Path) -> None:
     offline = good / "offline"
     offline.mkdir()
     (offline / "index.html").write_text("<html></html>", encoding="utf-8")
-    (offline / "asset.css").write_text("a{}", encoding="utf-8")
 
     forbidden, layout = _scan_bucket(good)
     assert not forbidden
     assert not layout
+
+    polluted = root / "1003"
+    polluted.mkdir(parents=True)
+    (polluted / "metadata.json").write_text("{}", encoding="utf-8")
+    (polluted / "hash_cache.dat").write_bytes(b"x")
+    _forbidden, layout_polluted = _scan_bucket(polluted)
+    assert any(h.endswith("hash_cache.dat") for h in layout_polluted)
+
+    allowed_assets = root / "1004"
+    allowed_assets.mkdir(parents=True)
+    (allowed_assets / "metadata.json").write_text("{}", encoding="utf-8")
+    assets = allowed_assets / "offline" / "assets"
+    assets.mkdir(parents=True)
+    (assets / "all.css").write_text("body{}", encoding="utf-8")
+    (allowed_assets / "offline" / "index.html").write_text("<html></html>", encoding="utf-8")
+    forbidden_ok, layout_ok = _scan_bucket(allowed_assets)
+    assert not forbidden_ok
+    assert not layout_ok
 
     bad = root / "1002"
     bad.mkdir()

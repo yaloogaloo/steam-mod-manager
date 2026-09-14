@@ -318,7 +318,9 @@ def scan_identity_recovery(
             )
             continue
 
-        info_uuid = _text(payload.get("internal_id"))
+        from services.mod_identity import read_entity_key
+
+        info_uuid = read_entity_key(payload)
         info_ext = _text(payload.get("external_id") or payload.get("published_file_id"))
         info_plat = _text(
             payload.get("platform") or payload.get("source_type")
@@ -328,7 +330,7 @@ def scan_identity_recovery(
         except (TypeError, ValueError):
             info_app = 0
 
-        # Resolve DB entity by internal_id only (UUID column or numeric mod_id)
+        # Resolve DB entity by entity_key / legacy sidecar key → mods.internal_id
         matched: dict[str, Any] | None = None
         if info_uuid:
             uuid_hits = by_uuid.get(info_uuid) or []
@@ -471,14 +473,16 @@ def scan_identity_recovery(
             )
             continue
         payload, info_path = _read_info(p)
-        if payload is None or not _text(payload.get("internal_id")):
+        from services.mod_identity import read_entity_key
+
+        if payload is None or not read_entity_key(payload):
             # Already reported when scanning folders if path under library;
             # still report for paths outside scanned tree.
             if mid not in info_seen_mod_ids:
                 findings.append(
                     _finding(
                         code=DB_WITHOUT_VALID_INFO,
-                        reason="DB path exists but .info missing or lacks internal_id",
+                        reason="DB path exists but .info missing or lacks entity_key",
                         recommended_action=ACTION_RESTORE_INFO_FROM_BACKUP,
                         internal_id=_text(r.get("internal_id")) or mid,
                         app_id=int(r.get("app_id") or 0),
@@ -504,7 +508,9 @@ def scan_identity_recovery(
                     payload = {"_read_error": True}
 
             db_row = by_mod_id.get(folder_name)
-            bak_uuid = _text(payload.get("internal_id"))
+            from services.mod_identity import read_entity_key
+
+            bak_uuid = read_entity_key(payload)
             bak_ws = _text(payload.get("workspace_id"))
             bak_plat = _text(
                 payload.get("platform") or payload.get("source_type")

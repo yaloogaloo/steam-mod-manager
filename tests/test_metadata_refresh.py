@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from unittest.mock import MagicMock
-
 import pytest
 
 from core.db_manager import DatabaseManager
@@ -20,6 +18,7 @@ from services.metadata_refresh import (
     refresh_steam_mods_metadata,
     rename_managed_folder_for_title,
 )
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -30,23 +29,26 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed_failed_mod(lib: Path, *, mid: str = "3413520661") -> Path:
-    folder = lib / "Game" / f"Unknown_Mod_{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": f"Unknown_Mod_{mid}",
-                "fetch_error": "GetPublishedFileDetails timeout",
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+def _seed_failed_mod(
+    lib: Path, db: DatabaseManager, *, workshop: str = "3413520661"
+) -> tuple[Path, str]:
+    """Create Entity + failed-metadata folder. Returns (folder, mods.mod_id PK)."""
+    folder = lib / "Game" / f"Unknown_Mod_{workshop}"
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(
+        db, external_id=workshop, title=f"Unknown_Mod_{workshop}"
     )
-    return folder
+    pk = prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title=f"Unknown_Mod_{workshop}",
+        extra={
+            "fetch_error": "GetPublishedFileDetails timeout",
+            "display_name": f"Unknown_Mod_{workshop}",
+        },
+    )
+    return folder, pk
 
 
 def test_unknown_title_detection() -> None:
@@ -73,17 +75,20 @@ def test_failed_metadata_retries_successfully(
     db: DatabaseManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lib = tmp_path / "library"
-    folder = _seed_failed_mod(lib)
-    mid = "3413520661"
+    # Align with conftest isolated library root (Path Lifecycle).
+    lib = tmp_path / "_smm_isolate_mod"
+    workshop = "3413520661"
+    folder, pk = _seed_failed_mod(lib, db, workshop=workshop)
 
     fresh = ModMetadata(
-        published_file_id=mid,
+        published_file_id=workshop,
         title="Cool Workshop Mod",
         description="A real description",
         preview_url="https://example.com/cover.jpg",
         time_updated=1700000000,
-        app_id=123,
+        # Keep app_id=0 so refresh does not UPDATE mods.app_id to an
+        # unseeded games FK (test seeds Entity with default app_id=0).
+        app_id=0,
     )
 
     def fake_refresh(self, ids, **kwargs):
@@ -103,7 +108,7 @@ def test_failed_metadata_retries_successfully(
     monkeypatch.setattr(SteamWorkshopClient, "fetch_and_save_cover", fake_cover)
 
     result = refresh_steam_mod_metadata(
-        mid, folder, library_root=lib, force=False, download_cover=True
+        pk, folder, library_root=lib, force=False, download_cover=True, db=db
     )
     assert result.success is True
     assert result.skipped is False
@@ -135,11 +140,12 @@ def test_cover_updated_on_refresh(
     db: DatabaseManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lib = tmp_path / "library"
-    folder = _seed_failed_mod(lib, mid="99")
+    lib = tmp_path / "_smm_isolate_mod"
+    workshop = "99"
+    folder, pk = _seed_failed_mod(lib, db, workshop=workshop)
 
     fresh = ModMetadata(
-        published_file_id="99",
+        published_file_id=workshop,
         title="Cover Mod",
         preview_url="https://example.com/a.png",
     )
@@ -157,7 +163,9 @@ def test_cover_updated_on_refresh(
 
     monkeypatch.setattr(SteamWorkshopClient, "fetch_and_save_cover", fake_cover)
 
-    result = refresh_steam_mod_metadata("99", folder, library_root=lib)
+    result = refresh_steam_mod_metadata(
+        pk, folder, library_root=lib, db=db
+    )
     assert result.success
     assert result.cover_path
     assert Path(result.cover_path).is_file() or (
@@ -170,16 +178,18 @@ def test_batch_skips_healthy_and_dedupes_requests(
     db: DatabaseManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    lib = tmp_path / "library"
-    failed = _seed_failed_mod(lib, mid="111")
+    lib = tmp_path / "_smm_isolate_mod"
+    failed, pk_failed = _seed_failed_mod(lib, db, workshop="111")
     healthy_folder = lib / "Game" / "Healthy Mod"
-    (healthy_folder / INFO_DIR_NAME).mkdir(parents=True)
-    (healthy_folder / INFO_DIR_NAME / "metadata.json").write_text(
-        json.dumps(
-            {"published_file_id": "222", "title": "Healthy Mod"},
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    healthy_folder.mkdir(parents=True, exist_ok=True)
+    created_ok = create_steam_test_mod(
+        db, external_id="222", title="Healthy Mod"
+    )
+    pk_ok = prove_managed_folder(
+        db,
+        healthy_folder,
+        handle=created_ok.mod_id,
+        title="Healthy Mod",
     )
 
     fetch_ids: list[list[str]] = []
@@ -197,12 +207,12 @@ def test_batch_skips_healthy_and_dedupes_requests(
         lambda *a, **k: None,
     )
 
-    # Duplicate 111 should collapse to one network call.
+    # Duplicate failed PK should collapse to one network call.
     results = refresh_steam_mods_metadata(
         [
-            ("111", failed),
-            ("222", healthy_folder),
-            ("111", failed),
+            (pk_failed, failed),
+            (pk_ok, healthy_folder),
+            (pk_failed, failed),
         ],
         library_root=lib,
         max_workers=2,
@@ -210,12 +220,11 @@ def test_batch_skips_healthy_and_dedupes_requests(
     )
     assert len(results) == 2
     by_id = {r.mod_id: r for r in results}
-    assert by_id["222"].skipped is True
-    assert by_id["111"].success is True
-    assert by_id["111"].skipped is False
-    # Only the failed id was fetched; once.
+    assert by_id[pk_ok].skipped is True
+    assert by_id[pk_failed].success is True
+    assert by_id[pk_failed].skipped is False
+    # Steam API still receives Workshop ID from the Entity row — once.
     assert fetch_ids == [["111"]]
-
 
 def test_rename_collision_handled(tmp_path: Path) -> None:
     lib = tmp_path / "library"

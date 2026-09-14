@@ -8,9 +8,8 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from services.deploy import ModDeployer
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.deploy_path_audit import (
     CUSTOM_DEPLOY_PATH_MISSING,
     GAME_CONFIG_PATH_MISSING,
@@ -24,9 +23,7 @@ from services.deploy_path_audit import (
     reset_path_repair_history,
 )
 from services.deploy_path_lifecycle import CUSTOM_DEPLOY_PATH_MISSING as _CDM
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 
-# Re-export sanity — audit module imports codes from lifecycle.
 assert CUSTOM_DEPLOY_PATH_MISSING == _CDM
 
 ANNO = 916440
@@ -51,7 +48,7 @@ def _seed_bg3_mod(
     install: Path,
     mods: Path,
     custom: str = "",
-) -> Path:
+) -> tuple[Path, str]:
     install.mkdir(parents=True, exist_ok=True)
     mods.mkdir(parents=True, exist_ok=True)
     db.upsert_game(
@@ -67,25 +64,17 @@ def _seed_bg3_mod(
     folder = library / "Baldurs Gate 3" / f"Mod_{mid}"
     folder.mkdir(parents=True)
     (folder / "payload.bin").write_bytes(b"x")
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"internal_id": "{mid}", "app_id": {BG3}, "title": "Mod_{mid}"}}',
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mid, title=f"Mod_{mid}", app_id=BG3, game_name="Baldurs Gate 3"
     )
-    create_steam_test_mod(db, external_id=mid, title=f"Mod_{mid}", app_id=BG3, game_name="Baldurs Gate 3")
-    bind_managed_path(db, mid, folder, title=f"Mod_{mid}")
-
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=mid,
-        workspace_id="14717",
-        last_known_path=str(folder.resolve()),
-        folder_present=True,
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db, folder, handle=pk, title=f"Mod_{mid}", app_id=BG3, game_name="Baldurs Gate 3"
     )
+    db.update_mod_identity_fields(pk, workspace_id="14717")
     if custom:
-        db.update_mod_user_metadata(mid, {"custom_deploy_path": custom})
-    return folder
+        db.update_mod_user_metadata(pk, {"custom_deploy_path": custom})
+    return folder, pk
 
 
 def test_case1_clear_stale_custom_inherits_game_mod_path(
@@ -98,7 +87,7 @@ def test_case1_clear_stale_custom_inherits_game_mod_path(
     stale_custom = (
         tmp_path / "D_SteamLibrary" / "steamapps" / "common" / "Baldurs Gate 3" / "Mods"
     )
-    folder = _seed_bg3_mod(
+    folder, pk = _seed_bg3_mod(
         db, library, mid="1339", install=install, mods=mods, custom=str(stale_custom)
     )
     assert folder.is_dir()
@@ -108,17 +97,16 @@ def test_case1_clear_stale_custom_inherits_game_mod_path(
     customs = [
         f
         for f in report.findings
-        if f.path_field == "custom_deploy_path" and f.internal_id == "1339"
+        if f.path_field == "custom_deploy_path" and f.internal_id == pk
     ]
     assert len(customs) == 1
     assert customs[0].error_code == CUSTOM_DEPLOY_PATH_MISSING
     assert customs[0].app_id == BG3
 
-    before_id = "1339"
     result = repair_deploy_path(
         action=REPAIR_CLEAR_CUSTOM,
         db=db,
-        internal_id="1339",
+        internal_id=pk,
     )
     assert result.success
     assert result.record is not None
@@ -127,16 +115,14 @@ def test_case1_clear_stale_custom_inherits_game_mod_path(
     assert result.record.timestamp
     assert result.still_missing is False
 
-    display = db.get_mod_display_info("1339")
+    display = db.get_mod_display_info(pk)
     assert display is not None
     assert (display.custom_deploy_path or "").strip() == ""
-    # Identity unchanged (lookup still by internal_id / PK).
-    assert db.get_mod(before_id) is not None
+    assert db.get_mod(pk) is not None
 
-    # Deploy resolve now uses live game.mod_path (no custom override).
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        "1339", require_target_exists=True, prepare_archives=False
+        pk, require_target_exists=True, prepare_archives=False
     )
     assert err is None
     assert ctx is not None
@@ -144,7 +130,7 @@ def test_case1_clear_stale_custom_inherits_game_mod_path(
     assert Path(ctx.config.mod_path).resolve() == mods.resolve()
 
     leftover = reaudit_after_repair(
-        db=db, internal_id="1339", path_field="custom_deploy_path"
+        db=db, internal_id=pk, path_field="custom_deploy_path"
     )
     assert leftover == []
 
@@ -159,8 +145,7 @@ def test_case2_game_mod_path_stale_repair_revalidates(
     stale_mods = (
         tmp_path / "D_SteamLibrary" / "steamapps" / "common" / "Baldurs Gate 3" / "Mods"
     )
-    _seed_bg3_mod(db, library, mid="1340", install=install, mods=live_mods)
-    # Point config at missing D: path after seed.
+    _folder, pk = _seed_bg3_mod(db, library, mid="1340", install=install, mods=live_mods)
     db.update_game_deploy_config(
         BG3,
         install_path=str(install),
@@ -207,7 +192,7 @@ def test_case2_game_mod_path_stale_repair_revalidates(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        "1340", require_target_exists=True, prepare_archives=False
+        pk, require_target_exists=True, prepare_archives=False
     )
     assert err is None
     assert ctx is not None
@@ -221,54 +206,54 @@ def test_case3_repair_does_not_modify_internal_id(
     install = tmp_path / "F" / "Baldurs Gate 3"
     mods = install / "Mods"
     stale = tmp_path / "D" / "old" / "custom"
-    _seed_bg3_mod(
+    _folder, pk = _seed_bg3_mod(
         db, library, mid="1341", install=install, mods=mods, custom=str(stale)
     )
-    # Force UUID-like internal_id column distinct from PK display token.
-    import sqlite3
-
+    frozen = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET internal_id = ? WHERE mod_id = ?",
-            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1341),
+            (frozen, int(pk)),
         )
         db._conn.commit()
 
     before = db._conn.execute(
-        "SELECT mod_id, internal_id, workspace_id FROM mods WHERE mod_id = 1341"
+        "SELECT mod_id, internal_id, workspace_id FROM mods WHERE mod_id = ?",
+        (int(pk),),
     ).fetchone()
-    assert str(before["internal_id"]) == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert str(before["internal_id"]) == frozen
     assert str(before["workspace_id"]) == "14717"
 
     result = repair_deploy_path(
-        action=REPAIR_CLEAR_CUSTOM, db=db, internal_id="1341"
+        action=REPAIR_CLEAR_CUSTOM, db=db, internal_id=pk
     )
     assert result.success
 
     after = db._conn.execute(
         "SELECT mod_id, internal_id, workspace_id, custom_deploy_path "
-        "FROM mods WHERE mod_id = 1341"
+        "FROM mods WHERE mod_id = ?",
+        (int(pk),),
     ).fetchone()
-    assert int(after["mod_id"]) == 1341
-    assert str(after["internal_id"]) == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert str(after["mod_id"]) == pk
+    assert str(after["internal_id"]) == frozen
     assert str(after["workspace_id"]) == "14717"
     assert str(after["custom_deploy_path"] or "") == ""
 
-    # Explicit custom update also preserves identity.
     live_custom = mods / "ArmoryOverride"
     live_custom.mkdir(parents=True)
     result2 = repair_deploy_path(
         action=REPAIR_UPDATE_CUSTOM,
         db=db,
-        internal_id="1341",
+        internal_id=pk,
         new_path=str(live_custom),
     )
     assert result2.success
     after2 = db._conn.execute(
-        "SELECT mod_id, internal_id, workspace_id FROM mods WHERE mod_id = 1341"
+        "SELECT mod_id, internal_id, workspace_id FROM mods WHERE mod_id = ?",
+        (int(pk),),
     ).fetchone()
-    assert int(after2["mod_id"]) == 1341
-    assert str(after2["internal_id"]) == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert str(after2["mod_id"]) == pk
+    assert str(after2["internal_id"]) == frozen
     assert str(after2["workspace_id"]) == "14717"
 
 
@@ -279,17 +264,17 @@ def test_ignore_records_without_mutation(
     install = tmp_path / "F" / "Baldurs Gate 3"
     mods = install / "Mods"
     stale = tmp_path / "D" / "gone"
-    _seed_bg3_mod(
+    _folder, pk = _seed_bg3_mod(
         db, library, mid="1342", install=install, mods=mods, custom=str(stale)
     )
-    before = db.get_mod_display_info("1342")
+    before = db.get_mod_display_info(pk)
     assert before is not None
     before_path = (before.custom_deploy_path or "").strip()
 
     result = repair_deploy_path(
         action=REPAIR_IGNORE,
         db=db,
-        internal_id="1342",
+        internal_id=pk,
         path_field="custom_deploy_path",
     )
     assert result.success
@@ -299,7 +284,7 @@ def test_ignore_records_without_mutation(
     assert result.record.after_path == before_path
     assert result.record.timestamp
 
-    after = db.get_mod_display_info("1342")
+    after = db.get_mod_display_info(pk)
     assert after is not None
     assert (after.custom_deploy_path or "").strip() == before_path
 
@@ -319,7 +304,6 @@ def test_audit_skips_relative_and_empty_paths(
         f.path_field not in ("install_path", "mod_path") or f.app_id != BG3
         for f in report.findings
     )
-    # Relative install must not be reported (Phase 2 scope: absolute only).
     assert not any(
         f.app_id == BG3 and f.path_field == "install_path" for f in report.findings
     )

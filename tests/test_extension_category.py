@@ -114,8 +114,8 @@ def _bind_named_type(db: DatabaseManager, pk: str, app_id: int, name: str):
     return created
 
 
-def _show(panel: ModDetailPanel, folder: Path, pk: str) -> None:
-    panel.resize(420, 900)
+def _show(panel: ModDetailPanel, folder: Path, pk: str, *, width: int = 420) -> None:
+    panel.resize(width, 900)
     panel.show()
     panel.show_mod(folder, mod_id=pk, game_id=100, game_name="SomeGame")
     QApplication.processEvents()
@@ -133,15 +133,44 @@ def _rich_and_category(panel: ModDetailPanel) -> tuple[str, str, bool]:
     return rich, cat, shown
 
 
-def _rich_needed_height(label, *, min_width: int = 360) -> int:
+def _rich_needed_height(label) -> int:
     from PySide6.QtGui import QTextDocument
 
+    width = int(label.contentsRect().width() or label.width() or 0)
+    if width <= 0:
+        width = 360
     doc = QTextDocument()
     doc.setDefaultFont(label.font())
     doc.setDocumentMargin(0)
     doc.setHtml(str(label.text() or ""))
-    doc.setTextWidth(max(int(label.width() or 0), min_width))
+    doc.setTextWidth(width)
     return int(doc.size().height())
+
+
+def _assert_category_geometry_visible(panel: ModDetailPanel, expected: str) -> None:
+    rich, cat, visible = _rich_and_category(panel)
+    assert visible is True
+    assert cat == f"分类：{expected}"
+    needed = _rich_needed_height(panel.meta_rich_label)
+    assert needed <= panel.meta_rich_label.height() + 2
+    assert panel.meta_rich_label.height() <= panel.meta_rich_label.maximumHeight()
+
+
+def _rename_type_display_name(app_id: int, type_id: int, new_name: str) -> None:
+    catalog = get_mod_type_catalog()
+    payload = json.loads(catalog.path.read_text(encoding="utf-8"))
+    game = payload["games"][str(app_id)]
+    for item in game["types"]:
+        if int(item["id"]) == int(type_id):
+            item["name"] = new_name
+            break
+    else:
+        raise AssertionError(f"type_id={type_id} missing for app_id={app_id}")
+    catalog.path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    catalog.reload()
 
 
 def test_extension_category_shows_without_original_name(
@@ -212,25 +241,26 @@ def test_extension_category_not_clipped_when_original_name_present(
     assert needed <= panel.meta_rich_label.height() + 2
     assert needed <= panel.meta_rich_label.maximumHeight()
     assert panel.meta_rich_label.height() <= panel.meta_rich_label.maximumHeight()
-    assert visible_extension_category("拓展", "") == ""
-    assert visible_extension_category("拓展", "   ") == ""
-    assert visible_extension_category("拓展", "动画") == "动画"
-    assert visible_extension_category("拓展", "UI") == "UI"
-    assert visible_extension_category("普通", "动画") == ""
-    assert visible_extension_category("普通", "") == ""
-    assert visible_extension_category("", "动画") == ""
-    assert visible_extension_category(None, "动画") == ""
 
 
-def test_visible_extension_category_helper() -> None:
-    assert visible_extension_category("拓展", "") == ""
-    assert visible_extension_category("拓展", "   ") == ""
-    assert visible_extension_category("拓展", "动画") == "动画"
-    assert visible_extension_category("拓展", "UI") == "UI"
-    assert visible_extension_category("普通", "动画") == ""
-    assert visible_extension_category("普通", "") == ""
-    assert visible_extension_category("", "动画") == ""
-    assert visible_extension_category(None, "动画") == ""
+def test_visible_extension_category_uses_type_id_not_name() -> None:
+    catalog = get_mod_type_catalog()
+    ext = catalog.add_type(100, MOD_TYPE_EXTENSION)
+    other = catalog.add_type(100, "美化")
+    assert visible_extension_category("", app_id=100, type_id=ext.type_id) == ""
+    assert visible_extension_category("   ", app_id=100, type_id=ext.type_id) == ""
+    assert visible_extension_category("动画", app_id=100, type_id=ext.type_id) == "动画"
+    assert visible_extension_category("UI", app_id=100, type_id=ext.type_id) == "UI"
+    assert visible_extension_category("动画", app_id=100, type_id=other.type_id) == ""
+    assert visible_extension_category("动画", app_id=100, type_id=None) == ""
+    assert visible_extension_category("动画", app_id=0, type_id=ext.type_id) == ""
+
+    _rename_type_display_name(100, ext.type_id, "扩展")
+    assert catalog.resolve_name(100, ext.type_id) == "扩展"
+    assert catalog.extension_type_id(100) == ext.type_id
+    assert catalog.find_type_by_name(100, "拓展") is None
+    assert visible_extension_category("动画", app_id=100, type_id=ext.type_id) == "动画"
+    assert visible_extension_category("动画", app_id=100, type_id=other.type_id) == ""
 
 
 def test_default_extension_hides_empty_category(
@@ -435,10 +465,17 @@ def test_type_switch_hides_then_restores_category(
 
 
 def test_edit_dialog_category_only_for_extension(qapp: QApplication) -> None:
+    catalog = get_mod_type_catalog()
+    ext_type = catalog.add_type(100, MOD_TYPE_EXTENSION)
+    other_type = catalog.add_type(100, "美化")
     ext = EditModDialog(
         mod_id="1",
-        mod_type_id=1,
-        type_options=[(1, MOD_TYPE_EXTENSION), (2, "美化")],
+        game_id=100,
+        mod_type_id=ext_type.type_id,
+        type_options=[
+            (ext_type.type_id, catalog.resolve_name(100, ext_type.type_id)),
+            (other_type.type_id, "美化"),
+        ],
         category="动画",
         description="介绍正文",
     )
@@ -446,23 +483,27 @@ def test_edit_dialog_category_only_for_extension(qapp: QApplication) -> None:
     assert ext.category_edit.text() == "动画"
     assert ext.values()["category"] == "动画"
     assert ext.values()["mod_type"] == MOD_TYPE_EXTENSION
-    assert ext.values()["type_id"] == 1
+    assert ext.values()["type_id"] == ext_type.type_id
 
-    ext.type_combo.setCurrentIndex(ext.type_combo.findData(2))
+    ext.type_combo.setCurrentIndex(ext.type_combo.findData(other_type.type_id))
     QApplication.processEvents()
     assert ext.category_edit.isHidden()
     assert ext.values()["category"] == "动画"
-    assert ext.values()["type_id"] == 2
+    assert ext.values()["type_id"] == other_type.type_id
 
     other = EditModDialog(
         mod_id="2",
-        mod_type_id=2,
-        type_options=[(1, MOD_TYPE_EXTENSION), (2, "美化")],
+        game_id=100,
+        mod_type_id=other_type.type_id,
+        type_options=[
+            (ext_type.type_id, catalog.resolve_name(100, ext_type.type_id)),
+            (other_type.type_id, "美化"),
+        ],
         category="动画",
     )
     assert other.category_edit.isHidden()
     assert other.values()["category"] == "动画"
-    assert other.values()["type_id"] == 2
+    assert other.values()["type_id"] == other_type.type_id
 
 
 def test_category_shares_name_row_geometry(
@@ -547,3 +588,214 @@ def test_long_category_stays_in_name_block(
     assert panel.meta_rich_label.y() + panel.meta_rich_label.height() <= (
         panel.meta_desc_frame.y()
     )
+
+
+def test_renaming_type_name_does_not_hide_category(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    folder, pk = _seed(
+        tmp_path / "lib",
+        db,
+        external_id="88120",
+        title="RenameType",
+        description="介绍正文",
+    )
+    created = _bind_named_type(db, pk, 100, MOD_TYPE_EXTENSION)
+    type_id = created.type_id
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "",
+            "custom_description": "介绍正文",
+            "user_notes": "",
+            "favorite": False,
+            "category": "动画",
+        },
+    )
+    catalog = get_mod_type_catalog()
+    assert catalog.extension_type_id(100) == type_id
+    assert db.get_mod_type_id(pk) == type_id
+
+    panel = ModDetailPanel()
+    _show(panel, folder, pk)
+    _assert_category_geometry_visible(panel, "动画")
+
+    _rename_type_display_name(100, type_id, "扩展")
+    assert db.get_mod_type_id(pk) == type_id
+    assert catalog.resolve_name(100, type_id) == "扩展"
+    assert catalog.extension_type_id(100) == type_id
+    assert catalog.find_type_by_name(100, "拓展") is None
+
+    panel.show_mod(folder, mod_id=pk, game_id=100, game_name="SomeGame")
+    QApplication.processEvents()
+    _assert_category_geometry_visible(panel, "动画")
+    assert db.get_mod_type_id(pk) == type_id
+    panel.close()
+
+
+def test_edit_dialog_category_follows_type_id_after_rename(qapp: QApplication) -> None:
+    catalog = get_mod_type_catalog()
+    ext_type = catalog.add_type(100, MOD_TYPE_EXTENSION)
+    other_type = catalog.add_type(100, "美化")
+    _rename_type_display_name(100, ext_type.type_id, "扩展")
+    assert catalog.resolve_name(100, ext_type.type_id) == "扩展"
+    dlg = EditModDialog(
+        mod_id="3",
+        game_id=100,
+        mod_type_id=ext_type.type_id,
+        type_options=[
+            (ext_type.type_id, "扩展"),
+            (other_type.type_id, "美化"),
+        ],
+        category="动画",
+    )
+    assert dlg.values()["mod_type"] == "扩展"
+    assert dlg.values()["type_id"] == ext_type.type_id
+    assert not dlg.category_edit.isHidden()
+
+
+def test_extension_category_is_per_game_type_id(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    catalog = get_mod_type_catalog()
+    other_game = catalog.add_type(200, "美化")
+    ext_other = catalog.add_type(200, MOD_TYPE_EXTENSION)
+    ext_here = catalog.add_type(100, MOD_TYPE_EXTENSION)
+    assert catalog.extension_type_id(100) == ext_here.type_id
+    assert catalog.extension_type_id(200) == ext_other.type_id
+    assert catalog.is_extension_type(100, ext_here.type_id)
+    assert catalog.is_extension_type(200, ext_other.type_id)
+    assert not catalog.is_extension_type(200, other_game.type_id)
+    assert not catalog.is_extension_type(200, ext_here.type_id)
+
+    folder, pk = _seed(
+        tmp_path / "lib",
+        db,
+        external_id="88121",
+        title="OtherGameType",
+        description="介绍正文",
+    )
+    db.set_mod_type_id(pk, ext_other.type_id)
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "",
+            "custom_description": "介绍正文",
+            "user_notes": "",
+            "favorite": False,
+            "category": "动画",
+        },
+    )
+    panel = ModDetailPanel()
+    _show(panel, folder, pk)
+    rich, _cat, visible = _rich_and_category(panel)
+    assert visible is False
+    assert "分类" not in rich
+    panel.close()
+
+
+def test_resize_keeps_category_visible_wide_and_narrow(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    folder, pk = _seed(
+        tmp_path / "lib",
+        db,
+        external_id="88122",
+        title="Secret Society Enhanced Mod",
+        display_name="秘密结社增强模组",
+        description="介绍正文",
+    )
+    _bind_named_type(db, pk, 100, MOD_TYPE_EXTENSION)
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "秘密结社增强模组",
+            "custom_description": "介绍正文",
+            "user_notes": "",
+            "favorite": False,
+            "category": "动画",
+        },
+    )
+    panel = ModDetailPanel()
+    _show(panel, folder, pk, width=720)
+    _assert_category_geometry_visible(panel, "动画")
+    assert "<b>原名：</b>" in (panel.meta_rich_label.text() or "")
+
+    panel.resize(240, 900)
+    QApplication.processEvents()
+    _assert_category_geometry_visible(panel, "动画")
+    panel.close()
+
+
+def test_narrow_width_original_name_and_category(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    folder, pk = _seed(
+        tmp_path / "lib",
+        db,
+        external_id="88123",
+        title="Original English Title",
+        display_name="显示名称",
+        description="介绍正文",
+    )
+    _bind_named_type(db, pk, 100, MOD_TYPE_EXTENSION)
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "显示名称",
+            "custom_description": "介绍正文",
+            "user_notes": "",
+            "favorite": False,
+            "category": "动画",
+        },
+    )
+    panel = ModDetailPanel()
+    _show(panel, folder, pk, width=240)
+    _assert_category_geometry_visible(panel, "动画")
+    assert "<b>原名：</b>" in (panel.meta_rich_label.text() or "")
+    panel.close()
+
+
+def test_original_name_and_long_category_geometry(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    long_cat = "动画扩展分类标记" * 6
+    folder, pk = _seed(
+        tmp_path / "lib",
+        db,
+        external_id="88124",
+        title="Original English Title",
+        display_name="显示名称",
+        description="介绍正文",
+    )
+    _bind_named_type(db, pk, 100, MOD_TYPE_EXTENSION)
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "显示名称",
+            "custom_description": "介绍正文",
+            "user_notes": "",
+            "favorite": False,
+            "category": long_cat,
+        },
+    )
+    panel = ModDetailPanel()
+    _show(panel, folder, pk)
+    _assert_category_geometry_visible(panel, long_cat)
+    panel.close()
+
+
+def test_no_category_has_no_extra_blank_after_resize(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    folder, pk = _seed(tmp_path / "lib", db, external_id="88125", title="NoCatResize")
+    _bind_named_type(db, pk, 100, MOD_TYPE_EXTENSION)
+    panel = ModDetailPanel()
+    _show(panel, folder, pk, width=720)
+    assert "<b>分类：</b>" not in (panel.meta_rich_label.text() or "")
+    assert panel.meta_rich_label.height() < 80
+    panel.resize(240, 900)
+    QApplication.processEvents()
+    assert "<b>分类：</b>" not in (panel.meta_rich_label.text() or "")
+    assert panel.meta_rich_label.height() < 80
+    panel.close()

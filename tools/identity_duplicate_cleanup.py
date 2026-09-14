@@ -159,6 +159,8 @@ def _quarantine_entry(folder: Path) -> dict[str, Any]:
         app_id = int((info or {}).get("app_id") or 0)
     except (TypeError, ValueError):
         app_id = 0
+    from services.mod_identity import read_entity_key
+
     return {
         "path": str(folder.resolve()),
         "quarantine_root": str(folder.parents[1].resolve())
@@ -169,7 +171,8 @@ def _quarantine_entry(folder: Path) -> dict[str, Any]:
         "app_id": app_id,
         "workspace_id": _text((info or {}).get("workspace_id")),
         "title": _text((info or {}).get("title") or (info or {}).get("display_name")),
-        "internal_id": _text((info or {}).get("internal_id")),
+        # Report: filesystem binding (entity_key / legacy sidecar key).
+        "internal_id": read_entity_key(info or {}),
         "pollution_dirname": bool(POLLUTION_DIR_RE.match(folder.name)),
     }
 
@@ -307,7 +310,9 @@ def verify_cleanup(*, library: Path, db_path: Path, audit_out: Path) -> dict[str
         if app_id > 0 and ws:
             by_key[(app_id, ws)].append(str(folder.resolve()))
 
-        info_iid = _text((info or {}).get("internal_id"))
+        from services.mod_identity import read_entity_key
+
+        info_iid = read_entity_key(info or {})
         # Identity pollution only — folder-name suffixes are cosmetic, not IDs.
         if POLLUTION_ID_RE.match(info_iid):
             pollution_hits.append(f"info:{folder}:{info_iid}")

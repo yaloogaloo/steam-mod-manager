@@ -19,7 +19,7 @@ from services.mod_library_cache import (
     get_library_cache,
     reset_library_cache,
 )
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from ui.library_query import (
     FILTER_ALL,
     FILTER_CONTENT_MISSING,
@@ -47,36 +47,36 @@ def qapp() -> QApplication:
     return app
 
 
-def _seed(root: Path, db: DatabaseManager, count: int) -> None:
+def _seed(root: Path, db: DatabaseManager, count: int) -> list[str]:
+    from tests.helpers.identity import prove_managed_folder
+
     game = root / "PerfGame"
+    pks: list[str] = []
     for i in range(count):
-        mid = str(600000 + i)
-        folder = game / f"Mod{i:04d}"
-        info = folder / INFO_DIR_NAME
-        info.mkdir(parents=True)
-        (info / METADATA_FILENAME).write_text(
-            json.dumps(
-                {
-                    "internal_id": mid,
-                    "published_file_id": mid,
-                    "title": f"Perf Mod {i}",
-                    "game_name": "PerfGame",
-                    "description": f"desc {i}",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        workshop = str(600000 + i)
+        created = create_steam_test_mod(
+            db, external_id=workshop, title=f"Perf Mod {i}", game_name="PerfGame"
         )
+        pk = str(created.mod_id)
+        folder = game / f"Mod{i:04d}"
+        folder.mkdir(parents=True, exist_ok=True)
         (folder / "payload.bin").write_bytes(b"x" * 32)
+        prove_managed_folder(
+            db,
+            folder,
+            handle=pk,
+            title=f"Perf Mod {i}",
+            game_name="PerfGame",
+            extra={"description": f"desc {i}", "published_file_id": workshop},
+        )
+        info = folder / INFO_DIR_NAME
         if i % 17 == 0:
             (info / "cover.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 64)
-        create_steam_test_mod(
-            db, external_id=mid, title=f"Perf Mod {i}", game_name="PerfGame"
-        )
-        bind_managed_path(db, mid, folder, game_name="PerfGame", title=f"Perf Mod {i}")
-        db.update_mod_content_status(mid, content_status="healthy", folder_present=True)
+        db.update_mod_content_status(pk, content_status="healthy", folder_present=True)
         if i % 11 == 0:
-            db.update_mod_user_metadata(mid, {"favorite": True})
+            db.update_mod_user_metadata(pk, {"favorite": True})
+        pks.append(pk)
+    return pks
 
 
 def _make_db(tmp_path: Path, name: str) -> DatabaseManager:
@@ -195,11 +195,11 @@ def test_baseline_filter_search_memory(tmp_path: Path, n: int) -> None:
 def test_baseline_detail_open(qapp: QApplication, tmp_path: Path) -> None:
     db = _make_db(tmp_path, "detail.db")
     lib = tmp_path / "library"
-    _seed(lib, db, 20)
+    pks = _seed(lib, db, 20)
     folder = lib / "PerfGame" / "Mod0000"
     panel = ModDetailPanel()
     t0 = time.perf_counter()
-    panel.show_mod(folder, mod_id="600000")
+    panel.show_mod(folder, mod_id=pks[0])
     qapp.processEvents()
     elapsed = time.perf_counter() - t0
     print(f"\n[PERF] detail_open={elapsed:.4f}s")

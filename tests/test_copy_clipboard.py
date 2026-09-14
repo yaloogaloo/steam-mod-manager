@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,9 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from core.db_manager import PLATFORM_NEXUS, DatabaseManager
+from core.game_info import GameInfo
 from core.mod_platform import ModFileEntry, ModFilesBundle
+from tests.helpers.identity import prove_managed_folder
 from ui.mod_detail_panel import ModDetailPanel
 from ui.platform_labels import format_mod_info_clipboard
 
@@ -29,25 +30,11 @@ def qapp() -> QApplication:
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     manager = DatabaseManager.instance(tmp_path / "clip.db")
+    manager.upsert_game(
+        GameInfo(app_id=1623730, name="Palworld", folder_name="Palworld")
+    )
     yield manager
     DatabaseManager.reset_instance()
-
-
-def _mod_folder(root: Path, *, pub_id: str, title: str) -> Path:
-    folder = root / "Palworld" / title
-    info = folder / ".info"
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": pub_id,
-                "title": title,
-                "game_name": "Palworld",
-            }
-        ),
-        encoding="utf-8",
-    )
-    return folder
 
 
 def test_format_mod_info_clipboard_phase6() -> None:
@@ -87,12 +74,30 @@ def test_copy_buttons_and_clipboard(
         source_url="https://www.nexusmods.com/palworld/mods/336",
         title="Pal Analyzer",
         mod_files=bundle,
-            app_id=1623730,
+        app_id=1623730,
         game_name="Palworld",
-)
-    folder = _mod_folder(tmp_path, pub_id=info.mod_id, title="Pal Analyzer")
+    )
+    pk = str(info.mod_id)
+    folder = tmp_path / "Palworld" / "Pal Analyzer"
+    folder.mkdir(parents=True)
+    (folder / "main.zip").write_bytes(b"z")
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title="Pal Analyzer",
+        app_id=1623730,
+        game_name="Palworld",
+        platform=PLATFORM_NEXUS,
+        extra={
+            "url": "https://www.nexusmods.com/palworld/mods/336",
+            "source_type": PLATFORM_NEXUS,
+        },
+    )
+
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=pk)
+    qapp.processEvents()
 
     assert panel.btn_copy_name.text() == "复制"
     assert panel.btn_copy_id.text() == "复制"

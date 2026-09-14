@@ -10,7 +10,7 @@ from typing import Any
 from core.mod_platform import PLATFORM_STEAM, normalize_platform, parse_metadata_platform
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, read_info_metadata_dict
-from services.metadata_backup import load_backup
+from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root, load_backup
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +181,10 @@ class ModMetadataResolver:
             # Detail / resolver require caller-supplied internal_id — no path invent.
             return None
         # Bound folder must prove the same entity when .info is present.
-        proof = _first_text(info.get("internal_id"))
+        # entity_key == Entity.internal_id (filesystem binding, not a third Mod ID).
+        from services.mod_identity import read_entity_key
+
+        proof = read_entity_key(info)
         if proof:
             from services.mod_identity import ensure_mod_identity
 
@@ -429,10 +432,21 @@ class ModMetadataResolver:
         mod_id: int | str | None = None,
         managed_path: str | Path | None = None,
     ) -> Path | None:
-        resolved = self.resolve(mod_id, managed_path)
-        if resolved is None or not resolved.offline_path:
+        """Return a file://-openable offline index under ``cache/offline_view``.
+
+        May verify Store + materialize. UI Open Offline must not call this on
+        the Qt thread — use :func:`probe_offline_open` + worker
+        :func:`prepare_offline_open`.
+        """
+        from services.info_asset_runtime import prepare_offline_open
+        from services.perf_stage import perf_stage
+
+        with perf_stage("offline_open_materialize"):
+            mid, path = self._resolve_identity(mod_id, managed_path)
+            result = prepare_offline_open(path, mod_id=str(mid or ""))
+            if result.ok and result.path is not None:
+                return result.path
             return None
-        return _usable_file(resolved.offline_path, allow_empty=True)
 
     def list_visible_mods(
         self,
@@ -507,19 +521,11 @@ class ModMetadataResolver:
         if not mid.isdigit():
             return "", path
         if not _folder_exists(path):
-            try:
-                from services.path_lifecycle import resolve_managed_folder
-
-                healed = resolve_managed_folder(mid, hint_path=path, db=None)
-                if healed.path is not None and healed.path.is_dir():
-                    path = healed.path
-            except Exception:  # noqa: BLE001
-                sqlite = self._sqlite_row(mid)
-                lkp = str((sqlite or {}).get("last_known_path") or "").strip()
-                if lkp and Path(lkp).is_dir():
-                    path = Path(lkp)
-                elif path is None and lkp:
-                    path = Path(lkp)
+            sqlite = self._sqlite_row(mid)
+            lkp = str((sqlite or {}).get("last_known_path") or "").strip()
+            if lkp:
+                path = Path(lkp)
+            # Presence Reconcile owns rediscovery. Resolver is display-only.
         return mid, path
 
     def _sqlite_row(self, mod_id: str) -> dict[str, Any] | None:
@@ -615,33 +621,41 @@ class ModMetadataResolver:
         return None
 
     def _offline_existing(self, root: Path, backup) -> Path | None:
-        from services.file_ops import LEGACY_INFO_DIR_NAME
-        from services.offline.paths import resolve_offline_page as resolve_info_offline
+        from services.info_asset_runtime import probe_live_offline_available
 
-        found = resolve_info_offline(root)
-        if found is not None:
-            return found.resolve()
-        for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            for candidate in (
-                root / info_name / "offline" / "index.html",
-                root / info_name / "index.html",
-            ):
-                try:
-                    if candidate.is_file():
-                        return candidate.resolve()
-                except OSError:
-                    continue
+        # Detail resolve must NOT materialize offline_view (hash+copy on UI thread).
+        # OPEN uses resolve_offline_page → ensure_live_offline_openable.
+        marker = probe_live_offline_available(root)
+        if marker is not None:
+            return marker.resolve()
+
         if backup is not None:
+            # Presence only — do not materialize Backup offline closure here.
+            mid = str(getattr(backup, "mod_id", "") or "").strip()
+            if mid.isdigit():
+                backup_index = backup_root(mid) / BACKUP_OFFLINE_DIR / "index.html"
+                try:
+                    if backup_index.is_file():
+                        return backup_index.resolve()
+                except OSError:
+                    pass
             return _usable_file(backup.offline_path, allow_empty=True)
         return None
 
     def _offline_missing(self, backup, sqlite: dict[str, Any] | None = None) -> Path | None:
+        """Folder-absent presence marker. Does not materialize or OPEN."""
+        mid = ""
         if backup is not None:
-            found = _usable_file(backup.offline_path, allow_empty=True)
-            if found is not None:
-                return found
-        if sqlite is not None:
-            return _usable_file(sqlite.get("backup_offline_path"), allow_empty=True)
+            mid = str(getattr(backup, "mod_id", "") or "").strip()
+        if not mid.isdigit() and sqlite is not None:
+            mid = str(sqlite.get("mod_id") or "").strip()
+        if mid.isdigit():
+            backup_index = backup_root(mid) / BACKUP_OFFLINE_DIR / "index.html"
+            try:
+                if backup_index.is_file():
+                    return backup_index.resolve()
+            except OSError:
+                pass
         return None
 
 

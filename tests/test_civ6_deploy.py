@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -13,7 +12,6 @@ from core.mod_platform import (
     PLATFORM_STEAM,
     is_civilization_vi_game,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import (
     CIVILIZATION_VI_APP_ID,
@@ -24,8 +22,8 @@ from services.deploy_rules import (
     resolve_strategy,
 )
 from services.deploy_rules.base import DeployContext
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import create_steam_test_mod, bind_managed_path
+from services.file_ops import INFO_DIR_NAME
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 CIV6 = CIVILIZATION_VI_APP_ID
 assert CIV6 == 289070
@@ -35,7 +33,7 @@ assert CIV6 in CIVILIZATION_VI_APP_IDS
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "civ6_deploy.db")
+    manager = DatabaseManager.instance(tmp_path / "civ6_deploy.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -57,25 +55,12 @@ def _seed_mod(
     library: Path,
     *,
     folder: str,
-    mod_id: str,
     files: dict[str, str],
 ) -> Path:
     mod_dir = library / "文明Ⅵ" / folder
     mod_dir.mkdir(parents=True)
     info = mod_dir / INFO_DIR_NAME
     info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        (
-            "{\n"
-            f'  "internal_id": "{mod_id}",\n'
-            f'  "published_file_id": "{mod_id}",\n'
-            f'  "title": "{folder}",\n'
-            f'  "app_id": {CIV6},\n'
-            '  "game_name": "文明Ⅵ"\n'
-            "}\n"
-        ),
-        encoding="utf-8",
-    )
     (info / "manager_only.txt").write_text("skip", encoding="utf-8")
     for rel, data in files.items():
         path = mod_dir / rel
@@ -84,37 +69,28 @@ def _seed_mod(
     return mod_dir
 
 
-def _prove_managed_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
-    """Stamp ``.info.internal_id`` so Deploy path resolve accepts the folder."""
-    proof = str(mid)
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    meta_path = info / METADATA_FILENAME
-    payload: dict = {}
-    if meta_path.is_file():
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
-    payload["internal_id"] = proof
-    payload.setdefault("published_file_id", mid)
-    meta_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=proof,
-        last_known_path=str(folder),
-        folder_present=True,
-    )
-
-
 def _register(
-    db: DatabaseManager, *, mod_id: str, title: str, folder: Path
-) -> None:
-    create_steam_test_mod(
+    db: DatabaseManager,
+    *,
+    external_id: str,
+    title: str,
+    folder: Path,
+) -> str:
+    created = create_steam_test_mod(
         db,
-        external_id=str(mod_id),
+        external_id=str(external_id),
         title=title,
         app_id=CIV6,
         game_name="文明Ⅵ",
     )
-    _prove_managed_folder(db, mod_id, folder)
+    return prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title=title,
+        app_id=CIV6,
+        game_name="文明Ⅵ",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +149,6 @@ def test_empty_target_success(tmp_path: Path, db: DatabaseManager) -> None:
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id="289070101",
         files={
             "file1.txt": "one",
             "file2.txt": "two",
@@ -181,7 +156,7 @@ def test_empty_target_success(tmp_path: Path, db: DatabaseManager) -> None:
             "Assets/y.txt": "y",
         },
     )
-    _register(db, mod_id="289070101", title=folder, folder=source)
+    pk = _register(db, external_id="289070101", title=folder, folder=source)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("289070101")
     assert result["success"] is True, result
@@ -208,8 +183,8 @@ def test_existing_target_redeploy_success(tmp_path: Path, db: DatabaseManager) -
     folder = "ModExisting"
     files = {f"f{i}.txt": f"v{i}" for i in range(5)}
     files["Assets/nested.txt"] = "n"
-    source = _seed_mod(library, folder=folder, mod_id="289070102", files=files)
-    _register(db, mod_id="289070102", title=folder, folder=source)
+    source = _seed_mod(library, folder=folder, files=files)
+    pk = _register(db, external_id="289070102", title=folder, folder=source)
 
     deployer = ModDeployer(library_root=library, db=db)
     first = deployer.deploy_mod("289070102")
@@ -232,15 +207,19 @@ def test_partial_existing_target_success(tmp_path: Path, db: DatabaseManager) ->
     mods = _configure_civ6(db, tmp_path / "CivModsPartial")
     folder = "ModPartial"
     files = {f"f{i}.txt": f"content-{i}" for i in range(10)}
-    source = _seed_mod(library, folder=folder, mod_id="289070103", files=files)
-    _register(db, mod_id="289070103", title=folder, folder=source)
+    source = _seed_mod(library, folder=folder, files=files)
+    pk = _register(db, external_id="289070103", title=folder, folder=source)
+
+    deployer = ModDeployer(library_root=library, db=db)
+    first = deployer.deploy_mod(pk)
+    assert first["success"] is True, first
 
     target = mods / folder
-    target.mkdir(parents=True)
+    # Leave a partial set of owned targets (prior deploy), then redeploy.
     for i in range(6):
-        (target / f"f{i}.txt").write_text(f"old-{i}", encoding="utf-8")
+        (target / f"f{i}.txt").unlink()
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("289070103")
+    result = deployer.deploy_mod(pk)
     assert result["success"] is True, result
     assert int(result.get("planned_files") or 0) == 10
     assert int(result.get("verified_files") or 0) == 10
@@ -264,8 +243,8 @@ def test_manifest_equals_fileplan(tmp_path: Path, db: DatabaseManager) -> None:
         "b.txt": "b",
         "Assets/c.txt": "c",
     }
-    source = _seed_mod(library, folder=folder, mod_id="289070104", files=files)
-    _register(db, mod_id="289070104", title=folder, folder=source)
+    source = _seed_mod(library, folder=folder, files=files)
+    pk = _register(db, external_id="289070104", title=folder, folder=source)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod("289070104")
     assert result["success"] is True, result
@@ -297,17 +276,16 @@ def test_uses_configured_mod_path_not_hardcoded(
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id="289070105",
         files={"modinfo": "<Mod/>", "Assets/tex.png": "png"},
     )
-    _register(db, mod_id="289070105", title=folder, folder=source)
+    pk = _register(db, external_id="289070105", title=folder, folder=source)
 
     # Confirm Steam Workshop identity defaults (platform steam).
-    display = db.get_mod_display_info("289070105")
+    display = db.get_mod_display_info(pk)
     assert display is not None
     assert display.platform == PLATFORM_STEAM
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("289070105")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
 
     target = Path(result["target"]).resolve()
@@ -340,10 +318,9 @@ def test_chinese_directory_maps_to_workspace_id(
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id=workspace_id,
         files={"file1.modinfo": "<Mod/>", "Assets/a.xml": "<ok/>"},
     )
-    _register(db, mod_id=workspace_id, title=folder, folder=source)
+    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(workspace_id)
     assert result["success"] is True, result
@@ -371,29 +348,21 @@ def test_chinese_directory_uses_workspace_id_not_mod_id_pk(
 
     library = tmp_path / "library"
     mods = _configure_civ6(db, tmp_path / "CivModsPkWs")
-    pk = "465"
     workspace_id = "3681020076"
     folder = "测试中文Mod"
     assert contains_chinese(folder)
-    assert pk != workspace_id
 
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id=pk,
         files={"file1.modinfo": "<Mod/>", "Assets/a.xml": "<ok/>"},
     )
-    _register(db, mod_id=pk, title=folder, folder=source)
-    # upsert_mod sets workspace_id=PK under Steam scheme — overwrite to diverge.
-    db.update_mod_identity_fields(
-        pk,
-        workspace_id=workspace_id,
-        external_id=workspace_id,
-    )
+    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
     info = db.get_mod_display_info(pk)
     assert info is not None
     assert str(info.mod_id) == pk
     assert str(info.workspace_id) == workspace_id
+    assert pk != workspace_id
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
@@ -417,10 +386,9 @@ def test_english_directory_keeps_original_name(
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id=mid,
         files={"ui.modinfo": "<Mod/>"},
     )
-    _register(db, mod_id=mid, title=folder, folder=source)
+    pk = _register(db, external_id=mid, title=folder, folder=source)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
     assert result["success"] is True, result
@@ -439,10 +407,9 @@ def test_mixed_chinese_english_maps_to_workspace_id(
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id=workspace_id,
         files={"x.modinfo": "<Mod/>"},
     )
-    _register(db, mod_id=workspace_id, title=folder, folder=source)
+    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(workspace_id)
     assert result["success"] is True, result
@@ -462,7 +429,6 @@ def test_chinese_fileplan_uses_workspace_id_targets_directly(
     source = _seed_mod(
         library,
         folder=folder,
-        mod_id=pk,
         files={"a.txt": "1", "Assets/b.txt": "2"},
     )
     cfg = db.get_game_deploy_config(CIV6)
@@ -498,8 +464,8 @@ def test_chinese_existing_target_redeploy_success(
     workspace_id = "2465378070"
     folder = "Civ6 Plus：和而不同"
     files = {f"f{i}.txt": f"v{i}" for i in range(4)}
-    source = _seed_mod(library, folder=folder, mod_id=workspace_id, files=files)
-    _register(db, mod_id=workspace_id, title=folder, folder=source)
+    source = _seed_mod(library, folder=folder, files=files)
+    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
 
     deployer = ModDeployer(library_root=library, db=db)
     assert deployer.deploy_mod(workspace_id)["success"] is True
@@ -521,8 +487,8 @@ def test_chinese_manifest_equals_fileplan(
     workspace_id = "111222333"
     folder = "中文测试Mod"
     files = {"a.modinfo": "<a/>", "Assets/x.xml": "<x/>"}
-    source = _seed_mod(library, folder=folder, mod_id=workspace_id, files=files)
-    _register(db, mod_id=workspace_id, title=folder, folder=source)
+    source = _seed_mod(library, folder=folder, files=files)
+    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(workspace_id)
     assert result["success"] is True, result
@@ -557,27 +523,16 @@ def test_non_civ6_chinese_folder_keeps_name(
     mid = "555666777"
     mod_dir = library / "SomeGame" / folder
     mod_dir.mkdir(parents=True)
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        (
-            "{\n"
-            f'  "internal_id": "{mid}",\n'
-            f'  "published_file_id": "{mid}",\n'
-            f'  "title": "{folder}",\n'
-            f'  "app_id": {app_id},\n'
-            '  "game_name": "SomeGame"\n'
-            "}\n"
-        ),
-        encoding="utf-8",
-    )
+    (mod_dir / INFO_DIR_NAME).mkdir()
     (mod_dir / "a.txt").write_text("a", encoding="utf-8")
-    create_steam_test_mod(
+    created = create_steam_test_mod(
         db, external_id=mid, title=folder, app_id=app_id, game_name="SomeGame"
     )
-    _prove_managed_folder(db, mid, mod_dir)
+    pk = prove_managed_folder(
+        db, mod_dir, handle=created.mod_id, title=folder, app_id=app_id, game_name="SomeGame"
+    )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     assert Path(result["target"]).resolve() == (mods / folder).resolve()
     assert mod_dir.name == folder

@@ -856,6 +856,48 @@ def test_sort_mode_library_order_and_viewport(
     view.deleteLater()
 
 
+def test_wh3_sort_mode_keeps_disabled_deployed_excludes_undeployed(
+    qapp, tmp_path: Path, db: DatabaseManager
+) -> None:
+    from ui.library_view import ModLibraryView
+
+    _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    deployed_on = _seed_wh3_mod(
+        library, db, folder="On", workshop_id="9101", pack_name="on.pack"
+    )
+    deployed_off = _seed_wh3_mod(
+        library,
+        db,
+        folder="Off",
+        workshop_id="9102",
+        pack_name="off.pack",
+        enabled=False,
+    )
+    undeployed = _seed_wh3_mod(
+        library,
+        db,
+        folder="Skip",
+        workshop_id="9103",
+        pack_name="skip.pack",
+        deployed=False,
+    )
+    persist_load_order([deployed_on, deployed_off], db, library_root=library)
+    view = ModLibraryView()
+    view.set_target_root(str(library))
+    view.set_preferred_filter("Warhammer3")
+    view.refresh()
+    view.btn_wh3_sort_mode.setChecked(True)
+    filtered = [str(index.mod_id) for index, _payload in view._filtered_row_entries]
+    assert deployed_on in filtered
+    assert deployed_off in filtered
+    assert undeployed not in filtered
+    view.btn_wh3_sort_mode.setChecked(False)
+    restored = [str(index.mod_id) for index, _payload in view._filtered_row_entries]
+    assert undeployed in restored
+    view.deleteLater()
+
+
 def test_new_mod_appended_missing_dropped(tmp_path: Path, db: DatabaseManager) -> None:
     from core.db_manager import DEPLOY_STATUS_NOT_DEPLOYED
 
@@ -897,11 +939,12 @@ def test_reorder_does_not_copy_or_hash_packs(
     assert load_saved_order() == [b, a]
 
 
-def test_load_order_writes_wh3_dir_not_data_root(
+def test_load_order_writes_config_not_data_wh3(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    from core.paths import data_dir
+    from core.paths import data_dir, load_order_dir
     from services.wh3_activation import (
+        WH3_CANONICAL_ORDER_FILENAME,
         WH3_LEGACY_ORDER_FILENAME,
         WH3_ORDER_FILENAME,
         WH3_STATE_DIRNAME,
@@ -911,9 +954,11 @@ def test_load_order_writes_wh3_dir_not_data_root(
     library = tmp_path / "mod"
     a = _seed_wh3_mod(library, db, folder="A", workshop_id="71", pack_name="a.pack")
     persist_load_order([a], db, library_root=library)
-    new_path = data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
+    new_path = load_order_dir() / WH3_CANONICAL_ORDER_FILENAME
+    old_dir = data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
     legacy = data_dir() / WH3_LEGACY_ORDER_FILENAME
     assert new_path.is_file()
+    assert not old_dir.exists()
     assert not legacy.exists()
     assert load_saved_order() == [a]
 
@@ -923,9 +968,9 @@ def test_legacy_wh3_load_order_json_migrates_once(
 ) -> None:
     import json
 
-    from core.paths import data_dir
+    from core.paths import data_dir, load_order_dir
     from services.wh3_activation import (
-        WH3_LEGACY_ORDER_FILENAME,
+        WH3_CANONICAL_ORDER_FILENAME,
         WH3_ORDER_FILENAME,
         WH3_STATE_DIRNAME,
     )
@@ -934,8 +979,48 @@ def test_legacy_wh3_load_order_json_migrates_once(
     library = tmp_path / "mod"
     a = _seed_wh3_mod(library, db, folder="A", workshop_id="81", pack_name="a.pack")
     b = _seed_wh3_mod(library, db, folder="B", workshop_id="82", pack_name="b.pack")
+    old_path = data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
+    new_path = load_order_dir() / WH3_CANONICAL_ORDER_FILENAME
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text(
+        json.dumps({"order": [b, a]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert load_saved_order() == [b, a]
+    assert new_path.is_file()
+    assert not old_path.exists()
+    assert load_saved_order() == [b, a]
+    assert resolved_load_order(db, library_root=library) == [b, a]
+    persist_load_order(load_saved_order(), db, library_root=library)
+    assert not old_path.exists()
+    assert json.loads(new_path.read_text(encoding="utf-8")) == {"order": [b, a]}
+    from services.wh3_activation import collect_enabled_pack_lines, render_used_mods_text
+
+    text = render_used_mods_text(
+        collect_enabled_pack_lines(db, library_root=library)
+    )
+    assert 'mod "a.pack";' in text
+    assert 'mod "b.pack";' in text
+    assert text.index('mod "b.pack";') < text.index('mod "a.pack";')
+
+
+def test_root_legacy_wh3_load_order_json_migrates_once(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    import json
+
+    from core.paths import data_dir, load_order_dir
+    from services.wh3_activation import (
+        WH3_CANONICAL_ORDER_FILENAME,
+        WH3_LEGACY_ORDER_FILENAME,
+    )
+
+    _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    a = _seed_wh3_mod(library, db, folder="A", workshop_id="83", pack_name="a.pack")
+    b = _seed_wh3_mod(library, db, folder="B", workshop_id="84", pack_name="b.pack")
     legacy = data_dir() / WH3_LEGACY_ORDER_FILENAME
-    new_path = data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
+    new_path = load_order_dir() / WH3_CANONICAL_ORDER_FILENAME
     legacy.write_text(
         json.dumps({"order": [b, a]}, ensure_ascii=False),
         encoding="utf-8",
@@ -943,8 +1028,6 @@ def test_legacy_wh3_load_order_json_migrates_once(
     assert load_saved_order() == [b, a]
     assert new_path.is_file()
     assert not legacy.exists()
-    assert load_saved_order() == [b, a]
-    assert resolved_load_order(db, library_root=library) == [b, a]
 
 
 def test_new_wh3_order_file_wins_over_legacy(
@@ -952,9 +1035,9 @@ def test_new_wh3_order_file_wins_over_legacy(
 ) -> None:
     import json
 
-    from core.paths import data_dir
+    from core.paths import data_dir, load_order_dir
     from services.wh3_activation import (
-        WH3_LEGACY_ORDER_FILENAME,
+        WH3_CANONICAL_ORDER_FILENAME,
         WH3_ORDER_FILENAME,
         WH3_STATE_DIRNAME,
         save_saved_order,
@@ -965,15 +1048,18 @@ def test_new_wh3_order_file_wins_over_legacy(
     a = _seed_wh3_mod(library, db, folder="A", workshop_id="91", pack_name="a.pack")
     b = _seed_wh3_mod(library, db, folder="B", workshop_id="92", pack_name="b.pack")
     save_saved_order([a, b])
-    legacy = data_dir() / WH3_LEGACY_ORDER_FILENAME
-    new_path = data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
-    legacy.write_text(
+    old_path = data_dir() / WH3_STATE_DIRNAME / WH3_ORDER_FILENAME
+    new_path = load_order_dir() / WH3_CANONICAL_ORDER_FILENAME
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text(
         json.dumps({"order": [b, a]}, ensure_ascii=False),
         encoding="utf-8",
     )
     assert new_path.is_file()
     assert load_saved_order() == [a, b]
-    assert not legacy.exists()
+    assert not old_path.exists()
+    save_saved_order([a, b])
+    assert not old_path.exists()
 
 
 def test_wh3_sort_mode_hidden_for_other_games(

@@ -199,13 +199,16 @@ class WebSnapshotDownloader:
         used_browser = False
         try:
             target.mkdir(parents=True, exist_ok=True)
-            assets_dir = target / DEFAULT_ASSETS_DIR
-            if assets_dir.exists():
-                shutil.rmtree(assets_dir, ignore_errors=True)
-            assets_dir.mkdir(parents=True, exist_ok=True)
+            from services.offline.staging import (
+                cleanup_capture_staging,
+                reset_capture_assets_dir,
+            )
+
+            assets_dir = reset_capture_assets_dir(target)
 
             html_text, final_url, used_browser = self._fetch_html(page_url)
             if not html_text.strip():
+                cleanup_capture_staging(target)
                 return SnapshotResult(
                     success=False,
                     html_path=index_path,
@@ -236,6 +239,9 @@ class WebSnapshotDownloader:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Snapshot failed for %s: %s", page_url, exc)
+            from services.offline.staging import cleanup_capture_staging
+
+            cleanup_capture_staging(target)
             return SnapshotResult(
                 success=False,
                 html_path=index_path,

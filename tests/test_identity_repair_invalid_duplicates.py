@@ -14,7 +14,7 @@ from core.game_info import GameInfo
 from core.models import ModMetadata
 from core.mod_platform import PLATFORM_NEXUS, PLATFORM_STEAM
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from services.identity_service import identity_create_scope
+from services.identity_service import create_mod_identity, identity_create_scope
 from services.identity_repair import (
     ACTION_CONFLICT,
     ACTION_REMOVE_INVALID,
@@ -424,11 +424,20 @@ def test_10_simulated_full_repair_zero_severity(
     steam = "3591453758"
     live = _folder(library, "Anno 1800", "Collectibles")
     leftover = _folder(library, "Anno 1800", f"Unknown Mod {steam}")
-    db.upsert_mod(
-        ModMetadata(published_file_id=steam, title="Collectibles", app_id=916440)
-    )
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=steam,
+            workshop_id=steam,
+            title="Collectibles",
+            app_id=916440,
+            game_name="Anno 1800",
+            source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={steam}",
+        )
+    steam_pk = str(created.mod_id)
     db.update_mod_identity_fields(
-        int(steam),
+        int(steam_pk),
         last_known_path=str(live.resolve()),
         app_id=916440,
         platform=PLATFORM_STEAM,

@@ -167,7 +167,13 @@ def log_deploy_result(
 def write_deploy_timing(managed_folder: str | Path | None, sess: DeployTimingSession) -> None:
     if not managed_folder:
         return
-    path = Path(managed_folder) / ".info" / "deploy_timing.json"
+    root = Path(managed_folder)
+    try:
+        if not root.is_dir():
+            return
+    except OSError:
+        return
+    path = root / ".info" / "deploy_timing.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(

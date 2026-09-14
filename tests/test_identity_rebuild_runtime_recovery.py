@@ -3,7 +3,7 @@
 Covers post-rebuild migration semantics without touching Identity Contract:
 - deployment / tags / favorites migrate via mapping (not entity recreate)
 - offline reflects .info/index.html presence
-- deploy resolves via .info.internal_id, not last_known_path alone
+- deploy resolves via .info/entity_key, not last_known_path alone
 - BG3/Stardew same workspace stay independent
 - same-game duplicate workspace rejected at scan uniqueness level
 """

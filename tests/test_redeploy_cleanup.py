@@ -5,11 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
@@ -38,7 +34,7 @@ def _seed(
     files: dict[str, str],
     game: str = "G",
     app_id: int = 42,
-) -> Path:
+) -> tuple[Path, str]:
     mod = library / game / title
     mod.mkdir(parents=True)
     for name, text in files.items():
@@ -46,17 +42,15 @@ def _seed(
     created = create_steam_test_mod(
         db, external_id=mid, title=title, app_id=app_id, game_name=game
     )
-    write_info_sidecar(
+    pk = prove_managed_folder(
+        db,
         mod,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title=title,
-        external_id=mid,
-        workspace_id=str(created.workspace_id or mid),
         app_id=app_id,
         game_name=game,
     )
-    bind_managed_path(db, created.mod_id, mod, title=title, game_name=game)
-    return mod
+    return mod, pk
 
 
 def test_redeploy_removes_stale_files_and_rewrites_manifest(
@@ -69,7 +63,7 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     db.update_game_deploy_config(
         42, name="G", mod_path=str(mods_root), deploy_type=DEPLOY_TYPE_FOLDER_COPY
     )
-    mod = _seed(
+    mod, pk = _seed(
         db,
         library,
         mid="96001",
@@ -101,7 +95,7 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     assert len(new_man.files) == 1
     assert new_man.files[0].target.endswith("A.txt")
 
-    info = db.get_mod_deploy_info("96001")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
 

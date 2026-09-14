@@ -130,7 +130,10 @@ def _info_path_for(last_known_path: str) -> str:
     return str(Path(root) / INFO_DIR / METADATA_NAME)
 
 
-def _read_info_internal_id(info_path: str) -> str:
+def _read_info_entity_key(info_path: str) -> str:
+    """Read ``.info`` filesystem binding key (entity_key, legacy internal_id OK)."""
+    from services.mod_identity import read_entity_key
+
     path = Path(info_path) if info_path else Path()
     if not path.is_file():
         return ""
@@ -140,7 +143,11 @@ def _read_info_internal_id(info_path: str) -> str:
         return ""
     if not isinstance(raw, dict):
         return ""
-    return _text(raw.get("internal_id"))
+    return read_entity_key(raw)
+
+
+# Legacy alias — reads entity_key with legacy sidecar key fallback.
+_read_info_internal_id = _read_info_entity_key
 
 
 def scan_workspace_external_mismatch(con: sqlite3.Connection) -> dict[str, Any]:

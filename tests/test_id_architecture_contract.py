@@ -107,7 +107,7 @@ def test_nexus_workspace_id_equals_external_id(db: DatabaseManager) -> None:
     )
     info = db.get_mod_display_info(created.mod_id)
     assert info is not None
-    assert is_internal_mod_id(info.mod_id)
+    assert not is_internal_mod_id(info.mod_id)
     assert info.external_id == NEXUS_MOD
     assert info.workspace_id == NEXUS_MOD
     assert info.workspace_id != info.mod_id
@@ -126,7 +126,7 @@ def test_other_platform_workspace_id_is_generated(db: DatabaseManager) -> None:
     )
     info = db.get_mod_display_info(created.mod_id)
     assert info is not None
-    assert is_internal_mod_id(info.mod_id)
+    assert not is_internal_mod_id(info.mod_id)
     assert info.workspace_id
     assert info.workspace_id != info.mod_id
     assert not is_internal_mod_id(info.workspace_id)

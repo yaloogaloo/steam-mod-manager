@@ -17,11 +17,9 @@ import pytest
 
 from core.db_manager import RELATIONSHIP_CONFLICT, DatabaseManager
 from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
-from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy import _schedule_post_deploy_conflict_scan
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -32,16 +30,22 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(library: Path, mid: str) -> Path:
-    folder = library / "Game" / mid
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"published_file_id":"{mid}","title":"M{mid}"}}',
-        encoding="utf-8",
-    )
+def _seed(
+    library: Path,
+    db: DatabaseManager,
+    *,
+    external_id: str,
+    title: str = "",
+) -> tuple[Path, str]:
+    folder = library / "Game" / external_id
+    folder.mkdir(parents=True, exist_ok=True)
     (folder / "mod.pak").write_bytes(b"x")
-    return folder
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title or f"M{external_id}"
+    )
+    pk = str(created.mod_id)
+    prove_managed_folder(db, folder, handle=pk, title=title or f"M{external_id}")
+    return folder, pk
 
 
 def _write_targets(folder: Path, mid: str, targets: list[str]) -> None:
@@ -70,20 +74,22 @@ def test_detector_persist_never_writes_conflict_status(
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "shared.pak").resolve())
     (tmp_path / "game").mkdir()
+    folders: dict[str, str] = {}
     for mid in ("101", "102"):
-        folder = _seed(library, mid)
-        _write_targets(folder, mid, [shared])
-        create_steam_test_mod(db, external_id=mid, title=f"M{mid}")
-    db.add_mod_relationship(101, 102, RELATIONSHIP_CONFLICT)
+        folder, pk = _seed(library, db, external_id=mid)
+        _write_targets(folder, pk, [shared])
+        folders[mid] = pk
+    pk_a, pk_b = folders["101"], folders["102"]
+    db.add_mod_relationship(pk_a, pk_b, RELATIONSHIP_CONFLICT)
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["101"].conflicts
+    assert reports[pk_a].conflicts
     assert any(
         c.conflict_type == ConflictType.RELATIONSHIP.value
-        for c in reports["101"].conflicts
+        for c in reports[pk_a].conflicts
     )
-    assert db.get_mod_status(101).conflict_status == CONFLICT_STATUS_NONE
-    assert db.get_mod_status(102).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_b).conflict_status == CONFLICT_STATUS_NONE
 
 
 def test_post_deploy_scan_is_noop_for_conflict_status(
@@ -92,13 +98,14 @@ def test_post_deploy_scan_is_noop_for_conflict_status(
     library = tmp_path / "mod"
     shared = str((tmp_path / "game" / "a.pak").resolve())
     (tmp_path / "game").mkdir()
+    pks: list[str] = []
     for mid in ("201", "202"):
-        folder = _seed(library, mid)
-        _write_targets(folder, mid, [shared])
-        create_steam_test_mod(db, external_id=mid, title=f"M{mid}")
-    db.add_mod_relationship(201, 202, RELATIONSHIP_CONFLICT)
+        folder, pk = _seed(library, db, external_id=mid)
+        _write_targets(folder, pk, [shared])
+        pks.append(pk)
+    db.add_mod_relationship(pks[0], pks[1], RELATIONSHIP_CONFLICT)
     _schedule_post_deploy_conflict_scan(library, db=db)
-    assert db.get_mod_status(201).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pks[0]).conflict_status == CONFLICT_STATUS_NONE
 
 
 def test_user_mark_survives_detector_and_is_only_user_writer(
@@ -110,15 +117,14 @@ def test_user_mark_survives_detector_and_is_only_user_writer(
     )
 
     library = tmp_path / "mod"
-    folder = _seed(library, "301")
-    _write_targets(folder, "301", [str((tmp_path / "t.pak").resolve())])
-    create_steam_test_mod(db, external_id="301", title="U")
-    set_conflict_annotation(301, note="user", db=db)
+    folder, pk = _seed(library, db, external_id="301", title="U")
+    _write_targets(folder, pk, [str((tmp_path / "t.pak").resolve())])
+    set_conflict_annotation(pk, note="user", db=db)
     ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert db.get_mod_status(301).conflict_status == CONFLICT_STATUS_CONFLICT
-    clear_conflict_annotation(301, db=db)
+    assert db.get_mod_status(pk).conflict_status == CONFLICT_STATUS_CONFLICT
+    clear_conflict_annotation(pk, db=db)
     ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert db.get_mod_status(301).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk).conflict_status == CONFLICT_STATUS_NONE
 
 
 def test_migration_clears_polluted_conflict_status(tmp_path: Path) -> None:
@@ -126,7 +132,8 @@ def test_migration_clears_polluted_conflict_status(tmp_path: Path) -> None:
 
     DatabaseManager.reset_instance()
     db = DatabaseManager.instance(tmp_path / "migrate_conflict.db")
-    create_steam_test_mod(db, external_id="401", title="Polluted")
+    created = create_steam_test_mod(db, external_id="401", title="Polluted")
+    pk = str(created.mod_id)
     with db._lock:  # noqa: SLF001
         # Simulate upgrade: drop one-shot flag, plant polluted row, re-run.
         db._conn.execute(  # noqa: SLF001
@@ -135,18 +142,18 @@ def test_migration_clears_polluted_conflict_status(tmp_path: Path) -> None:
         )
         db._conn.execute(  # noqa: SLF001
             "UPDATE mods SET conflict_status = ?, conflict_note = ? WHERE mod_id = ?",
-            ("conflict", "system inferred", 401),
+            ("conflict", "system inferred", int(pk)),
         )
         db._clear_system_inferred_conflict_pollution()  # noqa: SLF001
         db._conn.commit()  # noqa: SLF001
-    assert db.get_mod_status(401).conflict_status == CONFLICT_STATUS_NONE
-    assert db.get_mod_status(401).conflict_note == ""
+    assert db.get_mod_status(pk).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk).conflict_note == ""
     # Second run is a no-op (flag set) — user marks must survive.
-    set_conflict_annotation(401, note="user", db=db)
+    set_conflict_annotation(pk, note="user", db=db)
     with db._lock:  # noqa: SLF001
         db._clear_system_inferred_conflict_pollution()  # noqa: SLF001
         db._conn.commit()  # noqa: SLF001
-    assert db.get_mod_status(401).conflict_status == CONFLICT_STATUS_CONFLICT
+    assert db.get_mod_status(pk).conflict_status == CONFLICT_STATUS_CONFLICT
     DatabaseManager.reset_instance()
 
 
@@ -173,17 +180,11 @@ def test_library_cache_does_not_conflate_conflict_into_identity(
     from services.user_annotation import set_conflict_annotation
 
     library = tmp_path / "mod"
-    folder = _seed(library, "501")
-    create_steam_test_mod(db, external_id="501", title="Card")
-    db.update_mod_identity_fields(
-        "501",
-        last_known_path=str(folder.resolve()),
-        folder_present=True,
-    )
-    set_conflict_annotation(501, note="u", db=db)
+    folder, pk = _seed(library, db, external_id="501", title="Card")
+    set_conflict_annotation(pk, note="u", db=db)
     cache = get_library_cache()
     snap = cache.load_snapshot(library, force=True)
-    cards = [c for c in snap.cards if c.id == "501"]
+    cards = [c for c in snap.cards if str(c.id) == pk]
     assert cards
     assert cards[0].conflict is True
     assert cards[0].conflict_status == CONFLICT_STATUS_CONFLICT

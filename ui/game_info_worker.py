@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from core.game_info import GameInfo
-from core.paths import data_dir
+from core.paths import headers_cache_dir
 from core.steam_api import SteamWorkshopClient
 
 
@@ -28,8 +28,7 @@ class GameInfoWorker(QThread):
             with SteamWorkshopClient() as client:
                 info = client.get_game_info(self.app_id)
                 if info.header_image:
-                    headers_dir = data_dir() / "headers"
-                    headers_dir.mkdir(parents=True, exist_ok=True)
+                    headers_dir = headers_cache_dir()
                     target = headers_dir / f"{info.app_id}.jpg"
                     saved = client.download_preview(
                         info.header_image,

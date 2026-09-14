@@ -217,11 +217,14 @@ def preflight_restore_items(
 
 
 def _validate_info_against_db(info: dict[str, Any], db: dict[str, Any]) -> tuple[bool, list[str]]:
+    from services.mod_identity import read_entity_key
+
     fails: list[str] = []
-    info_iid = _text(info.get("internal_id"))
+    # Compare filesystem binding (entity_key / legacy) to Entity.internal_id.
+    info_iid = read_entity_key(info)
     db_iid = _text(db.get("internal_id")) or _text(db.get("mod_id"))
     if info_iid != db_iid:
-        fails.append(f"info.internal_id={info_iid!r} != db={db_iid!r}")
+        fails.append(f"info.entity_key={info_iid!r} != db.internal_id={db_iid!r}")
 
     info_plat = _text(info.get("platform") or info.get("source_type")).lower()
     db_plat = _text(db.get("platform")).lower()
@@ -262,10 +265,13 @@ def _run_identity_validator(db: dict[str, Any], info: dict[str, Any]) -> list[st
 
 
 def _build_restored_payload(backup: dict[str, Any], db: dict[str, Any]) -> dict[str, Any]:
+    from services.mod_identity import set_entity_key
+
     payload = dict(backup)
     # DB is authority for identity stamps — do not invent new ids.
+    # entity_key is filesystem binding (value == Entity.internal_id), not a third ID.
     db_iid = _text(db.get("internal_id")) or _text(db.get("mod_id"))
-    payload["internal_id"] = db_iid
+    payload = set_entity_key(payload, db_iid)
     payload["platform"] = _text(db.get("platform"))
     payload["source_type"] = _text(db.get("platform")) or _text(
         backup.get("source_type")
@@ -279,11 +285,14 @@ def _build_restored_payload(backup: dict[str, Any], db: dict[str, Any]) -> dict[
 
 
 def _write_info(folder: Path, payload: dict[str, Any]) -> Path:
+    from services.mod_identity import normalize_info_entity_key_payload
+
     info_dir = folder / INFO_DIR
     info_dir.mkdir(parents=True, exist_ok=True)
     meta = info_dir / METADATA
+    normalized, _ = normalize_info_entity_key_payload(dict(payload))
     meta.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return meta
@@ -388,6 +397,8 @@ def apply_restore_items(
             validator_codes = _run_identity_validator(db, info_after)
             # Soft: pollution findings on dirty DB rows may pre-exist; only fail hard
             # mismatches already checked. Record validator output.
+            from services.mod_identity import read_entity_key
+
             results.append(
                 {
                     "finding_id": finding_id,
@@ -398,7 +409,7 @@ def apply_restore_items(
                     "had_info_before": had_info,
                     "rollback_copy": str(rb_meta) if rb_meta else "",
                     "validator_codes": [str(c) for c in validator_codes],
-                    "info_internal_id": _text(info_after.get("internal_id")),
+                    "info_internal_id": read_entity_key(info_after),
                 }
             )
         except Exception as exc:

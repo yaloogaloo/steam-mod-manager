@@ -34,23 +34,38 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     reset_library_cache()
 
-def _seed(library: Path, db: DatabaseManager, mid: str, *, with_payload: bool, game: str='LifeGame', app_id: int=424201) -> Path:
+def _seed(library: Path, db: DatabaseManager, workshop: str, *, with_payload: bool, game: str='LifeGame', app_id: int=424201) -> tuple[Path, str]:
+    """Create Steam entity; return (folder, mods.mod_id PK). workshop ≠ PK."""
     db.upsert_game(GameInfo(app_id=app_id, name=game, folder_name=game))
-    folder = library / game / f'Mod{mid}'
+    created = create_steam_test_mod(
+        db, external_id=workshop, title=f'Mod{workshop}', app_id=app_id, game_name=game
+    )
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id or pk)
+    folder = library / game / f'Mod{workshop}'
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(json.dumps({'internal_id': mid, 'published_file_id': mid, 'title': f'Mod{mid}', 'app_id': app_id, 'game_name': game}), encoding='utf-8')
+    (info / METADATA_FILENAME).write_text(
+        json.dumps(
+            {
+                'internal_id': frozen,
+                'published_file_id': workshop,
+                'title': f'Mod{workshop}',
+                'app_id': app_id,
+                'game_name': game,
+            }
+        ),
+        encoding='utf-8',
+    )
     if with_payload:
         (folder / 'mod.pak').write_bytes(b'payload')
-    create_steam_test_mod(db, external_id=mid, title=f'Mod{mid}', app_id=app_id, game_name=game)
-    bind_managed_path(db, mid, folder, game_name=game, title=f'Mod{mid}')
-    db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
-    return folder
+    bind_managed_path(db, pk, folder, game_name=game, title=f'Mod{workshop}')
+    db.update_mod_content_status(pk, content_status=CONTENT_HEALTHY)
+    return folder, pk
 
 def test_empty_payload_persists_content_missing(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'mod'
-    mid = '770001'
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, '770001', with_payload=False)
     cs = persist_evaluated_content_status(mid, folder, db=db, folder_present=True)
     assert cs == CONTENT_CONTENT_MISSING
     row = db.get_mod_backup_row(mid) or {}
@@ -58,8 +73,7 @@ def test_empty_payload_persists_content_missing(db: DatabaseManager, tmp_path: P
 
 def test_healthy_payload_not_false_missing(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'mod'
-    mid = '770002'
-    folder = _seed(library, db, mid, with_payload=True)
+    folder, mid = _seed(library, db, '770002', with_payload=True)
     cs = persist_evaluated_content_status(mid, folder, db=db, folder_present=True)
     assert cs == CONTENT_HEALTHY
     row = db.get_mod_backup_row(mid) or {}
@@ -67,8 +81,7 @@ def test_healthy_payload_not_false_missing(db: DatabaseManager, tmp_path: Path) 
 
 def test_refresh_keeps_missing_status(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'mod'
-    mid = '770003'
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, '770003', with_payload=False)
     persist_evaluated_content_status(mid, folder, db=db, folder_present=True)
     local = reconcile_local_state(mid, folder, db=db)
     assert local.content_status == CONTENT_CONTENT_MISSING
@@ -76,16 +89,14 @@ def test_refresh_keeps_missing_status(db: DatabaseManager, tmp_path: Path) -> No
 
 def test_reconcile_evaluates_missing_via_authority(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'mod'
-    mid = '770004'
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, '770004', with_payload=False)
     db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
     reconcile_library(library)
     assert row_content_status(db.get_mod_backup_row(mid) or {}) == CONTENT_CONTENT_MISSING
 
 def test_reconcile_does_not_false_mark_healthy_payload(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'mod'
-    mid = '770005'
-    folder = _seed(library, db, mid, with_payload=True)
+    folder, mid = _seed(library, db, '770005', with_payload=True)
     db.update_mod_content_status(mid, content_status=CONTENT_CONTENT_MISSING)
     reconcile_local_state(mid, folder, db=db)
     reconcile_library(library)
@@ -93,8 +104,7 @@ def test_reconcile_does_not_false_mark_healthy_payload(db: DatabaseManager, tmp_
 
 def test_library_snapshot_reads_projection_not_rescan(db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     library = tmp_path / 'mod'
-    mid = '770006'
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, '770006', with_payload=False)
     persist_evaluated_content_status(mid, folder, db=db, folder_present=True)
     calls: list[str] = []
 
@@ -113,8 +123,7 @@ def test_library_snapshot_reads_projection_not_rescan(db: DatabaseManager, tmp_p
 def test_projection_patch_survives_stale_card_data(db: DatabaseManager, tmp_path: Path) -> None:
     """Viewport must not re-apply healthy ModCardData after Validator write."""
     library = tmp_path / 'mod'
-    mid = '770007'
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, '770007', with_payload=False)
     reset_library_cache()
     cache = get_library_cache()
     snap = cache.load_snapshot(library, force=True)
@@ -130,10 +139,8 @@ def test_projection_patch_survives_stale_card_data(db: DatabaseManager, tmp_path
 
 def test_game_switch_projection_keeps_missing(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'mod'
-    mid_a = '770008'
-    mid_b = '770009'
-    folder_a = _seed(library, db, mid_a, with_payload=False, game='GameA', app_id=101)
-    _seed(library, db, mid_b, with_payload=True, game='GameB', app_id=102)
+    folder_a, mid_a = _seed(library, db, '770008', with_payload=False, game='GameA', app_id=101)
+    _folder_b, mid_b = _seed(library, db, '770009', with_payload=True, game='GameB', app_id=102)
     persist_evaluated_content_status(mid_a, folder_a, db=db, folder_present=True)
     reset_library_cache()
     snap = build_library_snapshot(library)

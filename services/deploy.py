@@ -57,6 +57,7 @@ from services.deploy_rules import (
     DEPLOY_TYPE_PALWORLD_PAK,
     DEPLOY_TYPE_SLAY_THE_SPIRE,
     DEPLOY_TYPE_STARDEW_VALLEY,
+    DEPLOY_TYPE_STELLARIS,
     DEPLOY_TYPE_WARHAMMER3,
     PALWORLD_APP_ID,
     STARDEW_VALLEY_APP_ID,
@@ -1008,21 +1009,31 @@ class ModDeployer:
             file_manager=self.files,
         )
 
+        skip_library_payload = False
+        hint = ""
+        try:
+            brow = db.get_mod_backup_row(mid) or {}
+            hint = str(brow.get("last_known_path") or "").strip()
+        except Exception:  # noqa: BLE001
+            hint = str(getattr(db_meta, "last_known_path", "") or "").strip()
         if source is None or not source.is_dir():
-            hint = ""
-            try:
-                hint = str(getattr(db_meta, "last_known_path", "") or "").strip()
-            except Exception:  # noqa: BLE001
-                hint = ""
-            fail = source_mod_path_failure(
-                library_root=self.library_root,
-                internal_id=mid,
-                path=hint or None,
-            )
-            return None, fail.as_error_dict(mod_id=mid), None
+            from services.mod_presence import deployment_capability
 
-        source = source.resolve()
-        fs_meta = self.files.load_metadata(source)
+            cap = deployment_capability(mid, db=db)
+            if not cap.allowed:
+                fail = source_mod_path_failure(
+                    library_root=self.library_root,
+                    internal_id=mid,
+                    path=hint or None,
+                )
+                return None, fail.as_error_dict(mod_id=mid), None
+            skip_library_payload = True
+            source = Path(hint) if hint else Path(f"__missing__/{mid}")
+            prepare_archives = False
+
+        if source.is_dir():
+            source = source.resolve()
+        fs_meta = self.files.load_metadata(source) if source.is_dir() else None
         app_id = 0
         if db_meta and db_meta.app_id:
             app_id = int(db_meta.app_id)
@@ -1321,9 +1332,12 @@ class ModDeployer:
                     out["status"] = "TIMEOUT"
                 return None, out, None
         else:
-            allowed = _normalize_deploy_allow_list(
-                resolve_deploy_sources(mid, source, db=db)
-            )
+            if skip_library_payload or not source.is_dir():
+                allowed = None
+            else:
+                allowed = _normalize_deploy_allow_list(
+                    resolve_deploy_sources(mid, source, db=db)
+                )
 
         return (
             DeployContext(
@@ -1626,6 +1640,7 @@ class ModDeployer:
 
         log_archive_runtime_identity(logger, prefix="[DEPLOY_RUNTIME]")
 
+        from services.stellaris_activation import is_stellaris_activation_app
         from services.wh3_activation import is_wh3_activation_app
 
         app_id_hint = 0
@@ -1637,11 +1652,13 @@ class ModDeployer:
             except Exception:  # noqa: BLE001
                 app_id_hint = 0
         wh3_activation = is_wh3_activation_app(app_id_hint)
+        stellaris_activation = is_stellaris_activation_app(app_id_hint)
 
         if (
             mid.isdigit()
             and not self._database().is_mod_enabled(mid)
             and not wh3_activation
+            and not stellaris_activation
         ):
             error = "Mod disabled"
             logger.warning(
@@ -1656,11 +1673,16 @@ class ModDeployer:
                 "mod_id": mid,
             }
 
+        from services.mod_presence import deployment_capability
+
+        cap = deployment_capability(mid, db=self._database())
+        workshop_miss_ok = bool(cap.allowed and cap.source_kind == "workshop")
+
         # content_status gates (Phase 8) — separate from deployment_status
         blocked = deploy_block_reason_for_content_status(
             content_status_for_mod(mid, db=self._database())
         )
-        if blocked:
+        if blocked and not workshop_miss_ok:
             logger.warning(
                 "%s result=fail stage=early_gate reason=content_status "
                 "error=%s",
@@ -1683,8 +1705,8 @@ class ModDeployer:
             library_root=self.library_root,
             file_manager=self.files,
         )
-        if source_for_gate is None:
-            # Entity exists in DB but no proven disk folder via .info.internal_id.
+        if source_for_gate is None and not workshop_miss_ok:
+            # Entity exists in DB but no proven disk folder via .info/entity_key.
             # Never confuse this with game ``mod_path`` configuration errors.
             from services.deploy_path_lifecycle import source_mod_path_failure
 
@@ -1701,7 +1723,11 @@ class ModDeployer:
             if mid.isdigit():
                 self._mark_failed(mid, error=str(out.get("error") or ""))
             return out
-        if source_for_gate is not None and is_mod_folder_absent(mid, source_for_gate):
+        if (
+            source_for_gate is not None
+            and is_mod_folder_absent(mid, source_for_gate)
+            and not workshop_miss_ok
+        ):
             logger.warning(
                 "%s result=fail stage=early_gate reason=folder_missing error=%s",
                 log_prefix,
@@ -1729,7 +1755,7 @@ class ModDeployer:
                 )
 
         try:
-            if not wh3_activation:
+            if not wh3_activation and not workshop_miss_ok:
                 from services.mod_source_integrity import validate_source
 
                 validate_source(
@@ -2078,8 +2104,8 @@ class ModDeployer:
                             "压缩包源缺失："
                             + ", ".join(str(p) for p in missing_zips[:3])
                         )
-                elif ctx.deploy_type == DEPLOY_TYPE_WARHAMMER3:
-                    # Archives are prepared into the Workshop tree later.
+                elif ctx.deploy_type in (DEPLOY_TYPE_WARHAMMER3, DEPLOY_TYPE_STELLARIS):
+                    # Workshop-source activation does not copy the library folder.
                     pass
                 else:
                     verify_deploy_source(
@@ -2148,6 +2174,19 @@ class ModDeployer:
                 return self._finish_wh3_activation_deploy(
                     ctx,
                     planned,
+                    relationship_warnings,
+                    log_prefix,
+                )
+        if (
+            planned.success
+            and not str(ctx.custom_deploy_path or "").strip()
+            and ctx.deploy_type == DEPLOY_TYPE_STELLARIS
+        ):
+            from services.stellaris_activation import is_stellaris_activation_app
+
+            if is_stellaris_activation_app(ctx.app_id):
+                return self._finish_stellaris_activation_deploy(
+                    ctx,
                     relationship_warnings,
                     log_prefix,
                 )
@@ -2983,6 +3022,144 @@ class ModDeployer:
             "deploy_type": result.deploy_type or ctx.deploy_type,
         }
 
+    def _finish_stellaris_activation_deploy(
+        self,
+        ctx: DeployContext,
+        relationship_warnings: list[dict[str, Any]],
+        log_prefix: str,
+    ) -> dict[str, Any]:
+        """Stellaris deploy: record status + sync launcher enable/order. Never copy."""
+        from services.stellaris_activation import (
+            persist_load_order,
+            load_saved_order,
+            sync_stellaris_launcher,
+        )
+
+        library = ctx.library_folder()
+        when = _utc_deploy_time()
+        db_warning: str | None = None
+        try:
+            self._database().update_mod_deploy_status(
+                ctx.internal_id,
+                deploy_status=DEPLOY_STATUS_DEPLOYED,
+                deploy_path=str(library),
+                deploy_time=when,
+                deploy_error="",
+                app_id=ctx.app_id,
+            )
+            try:
+                self._database().enable_mod(ctx.internal_id)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "Stellaris enable after deploy failed internal_id=%s",
+                    ctx.internal_id,
+                    exc_info=True,
+                )
+            try:
+                from services.mod_projection_events import notify_mod_changed
+
+                notify_mod_changed(ctx.internal_id)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "notify_mod_changed after Stellaris deploy failed internal_id=%s",
+                    ctx.internal_id,
+                    exc_info=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            db_warning = "database_update_failed"
+            logger.warning(
+                "[DEPLOY] Stellaris database status update failed internal_id=%s error=%s",
+                ctx.internal_id,
+                exc,
+            )
+        try:
+            persist_load_order(load_saved_order(), db=self._database())
+            sync_stellaris_launcher(db=self._database())
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "%s Stellaris launcher sync after deploy failed",
+                log_prefix,
+                exc_info=True,
+            )
+        logger.info(
+            "%s source=%s target=%s type=%s result=ok copied=0",
+            log_prefix,
+            library,
+            library,
+            ctx.deploy_type,
+        )
+        out: dict[str, Any] = {
+            "success": True,
+            "mod_id": ctx.internal_id,
+            "source": str(library),
+            "target": str(library),
+            "managed_path": str(library),
+            "copied_files": 0,
+            "validated": 0,
+            "files": [],
+            "deploy_type": ctx.deploy_type,
+            "deploy_time": when,
+            "deployment_status": "deployed",
+            "planned_files": 0,
+            "backed_up_files": 0,
+            "applied_files": 0,
+            "verified_files": 0,
+            "failed_files": 0,
+        }
+        if db_warning:
+            out["warning"] = db_warning
+        if relationship_warnings:
+            out["relationship_warnings"] = relationship_warnings
+        return out
+
+    def _undeploy_stellaris_activation(
+        self,
+        ctx: DeployContext,
+        log_prefix: str,
+    ) -> dict[str, Any]:
+        """Clear Stellaris deploy status without deleting Workshop or library files."""
+        from services.stellaris_activation import persist_load_order, load_saved_order, sync_stellaris_launcher
+
+        try:
+            self._database().update_mod_deploy_status(
+                ctx.internal_id,
+                deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
+                deploy_path="",
+                deploy_time="",
+                deploy_error="",
+                app_id=ctx.app_id,
+            )
+            try:
+                from services.mod_projection_events import notify_mod_changed
+
+                notify_mod_changed(ctx.internal_id)
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "notify_mod_changed after Stellaris undeploy failed internal_id=%s",
+                    ctx.internal_id,
+                    exc_info=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            error = f"更新部署状态失败：{exc}"
+            logger.warning("%s result=fail error=%s", log_prefix, error)
+            return {"success": False, "error": error, "mod_id": ctx.internal_id}
+        try:
+            persist_load_order(load_saved_order(), db=self._database())
+            sync_stellaris_launcher(db=self._database())
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "%s Stellaris launcher sync after undeploy failed",
+                log_prefix,
+                exc_info=True,
+            )
+        logger.info("%s source=%s result=ok removed=0", log_prefix, ctx.source)
+        return {
+            "success": True,
+            "mod_id": ctx.internal_id,
+            "removed_files": 0,
+            "deploy_type": ctx.deploy_type,
+        }
+
     def deployment_status(self, internal_id: int | str) -> str:
         """Phase 8 runtime deployment_status (not content_status)."""
         return resolve_deployment_status(
@@ -3082,6 +3259,14 @@ class ModDeployer:
 
             if is_wh3_activation_app(ctx.app_id):
                 return self._undeploy_wh3_activation(ctx, log_prefix)
+        if (
+            not str(ctx.custom_deploy_path or "").strip()
+            and ctx.deploy_type == DEPLOY_TYPE_STELLARIS
+        ):
+            from services.stellaris_activation import is_stellaris_activation_app
+
+            if is_stellaris_activation_app(ctx.app_id):
+                return self._undeploy_stellaris_activation(ctx, log_prefix)
 
         manifest_root = ctx.library_folder()
         manifest = load_manifest(manifest_root, expected_internal_id=mid)

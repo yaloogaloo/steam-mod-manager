@@ -6,7 +6,8 @@ LayoutSnapshotProcessor). Never uses requests/httpx as the primary fetch.
 GitHub: HTTP layout download first; optional browser backup; styled fallback.
 
 Outputs under ``.info/offline/``:
-  index.html, assets/ (CSS), metadata.json
+  index.html, metadata.json, manifest.json
+Capture bytes stage under ``cache/temp/offline_staging`` then Asset Store.
 """
 
 from __future__ import annotations
@@ -374,10 +375,9 @@ class LayoutSnapshotDownloader:
         base = final_url or page_url
         try:
             target.mkdir(parents=True, exist_ok=True)
-            assets_dir = target / DEFAULT_ASSETS_DIR
-            if assets_dir.exists():
-                shutil.rmtree(assets_dir, ignore_errors=True)
-            assets_dir.mkdir(parents=True, exist_ok=True)
+            from services.offline.staging import reset_capture_assets_dir
+
+            assets_dir = reset_capture_assets_dir(target)
             images_dir = assets_dir / "images"
             images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -411,6 +411,9 @@ class LayoutSnapshotDownloader:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Layout snapshot failed for %s: %s", page_url, exc)
+            from services.offline.staging import cleanup_capture_staging
+
+            cleanup_capture_staging(target)
             return LayoutSnapshotResult(
                 success=False,
                 html_path=index_path,
@@ -619,7 +622,9 @@ def write_github_fallback(
 ) -> Path:
     """GitHub-styled offline fallback: header, title, tabs, README + files cards."""
     target = Path(output_dir)
-    assets = target / DEFAULT_ASSETS_DIR
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets = resolve_capture_assets_dir(target)
     assets.mkdir(parents=True, exist_ok=True)
     css_name = "github_fallback.css"
     (assets / css_name).write_text(
@@ -728,7 +733,9 @@ def write_nexus_fallback(
 ) -> Path:
     """Nexus-styled offline fallback: hero title, description | metadata, files."""
     target = Path(output_dir)
-    assets = target / DEFAULT_ASSETS_DIR
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets = resolve_capture_assets_dir(target)
     assets.mkdir(parents=True, exist_ok=True)
     css_name = "nexus_fallback.css"
     (assets / css_name).write_text(

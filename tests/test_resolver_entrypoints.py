@@ -8,14 +8,13 @@ import shutil
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder, write_info_sidecar
 
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, persist_unified_metadata_dict
 from services.metadata_backup import backup_root, sync_metadata_backup
 from services.mod_metadata_resolver import resolve_cover_path, resolve_offline_page
@@ -54,11 +53,6 @@ def _disable_dialog_offline_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _write_info(folder: Path, payload: dict) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
-    persist_unified_metadata_dict(folder, payload)
-
-
 def _write_backup(
     mod_id: str,
     payload: dict,
@@ -81,31 +75,52 @@ def _write_backup(
     return dest
 
 
+def _seed(
+    db: DatabaseManager,
+    folder: Path,
+    *,
+    workshop: str,
+    title: str,
+    extra: dict | None = None,
+) -> tuple[str, str]:
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(db, external_id=workshop, title=title)
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=title,
+        extra=extra or {},
+    )
+    return pk, frozen
+
+
 def test_detail_dialog_existing_folder_prefers_info(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, data_root: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModA"
-    _write_info(
+    pk, frozen = _seed(
+        db,
         folder,
+        workshop="920201",
+        title="A",
+        extra={"display_name": "A"},
+    )
+
+    db.update_mod_user_metadata(pk, {"display_name": "C"})
+    _write_backup(
+        pk,
         {
-            "internal_id": "920201",
+            "internal_id": frozen,
             "published_file_id": "920201",
-            "title": "A",
-            "display_name": "A",
+            "title": "B",
+            "display_name": "B",
         },
     )
-    create_steam_test_mod(db, external_id="920201", title="C")
-    bind_managed_path(db, "920201", folder, title="C")
 
-    db.update_mod_user_metadata("920201", {"display_name": "C"})
-    _write_backup(
-        "920201",
-        {
-            "internal_id": "920201",
-            "published_file_id": "920201", "title": "B", "display_name": "B"},
-    )
-
-    dialog = ModDetailDialog(folder, mod_id="920201")
+    dialog = ModDetailDialog(folder, mod_id=pk)
     try:
         assert dialog.title_label.text() == "A"
         assert dialog._resolved is not None
@@ -120,24 +135,20 @@ def test_detail_dialog_missing_folder_prefers_backup(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, data_root: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModB"
-    _write_info(
+    pk, frozen = _seed(
+        db,
         folder,
-        {
-            "internal_id": "920202",
-            "published_file_id": "920202",
-            "title": "FromInfo",
-            "display_name": "FromInfo",
-        },
+        workshop="920202",
+        title="FromInfo",
+        extra={"display_name": "FromInfo"},
     )
-    create_steam_test_mod(db, external_id="920202", title="C")
-    bind_managed_path(db, "920202", folder, title="C")
 
-    db.update_mod_user_metadata("920202", {"display_name": "C"})
+    db.update_mod_user_metadata(pk, {"display_name": "C"})
     sync_metadata_backup(folder)
     _write_backup(
-        "920202",
+        pk,
         {
-            "internal_id": "920202",
+            "internal_id": frozen,
             "published_file_id": "920202",
             "title": "B",
             "display_name": "B",
@@ -145,9 +156,9 @@ def test_detail_dialog_missing_folder_prefers_backup(
         },
     )
     shutil.rmtree(folder)
-    db.set_mod_folder_present("920202", present=False)
+    db.set_mod_folder_present(pk, present=False)
 
-    dialog = ModDetailDialog(folder, mod_id="920202")
+    dialog = ModDetailDialog(folder, mod_id=pk)
     try:
         assert dialog.title_label.text() == "B"
         assert dialog._resolved is not None
@@ -169,27 +180,40 @@ def test_missing_folder_opens_backup_offline_from_dialog(
     folder = tmp_path / "mod" / "Game" / "ModC"
     info = folder / INFO_DIR_NAME / "offline"
     info.mkdir(parents=True)
-    persist_unified_metadata_dict(
+    created = create_steam_test_mod(db, external_id="920203", title="Off")
+    pk = str(created.mod_id)
+    write_info_sidecar(
         folder,
-        {
-            "internal_id": "920203",
-            "published_file_id": "920203", "title": "Off", "display_name": "Off"},
+        internal_id=str(created.internal_id),
+        title="Off",
+        external_id="920203",
+        workspace_id=str(created.workspace_id or "920203"),
+        extra={"display_name": "Off"},
     )
+    from tests.helpers.identity import bind_managed_path
+
+    bind_managed_path(db, pk, folder, title="Off")
     (info / "index.html").write_text("<html>info</html>", encoding="utf-8")
-    create_steam_test_mod(db, external_id="920203", title="Off")
-    bind_managed_path(db, "920203", folder, title="Off")
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     sync_metadata_backup(folder)
     shutil.rmtree(folder)
-    db.set_mod_folder_present("920203", present=False)
+    db.set_mod_folder_present(pk, present=False)
 
-    page = resolve_offline_page("920203", folder)
+    page = resolve_offline_page(pk, folder)
     assert page is not None
     assert page.is_file()
-    assert "mod_backup" in str(page).replace("\\", "/")
-    assert offline_page_exists(folder, mod_id="920203") is True
+    assert "offline_view" in str(page).replace("\\", "/")
+    assert "mod_backup" not in str(page).replace("\\", "/")
+    assert offline_page_exists(folder, mod_id=pk) is True
 
-    dialog = ModDetailDialog(folder, mod_id="920203")
+    dialog = ModDetailDialog(folder, mod_id=pk)
     opened: list[str] = []
     monkeypatch.setattr(
         "ui.mod_detail_dialog.QDesktopServices.openUrl",
@@ -197,6 +221,7 @@ def test_missing_folder_opens_backup_offline_from_dialog(
     )
     try:
         dialog._open_offline()
+        qapp.processEvents()
         assert len(opened) == 1
         assert Path(opened[0]).resolve() == page.resolve()
     finally:
@@ -209,29 +234,24 @@ def test_existing_folder_uses_backup_cover_when_info_cover_deleted(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, data_root: Path
 ) -> None:
     folder = tmp_path / "mod" / "Game" / "ModD"
-    _write_info(
+    pk, _frozen = _seed(
+        db,
         folder,
-        {
-            "internal_id": "920204",
-            "published_file_id": "920204",
-            "title": "CoverMod",
-            "display_name": "CoverMod",
-            "cover_path": ".info/cover.jpg",
-        },
+        workshop="920204",
+        title="CoverMod",
+        extra={"display_name": "CoverMod", "cover_path": ".info/cover.jpg"},
     )
     (folder / INFO_DIR_NAME / "cover.jpg").write_bytes(b"info-cover")
-    create_steam_test_mod(db, external_id="920204", title="CoverMod")
-    bind_managed_path(db, "920204", folder, title="CoverMod")
 
     sync_metadata_backup(folder)
     (folder / INFO_DIR_NAME / "cover.jpg").unlink()
 
-    cover = resolve_cover_path("920204", folder)
+    cover = resolve_cover_path(pk, folder)
     assert cover is not None
     assert cover.is_file()
     assert "mod_backup" in str(cover).replace("\\", "/")
 
-    dialog = ModDetailDialog(folder, mod_id="920204")
+    dialog = ModDetailDialog(folder, mod_id=pk)
     try:
         pix = dialog.cover_label.pixmap()
         assert pix is not None and not pix.isNull()
@@ -274,5 +294,5 @@ def test_ui_display_files_do_not_call_load_metadata() -> None:
     assert "resolve_mod_metadata" in dialog_src
     assert "find_local_cover" not in dialog_src
     query_src = (root / "ui" / "library_query.py").read_text(encoding="utf-8")
-    assert "resolve_offline_page" in query_src
+    assert "probe_offline_open" in query_src
     assert "offline_page_file_exists" not in query_src

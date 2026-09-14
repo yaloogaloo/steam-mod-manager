@@ -4,9 +4,12 @@ ID ARCHITECTURE CONTRACT (Frozen Minimal Model — do not reinterpret):
 
 * ``internal_id`` (TEXT ``mods.internal_id``)
   Durable business Entity Identity. Answers “is this the same Mod?”.
-  Minted at create; persisted on the row and in ``.info.internal_id``.
+  Minted at create; persisted on the row. Proven on disk as ``.info/internal_id``
+  (same Entity identity value — not a third Mod ID).
   Independent of the SQLite PK. Never ``internal_id = str(mod_id)``.
   Never ``correlation_id``. Never ``workspace_id``.
+  Do not introduce ``entity_key`` as an identity field (legacy JSON key may be
+  read once and migrated to ``internal_id``).
 
 * ``mods.mod_id`` (code: ``mod_id``)
   SQLite implementation PK and FK target (``collection_mods.mod_id``,

@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import (
     DEPLOY_TYPE_FOLDER_COPY,
@@ -16,8 +15,7 @@ from services.deploy_rules import (
     resolve_deploy_type,
 )
 from services.deploy_rules.palworld import PalworldStrategy
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 APP_ID = 1623730
 
@@ -31,18 +29,23 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _meta(mod: Path, mid: str) -> None:
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "internal_id": "{mid}",\n'
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{mod.name}",\n'
-        f'  "app_id": {APP_ID},\n'
-        '  "game_name": "Palworld"\n'
-        "}\n",
-        encoding="utf-8",
+def _register(
+    db: DatabaseManager,
+    mod: Path,
+    *,
+    external_id: str,
+    title: str,
+) -> str:
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title, app_id=APP_ID, game_name="Palworld"
+    )
+    return prove_managed_folder(
+        db,
+        mod,
+        handle=created.mod_id,
+        title=title,
+        app_id=APP_ID,
+        game_name="Palworld",
     )
 
 
@@ -67,7 +70,6 @@ def test_case_a_folder_mod_fallback(
     (mod / "plugin.dll").write_bytes(b"DLL")
     (mod / "Info.json").write_text("{}", encoding="utf-8")
     (mod / "thumbnail.png").write_bytes(b"\x89PNG")
-    _meta(mod, "3704000001")
 
     db.update_game_deploy_config(
         APP_ID,
@@ -76,10 +78,9 @@ def test_case_a_folder_mod_fallback(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    create_steam_test_mod(db, external_id="3704000001", title="FolderOnly", app_id=APP_ID)
-    bind_managed_path(db, "3704000001", mod, title="FolderOnly")
+    pk = _register(db, mod, external_id="3704000001", title="FolderOnly")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("3704000001")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_PALWORLD_PAK
 
@@ -107,7 +108,6 @@ def test_case_b_ordinary_pak(tmp_path: Path, db: DatabaseManager) -> None:
     mod = library / "Palworld" / "PakOnly"
     mod.mkdir(parents=True)
     (mod / "test.pak").write_bytes(b"TEST")
-    _meta(mod, "3704000002")
 
     db.update_game_deploy_config(
         APP_ID,
@@ -116,10 +116,9 @@ def test_case_b_ordinary_pak(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    create_steam_test_mod(db, external_id="3704000002", title="PakOnly", app_id=APP_ID)
-    bind_managed_path(db, "3704000002", mod, title="PakOnly")
+    pk = _register(db, mod, external_id="3704000002", title="PakOnly")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("3704000002")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
 
     target = install / "Pal" / "Content" / "Paks" / "~mods" / "test.pak"
@@ -143,7 +142,6 @@ def test_case_c_logicmods(tmp_path: Path, db: DatabaseManager) -> None:
     logic = mod / "LogicMods"
     logic.mkdir(parents=True)
     (logic / "test.pak").write_bytes(b"LOGIC")
-    _meta(mod, "3704000003")
 
     db.update_game_deploy_config(
         APP_ID,
@@ -151,10 +149,9 @@ def test_case_c_logicmods(tmp_path: Path, db: DatabaseManager) -> None:
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    create_steam_test_mod(db, external_id="3704000003", title="LogicOnly", app_id=APP_ID)
-    bind_managed_path(db, "3704000003", mod, title="LogicOnly")
+    pk = _register(db, mod, external_id="3704000003", title="LogicOnly")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod("3704000003")["success"]
+    assert ModDeployer(library_root=library, db=db).deploy_mod(pk)["success"]
     target = install / "Pal" / "Content" / "Paks" / "LogicMods" / "test.pak"
     assert target.read_bytes() == b"LOGIC"
     man = load_manifest(mod)
@@ -179,7 +176,6 @@ def test_case_d_mixed_pak_and_folder(
     (mod / "Paks" / "b.pak").write_bytes(b"B")
     (mod / "Config").mkdir()
     (mod / "Config" / "c.ini").write_text("ok", encoding="utf-8")
-    _meta(mod, "3704000004")
 
     db.update_game_deploy_config(
         APP_ID,
@@ -188,10 +184,9 @@ def test_case_d_mixed_pak_and_folder(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    create_steam_test_mod(db, external_id="3704000004", title="Mixed", app_id=APP_ID)
-    bind_managed_path(db, "3704000004", mod, title="Mixed")
+    pk = _register(db, mod, external_id="3704000004", title="Mixed")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("3704000004")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
 
     assert (
@@ -235,7 +230,6 @@ def test_case_e_undeploy_only_manifest_targets(
     (mod / "Paks" / "b.pak").write_bytes(b"B")
     (mod / "Config").mkdir()
     (mod / "Config" / "c.ini").write_text("ok", encoding="utf-8")
-    _meta(mod, "3704000005")
 
     db.update_game_deploy_config(
         APP_ID,
@@ -244,11 +238,10 @@ def test_case_e_undeploy_only_manifest_targets(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    create_steam_test_mod(db, external_id="3704000005", title="MixedUndeploy", app_id=APP_ID)
-    bind_managed_path(db, "3704000005", mod, title="MixedUndeploy")
+    pk = _register(db, mod, external_id="3704000005", title="MixedUndeploy")
 
     dep = ModDeployer(library_root=library, db=db)
-    assert dep.deploy_mod("3704000005")["success"]
+    assert dep.deploy_mod(pk)["success"]
 
     foreign_pak = install / "Pal" / "Content" / "Paks" / "~mods" / "Other.pak"
     foreign_pak.write_bytes(b"keep")
@@ -256,7 +249,7 @@ def test_case_e_undeploy_only_manifest_targets(
     foreign_folder.parent.mkdir(parents=True)
     foreign_folder.write_text("keep", encoding="utf-8")
 
-    assert dep.undeploy_mod("3704000005")["success"]
+    assert dep.undeploy_mod(pk)["success"]
 
     assert not (
         install / "Pal" / "Content" / "Paks" / "LogicMods" / "a.pak"
@@ -284,7 +277,6 @@ def test_auto_pick_up_style_paks_subdir(
     paks_dir.mkdir(parents=True)
     (paks_dir / "test.pak").write_bytes(b"TEST")
     (mod / "Info.json").write_text("{}", encoding="utf-8")
-    _meta(mod, "3703542467")
 
     db.update_game_deploy_config(
         APP_ID,
@@ -293,10 +285,9 @@ def test_auto_pick_up_style_paks_subdir(
         mod_path=str(ue4ss_mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    create_steam_test_mod(db, external_id="3703542467", title="Auto PickUp", app_id=APP_ID)
-    bind_managed_path(db, "3703542467", mod, title="Auto PickUp")
+    pk = _register(db, mod, external_id="3703542467", title="Auto PickUp")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("3703542467")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True
     assert (install / "Pal" / "Content" / "Paks" / "~mods" / "test.pak").is_file()
     assert not (ue4ss_mods / "Auto PickUp" / "Paks").exists()

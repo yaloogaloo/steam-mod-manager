@@ -9,11 +9,7 @@ import pytest
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
 from core.game_info import GameInfo
 from services.deploy import ModDeployer
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -37,17 +33,13 @@ def _mod_folder(
     created = create_steam_test_mod(
         db, external_id=mid, title=f"Mod{mid}", app_id=1623730, game_name="Palworld"
     )
-    write_info_sidecar(
+    prove_managed_folder(
+        db,
         folder,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title=f"Mod{mid}",
-        external_id=mid,
-        workspace_id=str(created.workspace_id or mid),
         app_id=1623730,
         game_name="Palworld",
-    )
-    bind_managed_path(
-        db, created.mod_id, folder, title=f"Mod{mid}", game_name="Palworld"
     )
     return folder
 

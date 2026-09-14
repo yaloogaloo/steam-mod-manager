@@ -17,11 +17,18 @@ htmlcov/
 config.local.json
 settings.json
 config/modio.json
+config/load_order/*.json
+!config/load_order/.gitkeep
 mod/*
 !mod/.gitkeep
+# Regenerable performance cache (safe to delete entirely)
+cache/
+# Runtime logs (crash traces). Keep the directory placeholder.
+logs/*
+!logs/.gitkeep
 # data/mod_manager.db
 # data/mod_manager.db-*
-# data/headers/
+# Phase 10: headers / import_cache / asset_cache live under cache/
 data/import_cache
 data/mod_backup
 data/asset_cache/

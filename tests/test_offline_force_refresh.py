@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from core.db_manager import DatabaseManager
 from core.models import ModMetadata
 from services import archive as archive_mod
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.archive import (
     ARCHIVE_OUTCOME_FAILED,
     ARCHIVE_OUTCOME_SKIPPED,
@@ -337,12 +337,13 @@ def test_case12_provider_force_refresh_passed(
 ) -> None:
     lib = tmp_path / "mod"
     folder = lib / "Game" / "Mod"
-    info = folder / ".info"
-    info.mkdir(parents=True)
-    (info / "index.html").write_text(VALID_HTML, encoding="utf-8")
-    create_steam_test_mod(db, external_id="3596053192", title="Mod")
-    bind_managed_path(db, "3596053192", folder, title="Mod")
-
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / ".info").mkdir(parents=True, exist_ok=True)
+    (folder / ".info" / "index.html").write_text(VALID_HTML, encoding="utf-8")
+    created = create_steam_test_mod(db, external_id="3596053192", title="Mod")
+    prove_managed_folder(
+        db, folder, handle=created.mod_id, title="Mod", game_name="Game"
+    )
     seen: dict[str, Any] = {}
 
     def tracking(self, info_dir, published_file_id, **kwargs):
@@ -357,7 +358,7 @@ def test_case12_provider_force_refresh_passed(
     monkeypatch.setattr(OfflinePageArchiver, "ensure_offline_page", tracking)
 
     result = SteamOfflineProvider().update_offline_page(
-        "3596053192",
+        created.mod_id,
         managed_path=folder,
         library_root=lib,
         force_refresh=True,

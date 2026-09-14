@@ -8,15 +8,13 @@ import pytest
 
 from core.db_manager import RELATIONSHIP_CONFLICT, DatabaseManager
 from core.mod_status import CONFLICT_STATUS_CONFLICT, CONFLICT_STATUS_NONE
-from core.models import ModMetadata
 from services.conflict import ConflictDetector, ConflictType
 from services.deploy_rules.manifest import (
     DeployManifest,
     ManifestFileEntry,
     save_manifest,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -28,15 +26,21 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(library: Path, mid: str, *, title: str = "") -> Path:
-    folder = library / "BaldursGate3" / mid
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"published_file_id":"{mid}","title":"{title or mid}"}}',
-        encoding="utf-8",
+def _seed(
+    library: Path,
+    db: DatabaseManager,
+    *,
+    external_id: str,
+    title: str = "",
+) -> tuple[Path, str]:
+    folder = library / "BaldursGate3" / external_id
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title or external_id
     )
-    return folder
+    pk = str(created.mod_id)
+    prove_managed_folder(db, folder, handle=pk, title=title or external_id)
+    return folder, pk
 
 
 def _manifest(folder: Path, mid: str, target: str) -> None:
@@ -58,29 +62,27 @@ def test_case1_distinct_paks_same_mods_dir_no_conflict(
     mods_dir = tmp_path / "BG3" / "Mods"
     t_a = str((mods_dir / "A.pak").resolve())
     t_b = str((mods_dir / "B.pak").resolve())
-    a = _seed(library, "101", title="ModA")
-    b = _seed(library, "102", title="ModB")
-    _manifest(a, "101", t_a)
-    _manifest(b, "102", t_b)
-    create_steam_test_mod(db, external_id="101", title="ModA")
-    create_steam_test_mod(db, external_id="102", title="ModB")
+    a, pk_a = _seed(library, db, external_id="101", title="ModA")
+    b, pk_b = _seed(library, db, external_id="102", title="ModB")
+    _manifest(a, pk_a, t_a)
+    _manifest(b, pk_b, t_b)
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
-    assert reports["101"].status == CONFLICT_STATUS_NONE
-    assert reports["102"].status == CONFLICT_STATUS_NONE
-    assert reports["101"].conflicts == []
-    assert reports["102"].conflicts == []
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_b].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].conflicts == []
+    assert reports[pk_b].conflicts == []
     assert not any(
         c.conflict_type == ConflictType.PAK_OVERLAP.value
         for rep in reports.values()
         for c in rep.conflicts
     )
-    assert db.get_mod_status(101).conflict_status == CONFLICT_STATUS_NONE
-    assert db.get_mod_status(102).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
+    assert db.get_mod_status(pk_b).conflict_status == CONFLICT_STATUS_NONE
 
     # preview_targets agrees with check_all_mods (no path conflict)
-    preview = det.preview_targets("101", [t_a])
+    preview = det.preview_targets(pk_a, [t_a])
     assert preview.status == CONFLICT_STATUS_NONE
     assert preview.conflicts == []
 
@@ -90,26 +92,24 @@ def test_case2_identical_pak_target_is_file_overwrite(
 ) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "BG3" / "Mods" / "Test.pak").resolve())
-    a = _seed(library, "201", title="ModA")
-    b = _seed(library, "202", title="ModB")
-    _manifest(a, "201", shared)
-    _manifest(b, "202", shared)
-    create_steam_test_mod(db, external_id="201", title="ModA")
-    create_steam_test_mod(db, external_id="202", title="ModB")
+    a, pk_a = _seed(library, db, external_id="201", title="ModA")
+    b, pk_b = _seed(library, db, external_id="202", title="ModB")
+    _manifest(a, pk_a, shared)
+    _manifest(b, pk_b, shared)
 
     det = ConflictDetector(library, db=db)
     reports = det.check_all_mods(persist=True)
-    assert reports["201"].status == CONFLICT_STATUS_NONE
-    assert reports["202"].status == CONFLICT_STATUS_NONE
-    assert reports["201"].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
-    assert set(reports["201"].conflicts[0].mods) == {"201", "202"}
-    assert db.get_mod_status(201).conflict_status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_b].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
+    assert set(reports[pk_a].conflicts[0].mods) == {pk_a, pk_b}
+    assert db.get_mod_status(pk_a).conflict_status == CONFLICT_STATUS_NONE
 
-    preview = det.preview_targets("201", [shared])
+    preview = det.preview_targets(pk_a, [shared])
     assert preview.status == CONFLICT_STATUS_NONE
     assert preview.conflicts
     assert preview.conflicts[0].conflict_type == ConflictType.FILE_OVERWRITE.value
-    assert "202" in preview.conflicts[0].mods
+    assert pk_b in preview.conflicts[0].mods
 
 
 def test_case3_user_relationship_conflict_still_visible(
@@ -120,37 +120,35 @@ def test_case3_user_relationship_conflict_still_visible(
     # Distinct targets — no FILE_OVERWRITE
     t_a = str((mods_dir / "RelA.pak").resolve())
     t_b = str((mods_dir / "RelB.pak").resolve())
-    a = _seed(library, "301", title="Source")
-    b = _seed(library, "302", title="DeclaredRival")
-    _manifest(a, "301", t_a)
-    _manifest(b, "302", t_b)
-    create_steam_test_mod(db, external_id="301", title="Source")
-    create_steam_test_mod(db, external_id="302", title="DeclaredRival")
-    db.add_mod_relationship(301, 302, RELATIONSHIP_CONFLICT)
+    a, pk_a = _seed(library, db, external_id="301", title="Source")
+    b, pk_b = _seed(library, db, external_id="302", title="DeclaredRival")
+    _manifest(a, pk_a, t_a)
+    _manifest(b, pk_b, t_b)
+    db.add_mod_relationship(pk_a, pk_b, RELATIONSHIP_CONFLICT)
 
     # Relationship API still surfaces the declaration
-    grouped = db.get_mod_relationships("301")
+    grouped = db.get_mod_relationships(pk_a)
     assert any(
-        str(item.get("mod_id") or item.get("target_mod_id")) == "302"
+        str(item.get("mod_id") or item.get("target_mod_id")) == pk_b
         for item in (grouped.get("conflicts") or [])
     )
-    warns = db.check_relationship_deploy_warnings(301)
+    warns = db.check_relationship_deploy_warnings(pk_a)
     assert any(w.get("type") == "known_conflict" for w in warns)
 
     # Detector keeps RELATIONSHIP as a separate entry (not FILE_OVERWRITE)
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
     rel_entries = [
         c
-        for c in reports["301"].conflicts
+        for c in reports[pk_a].conflicts
         if c.conflict_type == ConflictType.RELATIONSHIP.value
     ]
     assert rel_entries
-    assert "302" in rel_entries[0].mods
+    assert pk_b in rel_entries[0].mods
     assert not any(
         c.conflict_type == ConflictType.FILE_OVERWRITE.value
-        for c in reports["301"].conflicts
+        for c in reports[pk_a].conflicts
     )
-    assert reports["301"].status == CONFLICT_STATUS_CONFLICT
+    assert reports[pk_a].status == CONFLICT_STATUS_CONFLICT
 
 
 def test_case4_disabled_mod_excluded_from_path_conflict(
@@ -158,19 +156,17 @@ def test_case4_disabled_mod_excluded_from_path_conflict(
 ) -> None:
     library = tmp_path / "mod"
     shared = str((tmp_path / "BG3" / "Mods" / "Shared.pak").resolve())
-    a = _seed(library, "401", title="Enabled")
-    b = _seed(library, "402", title="Disabled")
-    _manifest(a, "401", shared)
-    _manifest(b, "402", shared)
-    create_steam_test_mod(db, external_id="401", title="Enabled")
-    create_steam_test_mod(db, external_id="402", title="Disabled")
-    db.disable_mod(402)
+    a, pk_a = _seed(library, db, external_id="401", title="Enabled")
+    b, pk_b = _seed(library, db, external_id="402", title="Disabled")
+    _manifest(a, pk_a, shared)
+    _manifest(b, pk_b, shared)
+    db.disable_mod(pk_b)
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=True)
-    assert reports["401"].status == CONFLICT_STATUS_NONE
-    assert reports["401"].conflicts == []
-    assert all("402" not in c.mods for c in reports["401"].conflicts)
+    assert reports[pk_a].status == CONFLICT_STATUS_NONE
+    assert reports[pk_a].conflicts == []
+    assert all(pk_b not in c.mods for c in reports[pk_a].conflicts)
 
-    preview = ConflictDetector(library, db=db).preview_targets("401", [shared])
+    preview = ConflictDetector(library, db=db).preview_targets(pk_a, [shared])
     assert preview.conflicts == []
     assert preview.status == CONFLICT_STATUS_NONE

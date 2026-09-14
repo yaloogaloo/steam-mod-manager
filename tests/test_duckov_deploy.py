@@ -14,9 +14,9 @@ from services.deploy_rules.duckov import (
     find_duckov_mod_root,
     validate_duckov_target,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
 from services.importers.archive import extract_archive
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -45,33 +45,18 @@ def _seed_mod(
     db: DatabaseManager,
     *,
     folder: str,
-    mod_id: str,
+    external_id: str,
     files: dict[str, bytes | str],
-) -> Path:
+) -> tuple[Path, str]:
     created = create_steam_test_mod(
         db,
-        external_id=str(mod_id),
+        external_id=str(external_id),
         title=folder,
         app_id=DUCKOV_APP_ID,
         game_name="DuckovGame",
     )
-    pk = str(created.mod_id)
     mod_dir = library / "DuckovGame" / folder
     mod_dir.mkdir(parents=True)
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        (
-            "{\n"
-            f'  "internal_id": "{pk}",\n'
-            f'  "published_file_id": "{mod_id}",\n'
-            f'  "title": "{folder}",\n'
-            f'  "app_id": {DUCKOV_APP_ID},\n'
-            f'  "game_name": "DuckovGame"\n'
-            "}\n"
-        ),
-        encoding="utf-8",
-    )
     for rel, data in files.items():
         path = mod_dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,8 +64,15 @@ def _seed_mod(
             path.write_bytes(data)
         else:
             path.write_text(data, encoding="utf-8")
-    bind_managed_path(db, pk, mod_dir, game_name="DuckovGame", title=folder)
-    return mod_dir
+    pk = prove_managed_folder(
+        db,
+        mod_dir,
+        handle=created.mod_id,
+        title=folder,
+        app_id=DUCKOV_APP_ID,
+        game_name="DuckovGame",
+    )
+    return mod_dir, pk
 
 
 def _make_zip(path: Path, mapping: dict[str, bytes]) -> None:
@@ -94,18 +86,18 @@ def test_case1_plain_directory_deploy(tmp_path: Path, db: DatabaseManager) -> No
     library = tmp_path / "mod"
     mod_path = _configure_duckov(db, tmp_path)
     folder = "Pokemon Mod"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90001",
+        external_id="90001",
         files={
             "info.ini": "[Mod]\nname=Pokemon\n",
             "a.dll": b"MZ",
             "assets/x.txt": "ok",
         },
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90001")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
 
     target = mod_path / folder
@@ -119,11 +111,11 @@ def test_case2_zip_flat_contents(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "mod"
     mod_path = _configure_duckov(db, tmp_path)
     folder = "ZipFlat"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90002",
+        external_id="90002",
         files={
             "Mod.zip": b"",  # placeholder overwritten below
         },
@@ -137,7 +129,7 @@ def test_case2_zip_flat_contents(tmp_path: Path, db: DatabaseManager) -> None:
             "assets/x.txt": b"ok",
         },
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90002")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     target = mod_path / folder
     assert (target / "info.ini").is_file()
@@ -149,9 +141,9 @@ def test_case3_zip_single_wrapper_unwrapped(tmp_path: Path, db: DatabaseManager)
     library = tmp_path / "mod"
     mod_path = _configure_duckov(db, tmp_path)
     folder = "Wrapped Mod"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
-        db, folder=folder, mod_id="90003", files={})
+        db, folder=folder, external_id="90003", files={})
     zip_path = library / "DuckovGame" / folder / "content.zip"
     _make_zip(
         zip_path,
@@ -160,7 +152,7 @@ def test_case3_zip_single_wrapper_unwrapped(tmp_path: Path, db: DatabaseManager)
             "Wrapped Mod/a.dll": b"MZ",
         },
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90003")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     target = mod_path / folder
     assert (target / "info.ini").is_file()
@@ -171,14 +163,14 @@ def test_case4_missing_info_ini_fails(tmp_path: Path, db: DatabaseManager) -> No
     library = tmp_path / "mod"
     _configure_duckov(db, tmp_path)
     folder = "NoIni"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90004",
+        external_id="90004",
         files={"a.dll": b"MZ"},
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90004")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is False
     assert "info.ini" in str(result.get("error") or "")
 
@@ -212,14 +204,14 @@ def test_case7_missing_mod_path(tmp_path: Path, db: DatabaseManager) -> None:
         deploy_type="folder_copy",
     )
     folder = "Any"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90007",
+        external_id="90007",
         files={"info.ini": "[Mod]\n"},
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90007")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is False
     assert "Mod 部署目录" in str(result.get("error") or "")
 
@@ -238,14 +230,14 @@ def test_case8_uses_game_mod_path_not_hardcoded(
         deploy_type="folder_copy",
     )
     folder = "CfgMod"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90008",
+        external_id="90008",
         files={"info.ini": "[Mod]\n", "x.dll": b"1"},
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90008")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     assert (custom_mod_path / folder / "info.ini").is_file()
 
@@ -263,20 +255,21 @@ def test_case9_other_game_folder_copy_regression(
         deploy_type="folder_copy",
     )
     folder = "PlainMod"
-    create_steam_test_mod(
+    created = create_steam_test_mod(
         db, external_id="8800", title=folder, app_id=99999, game_name="OtherGame"
     )
     mod_dir = library / "OtherGame" / folder
     mod_dir.mkdir(parents=True)
     (mod_dir / "file.txt").write_text("ok", encoding="utf-8")
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        '{"internal_id":"8800","published_file_id":"8800","title":"PlainMod","app_id":99999}\n',
-        encoding="utf-8",
+    pk = prove_managed_folder(
+        db,
+        mod_dir,
+        handle=created.mod_id,
+        title=folder,
+        app_id=99999,
+        game_name="OtherGame",
     )
-    bind_managed_path(db, "8800", mod_dir, game_name="OtherGame", title=folder)
-    result = ModDeployer(library_root=library, db=db).deploy_mod("8800")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     assert (game_mods / folder / "file.txt").is_file()
 
@@ -287,18 +280,18 @@ def test_empty_marker_file_does_not_fail_deploy(
     library = tmp_path / "mod"
     mod_path = _configure_duckov(db, tmp_path)
     folder = "Daily Interest"
-    _seed_mod(
+    _, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90010",
+        external_id="90010",
         files={
             "info.ini": "[Mod]\nname=Daily\n",
             "NODEBUG_DAILY_INTEREST": b"",
             "DailyInterest.dll": b"MZ",
         },
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90010")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
 
     target = mod_path / folder
@@ -314,18 +307,18 @@ def test_empty_directory_does_not_fail_deploy(
     library = tmp_path / "mod"
     mod_path = _configure_duckov(db, tmp_path)
     folder = "EmptyDirMod"
-    mod_dir = _seed_mod(
+    mod_dir, pk = _seed_mod(
         library,
         db,
         folder=folder,
-        mod_id="90011",
+        external_id="90011",
         files={
             "info.ini": "[Mod]\n",
             "assets/x.txt": "ok",
         },
     )
     (mod_dir / "assets").mkdir(exist_ok=True)
-    result = ModDeployer(library_root=library, db=db).deploy_mod("90011")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert result["success"] is True, result
     assert (mod_path / folder / "info.ini").is_file()
     assert (mod_path / folder / "assets" / "x.txt").is_file()

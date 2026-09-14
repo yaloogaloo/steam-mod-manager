@@ -101,7 +101,8 @@ def discover_folder_by_internal_id(
     db=None,
 ) -> Path | None:
     """
-    Find a managed folder whose ``.info.internal_id`` matches *internal_id*.
+    Find a managed folder whose ``.info/internal_id`` matches *internal_id*
+    (same Entity ``mods.internal_id`` — not a third Mod ID).
 
     Identity-only discovery (never folder name / workspace_id / path invent).
     When *expected_mod_id* is set, the sidecar must resolve to that DB entity.
@@ -135,6 +136,7 @@ def discover_folder_by_internal_id(
             if not folder.is_dir():
                 continue
             raw = dict(read_info_metadata_dict(folder) or {})
+            # .info/internal_id == Entity.internal_id; never a third Mod ID.
             iid = read_internal_id(raw)
             if iid != key:
                 continue
@@ -160,13 +162,13 @@ def resolve_mod_folder_by_internal_id(
     db=None,
 ) -> Path | None:
     """
-    Runtime folder resolution: entity proof → disk scan of ``.info.internal_id``.
+    Runtime folder resolution: entity proof → disk scan of ``.info/internal_id``.
 
     Accepts UUID ``mods.internal_id`` **or** integer PK ``mods.mod_id``.
     Never uses workspace_id / folder name / published_file_id / raw path as identity.
 
     ``last_known_path`` may be used only as a proven cache hint (must match
-    ``.info.internal_id``); on miss, scan the managed library root.
+    ``.info/internal_id``); on miss, scan the managed library root.
     """
     from core.db_manager import get_db
 
@@ -232,9 +234,10 @@ def _folder_proves_mod_entity(
     mod_id: str,
     db,
 ) -> bool:
-    """True when folder/.info.internal_id binds to *mod_id* (never path/name).
+    """True when folder/.info/internal_id binds to *mod_id* (never path/name).
 
-    Lightweight: read ``.info.internal_id`` only — no full ensure_mod_identity.
+    Lightweight: read ``.info/internal_id`` (temporary legacy ``entity_key``
+    accepted) — no full ensure_mod_identity. Value must equal Entity.internal_id.
     """
     from services.mod_identity import read_internal_id
 
@@ -288,8 +291,9 @@ def resolve_managed_folder(
     """
     Resolve the on-disk managed folder for *mod_id*.
 
-    Accept a candidate only when ``.info.internal_id`` proves the entity.
-    Never match via workspace_id / folder name / path invent / published_file_id.
+    Accept a candidate only when ``.info/internal_id`` proves the entity
+    (value == Entity ``mods.internal_id``). Never match via workspace_id /
+    folder name / path invent / published_file_id.
     """
     from core.db_manager import get_db
 
@@ -360,7 +364,7 @@ def resolve_managed_folder(
 
         invalidate_managed_path_cache(mid, library_root=library_root)
 
-    # Dead / unproven last_known_path: discover by .info.internal_id only.
+    # Dead / unproven last_known_path: discover by .info/internal_id only.
     scan_root = library_root
     if scan_root is None:
         dead = str(row.get("last_known_path") or "").strip()

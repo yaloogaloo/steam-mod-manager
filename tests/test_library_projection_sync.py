@@ -10,7 +10,6 @@ Card paint reads Projection only.
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
 import pytest
@@ -22,8 +21,7 @@ from core.db_manager import (
 )
 from core.game_info import GameInfo
 from core.mod_platform import OFFLINE_STATUS_ARCHIVED
-from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
 from services.mod_library_cache import (
     get_library_cache,
     reset_library_cache,
@@ -32,7 +30,7 @@ from services.mod_projection_events import (
     notify_mod_changed,
     reset_mod_changed_listeners,
 )
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -50,34 +48,30 @@ def db(tmp_path: Path) -> DatabaseManager:
 def _seed(
     library: Path,
     db: DatabaseManager,
-    mid: str,
+    workshop_id: str,
     *,
     title: str = "LifeMod",
     game: str = "LifeGame",
     app_id: int = 880021,
-) -> Path:
+) -> tuple[Path, str]:
+    """Create Steam entity + folder. Returns (folder, mods.mod_id PK)."""
     db.upsert_game(GameInfo(app_id=app_id, name=game, folder_name=game))
-    folder = library / game / f"{title}_{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": mid,
-                "published_file_id": mid,
-                "title": title,
-                "app_id": app_id,
-                "game_name": game,
-            }
-        ),
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=workshop_id, title=title, app_id=app_id, game_name=game
     )
+    pk = str(created.mod_id)
+    folder = library / game / f"{title}_{workshop_id}"
+    folder.mkdir(parents=True, exist_ok=True)
     (folder / "mod.pak").write_bytes(b"payload")
-    create_steam_test_mod(
-        db, external_id=mid, title=title, app_id=app_id, game_name=game
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=title,
+        app_id=app_id,
+        game_name=game,
     )
-    bind_managed_path(db, mid, folder, game_name=game, title=title)
-    return folder
+    return folder, pk
 
 
 def _assert_aligned(mid: str, **expect) -> None:
@@ -113,14 +107,13 @@ def test_name_change_updates_projection_immediately(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "881001"
-    _seed(library, db, mid, title="OldLife")
+    _folder, pk = _seed(library, db, "881001", title="OldLife")
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
-    assert cache.get_card_data(mid).title == "OldLife"
+    assert cache.get_card_data(pk).title == "OldLife"
 
     db.update_mod_user_metadata(
-        mid,
+        pk,
         {
             "display_name": "NewLifeName",
             "custom_description": "",
@@ -128,24 +121,23 @@ def test_name_change_updates_projection_immediately(
             "favorite": False,
         },
     )
-    notify_mod_changed(mid)
-    _assert_aligned(mid, name="NewLifeName")
+    notify_mod_changed(pk)
+    _assert_aligned(pk, name="NewLifeName")
 
 
 def test_cover_change_updates_projection_immediately(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "881002"
-    folder = _seed(library, db, mid)
+    folder, pk = _seed(library, db, "881002")
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
 
     rel = f"{INFO_DIR_NAME}/cover.jpg"
     (folder / INFO_DIR_NAME / "cover.jpg").write_bytes(b"\xff\xd8\xfffake")
-    db.update_mod_cover_path(mid, rel)
-    notify_mod_changed(mid)
-    _assert_aligned(mid, cover=rel)
+    db.update_mod_cover_path(pk, rel)
+    notify_mod_changed(pk)
+    _assert_aligned(pk, cover=rel)
 
 
 def test_offline_generation_keeps_badge_projection(
@@ -153,25 +145,24 @@ def test_offline_generation_keeps_badge_projection(
 ) -> None:
     """After offline archive, projection keeps has_offline; card hides attention badge."""
     library = tmp_path / "mod"
-    mid = "881003"
-    folder = _seed(library, db, mid)
+    folder, pk = _seed(library, db, "881003")
     offline = folder / INFO_DIR_NAME / "offline.html"
     offline.write_text("<html>ok</html>", encoding="utf-8")
     db.update_mod_offline_status(
-        mid, status=OFFLINE_STATUS_ARCHIVED, provider="steam"
+        pk, status=OFFLINE_STATUS_ARCHIVED, provider="steam"
     )
     db._conn.execute(
         "UPDATE mods SET backup_offline_path = ? WHERE mod_id = ?",
-        (str(offline), int(mid)),
+        (str(offline), int(pk)),
     )
     db._conn.commit()
 
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
-    assert cache.get_card_data(mid).has_offline is True
+    assert cache.get_card_data(pk).has_offline is True
 
     db.update_mod_user_metadata(
-        mid,
+        pk,
         {
             "display_name": "KeepOffline",
             "custom_description": "",
@@ -179,42 +170,40 @@ def test_offline_generation_keeps_badge_projection(
             "favorite": False,
         },
     )
-    notify_mod_changed(mid)
-    card = cache.get_card_data(mid)
+    notify_mod_changed(pk)
+    card = cache.get_card_data(pk)
     assert card is not None
     assert card.title == "KeepOffline"
     assert card.has_offline is True
     assert card.offline_status == OFFLINE_STATUS_ARCHIVED
-    _assert_aligned(mid, name="KeepOffline", has_offline=True)
+    _assert_aligned(pk, name="KeepOffline", has_offline=True)
 
 
 def test_deploy_change_updates_projection(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "881004"
-    _seed(library, db, mid)
+    _folder, pk = _seed(library, db, "881004")
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
-    assert cache.get_card_data(mid).deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
+    assert cache.get_card_data(pk).deploy_status == DEPLOY_STATUS_NOT_DEPLOYED
 
-    db.update_mod_deploy_status(mid, deploy_status=DEPLOY_STATUS_DEPLOYED)
-    notify_mod_changed(mid)
-    _assert_aligned(mid, deploy_status=DEPLOY_STATUS_DEPLOYED)
-    assert cache.get_card_data(mid).deployed is True
+    db.update_mod_deploy_status(pk, deploy_status=DEPLOY_STATUS_DEPLOYED)
+    notify_mod_changed(pk)
+    _assert_aligned(pk, deploy_status=DEPLOY_STATUS_DEPLOYED)
+    assert cache.get_card_data(pk).deployed is True
 
 
 def test_game_reenter_keeps_projection(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "881005"
-    _seed(library, db, mid, title="Before")
+    _folder, pk = _seed(library, db, "881005", title="Before")
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
 
     db.update_mod_user_metadata(
-        mid,
+        pk,
         {
             "display_name": "AfterReenter",
             "custom_description": "",
@@ -222,10 +211,10 @@ def test_game_reenter_keeps_projection(
             "favorite": True,
         },
     )
-    notify_mod_changed(mid)
+    notify_mod_changed(pk)
 
     again = cache.load_snapshot(library, force=False)
-    card = next(c for c in again.cards if c.id == mid)
+    card = next(c for c in again.cards if c.id == pk)
     assert card.title == "AfterReenter"
     assert card.favorite is True
 
@@ -234,8 +223,7 @@ def test_mutation_forbids_full_library_refresh(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     library = tmp_path / "mod"
-    mid = "881006"
-    _seed(library, db, mid)
+    _folder, pk = _seed(library, db, "881006")
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
 
@@ -250,10 +238,10 @@ def test_mutation_forbids_full_library_refresh(
 
     monkeypatch.setattr(mlc, "build_library_snapshot", tracked)
 
-    db.update_mod_cover_path(mid, f"{INFO_DIR_NAME}/c.png")
-    notify_mod_changed(mid)
-    db.update_mod_deploy_status(mid, deploy_status=DEPLOY_STATUS_DEPLOYED)
-    notify_mod_changed(mid)
+    db.update_mod_cover_path(pk, f"{INFO_DIR_NAME}/c.png")
+    notify_mod_changed(pk)
+    db.update_mod_deploy_status(pk, deploy_status=DEPLOY_STATUS_DEPLOYED)
+    notify_mod_changed(pk)
 
     assert calls == []
     assert cache.peek_snapshot(library) is not None

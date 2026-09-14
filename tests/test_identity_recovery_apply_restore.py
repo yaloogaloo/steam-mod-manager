@@ -105,7 +105,11 @@ def test_apply_restore_writes_info_and_keeps_db(tmp_path: Path) -> None:
     assert assert_frozen_unchanged(before_snap, after_snap) == []
     assert result["restored_count"] == 1
     info = json.loads((folder / ".info" / "metadata.json").read_text(encoding="utf-8"))
-    assert info["internal_id"] == "uuid-1"
+    from services.mod_identity import read_entity_key
+
+    assert read_entity_key(info) == "uuid-1"
+    assert info.get("internal_id") == "uuid-1"
+    assert "entity_key" not in info
     assert info["external_id"] == "1333"
     assert info["app_id"] == 413150
 
@@ -174,7 +178,11 @@ def test_identity_match_and_payload_stamp() -> None:
     ok, fails = _identity_match(bak, db)
     assert ok and fails == []
     payload = _build_restored_payload(bak, db)
-    assert payload["internal_id"] == "u"
+    from services.mod_identity import read_entity_key
+
+    assert read_entity_key(payload) == "u"
+    assert payload.get("internal_id") == "u"
+    assert "entity_key" not in payload
     assert payload["workspace_id"] == "9"
     ok2, _ = _validate_info_against_db(payload, db)
     assert ok2

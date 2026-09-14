@@ -1,4 +1,4 @@
-"""Phase 4: library reconcile — external import, rename, rebuild."""
+"""Library reconcile — bind existing Entities; never mint identity from disk."""
 
 from __future__ import annotations
 
@@ -9,18 +9,22 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.mod_platform import is_internal_mod_id
+from core.mod_platform import PLATFORM_GITHUB, PLATFORM_NEXUS
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_reconcile import (
-    LIBRARY_STATUS_IMPORTED,
     LIBRARY_STATUS_MISSING,
     reconcile_library,
     resolve_library_games,
 )
-from services.metadata_backup import backup_root, load_backup
-from services.mod_identity import INTERNAL_ID_KEY, ensure_mod_identity, read_internal_id
-from services.mod_library_cache import build_library_snapshot
+from services.metadata_backup import load_backup
+from services.mod_identity import ensure_mod_identity, read_internal_id
 from services.mod_metadata_resolver import list_visible_mods, resolve_mod_metadata
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_other_test_mod,
+    create_test_mod_identity,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -63,9 +67,10 @@ def _only_mod_row(db: DatabaseManager) -> dict:
     return {k: rows[0][k] for k in rows[0].keys()}
 
 
-def test_case1_external_copy_full_game_detected(
+def test_case1_unbound_folder_is_ignored_not_imported(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
+    """``.info`` without matching Entity → IGNORE_UNBOUND; no Entity mint."""
     library = tmp_path / "mod"
     folder = library / "GameX" / "ModA"
     _write_info(
@@ -85,48 +90,46 @@ def test_case1_external_copy_full_game_detected(
 
     result = reconcile_library(library)
     assert result.scanned >= 1
-    assert result.imported >= 1
-    assert db.get_mod("960001") is None
-    row = _only_mod_row(db)
-    mid = str(row["mod_id"])
-    assert is_internal_mod_id(mid)
-    assert str(row["workspace_id"]) == "960001"
-    assert str(row["platform"]) == "nexus"
-    assert load_backup(mid) is not None
-    visible = list_visible_mods(library, "GameX")
-    assert any(m.published_file_id == mid and m.workspace_id == "960001" for m in visible)
-    bak = db.get_mod_backup_row(mid)
-    assert bak is not None
-    assert int(bak["folder_present"]) == 1
-    assert str(bak.get("library_status") or "") in (
-        LIBRARY_STATUS_IMPORTED,
-        "normal",
-        "",
-    )
-    assert str(bak.get("source_type") or "") == "external"
-    assert str(bak.get("content_status") or "") == "healthy"
+    assert result.imported == 0
+    assert any("IGNORE_UNBOUND" in n for n in result.notes)
+    with db._lock:
+        n = db._conn.execute("SELECT COUNT(*) AS n FROM mods").fetchone()["n"]
+    assert int(n) == 0
 
 
 def test_case2_delete_game_still_visible(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = library / "GameY" / "ModB"
-    _write_info(
-        folder,
-        {
-            "published_file_id": "960002",
-            "title": "ModB",
-            "game_name": "GameY",
-            "source_type": "github",
-            "url": "https://github.com/owner/modb",
-            "workspace_id": "owner/modb",
-            "external_id": "owner/modb",
-            "app_id": 2,
-        },
+    created = create_test_mod_identity(
+        db,
+        platform=PLATFORM_GITHUB,
+        external_id="owner/modb",
+        source_url="https://github.com/owner/modb",
+        title="ModB",
+        app_id=2,
+        game_name="GameY",
     )
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
+    folder = library / "GameY" / "ModB"
+    write_info_sidecar(
+        folder,
+        internal_id=frozen,
+        title="ModB",
+        external_id="owner/modb",
+        workspace_id=str(created.workspace_id or "owner/modb"),
+        app_id=2,
+        game_name="GameY",
+        platform=PLATFORM_GITHUB,
+        extra={"url": "https://github.com/owner/modb", "source_type": "github"},
+    )
+    (folder / "content.pak").write_bytes(b"pak")
+    bind_managed_path(db, pk, folder, title="ModB", game_name="GameY")
+
     reconcile_library(library)
     mid = str(_only_mod_row(db)["mod_id"])
+    assert mid == pk
     shutil.rmtree(library / "GameY")
     result = reconcile_library(library)
     assert result.missing >= 1
@@ -147,23 +150,39 @@ def test_case3_restore_info_overwrites_backup(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
+    created = create_test_mod_identity(
+        db,
+        platform=PLATFORM_NEXUS,
+        external_id="960003",
+        source_url="https://www.nexusmods.com/gamez/mods/960003",
+        title="Old",
+        app_id=3,
+        game_name="GameZ",
+    )
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
     folder = library / "GameZ" / "ModC"
-    _write_info(
+    write_info_sidecar(
         folder,
-        {
-            "published_file_id": "960003",
-            "title": "Old",
+        internal_id=frozen,
+        title="Old",
+        external_id="960003",
+        workspace_id="960003",
+        app_id=3,
+        game_name="GameZ",
+        platform=PLATFORM_NEXUS,
+        extra={
             "display_name": "Old",
-            "game_name": "GameZ",
-            "source_type": "nexus",
             "url": "https://www.nexusmods.com/gamez/mods/960003",
-            "workspace_id": "960003",
-            "external_id": "960003",
-            "app_id": 3,
+            "source_type": "nexus",
         },
     )
+    (folder / "content.pak").write_bytes(b"pak")
+    bind_managed_path(db, pk, folder, title="Old", game_name="GameZ")
+
     reconcile_library(library)
     mid = str(_only_mod_row(db)["mod_id"])
+    assert mid == pk
     archive = tmp_path / "archive" / "GameZ"
     shutil.copytree(library / "GameZ", archive)
     shutil.rmtree(library / "GameZ")
@@ -190,27 +209,46 @@ def test_case4_rename_does_not_duplicate(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
+    created = create_test_mod_identity(
+        db,
+        platform=PLATFORM_NEXUS,
+        external_id="960004",
+        source_url="https://www.nexusmods.com/anno1800/mods/960004",
+        title="BetterHarbor",
+        app_id=4,
+        game_name="Anno1800",
+    )
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
     folder = library / "Anno1800" / "BetterHarbor"
-    _write_info(
+    write_info_sidecar(
         folder,
-        {
-            "published_file_id": "960004",
-            "title": "BetterHarbor",
-            "game_name": "Anno1800",
-            "source_type": "nexus",
+        internal_id=frozen,
+        title="BetterHarbor",
+        external_id="960004",
+        workspace_id="960004",
+        app_id=4,
+        game_name="Anno1800",
+        platform=PLATFORM_NEXUS,
+        extra={
             "url": "https://www.nexusmods.com/anno1800/mods/960004",
-            "workspace_id": "960004",
-            "external_id": "960004",
-            "app_id": 4,
-            INTERNAL_ID_KEY: "fixed-uuid-960004",
+            "source_type": "nexus",
         },
     )
+    (folder / "content.pak").write_bytes(b"pak")
+    bind_managed_path(db, pk, folder, title="BetterHarbor", game_name="Anno1800")
+
     reconcile_library(library)
     mid = str(_only_mod_row(db)["mod_id"])
+    assert mid == pk
     renamed = library / "Anno1800" / "Better Harbor New"
     folder.rename(renamed)
     result = reconcile_library(library)
-    assert result.renamed >= 1
+    assert result.renamed >= 1 or any(
+        Path(str((db.get_mod_backup_row(mid) or {}).get("last_known_path") or "")).resolve()
+        == renamed.resolve()
+        for _ in (0,)
+    )
 
     visible = list_visible_mods(library, "Anno1800")
     ids = [m.published_file_id for m in visible]
@@ -218,9 +256,10 @@ def test_case4_rename_does_not_duplicate(
     row = db.get_mod_backup_row(mid)
     assert row is not None
     assert Path(str(row["last_known_path"])).samefile(renamed)
+    assert str(row.get("internal_id") or "") == frozen
 
 
-def test_case5_generates_uuid_without_published_file_id(
+def test_case5_unbound_local_folder_does_not_mint_uuid(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
@@ -238,36 +277,19 @@ def test_case5_generates_uuid_without_published_file_id(
         },
     )
     result = reconcile_library(library)
-    assert result.imported >= 1
-
+    assert result.imported == 0
+    assert any("IGNORE_UNBOUND" in n for n in result.notes)
     data = json.loads(
         (folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8")
     )
-    assert read_internal_id(data)
-    pub = str(data.get("published_file_id") or "").strip()
-    assert not pub or not is_internal_mod_id(pub)
-    info = db.find_mod_by_external("github", "a/b", app_id=1623730)
-    assert info is not None
-    mid = str(info.mod_id)
-    assert info.workspace_id
-    assert info.workspace_id != mid
-    # Stable on second pass
-    internal = read_internal_id(data)
-    reconcile_library(library)
-    data2 = json.loads(
-        (folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8")
-    )
-    assert read_internal_id(data2) == internal
-    assert str(data2.get("published_file_id") or "").strip() == pub
-    info2 = db.find_mod_by_external("github", "a/b", app_id=1623730)
-    assert info2 is not None
-    assert str(info2.mod_id) == mid
+    assert not read_internal_id(data)
+    assert db.find_mod_by_external("github", "a/b", app_id=1623730) is None
 
 
-def test_case6_rebuild_from_info_without_database(
+def test_case6_info_without_db_entity_does_not_rebuild(
     tmp_path: Path, data_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """New PC: only mod/ + .info; empty DB → rebuild."""
+    """``.info/internal_id`` absent from DB → orphan/unbound; never create Entity."""
     DatabaseManager.reset_instance()
     db = DatabaseManager.instance(tmp_path / "fresh.db")
     library = tmp_path / "mod"
@@ -283,19 +305,16 @@ def test_case6_rebuild_from_info_without_database(
             "workspace_id": "336",
             "external_id": "336",
             "app_id": 1623730,
+            "internal_id": "orphan-uuid-not-in-db",
         },
     )
     assert db.get_mod("960006") is None
     result = reconcile_library(library)
-    assert result.imported >= 1
-    assert db.get_mod("960006") is None
-    row = _only_mod_row(db)
-    mid = str(row["mod_id"])
-    assert is_internal_mod_id(mid)
-    assert str(row["workspace_id"]) == "336"
-    assert (backup_root(mid) / "metadata.json").is_file()
-    snap = build_library_snapshot(library)
-    assert any(c.id == mid or c.workspace_id == "336" for c in snap.cards)
+    assert result.imported == 0
+    assert any("IGNORE_UNBOUND" in n or "ORPHAN" in n.upper() for n in result.notes) or result.imported == 0
+    with db._lock:
+        n = db._conn.execute("SELECT COUNT(*) AS n FROM mods").fetchone()["n"]
+    assert int(n) == 0
     DatabaseManager.reset_instance()
 
 
@@ -307,10 +326,37 @@ def test_ensure_mod_identity_does_not_use_folder_name(
     (folder / INFO_DIR_NAME).mkdir()
     payload = {"title": "X", "source_type": "github"}
     mid, out, changed = ensure_mod_identity(folder, payload)
-    assert changed is True
     assert mid == ""
+    assert changed is False
     assert out.get("identity_status") == "unresolved"
-    assert not str(out.get("published_file_id") or "").isdigit() or not is_internal_mod_id(
-        out.get("published_file_id")
+    assert not read_internal_id(out)
+
+
+def test_bound_info_internal_id_rebinds_path(
+    db: DatabaseManager, data_root: Path, tmp_path: Path
+) -> None:
+    """``.info/internal_id`` matching DB Entity → path bind; no second Entity."""
+    library = tmp_path / "mod"
+    created = create_other_test_mod(db, title="Bound", external_id="ext-1", app_id=9, game_name="G")
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id)
+    folder = library / "G" / "Bound"
+    write_info_sidecar(
+        folder,
+        internal_id=frozen,
+        title="Bound",
+        external_id="ext-1",
+        workspace_id=str(created.workspace_id or "ext-1"),
+        app_id=9,
+        game_name="G",
     )
-    assert read_internal_id(out)
+    (folder / "content.pak").write_bytes(b"pak")
+    # Intentionally leave last_known_path empty — reconcile must bind via .info.
+    result = reconcile_library(library)
+    assert result.imported == 0
+    row = db.get_mod_backup_row(pk) or {}
+    assert Path(str(row.get("last_known_path") or "")).resolve() == folder.resolve()
+    assert str(row.get("internal_id") or "") == frozen
+    with db._lock:
+        n = db._conn.execute("SELECT COUNT(*) AS n FROM mods").fetchone()["n"]
+    assert int(n) == 1

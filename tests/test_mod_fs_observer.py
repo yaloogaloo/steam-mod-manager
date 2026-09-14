@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -10,9 +9,8 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services.content_status_eval import persist_evaluated_content_status
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_status import CONTENT_CONTENT_MISSING, CONTENT_HEALTHY
 from services.mod_fs_observer import (
     LEVEL_DEEP,
@@ -33,7 +31,11 @@ from services.mod_projection_events import (
     subscribe_mod_changed,
 )
 from services.mod_refresh import reconcile_local_state, refresh_mod
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -60,42 +62,51 @@ def db(tmp_path: Path) -> DatabaseManager:
 def _seed(
     library: Path,
     db: DatabaseManager,
-    mid: str,
+    external_id: str,
     *,
     with_payload: bool = True,
     game: str = "ObsGame",
     app_id: int = 880031,
-) -> Path:
+) -> tuple[Path, str]:
+    """Create Entity + managed folder with Frozen ``.info/entity_key``.
+
+    Returns ``(folder, mod_id_pk)``. Observer APIs take SQLite PK handles;
+    filesystem evidence uses durable ``mods.internal_id`` as ``entity_key``
+    (never PK / Workshop — entity_key is not a third Mod ID).
+    """
     db.upsert_game(GameInfo(app_id=app_id, name=game, folder_name=game))
-    folder = library / game / f"Mod{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "internal_id": mid,
-                "title": f"Mod{mid}",
-                "app_id": app_id,
-                "game_name": game,
-            }
-        ),
-        encoding="utf-8",
+    ext = str(external_id).strip()
+    created = create_steam_test_mod(
+        db, external_id=ext, title=f"Mod{ext}", app_id=app_id, game_name=game
+    )
+    mod_pk = str(created.mod_id)
+    frozen = str(created.internal_id or "").strip()
+    assert frozen, f"Entity {mod_pk} missing mods.internal_id"
+    assert frozen != mod_pk, "Frozen internal_id must not collapse to mod_id"
+    assert frozen != ext, "Frozen internal_id must not collapse to workspace_id"
+
+    folder = library / game / f"Mod{ext}"
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=frozen,
+        title=f"Mod{ext}",
+        external_id=ext,
+        workspace_id=str(created.workspace_id or ext),
+        app_id=app_id,
+        game_name=game,
+        platform=PLATFORM_STEAM,
     )
     if with_payload:
         (folder / "mod.pak").write_bytes(b"payload")
-    create_steam_test_mod(
-        db, external_id=mid, title=f"Mod{mid}", app_id=app_id, game_name=game
-    )
-    bind_managed_path(db, mid, folder, game_name=game, title=f"Mod{mid}")
-    db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
-    return folder
+    bind_managed_path(db, mod_pk, folder, game_name=game, title=f"Mod{ext}")
+    db.update_mod_content_status(mod_pk, content_status=CONTENT_HEALTHY)
+    return folder, mod_pk
 
 
 def test_l0_records_root_mtime_and_stamp(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    mid = "810001"
-    folder = _seed(library, db, mid)
+    folder, mid = _seed(library, db, "810001")
     result = observe_mod_fs(mid, LEVEL_PROBE, db=db)
     assert result.root_exists is True
     assert result.root_mtime is not None
@@ -109,8 +120,7 @@ def test_l0_records_root_mtime_and_stamp(db: DatabaseManager, tmp_path: Path) ->
 
 def test_external_mtime_change_marks_dirty(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    mid = "810002"
-    folder = _seed(library, db, mid)
+    folder, mid = _seed(library, db, "810002")
     first = observe_mod_fs(mid, LEVEL_PROBE, db=db)
     assert first.dirty is False
     time.sleep(0.05)
@@ -123,8 +133,7 @@ def test_external_add_file_triggers_l1_content_healthy(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810003"
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, "810003", with_payload=False)
     persist_evaluated_content_status(
         mid, folder, db=db, folder_present=True, notify_projection=False
     )
@@ -147,8 +156,7 @@ def test_external_delete_file_triggers_l1_content_missing(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810004"
-    folder = _seed(library, db, mid, with_payload=True)
+    folder, mid = _seed(library, db, "810004", with_payload=True)
     persist_evaluated_content_status(
         mid, folder, db=db, folder_present=True, notify_projection=False
     )
@@ -162,8 +170,7 @@ def test_detail_refresh_still_runs_l2(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810005"
-    folder = _seed(library, db, mid)
+    folder, mid = _seed(library, db, "810005")
     calls: list[str] = []
 
     from services import info_sidecar
@@ -198,8 +205,7 @@ def test_observe_l2_reuses_deep_sync(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810006"
-    folder = _seed(library, db, mid)
+    folder, mid = _seed(library, db, "810006")
     calls: list[str] = []
 
     def _rescan(*_a, **_k):
@@ -227,22 +233,20 @@ def test_global_refresh_batch_refuses_full_library_l2(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810007"
-    _seed(library, db, mid)
+    _folder, mid = _seed(library, db, "810007")
     with pytest.raises(ValueError, match="refuses level>=2"):
         observe_mods_fs_batch(level=LEVEL_DEEP, db=db)
     results = observe_mods_fs_batch(level=LEVEL_PROBE, db=db)
     assert any(r.internal_id == mid for r in results)
 
 
-def test_library_refresh_schedules_l0_not_l2() -> None:
+def test_library_refresh_schedules_presence_not_l2() -> None:
     import inspect
 
     from ui.library_view import ModLibraryView
 
     src = inspect.getsource(ModLibraryView.refresh)
-    assert "schedule_observe_mods_fs_batch" in src
-    assert "LEVEL_PROBE" in src
+    assert "schedule_presence_reconcile" in src
     assert "LEVEL_DEEP" not in src
     assert "rescan_mod_folder" not in src
     assert "reconcile_local_files" not in src
@@ -252,8 +256,7 @@ def test_projection_receives_filesystem_content_change(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810008"
-    folder = _seed(library, db, mid, with_payload=True)
+    folder, mid = _seed(library, db, "810008", with_payload=True)
     reset_library_cache()
     cache = get_library_cache()
     cache.load_snapshot(library, force=True)
@@ -275,8 +278,7 @@ def test_reconcile_defers_projection_touch_then_drains(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810009"
-    folder = _seed(library, db, mid, with_payload=False)
+    folder, mid = _seed(library, db, "810009", with_payload=False)
     db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
     seen: list[str] = []
     subscribe_mod_changed(lambda x: seen.append(str(x)))
@@ -303,8 +305,7 @@ def test_l1_l2_refuse_ui_thread(
         app = QApplication([])
 
     library = tmp_path / "mod"
-    mid = "810010"
-    folder = _seed(library, db, mid)
+    folder, mid = _seed(library, db, "810010")
 
     set_ui_thread_guard(True)
     monkeypatch.setattr(
@@ -323,8 +324,7 @@ def test_deploy_finish_updates_observation_stamp(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    mid = "810011"
-    folder = _seed(library, db, mid)
+    folder, mid = _seed(library, db, "810011")
     before = str((db.get_mod_fs_observation(mid) or {}).get("fs_observed_at") or "")
     touch_observation_stamp(mid, db=db, managed_path=folder)
     after = str((db.get_mod_fs_observation(mid) or {}).get("fs_observed_at") or "")

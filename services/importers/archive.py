@@ -26,7 +26,7 @@ from core.mod_platform import (
     normalize_platform,
 )
 from services.importers.local_scanner import is_history_version_path
-from core.paths import data_dir, project_root
+from core.paths import import_cache_dir, project_root
 from services.importers.github import GithubImporter
 from services.importers.importer_base import ImportResult, ModImporter
 from services.importers.modio import ModioImporter
@@ -37,7 +37,6 @@ from services.importers.steam import SteamImporter
 
 logger = logging.getLogger(__name__)
 
-IMPORT_CACHE_DIR_NAME = "import_cache"
 ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
 # Used only as a *hint* when choosing a nested Mod root — never as an import gate.
 _MOD_FILE_SUFFIXES = {".pak", ".dll", ".json", ".ini", ".cfg"}
@@ -128,14 +127,12 @@ def _raise_rar_execution_failed(
 
 
 def import_cache_root() -> Path:
-    path = data_dir() / IMPORT_CACHE_DIR_NAME
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return import_cache_dir()
 
 
 def cleanup_import_cache(path: str | Path | None = None) -> bool:
     """
-    Delete a temporary extract directory under ``data/import_cache/``.
+    Delete a temporary extract directory under ``cache/import_cache/``.
 
     Only removes paths that resolve inside the import cache root.
     Returns True when something was removed.
@@ -416,7 +413,7 @@ def extract_archive(
     dest_dir: str | Path | None = None,
 ) -> Path:
     """
-    Extract *archive_path* into ``data/import_cache/{uuid}/`` (or *dest_dir*).
+    Extract *archive_path* into ``cache/import_cache/{uuid}/`` (or *dest_dir*).
 
     ``.zip`` → stdlib ``zipfile``.
     ``.7z`` → system ``7z`` CLI when present, else ``py7zr``.

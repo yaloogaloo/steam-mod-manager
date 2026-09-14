@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +11,6 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DEPLOY_STATUS_FAILED, DatabaseManager
-from core.models import ModMetadata
 from services.importers.archive import (
     TOOL_UNAVAILABLE_MSG,
     RAR_TOOL_UNAVAILABLE_MSG,
@@ -22,7 +20,7 @@ from services.importers.archive import (
     resolve_bundled_unrar_tool,
 )
 from ui.mod_detail_panel import ModDetailPanel
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture(scope="module")
@@ -41,31 +39,32 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _mod_folder(root: Path, *, pub_id: str, title: str) -> Path:
+def _seed_mod(
+    db: DatabaseManager, root: Path, *, external_id: str, title: str
+) -> tuple[Path, str]:
     folder = root / "Palworld" / title
-    info = folder / ".info"
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": pub_id,
-                "title": title,
-                "game_name": "Palworld",
-            }
-        ),
-        encoding="utf-8",
+    folder.mkdir(parents=True, exist_ok=True)
+    created = create_steam_test_mod(
+        db, external_id=external_id, title=title, game_name="Palworld"
     )
-    return folder
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=title,
+        game_name="Palworld",
+    )
+    return folder, pk
 
 
 def test_status_banner_hidden_by_default(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = _mod_folder(tmp_path, pub_id="95001", title="OkMod")
-    create_steam_test_mod(db, external_id="95001", title="OkMod")
+    folder, pk = _seed_mod(db, tmp_path, external_id="95001", title="OkMod")
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder, mod_id="95001")
+    panel.show_mod(folder, mod_id=pk)
     qapp.processEvents()
     assert panel._status_banner.isHidden()
 
@@ -73,18 +72,17 @@ def test_status_banner_hidden_by_default(
 def test_status_banner_shows_concrete_deploy_failure(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = _mod_folder(tmp_path, pub_id="95002", title="FailMod")
-    create_steam_test_mod(db, external_id="95002", title="FailMod")
+    folder, pk = _seed_mod(db, tmp_path, external_id="95002", title="FailMod")
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder, mod_id="95002")
+    panel.show_mod(folder, mod_id=pk)
     qapp.processEvents()
 
     panel.apply_deploy_result(
         {
             "success": False,
             "error": f"{UNSUPPORTED_FMT_MSG} .rar",
-            "mod_id": "95002",
+            "mod_id": pk,
         }
     )
     qapp.processEvents()
@@ -163,10 +161,9 @@ def test_rar_without_tools_reports_reason(
 def test_failed_db_status_rehydrates_banner(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    folder = _mod_folder(tmp_path, pub_id="95003", title="PersistFail")
-    create_steam_test_mod(db, external_id="95003", title="PersistFail")
+    folder, pk = _seed_mod(db, tmp_path, external_id="95003", title="PersistFail")
     db.update_mod_deploy_status(
-        "95003",
+        pk,
         deploy_status=DEPLOY_STATUS_FAILED,
         deploy_error=RAR_TOOL_UNAVAILABLE_MSG,
         deploy_path="",
@@ -174,7 +171,7 @@ def test_failed_db_status_rehydrates_banner(
     )
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder, mod_id="95003")
+    panel.show_mod(folder, mod_id=pk)
     qapp.processEvents()
     assert not panel._status_banner.isHidden()
     body = panel._status_banner_body.text()

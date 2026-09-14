@@ -243,7 +243,10 @@ def _scan_db(db: Any, report: InvariantScanReport) -> None:
                 f"workspace_id={ws} is internal",
                 "SCRUB workspace_id",
             )
-        if is_internal_mod_id(mid) and ws == mid:
+        workspace_equals_pk = bool(mid and ws == mid)
+        if workspace_equals_pk and (
+            is_internal_mod_id(mid) or plat != PLATFORM_STEAM
+        ):
             add(
                 INTERNAL_ID_USED_AS_WORKSPACE_ID,
                 "CRITICAL",
@@ -256,7 +259,11 @@ def _scan_db(db: Any, report: InvariantScanReport) -> None:
                 "workspace_id equals internal mod_id",
                 "SCRUB workspace_id",
             )
-        if is_internal_mod_id(ext) or (ext == mid and is_internal_mod_id(mid) and plat == PLATFORM_STEAM):
+        external_equals_pk = bool(mid and ext == mid)
+        if is_internal_mod_id(ext) or (
+            external_equals_pk
+            and (is_internal_mod_id(mid) or plat != PLATFORM_STEAM)
+        ):
             add(
                 INTERNAL_ID_USED_AS_EXTERNAL_ID,
                 "CRITICAL",

@@ -306,6 +306,11 @@ def test_ui_viewport_pool_under_10k(
 
     monkeypatch.setattr("ui.library_view._library_load_sync", lambda: True)
     monkeypatch.setattr(
+        "services.presence_reconcile.schedule_presence_reconcile",
+        lambda *a, **k: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
         "services.mod_fs_observer.schedule_observe_mods_fs_batch",
         lambda *a, **k: None,
         raising=False,

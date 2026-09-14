@@ -167,8 +167,8 @@ def test_deleted_mod_removes_cache_under_game_filter(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "library"
-    a, _ = _seed(lib, db, game="Game", title="Keep", mid="97003")
-    b, _ = _seed(lib, db, game="Game", title="Gone", mid="97004")
+    a, pk_a = _seed(lib, db, game="Game", title="Keep", mid="97003")
+    b, pk_b = _seed(lib, db, game="Game", title="Gone", mid="97004")
     patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
@@ -179,14 +179,13 @@ def test_deleted_mod_removes_cache_under_game_filter(
     view._render_mod_cards(ModFileManager(lib))
     qapp.processEvents()
 
-    gone_key = view._card_cache_key(b, mod_id="97004")
+    gone_key = view._card_cache_key(b, mod_id=pk_b)
     assert gone_key in view._card_cache
 
     import shutil
 
     shutil.rmtree(b)
-    # DB-first Library keeps absent rows; remove the entity so projection drops it.
-    db.delete_mod_record("97004")
+    db.delete_mod_record(pk_b)
     view.refresh(force=True, reconcile=False)
     qapp.processEvents()
 

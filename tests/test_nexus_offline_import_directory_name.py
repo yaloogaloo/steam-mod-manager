@@ -160,7 +160,8 @@ def test_attach_offline_html_renames_existing_empty_mod_folder(
     src = tmp_path / "payload"
     src.mkdir()
     (src / "mod.pak").write_bytes(b"pak")
-    lib = tmp_path / "library"
+    # Must match conftest default_mod_library isolation for Path Lifecycle rename.
+    lib = tmp_path / "_smm_isolate_mod"
     imported = NexusImporter(db=db).import_mod(
         source_folder=src,
         title="Empty Mod abcdef12",

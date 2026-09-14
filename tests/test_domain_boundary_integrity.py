@@ -12,7 +12,6 @@ import pytest
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
 from core.mod_platform import FILE_TYPE_MAIN, PLATFORM_MODIO, PLATFORM_NEXUS, PLATFORM_STEAM, ModFileEntry, ModFilesBundle
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_errors import DeploySourceError
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
@@ -46,55 +45,51 @@ def _setup_modio_stub(
     tmp_path: Path,
     db: DatabaseManager,
     *,
-    mid: str = "17878835583808244",
+    external_id: str = "example-mod",
     folder: str = "ModioStub",
-) -> Path:
+) -> tuple[Path, str]:
+    """Register mod.io entity + proven folder. Returns (folder, mods.mod_id PK)."""
+    from tests.helpers.identity import prove_managed_folder
+
     library = tmp_path / "library"
     mod = library / "BG3" / folder
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": folder,
-                "app_id": 1086940,
-                "platform": PLATFORM_MODIO,
-                "source_type": PLATFORM_MODIO,
-                "url": "https://mod.io/g/baldursgate3/m/example-mod",
-                "modio_mod_id": 12345,
-                "modio_game_id": 6715,
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mid,
-            title=folder,
-            app_id=1086940,
-            game_name="BG3",
-            source_type=PLATFORM_MODIO,
-        )
-    )
-    db.update_mod_identity_fields(
-        mid,
-        folder_present=True,
-        last_known_path=str(mod),
-        library_status="healthy",
+    mod.mkdir(parents=True, exist_ok=True)
+    info = db.register_external_mod(
         platform=PLATFORM_MODIO,
+        external_id=str(external_id),
+        source_url="https://mod.io/g/baldursgate3/m/example-mod",
+        title=folder,
+        app_id=1086940,
+        game_name="Baldur's Gate 3",
     )
-    return mod
+    pk = str(info.mod_id)
+    prove_managed_folder(
+        db,
+        mod,
+        handle=pk,
+        title=folder,
+        app_id=1086940,
+        game_name="BG3",
+        platform=PLATFORM_MODIO,
+        extra={
+            "published_file_id": external_id,
+            "source_type": PLATFORM_MODIO,
+            "url": "https://mod.io/g/baldursgate3/m/example-mod",
+            "modio_mod_id": 12345,
+            "modio_game_id": 6715,
+        },
+    )
+    db.update_mod_content_status(pk, content_status=CONTENT_HEALTHY, folder_present=True)
+    return mod, pk
 
 
 def test_case1_modio_refresh_without_local_archive_succeeds(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     """mod.io refresh with metadata-only folder must not call deploy validation."""
-    mod = _setup_modio_stub(tmp_path, db)
+    mod, pk = _setup_modio_stub(tmp_path, db)
     provider_ok = MetadataRefreshResult(
-        mod_id="17878835583808244",
+        mod_id=pk,
         success=True,
         skipped=False,
         managed_path=mod,
@@ -112,7 +107,7 @@ def test_case1_modio_refresh_without_local_archive_succeeds(
             side_effect=DeploySourceError("must not run during refresh"),
         ):
             out = refresh_mod(
-                "17878835583808244",
+                pk,
                 mod,
                 platform=PLATFORM_MODIO,
                 library_root=tmp_path / "library",
@@ -129,16 +124,16 @@ def test_case1_modio_refresh_without_local_archive_succeeds(
 def test_case2_metadata_only_library_healthy_deploy_blocked(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod = _setup_modio_stub(tmp_path, db, mid="97020", folder="MetaOnly")
-    local = reconcile_local_state("97020", mod, db=db)
+    mod, pk = _setup_modio_stub(tmp_path, db, external_id="97020", folder="MetaOnly")
+    local = reconcile_local_state(pk, mod, db=db)
     assert local.folder_present is True
     assert local.content_status == CONTENT_CONTENT_MISSING
-    assert has_local_mod_payload(mod, mod_id="97020", db=db) is False
-    assert has_deployable_source(mod, mod_id="97020", db=db) is False
+    assert has_local_mod_payload(mod, mod_id=pk, db=db) is False
+    assert has_deployable_source(mod, mod_id=pk, db=db) is False
 
     db.update_game_deploy_config(100, name="Game", mod_path=str(tmp_path / "mods"))
     (tmp_path / "mods").mkdir()
-    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod("97020")
+    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(pk)
     assert deploy["success"] is False
     assert deploy.get("is_missing_content") or deploy.get("reason") in {
         "source_integrity",
@@ -149,11 +144,11 @@ def test_case2_metadata_only_library_healthy_deploy_blocked(
 def test_case3_invalid_zip_refresh_ok_deploy_fails(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod = _setup_modio_stub(tmp_path, db, mid="97021", folder="BadZip")
+    mod, pk = _setup_modio_stub(tmp_path, db, external_id="97021", folder="BadZip")
     bad = mod / "broken.zip"
     bad.write_bytes(b"not-a-zip")
     db.set_mod_files(
-        "97021",
+        pk,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -167,27 +162,27 @@ def test_case3_invalid_zip_refresh_ok_deploy_fails(
         ),
     )
 
-    local = reconcile_local_state("97021", mod, db=db)
+    local = reconcile_local_state(pk, mod, db=db)
     assert local.folder_present is True
     assert local.content_status == CONTENT_HEALTHY
-    assert has_local_mod_payload(mod, mod_id="97021", db=db) is True
-    assert has_deployable_source(mod, mod_id="97021", db=db) is False
+    assert has_local_mod_payload(mod, mod_id=pk, db=db) is True
+    assert has_deployable_source(mod, mod_id=pk, db=db) is False
 
     db.update_game_deploy_config(100, name="Game", mod_path=str(tmp_path / "mods"))
     (tmp_path / "mods").mkdir()
-    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod("97021")
+    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(pk)
     assert deploy["success"] is False
 
     with pytest.raises(DeploySourceError):
-        validate_source("97021", managed_path=mod, db=db, auto_reconcile=False)
+        validate_source(pk, managed_path=mod, db=db, auto_reconcile=False)
 
 
 def test_case4_deploy_source_error_never_reaches_refresh_worker(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod = _setup_modio_stub(tmp_path, db, mid="97022", folder="WorkerSafe")
+    mod, pk = _setup_modio_stub(tmp_path, db, external_id="97022", folder="WorkerSafe")
     provider_ok = MetadataRefreshResult(
-        mod_id="97022",
+        mod_id=pk,
         success=True,
         skipped=False,
         managed_path=mod,
@@ -199,7 +194,7 @@ def test_case4_deploy_source_error_never_reaches_refresh_worker(
 
     worker = ModRefreshWorker(
         mod,
-        mod_id="97022",
+        mod_id=pk,
         library_root=tmp_path / "library",
         platform=PLATFORM_MODIO,
     )
@@ -241,11 +236,17 @@ def test_case5_refresh_providers_independent_of_deploy_validator(
     provider_path: str | None,
     provider_name: str,
 ) -> None:
-    ids = {"steam": "970231", "nexus": "970232", "modio": "970233"}
-    mid = ids[provider_name]
-    mod = _setup_modio_stub(tmp_path, db, mid=mid, folder=f"Refresh_{provider_name}")
+    ids = {"steam": "970231", "nexus": "970232", "modio": "modio-refresh-233"}
+    external = ids[provider_name]
+    mod, mid = _setup_modio_stub(
+        tmp_path, db, external_id=external, folder=f"Refresh_{provider_name}"
+    )
     if platform == PLATFORM_STEAM:
-        db.update_mod_identity_fields(mid, platform=PLATFORM_STEAM)
+        db.update_mod_identity_fields(
+            mid,
+            platform=PLATFORM_STEAM,
+            external_id=external,
+        )
 
     validate_patch = patch(
         "services.mod_source_integrity.validate_source",

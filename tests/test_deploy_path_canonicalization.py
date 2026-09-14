@@ -20,7 +20,7 @@ from services.deploy_rules.manifest import DeployManifest, ManifestFileEntry, sa
 from services.deploy_security import ManifestSecurityError, collect_allowed_target_roots, validate_manifest_for_save, validate_manifest_targets
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, read_info_metadata_dict
 from services.identity_service import create_mod_identity
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
@@ -44,47 +44,68 @@ def _prove_managed_folder(
     folder: Path,
     *,
     extra: dict | None = None,
-) -> None:
-    """Stamp ``.info.internal_id`` so Deploy path resolve accepts the folder."""
-    proof = str(mid)
-    payload = {'internal_id': proof, 'published_file_id': mid}
+) -> str:
+    """Stamp ``.info/internal_id`` from Entity and bind path. Returns PK."""
+    title = ""
+    app_id = 0
+    game_name = ""
     if extra:
-        payload.update(extra)
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    meta_path = info / METADATA_FILENAME
-    if meta_path.is_file():
-        existing = json.loads(meta_path.read_text(encoding='utf-8'))
-        existing.update(payload)
-        payload = existing
-    meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=proof,
-        last_known_path=str(folder),
-        folder_present=True,
+        title = str(extra.get("title") or "")
+        app_id = int(extra.get("app_id") or 0)
+        game_name = str(extra.get("game_name") or "")
+    return prove_managed_folder(
+        db,
+        folder,
+        handle=mid,
+        title=title or folder.name,
+        app_id=app_id,
+        game_name=game_name,
+        extra=extra,
     )
 
+
 def _seed_modio(db: DatabaseManager, folder: Path, *, external_id: str, title: str) -> tuple[str, str]:
-    """Create a Mod.io row via the Identity Creation Gate. Returns (internal, workspace)."""
-    created = create_mod_identity(db, platform=PLATFORM_MODIO, external_id=external_id, source_url=f'https://mod.io/g/anno-1800/m/{external_id}', title=title, app_id=ANNO_1800_APP_ID, game_name='Anno 1800', operation='import')
-    internal = str(created.mod_id).strip()
-    workspace_id = str(created.workspace_id or '').strip()
-    _prove_managed_folder(
+    """Create a Mod.io row via the Identity Creation Gate. Returns (pk, workspace)."""
+    created = create_mod_identity(
         db,
-        internal,
+        platform=PLATFORM_MODIO,
+        external_id=external_id,
+        source_url=f"https://mod.io/g/anno-1800/m/{external_id}",
+        title=title,
+        app_id=ANNO_1800_APP_ID,
+        game_name="Anno 1800",
+        operation="import",
+    )
+    pk = str(created.mod_id).strip()
+    workspace_id = str(created.workspace_id or "").strip()
+    frozen = str(created.internal_id or "").strip()
+    prove_managed_folder(
+        db,
         folder,
+        handle=pk,
+        title=title,
+        app_id=ANNO_1800_APP_ID,
+        game_name="Anno 1800",
+        platform=PLATFORM_MODIO,
         extra={
-            'workspace_id': workspace_id,
-            'source_type': 'modio',
-            'platform': PLATFORM_MODIO,
-            'app_id': ANNO_1800_APP_ID,
-            'title': title,
+            "workspace_id": workspace_id,
+            "source_type": "modio",
+            "platform": PLATFORM_MODIO,
+            "app_id": ANNO_1800_APP_ID,
+            "title": title,
         },
     )
-    db.update_mod_identity_fields(internal, platform=PLATFORM_MODIO)
-    db.update_mod_content_status(internal, content_status='healthy')
-    return (internal, workspace_id)
+    # Mod.io deploy fixtures must not carry Steam published_file_id pollution.
+    meta_path = folder / INFO_DIR_NAME / METADATA_FILENAME
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    payload.pop("published_file_id", None)
+    payload["workspace_id"] = workspace_id
+    payload["source_type"] = "modio"
+    payload["internal_id"] = frozen
+    meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    db.update_mod_identity_fields(pk, platform=PLATFORM_MODIO)
+    db.update_mod_content_status(pk, content_status="healthy")
+    return (pk, workspace_id)
 
 def test_1_modio_source_resolution_without_published_file_id(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / 'library'
@@ -98,10 +119,11 @@ def test_1_modio_source_resolution_without_published_file_id(db: DatabaseManager
     sidecar = read_info_metadata_dict(folder) or {}
     assert not str(sidecar.get('published_file_id') or '').strip()
     internal, workspace_id = _seed_modio(db, folder, external_id='4503767', title='21 Legendary Items')
-    _meta(folder, {'workspace_id': workspace_id, 'source_type': 'modio', 'internal_id': internal})
     sidecar = read_info_metadata_dict(folder) or {}
     assert not str(sidecar.get('published_file_id') or '').strip()
     assert workspace_id
+    assert str(sidecar.get('internal_id') or '').strip()
+    assert str(sidecar.get('internal_id') or '').strip() != internal  # Entity UUID ≠ PK
     db.update_mod_identity_fields(internal, last_known_path=str(folder), folder_present=True)
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(install), deploy_type='folder_copy')
     out = ModDeployer(library_root=library, db=db).deploy_mod(internal)
@@ -121,7 +143,9 @@ def test_2_internal_id_deploy_does_not_require_published_file_id(db: DatabaseMan
     _internal, workspace_id = _seed_modio(db, folder, external_id='4503768', title='WS Deploy')
     assert _internal.isdigit()
     assert workspace_id
-    _meta(folder, {'workspace_id': workspace_id, 'source_type': 'modio', 'internal_id': _internal})
+    sidecar = read_info_metadata_dict(folder) or {}
+    frozen = str(sidecar.get('internal_id') or '').strip()
+    assert frozen and frozen != _internal
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(install), deploy_type='folder_copy')
     before = json.loads((folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding='utf-8'))
     out = ModDeployer(library_root=library, db=db).deploy_mod(_internal)
@@ -145,10 +169,10 @@ def test_3_drive_migration_remaps_relative_to_current_root(db: DatabaseManager, 
     (folder / 'a.xml').write_text('SRC', encoding='utf-8')
     _meta(folder, {'published_file_id': '91031', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(new_mods), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='91031', title='FooMod', app_id=4242)
-    _prove_managed_folder(db, '91031', folder, extra={'app_id': 4242, 'title': 'FooMod'})
-    save_manifest(folder, DeployManifest(mod_id='91031', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(old_file))]))
-    out = ModDeployer(library_root=library, db=db).undeploy_mod('91031')
+    created = create_steam_test_mod(db, external_id='91031', title='FooMod', app_id=4242)
+    pk = _prove_managed_folder(db, str(created.mod_id), folder, extra={'app_id': 4242, 'title': 'FooMod'})
+    save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(old_file))]))
+    out = ModDeployer(library_root=library, db=db).undeploy_mod(pk)
     assert out.get('success') is True, out
     assert not live.exists()
     assert old_file.read_text(encoding='utf-8') == 'OLD'
@@ -172,10 +196,10 @@ def test_5_different_drive_escape_not_approved(db: DatabaseManager, tmp_path: Pa
     (folder / 'a.txt').write_text('M', encoding='utf-8')
     _meta(folder, {'published_file_id': '91032', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(new_mods), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='91032', title='EscMod', app_id=4242)
-    _prove_managed_folder(db, '91032', folder, extra={'app_id': 4242, 'title': 'EscMod'})
-    save_manifest(folder, DeployManifest(mod_id='91032', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.txt'), target=str(secret.resolve()))]))
-    out = ModDeployer(library_root=library, db=db).undeploy_mod('91032')
+    created = create_steam_test_mod(db, external_id='91032', title='EscMod', app_id=4242)
+    pk = _prove_managed_folder(db, str(created.mod_id), folder, extra={'app_id': 4242, 'title': 'EscMod'})
+    save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.txt'), target=str(secret.resolve()))]))
+    out = ModDeployer(library_root=library, db=db).undeploy_mod(pk)
     assert out.get('success') is False, out
     err = str(out.get('error') or '')
     assert '安全校验' in err or 'outside' in err
@@ -201,9 +225,9 @@ def test_7_anno_archive_root_relative(db: DatabaseManager, tmp_path: Path) -> No
         zf.writestr(f'{zip_root}/data/config/export/main/asset/assets.xml', '<A/>')
     _meta(folder, {'published_file_id': '91677', 'workspace_id': '91677', 'source_type': 'modio'})
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(install), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='91677', title='1905-ocean-liner', app_id=ANNO_1800_APP_ID)
-    _prove_managed_folder(db, '91677', folder, extra={'app_id': ANNO_1800_APP_ID, 'title': '1905-ocean-liner'})
-    out = ModDeployer(library_root=library, db=db).deploy_mod('91677')
+    created = create_steam_test_mod(db, external_id='91677', title='1905-ocean-liner', app_id=ANNO_1800_APP_ID)
+    pk = _prove_managed_folder(db, str(created.mod_id), folder, extra={'app_id': ANNO_1800_APP_ID, 'title': '1905-ocean-liner'})
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out.get('success') is True, out
     man = load_manifest(folder)
     assert man is not None
@@ -226,9 +250,9 @@ def test_8_nested_data_does_not_report_missing_content(db: DatabaseManager, tmp_
         zf.writestr('[Gameplay] Pack/data/config/export/main/asset/assets.xml', '<A/>')
     _meta(folder, {'published_file_id': '91678'})
     db.update_game_deploy_config(ANNO_1800_APP_ID, name='Anno 1800', install_path=str(install), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='91678', title='Nested', app_id=ANNO_1800_APP_ID)
-    _prove_managed_folder(db, '91678', folder, extra={'app_id': ANNO_1800_APP_ID, 'title': 'Nested'})
-    out = ModDeployer(library_root=library, db=db).deploy_mod('91678')
+    created = create_steam_test_mod(db, external_id='91678', title='Nested', app_id=ANNO_1800_APP_ID)
+    pk = _prove_managed_folder(db, str(created.mod_id), folder, extra={'app_id': ANNO_1800_APP_ID, 'title': 'Nested'})
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out.get('success') is True, out
     assert '内容目录不存在' not in str(out.get('error') or '')
     assert (install / 'mods' / '[Gameplay] Pack' / '[Shared] Pools and Definitions' / 'data' / 'config' / 'export' / 'main' / 'asset' / 'assets.xml').is_file()
@@ -245,15 +269,15 @@ def test_9_archive_vs_folder_copy_undeploy_matches_deploy(db: DatabaseManager, t
     with zipfile.ZipFile(zip_folder / 'liner.zip', 'w') as zf:
         zf.writestr(f'{zip_root}/data/x.xml', '<A/>')
     _meta(zip_folder, {'published_file_id': '91679'})
-    create_steam_test_mod(db, external_id='91679', title='liner', app_id=ANNO_1800_APP_ID)
-    _prove_managed_folder(db, '91679', zip_folder, extra={'app_id': ANNO_1800_APP_ID, 'title': 'liner'})
-    deployed = deployer.deploy_mod('91679')
+    created = create_steam_test_mod(db, external_id='91679', title='liner', app_id=ANNO_1800_APP_ID)
+    pk = _prove_managed_folder(db, str(created.mod_id), zip_folder, extra={'app_id': ANNO_1800_APP_ID, 'title': 'liner'})
+    deployed = deployer.deploy_mod(pk)
     assert deployed.get('success') is True, deployed
     man = load_manifest(zip_folder)
     assert man is not None
     archive_targets = [Path(e.target).resolve() for e in man.files]
     assert all((t.exists() for t in archive_targets))
-    und = deployer.undeploy_mod('91679')
+    und = deployer.undeploy_mod(pk)
     assert und.get('success') is True, und
     assert all((not t.exists() for t in archive_targets))
     loose = library / 'Anno 1800' / 'LooseFoo'
@@ -261,16 +285,16 @@ def test_9_archive_vs_folder_copy_undeploy_matches_deploy(db: DatabaseManager, t
     (loose / 'data').mkdir()
     (loose / 'data' / 'y.xml').write_text('<Y/>', encoding='utf-8')
     _meta(loose, {'published_file_id': '91680'})
-    create_steam_test_mod(db, external_id='91680', title='LooseFoo', app_id=ANNO_1800_APP_ID)
-    _prove_managed_folder(db, '91680', loose, extra={'app_id': ANNO_1800_APP_ID, 'title': 'LooseFoo'})
-    deployed2 = deployer.deploy_mod('91680')
+    created = create_steam_test_mod(db, external_id='91680', title='LooseFoo', app_id=ANNO_1800_APP_ID)
+    pk = _prove_managed_folder(db, str(created.mod_id), loose, extra={'app_id': ANNO_1800_APP_ID, 'title': 'LooseFoo'})
+    deployed2 = deployer.deploy_mod(pk)
     assert deployed2.get('success') is True, deployed2
     man2 = load_manifest(loose)
     assert man2 is not None
     folder_targets = [Path(e.target).resolve() for e in man2.files]
     assert any(('LooseFoo' in t.parts for t in folder_targets))
     assert all(('[Gameplay]' not in part for t in folder_targets for part in t.parts))
-    und2 = deployer.undeploy_mod('91680')
+    und2 = deployer.undeploy_mod(pk)
     assert und2.get('success') is True, und2
     assert all((not t.exists() for t in folder_targets))
 
@@ -288,13 +312,13 @@ def test_10_legacy_manifest_remap_or_refuse(db: DatabaseManager, tmp_path: Path)
     (folder / 'b.xml').write_text('SRC', encoding='utf-8')
     _meta(folder, {'published_file_id': '91033', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(new_mods), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='91033', title='BarMod', app_id=4242)
-    _prove_managed_folder(db, '91033', folder, extra={'app_id': 4242, 'title': 'BarMod'})
+    created = create_steam_test_mod(db, external_id='91033', title='BarMod', app_id=4242)
+    pk = _prove_managed_folder(db, str(created.mod_id), folder, extra={'app_id': 4242, 'title': 'BarMod'})
     old_target = tmp_path / 'old' / 'game' / 'mods' / 'Bar' / 'b.xml'
     old_target.parent.mkdir(parents=True)
     old_target.write_text('HIST', encoding='utf-8')
-    save_manifest(folder, DeployManifest(mod_id='91033', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'b.xml'), target=str(old_target))]))
-    out = ModDeployer(library_root=library, db=db).undeploy_mod('91033')
+    save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'b.xml'), target=str(old_target))]))
+    out = ModDeployer(library_root=library, db=db).undeploy_mod(pk)
     assert out.get('success') is True, out
     assert not live.exists()
     assert old_target.read_text(encoding='utf-8') == 'HIST'
@@ -302,10 +326,10 @@ def test_10_legacy_manifest_remap_or_refuse(db: DatabaseManager, tmp_path: Path)
     folder2.mkdir(parents=True)
     (folder2 / 'c.xml').write_text('C', encoding='utf-8')
     _meta(folder2, {'published_file_id': '91034', 'app_id': 4242, 'game_name': 'Game'})
-    create_steam_test_mod(db, external_id='91034', title='NoDerive', app_id=4242)
-    _prove_managed_folder(db, '91034', folder2, extra={'app_id': 4242, 'title': 'NoDerive'})
-    save_manifest(folder2, DeployManifest(mod_id='91034', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder2 / 'c.xml'), target=str(unknown.resolve()))]))
-    out2 = ModDeployer(library_root=library, db=db).undeploy_mod('91034')
+    created = create_steam_test_mod(db, external_id='91034', title='NoDerive', app_id=4242)
+    pk = _prove_managed_folder(db, str(created.mod_id), folder2, extra={'app_id': 4242, 'title': 'NoDerive'})
+    save_manifest(folder2, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder2 / 'c.xml'), target=str(unknown.resolve()))]))
+    out2 = ModDeployer(library_root=library, db=db).undeploy_mod(pk)
     assert out2.get('success') is False, out2
     assert unknown.read_text(encoding='utf-8') == 'KEEP'
 

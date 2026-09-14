@@ -5,17 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
-from services.file_ops import INFO_DIR_NAME
 from services.metadata_refresh import MetadataRefreshResult
 from ui.mod_detail_panel import ModDetailPanel
+
+WORKSHOP_ID = "3413520661"
 
 
 @pytest.fixture(scope="module")
@@ -34,27 +34,30 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed(lib: Path, *, mid: str = "3413520661") -> Path:
-    folder = lib / "Game" / f"Unknown_Mod_{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        '{"published_file_id":"%s","title":"Unknown_Mod_%s",'
-        '"fetch_error":"timeout"}' % (mid, mid),
-        encoding="utf-8",
+def _seed(db: DatabaseManager, lib: Path, *, workshop: str = WORKSHOP_ID) -> tuple[Path, str]:
+    folder = lib / "Game" / f"Unknown_Mod_{workshop}"
+    folder.mkdir(parents=True)
+    created = create_steam_test_mod(
+        db, external_id=workshop, title=f"Unknown_Mod_{workshop}"
     )
-    return folder
+    pk = prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title=f"Unknown_Mod_{workshop}",
+        extra={"fetch_error": "timeout"},
+    )
+    return folder, pk
 
 
 def test_refresh_button_is_labeled_push_button(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "lib"
-    folder = _seed(lib)
-    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+    folder, pk = _seed(db, lib)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id="3413520661")
+    panel.show_mod(folder, mod_id=pk)
     qapp.processEvents()
     btn = panel.btn_refresh_mod
     assert isinstance(btn, QPushButton)
@@ -66,11 +69,10 @@ def test_refresh_button_state_machine(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "lib"
-    folder = _seed(lib)
-    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+    folder, pk = _seed(db, lib)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id="3413520661")
+    panel.show_mod(folder, mod_id=pk)
     qapp.processEvents()
 
     panel._set_refresh_button_state("running")
@@ -101,11 +103,10 @@ def test_click_sets_running_immediately_and_blocks_duplicate(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "lib"
-    folder = _seed(lib)
-    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+    folder, pk = _seed(db, lib)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id="3413520661")
+    panel.show_mod(folder, mod_id=pk)
     qapp.processEvents()
 
     monkeypatch.setattr(
@@ -149,14 +150,13 @@ def test_success_handler_sets_updated_label(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "lib"
-    folder = _seed(lib)
-    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+    folder, pk = _seed(db, lib)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id="3413520661")
+    panel.show_mod(folder, mod_id=pk)
     monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
     result = MetadataRefreshResult(
-        mod_id="3413520661",
+        mod_id=pk,
         success=True,
         managed_path=folder,
         old_path=folder,
@@ -173,18 +173,17 @@ def test_refresh_success_never_shows_status_banner(
 ) -> None:
     """Refresh soft feedback is op_status only — never detailStatusBanner."""
     lib = tmp_path / "lib"
-    folder = _seed(lib)
-    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
+    folder, pk = _seed(db, lib)
 
     panel = ModDetailPanel()
     panel.show()
-    panel.show_mod(folder, mod_id="3413520661")
+    panel.show_mod(folder, mod_id=pk)
     monkeypatch.setattr(panel, "show_mod", lambda *a, **k: None)
     qapp.processEvents()
 
     panel._on_metadata_refresh_finished(
         MetadataRefreshResult(
-            mod_id="3413520661",
+            mod_id=pk,
             success=True,
             managed_path=folder,
             old_path=folder,
@@ -220,13 +219,12 @@ def test_refresh_clears_missing_content_when_files_exist(
     )
 
     lib = tmp_path / "lib"
-    folder = _seed(lib)
+    folder, pk = _seed(db, lib)
     apply_missing_content_marker(folder)
     (folder / "payload.pak").write_bytes(b"pak")
-    create_steam_test_mod(db, external_id="3413520661", title="Unknown_Mod_3413520661")
 
     panel = ModDetailPanel()
-    panel.show_mod(folder, mod_id="3413520661")
+    panel.show_mod(folder, mod_id=pk)
     panel._current_platform = PLATFORM_OTHER
     monkeypatch.setattr("services.info_sidecar.rescan_mod_folder", lambda *a, **k: None)
     panel._on_refresh_mod()

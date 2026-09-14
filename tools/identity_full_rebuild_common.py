@@ -89,8 +89,13 @@ def read_info(folder: Path) -> tuple[dict[str, Any] | None, str]:
     return None, ""
 
 
-def write_info_internal_id(info_path: Path, internal_id: str) -> None:
-    """Replace ``.info.internal_id`` only — never invent workspace from path."""
+def write_info_entity_key(info_path: Path, internal_id: str) -> None:
+    """Replace ``.info/entity_key`` only — never invent workspace from path.
+
+    ``entity_key`` value must be Entity ``internal_id`` (not a third Mod ID).
+    """
+    from services.mod_identity import set_entity_key
+
     payload: dict[str, Any] = {}
     if info_path.is_file():
         try:
@@ -101,12 +106,16 @@ def write_info_internal_id(info_path: Path, internal_id: str) -> None:
             payload = {}
     # Drop legacy PK pollution mirrors; entity proof is UUID only.
     payload.pop("mod_id", None)
-    payload["internal_id"] = text(internal_id)
+    payload = set_entity_key(payload, text(internal_id))
     info_path.parent.mkdir(parents=True, exist_ok=True)
     info_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+# Legacy alias — canonical name is :func:`write_info_entity_key`.
+write_info_internal_id = write_info_entity_key
 
 
 def load_game_name_to_app_id(db_path: Path) -> dict[str, int]:
@@ -196,8 +205,11 @@ def scan_disk_entries(
         current_iid = ""
         platform = ""
         if info and not info.get("_read_error"):
+            from services.mod_identity import read_entity_key
+
             title = text(info.get("title") or info.get("display_name"))
-            current_iid = text(info.get("internal_id"))
+            # Prefer entity_key; legacy sidecar key internal_id accepted.
+            current_iid = text(read_entity_key(info))
             platform = text(info.get("platform") or info.get("source_type")).lower()
         entries.append(
             {

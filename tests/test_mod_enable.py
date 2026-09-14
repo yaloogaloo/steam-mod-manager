@@ -23,13 +23,13 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 
 def test_enable_disable_roundtrip(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="801", title="E")
+    pk = create_steam_test_mod(db, external_id="801", title="E").mod_id
 
-    assert db.is_mod_enabled(801) is True
-    assert db.disable_mod(801) is False
-    assert db.is_mod_enabled(801) is False
-    assert db.enable_mod(801) is True
-    info = db.get_mod_display_info(801)
+    assert db.is_mod_enabled(pk) is True
+    assert db.disable_mod(pk) is False
+    assert db.is_mod_enabled(pk) is False
+    assert db.enable_mod(pk) is True
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.enabled is True
 
@@ -40,17 +40,17 @@ def test_disabled_cannot_deploy(tmp_path: Path, db: DatabaseManager) -> None:
     info = folder / INFO_DIR_NAME
     info.mkdir(parents=True)
     (folder / "a.txt").write_text("x", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"801","title":"E","app_id":1,"game_name":"Game"}',
-        encoding="utf-8",
-    )
     db.update_game_deploy_config(
         1, name="Game", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
-    create_steam_test_mod(db, external_id="801", title="E", app_id=1)
+    created = create_steam_test_mod(db, external_id="801", title="E", app_id=1)
+    pk = str(created.mod_id)
+    from tests.helpers.identity import prove_managed_folder
 
-    db.disable_mod(801)
+    prove_managed_folder(db, folder, handle=pk, title="E", app_id=1, game_name="Game")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(801)
+    db.disable_mod(pk)
+
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is False
     assert out["error"] == "Mod disabled"

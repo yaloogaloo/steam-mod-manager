@@ -1,0 +1,8 @@
+{
+  "startup_reconcile_enabled": false,
+  "startup_reconcile_delay_ms": 15000,
+  "startup_reconcile_batch_size": 25,
+  "startup_reconcile_batch_pause_ms": 50,
+  "startup_reconcile_max_mods": 0,
+  "_comment": "Default off: GUI startup loads DB only. Env SMM_STARTUP_RECONCILE_ENABLED overrides enabled. When enabled, reconcile is delayed + batched. max_mods=0 means unlimited; >0 caps bind pass and skips missing/orphan phases."
+}

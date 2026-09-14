@@ -67,15 +67,17 @@ def _seed_mod(
         game_name="GameX",
         files={"a.txt": "x"},
     )
-    return seeded.folder, seeded.internal_id
+    return seeded.folder, seeded.mod_id
 
 
-def _three_mod_library(library: Path, db: DatabaseManager) -> list[tuple[Path, str]]:
+def _three_mod_library(library: Path, db: DatabaseManager) -> dict[str, str]:
+    """Seed three mods; return external_id → mods.mod_id PK."""
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    out: list[tuple[Path, str]] = []
-    for mid, title in (("7001", "Mod A"), ("7002", "Mod B"), ("7003", "Mod C")):
-        out.append(_seed_mod(library, db, external_id=mid, title=title))
-    return out
+    pks: dict[str, str] = {}
+    for external_id, title in (("7001", "Mod A"), ("7002", "Mod B"), ("7003", "Mod C")):
+        _folder, pk = _seed_mod(library, db, external_id=external_id, title=title)
+        pks[external_id] = pk
+    return pks
 
 
 def _card_data(path: Path, internal_id: str, title: str = "UX Mod") -> ModCardData:
@@ -315,7 +317,7 @@ def test_shift_range_selection(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     library = tmp_path / "mod"
-    _three_mod_library(library, db)
+    pks = _three_mod_library(library, db)
     patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
@@ -363,13 +365,14 @@ def test_shift_range_uses_sorted_layout_order(
     """Shift slice follows on-screen sort order, not _cards insertion order."""
     library = tmp_path / "mod"
     db.update_game_deploy_config(42, name="GameX", mod_path="")
-    # Seed Z→A; name sort puts Alpha first on screen.
-    for mid, title in (
+    pks: dict[str, str] = {}
+    for external_id, title in (
         ("7003", "Zulu"),
         ("7002", "Bravo"),
         ("7001", "Alpha"),
     ):
-        _seed_mod(library, db, external_id=mid, title=title)
+        _folder, pk = _seed_mod(library, db, external_id=external_id, title=title)
+        pks[external_id] = pk
 
     patch_library_get_db(monkeypatch, db)
 
@@ -378,10 +381,17 @@ def test_shift_range_uses_sorted_layout_order(
     view._sort_mode = SORT_NAME
     view.refresh()
     visible = view._visible_cards()
-    assert [c._mod_id() for c in visible] == ["7001", "7002", "7003"]
-    # Simulate internal list out of sync with on-screen layout order.
+    assert [c._mod_id() for c in visible] == [
+        pks["7001"],
+        pks["7002"],
+        pks["7003"],
+    ]
     view._cards = list(reversed(view._cards))
-    assert [c._mod_id() for c in view._cards] == ["7003", "7002", "7001"]
+    assert [c._mod_id() for c in view._cards] == [
+        pks["7003"],
+        pks["7002"],
+        pks["7001"],
+    ]
 
     view.on_mod_selected(visible[1]._mod_id())  # Bravo
     monkeypatch.setattr(
@@ -391,7 +401,10 @@ def test_shift_range_uses_sorted_layout_order(
     )
     view.on_mod_selected(visible[2]._mod_id())  # Zulu
 
-    assert {c._mod_id() for c in view._selected_cards} == {"7002", "7003"}
+    assert {c._mod_id() for c in view._selected_cards} == {
+        pks["7002"],
+        pks["7003"],
+    }
 
 
 def test_select_all_mods_shortcut(
@@ -419,7 +432,7 @@ def test_batch_set_category_binds_type_id(
     from services.mod_type_catalog import get_mod_type_catalog
 
     library = tmp_path / "mod"
-    _three_mod_library(library, db)
+    pks = _three_mod_library(library, db)
     patch_library_get_db(monkeypatch, db)
     created = get_mod_type_catalog().add_type(42, "Gameplay")
 
@@ -438,9 +451,9 @@ def test_batch_set_category_binds_type_id(
 
     view._on_batch_set_category(str(created.type_id))
 
-    assert db.get_mod_type_id("7001") == created.type_id
-    assert db.get_mod_type_id("7003") == created.type_id
-    assert db.get_mod_type_id("7002") is None
+    assert db.get_mod_type_id(pks["7001"]) == created.type_id
+    assert db.get_mod_type_id(pks["7003"]) == created.type_id
+    assert db.get_mod_type_id(pks["7002"]) is None
 
 
 def test_add_game_category_renders_sidebar_node(
@@ -482,7 +495,7 @@ def test_sidebar_category_filters_mod_list(
     from services.mod_type_catalog import get_mod_type_catalog
 
     library = tmp_path / "mod"
-    _three_mod_library(library, db)
+    pks = _three_mod_library(library, db)
     created = get_mod_type_catalog().add_type(42, "Gameplay")
     patch_library_get_db(monkeypatch, db)
 
@@ -525,4 +538,4 @@ def test_sidebar_category_filters_mod_list(
     filtered = view._visible_cards()
     assert len(filtered) == 2
     mids = {c._mod_id() for c in filtered}
-    assert mids == {"7001", "7003"}
+    assert mids == {pks["7001"], pks["7003"]}

@@ -143,6 +143,10 @@ class NexusManualOfflineProvider(OfflineProvider):
             )
             raise
 
+        from services.info_asset_runtime import require_cas_finalize
+
+        require_cas_finalize(output_dir, mod_id=mid, context=f"nexus:{mid}")
+
         get_db().update_mod_offline_status(
             mid,
             status=OFFLINE_STATUS_ARCHIVED,

@@ -7,7 +7,7 @@ alwaysApply: true
 
 Three identities. Never merge them.
 
-- **internal_id** (`mods.internal_id` TEXT): durable business Entity Identity. Answers “is this the same Mod?”. Minted at create; proven on disk as `.info.internal_id`. Never `internal_id = str(mod_id)`. Never `workspace_id`. Never `correlation_id`.
+- **internal_id** (`mods.internal_id` TEXT): durable business Entity Identity. Answers “is this the same Mod?”. Minted at create; proven on disk as `.info/internal_id` (same value — not a third Mod ID). Never `internal_id = str(mod_id)`. Never `workspace_id`. Never `correlation_id`.
 - **mod_id** (`mods.mod_id`): SQLite row PK and FK target only. Not the business Entity Identity. Business callers resolve `internal_id → resolve_mod_pk() → mod_id → DB/FK`.
 - **Workspace ID** (`mods.workspace_id`): platform / display identity only (Steam Workshop ID, Nexus Mod ID, …). NEVER Library / Reconcile / Backup / Deploy / UI entity identity. `find_mod_by_workspace_id` is a permanent no-op.
 - **external_id**: platform-native metadata. Not a second user Mod ID.
@@ -26,4 +26,6 @@ Steam PK may numerically equal Workshop ID (historical). Same digits ≠ same se
 
 Use names `internal_id`, `mod_id`, `workspace_id`, `external_id`. Do not use ambiguous `mod_id` for more than one of these.
 
-Ordinary UI shows **Workspace ID** only. Debug UI may show **SQLite PK**. `.info.internal_id` is filesystem registration proof, not a folder-name identity.
+Ordinary UI shows **Workspace ID** only. Debug UI may show **SQLite PK**. `.info/internal_id` is filesystem registration proof (same Entity `internal_id`), not a folder-name identity.
+
+Do not introduce `entity_key` as an identity field. A temporary legacy JSON key named `entity_key` may be read once and migrated to `internal_id`; never write it as canonical.

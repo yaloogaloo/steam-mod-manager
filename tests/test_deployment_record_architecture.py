@@ -43,14 +43,14 @@ def _game(db: DatabaseManager) -> None:
     )
 
 
-def _mod(db: DatabaseManager, mod_id: int, *, deployed: bool) -> None:
+def _mod(db: DatabaseManager, workshop_id: int, *, deployed: bool) -> int:
     with identity_create_scope():
         created = create_mod_identity(
             db,
             platform=PLATFORM_STEAM,
-            external_id=str(mod_id),
-            workshop_id=str(mod_id),
-            title=f"Mod {mod_id}",
+            external_id=str(workshop_id),
+            workshop_id=str(workshop_id),
+            title=f"Mod {workshop_id}",
             app_id=STARDEW,
             game_name="Stardew Valley",
         )
@@ -62,6 +62,7 @@ def _mod(db: DatabaseManager, mod_id: int, *, deployed: bool) -> None:
         ),
         deploy_path="" if not deployed else f"/fake/{entity_id}",
     )
+    return entity_id
 
 
 def _index(mod_id: str, *, deployed: bool) -> ModFilterIndex:
@@ -81,25 +82,24 @@ def _index(mod_id: str, *, deployed: bool) -> ModFilterIndex:
 
 def test_save_record_does_not_modify_deploy_status(db: DatabaseManager) -> None:
     _game(db)
-    for mid in (1, 2, 3):
-        _mod(db, mid, deployed=True)
+    pks = [_mod(db, mid, deployed=True) for mid in (1, 2, 3)]
     before = {
-        mid: db.get_mod_deploy_info(mid).deploy_status for mid in (1, 2, 3)
+        mid: db.get_mod_deploy_info(mid).deploy_status for mid in pks
     }
     dr.create_or_update_record(STARDEW, "存档1", db=db)
     after = {
-        mid: db.get_mod_deploy_info(mid).deploy_status for mid in (1, 2, 3)
+        mid: db.get_mod_deploy_info(mid).deploy_status for mid in pks
     }
     assert before == after
 
 
 def test_delete_record_does_not_delete_mods(db: DatabaseManager) -> None:
     _game(db)
-    _mod(db, 10, deployed=True)
+    pk = _mod(db, 10, deployed=True)
     record = dr.create_or_update_record(STARDEW, "del", db=db)
     assert dr.delete_record(record.id, db=db) is True
-    assert db.get_mod(10) is not None
-    assert db.get_mod_deploy_info(10).deploy_status == DEPLOY_STATUS_DEPLOYED
+    assert db.get_mod(pk) is not None
+    assert db.get_mod_deploy_info(pk).deploy_status == DEPLOY_STATUS_DEPLOYED
 
 
 def test_relative_status_not_written_to_database(db: DatabaseManager) -> None:
@@ -107,9 +107,9 @@ def test_relative_status_not_written_to_database(db: DatabaseManager) -> None:
     for mid in (1, 2, 3):
         _mod(db, mid, deployed=True)
     record = dr.create_or_update_record(STARDEW, "存档1", db=db)
-    _mod(db, 4, deployed=True)
+    pk4 = _mod(db, 4, deployed=True)
     recorded = frozenset(dr.get_record_mod_ids(record.id, db=db))
-    status = compute_record_relative_status(_index("4", deployed=True), recorded)
+    status = compute_record_relative_status(_index(str(pk4), deployed=True), recorded)
     assert status is not None and status.not_recorded_deployed
 
     forbidden = ("extra_deployed", "record_missing", "relative_status")

@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import tempfile
 import threading
@@ -49,6 +50,18 @@ DEFAULT_INDEX_NAME = "index.html"
 DEFAULT_ASSETS_DIR = "assets"
 DEFAULT_TIMEOUT = 15
 
+
+def _capture_assets_dir(output_dir: Path) -> Path:
+    from services.offline.staging import resolve_capture_assets_dir
+
+    return resolve_capture_assets_dir(output_dir)
+
+
+def _cleanup_capture_staging(output_dir: Path) -> None:
+    from services.offline.staging import cleanup_capture_staging
+
+    cleanup_capture_staging(output_dir)
+
 # Sidecar under ``.info/`` — not part of ModMetadata / SQLite schema.
 _ARCHIVE_ATTEMPT_NAME = "archive_attempt.json"
 ARCHIVE_RETRY_COOLDOWN_SEC = 10 * 60
@@ -80,11 +93,24 @@ MAX_CSS_FILES = 60
 MAX_IMAGES = 120
 MAX_ASSET_BYTES = 12 * 1024 * 1024
 
+# Regenerable URL-hash cache under cache/asset_cache/. Not Source of Truth.
+ASSET_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
+ASSET_CACHE_MAX_BYTES = 5 * 1024 * 1024 * 1024
+ASSET_CACHE_PRUNE_TARGET_BYTES = 4 * 1024 * 1024 * 1024
+ASSET_CACHE_MIN_AGE_SECONDS = 60 * 60
+ASSET_CACHE_PRUNE_INTERVAL_SECONDS = 24 * 60 * 60
+_ASSET_CACHE_PRUNE_STAMP_NAME = ".asset_cache_prune_stamp"
+_ASSET_CACHE_FILE_RE = re.compile(
+    r"^[0-9a-f]{64}\.(css|png|jpg|jpeg|gif|webp|svg|woff|woff2|ttf|eot|bin)$"
+)
+
 _GLOBAL_ASSET_SEMAPHORE = threading.Semaphore(GLOBAL_ASSET_WORKERS)
 
-# Global URL → sha256 disk cache under data/asset_cache/ (raw bytes, pre-CSS rewrite).
+# Global URL → sha256 disk cache under cache/asset_cache/ (raw bytes, pre-CSS rewrite).
 _ASSET_CACHE_STATS: dict[str, int] = {"hit": 0, "miss": 0, "fail": 0}
 _ASSET_CACHE_STATS_LOCK = threading.Lock()
+_ASSET_CACHE_PRUNE_LOCK = threading.Lock()
+_ASSET_CACHE_PRUNE_ATTEMPTED = False
 _CSS_LOCALIZED_MARK = "/* smm-css-localized */"
 _CSS_URL_RE = re.compile(r"url\(([^)]+)\)", re.IGNORECASE)
 _CACHE_KEY_LOCKS_GUARD = threading.Lock()
@@ -123,6 +149,13 @@ def reset_asset_cache_stats() -> None:
         _ASSET_CACHE_STATS["hit"] = 0
         _ASSET_CACHE_STATS["miss"] = 0
         _ASSET_CACHE_STATS["fail"] = 0
+
+
+def reset_asset_cache_prune_state() -> None:
+    """Test helper: allow ``maybe_prune_asset_cache`` to run again in this process."""
+    global _ASSET_CACHE_PRUNE_ATTEMPTED
+    with _ASSET_CACHE_PRUNE_LOCK:
+        _ASSET_CACHE_PRUNE_ATTEMPTED = False
 
 
 def get_asset_cache_stats() -> dict[str, int]:
@@ -232,6 +265,169 @@ def _copy_file_atomic(src: Path, dest: Path) -> None:
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _touch_asset_cache_mtime(path: Path) -> None:
+    """Bump mtime so prune can treat HIT as last-use. Does not rewrite bytes."""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def _asset_cache_prune_stamp_path() -> Path:
+    return asset_cache_dir() / _ASSET_CACHE_PRUNE_STAMP_NAME
+
+
+def _is_asset_cache_filename(name: str) -> bool:
+    return bool(_ASSET_CACHE_FILE_RE.fullmatch(name))
+
+
+def _unlink_cache_file(path: Path) -> bool:
+    try:
+        path.unlink()
+        return True
+    except OSError as exc:
+        logger.warning("Failed to prune asset cache file %s: %s", path, exc)
+        return False
+
+
+def _write_asset_cache_prune_stamp() -> None:
+    stamp = _asset_cache_prune_stamp_path()
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_bytes(b"")
+    except OSError as exc:
+        logger.warning("Failed to write asset cache prune stamp %s: %s", stamp, exc)
+
+
+def prune_asset_cache(
+    cache_root: Path | None = None,
+    *,
+    now: float | None = None,
+) -> dict[str, int]:
+    """Delete unusable, expired, or over-capacity regenerable cache files.
+
+    One-level ``iterdir`` only. Never reads file bytes or hashes contents.
+    Does not touch ``.info/offline/`` or Backup.
+    """
+    root = cache_root if cache_root is not None else asset_cache_dir()
+    now_ts = time.time() if now is None else float(now)
+    result = {
+        "scanned": 0,
+        "deleted": 0,
+        "bytes_deleted": 0,
+        "zero_byte": 0,
+        "ttl": 0,
+        "size_cap": 0,
+        "remaining_files": 0,
+        "remaining_bytes": 0,
+        "skipped": 0,
+    }
+    if not root.is_dir():
+        return result
+
+    ttl_age = float(ASSET_CACHE_TTL_SECONDS)
+    min_age = float(ASSET_CACHE_MIN_AGE_SECONDS)
+    max_bytes = int(ASSET_CACHE_MAX_BYTES)
+    target_bytes = int(ASSET_CACHE_PRUNE_TARGET_BYTES)
+
+    kept: list[tuple[float, int, Path]] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        logger.warning("Failed to list asset cache %s: %s", root, exc)
+        return result
+
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                result["skipped"] += 1
+                continue
+        except OSError:
+            result["skipped"] += 1
+            continue
+        if not _is_asset_cache_filename(entry.name):
+            result["skipped"] += 1
+            continue
+        try:
+            st = entry.stat()
+        except OSError:
+            result["skipped"] += 1
+            continue
+        result["scanned"] += 1
+        size = int(st.st_size)
+        mtime = float(st.st_mtime)
+        age = now_ts - mtime
+        if size == 0:
+            if _unlink_cache_file(entry):
+                result["deleted"] += 1
+                result["zero_byte"] += 1
+            continue
+        if age >= ttl_age and age >= min_age:
+            if _unlink_cache_file(entry):
+                result["deleted"] += 1
+                result["bytes_deleted"] += size
+                result["ttl"] += 1
+            continue
+        kept.append((mtime, size, entry))
+
+    remaining_bytes = sum(item[1] for item in kept)
+    if remaining_bytes > max_bytes:
+        kept.sort(key=lambda item: item[0])
+        for mtime, size, path in kept:
+            if remaining_bytes <= target_bytes:
+                break
+            if (now_ts - mtime) < min_age:
+                continue
+            if not _unlink_cache_file(path):
+                continue
+            remaining_bytes -= size
+            result["deleted"] += 1
+            result["bytes_deleted"] += size
+            result["size_cap"] += 1
+        kept = [item for item in kept if item[2].is_file()]
+        remaining_bytes = sum(item[1] for item in kept)
+
+    result["remaining_files"] = len(kept)
+    result["remaining_bytes"] = remaining_bytes
+    logger.info(
+        "[ASSET CACHE PRUNE] deleted=%s bytes=%s zero=%s ttl=%s size_cap=%s "
+        "remaining_files=%s remaining_bytes=%s",
+        result["deleted"],
+        result["bytes_deleted"],
+        result["zero_byte"],
+        result["ttl"],
+        result["size_cap"],
+        result["remaining_files"],
+        result["remaining_bytes"],
+    )
+    return result
+
+
+def maybe_prune_asset_cache(*, force: bool = False) -> dict[str, int] | None:
+    """At most once per process, and at most once per 24h stamp.
+
+    Never called per asset GET. Safe no-op when recently pruned.
+    """
+    global _ASSET_CACHE_PRUNE_ATTEMPTED
+    with _ASSET_CACHE_PRUNE_LOCK:
+        if not force and _ASSET_CACHE_PRUNE_ATTEMPTED:
+            return None
+        if not force:
+            stamp = _asset_cache_prune_stamp_path()
+            try:
+                if stamp.is_file():
+                    age = time.time() - stamp.stat().st_mtime
+                    if age < float(ASSET_CACHE_PRUNE_INTERVAL_SECONDS):
+                        _ASSET_CACHE_PRUNE_ATTEMPTED = True
+                        return None
+            except OSError:
+                pass
+        _ASSET_CACHE_PRUNE_ATTEMPTED = True
+        result = prune_asset_cache()
+        _write_asset_cache_prune_stamp()
+        return result
 
 
 class ArchiveRateLimitedError(RuntimeError):
@@ -462,15 +658,18 @@ def log_steam_http_request(
     settings_cookie: str | None,
     session_cookie_count: int,
     session_has_sessionid: bool,
+    timeout: float | None = None,
 ) -> None:
     """Sanitized pre-request diagnostics (no cookie values)."""
     logger.info(
-        "[STEAM ARCHIVE] HTTP request: url=%s proxy=%s impersonate=%s "
+        "[STEAM ARCHIVE] request start url=%s proxy=%s client=curl_cffi.Session "
+        "impersonate=%s verify=default timeout=%s "
         "user_agent=%s accept_language=%s referer=%s has_settings_cookie=%s "
         "settings_cookie_keys=%s session_cookie_count=%s session_has_sessionid=%s",
         url,
         proxy_label or "(direct)",
         impersonate,
+        timeout if timeout is not None else "",
         (headers.get("User-Agent") or "")[:80],
         headers.get("Accept-Language") or "",
         headers.get("Referer") or "",
@@ -1106,6 +1305,7 @@ class OfflinePageArchiver:
         self._session = None
 
     def __enter__(self) -> OfflinePageArchiver:
+        maybe_prune_asset_cache()
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -1178,6 +1378,7 @@ class OfflinePageArchiver:
                 self._steam_cookie
                 and "sessionid" in self._steam_cookie.lower()
             ),
+            timeout=kwargs.get("timeout"),
         )
 
         with STEAM_ARCHIVE_LIMITER.request_slot() as slot:
@@ -1325,10 +1526,14 @@ class OfflinePageArchiver:
             except _PROXY_TRANSPORT_ERRORS as exc:
                 logger.info("[ARCHIVE] proxy failed")
                 logger.info(
-                    "[ARCHIVE] proxy failed; direct_fallback=not_executed "
-                    "proxy=%s url=%s err=%s",
-                    redacted,
+                    "[STEAM ARCHIVE] request failed url=%s proxy=%s "
+                    "client=curl_cffi.Session impersonate=%s verify=default "
+                    "timeout=%s exception=%s:%s direct_fallback=not_executed",
                     url,
+                    redacted,
+                    kwargs.get("impersonate") or IMPERSONATE,
+                    kwargs.get("timeout"),
+                    type(exc).__name__,
                     exc,
                 )
                 raise _proxy_transport_error(
@@ -1379,7 +1584,7 @@ class OfflinePageArchiver:
         """
         Persist already-rendered HTML into ``output_dir/index.html`` + ``assets/``.
 
-        Reuses asset rewrite / download, ``data/asset_cache/``, and atomic write.
+        Reuses asset rewrite / download, ``cache/asset_cache/``, and atomic write.
         Used by mod.io (Playwright DOM) — does not change Steam Workshop archive.
         """
         page_url = normalize_page_url(page_url)
@@ -1391,8 +1596,7 @@ class OfflinePageArchiver:
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        assets_dir = output_dir / DEFAULT_ASSETS_DIR
-        assets_dir.mkdir(parents=True, exist_ok=True)
+        assets_dir = _capture_assets_dir(output_dir)
         index_path = output_dir / DEFAULT_INDEX_NAME
 
         try:
@@ -1403,12 +1607,26 @@ class OfflinePageArchiver:
             self._rewrite_and_download_assets(soup, page_url, assets_dir)
             self._write_atomic(index_path, str(soup))
         except RuntimeError:
+            _cleanup_capture_staging(output_dir)
             raise
         except Exception as exc:  # noqa: BLE001
+            _cleanup_capture_staging(output_dir)
             raise RuntimeError("资源下载失败") from exc
 
         if not index_path.is_file() or index_path.stat().st_size <= 0:
             raise RuntimeError("资源下载失败")
+        try:
+            from services.info_asset_runtime import require_cas_finalize
+
+            require_cas_finalize(output_dir, context=f"rendered:{page_url}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "LIVE CAS finalize failed for rendered HTML %s: %s",
+                page_url,
+                exc,
+                exc_info=True,
+            )
+            raise
         return index_path
 
     def archive_webpage(
@@ -1422,7 +1640,7 @@ class OfflinePageArchiver:
         Mirror an arbitrary webpage into ``output_dir/index.html`` + ``assets/``.
 
         Reuses the Steam HTTP stack (curl_cffi + ``impersonate=chrome131``),
-        HTML asset rewrite / download, ``data/asset_cache/``, and atomic write.
+        HTML asset rewrite / download, ``cache/asset_cache/``, and atomic write.
         Does **not** use ``SteamArchiveLimiter`` (Steam Workshop pacing only).
         """
         page_url = normalize_page_url(page_url)
@@ -1531,8 +1749,6 @@ class OfflinePageArchiver:
     ) -> ArchiveEnsureResult:
         info_dir = Path(info_dir)
         info_dir.mkdir(parents=True, exist_ok=True)
-        assets_dir = info_dir / DEFAULT_ASSETS_DIR
-        assets_dir.mkdir(parents=True, exist_ok=True)
 
         index_path = info_dir / DEFAULT_INDEX_NAME
         if index_path.exists() and not overwrite:
@@ -1550,6 +1766,8 @@ class OfflinePageArchiver:
                 metadata=metadata,
                 error=RATE_LIMIT_USER_MESSAGE,
             )
+
+        assets_dir = _capture_assets_dir(info_dir)
 
         write_last_archive_attempt(info_dir, failed=False)
         page_url = WORKSHOP_PAGE_URL.format(id=published_file_id)
@@ -1691,6 +1909,24 @@ class OfflinePageArchiver:
                 proxy_scheme=str(proxy_fields.get("proxy_scheme") or ""),
                 failure_layer="none",
             )
+            try:
+                from services.info_asset_runtime import require_cas_finalize
+
+                require_cas_finalize(
+                    info_dir, context=f"steam:{published_file_id}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                from services.info_asset_runtime import CasFinalizeError
+
+                logger.error(
+                    "LIVE CAS finalize failed for %s",
+                    published_file_id,
+                    extra={"error": str(exc)},
+                    exc_info=True,
+                )
+                if not isinstance(exc, CasFinalizeError):
+                    exc = CasFinalizeError(f"CAS finalize failed: {exc}")
+                raise exc
             return ArchiveEnsureResult(
                 path=index_path,
                 outcome=ARCHIVE_OUTCOME_SUCCESS,
@@ -1698,6 +1934,18 @@ class OfflinePageArchiver:
                 write_performed=True,
             )
         except Exception as exc:  # noqa: BLE001
+            _cleanup_capture_staging(info_dir)
+            from services.info_asset_runtime import CasFinalizeError
+
+            if isinstance(exc, CasFinalizeError):
+                write_last_archive_attempt(info_dir, failed=True)
+                return ArchiveEnsureResult(
+                    path=index_path,
+                    outcome=ARCHIVE_OUTCOME_FAILED,
+                    error=str(exc),
+                    http_performed=True,
+                    write_performed=True,
+                )
             write_last_archive_attempt(info_dir, failed=True)
             # Global fuse (consecutive HTML 429) → rate_limited status + keep page.
             # A single Mod's retryable 429 exhaustion must NOT mark the whole queue.
@@ -1872,6 +2120,33 @@ class OfflinePageArchiver:
         if index_path.is_file() and not force:
             try:
                 if is_valid_steam_workshop_page(index_path):
+                    # CAS_ONLY: ingest leftover durable assets on cache hit so
+                    # OPEN does not depend on long-lived .info/assets.
+                    try:
+                        from core.cas_runtime import cas_only_info_asset_runtime
+                        from services.info_asset_runtime import (
+                            safe_finalize_live_offline,
+                        )
+                        from services.offline.staging import capture_assets_dir
+
+                        leftovers = info_dir / "assets"
+                        staging = capture_assets_dir(info_dir, create=False)
+                        has_files = False
+                        if leftovers.is_dir():
+                            has_files = any(p.is_file() for p in leftovers.rglob("*"))
+                        if not has_files and staging.is_dir():
+                            has_files = any(p.is_file() for p in staging.rglob("*"))
+                        if cas_only_info_asset_runtime() and has_files:
+                            safe_finalize_live_offline(
+                                info_dir,
+                                context=f"steam-cache-hit:{published_file_id}",
+                            )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "Phase 6 cache-hit finalize failed for %s",
+                            published_file_id,
+                            exc_info=True,
+                        )
                     if on_status is not None:
                         try:
                             on_status("skipped")
@@ -2515,6 +2790,7 @@ class OfflinePageArchiver:
                 try:
                     if not dest.exists():
                         _copy_file_atomic(cached, dest)
+                    _touch_asset_cache_mtime(cached)
                     _bump_asset_stat("hit")
                     result_kind = "hit"
                     _bump_pipe("hit")

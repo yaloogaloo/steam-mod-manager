@@ -62,22 +62,23 @@ def _index(
     )
 
 
-def _seed_deployed(db: DatabaseManager, mod_id: int, *, workspace_id: str | None = None) -> None:
+def _seed_deployed(
+    db: DatabaseManager, workshop_id: int, *, workspace_id: str | None = None
+) -> int:
     with identity_create_scope():
         created = create_mod_identity(
             db,
             platform=PLATFORM_STEAM,
-            external_id=str(mod_id),
-            workshop_id=str(mod_id),
-            title=f"Mod {mod_id}",
+            external_id=str(workshop_id),
+            workshop_id=str(workshop_id),
+            title=f"Mod {workshop_id}",
             app_id=CIV6,
             game_name=GAME_FOLDER,
         )
     entity_id = int(created.mod_id)
-    ws = workspace_id if workspace_id is not None else str(entity_id)
+    ws = workspace_id if workspace_id is not None else str(workshop_id)
     db.update_mod_identity_fields(
         entity_id,
-        internal_id=str(entity_id),
         workspace_id=ws,
         folder_present=True,
     )
@@ -86,6 +87,7 @@ def _seed_deployed(db: DatabaseManager, mod_id: int, *, workspace_id: str | None
         deploy_status=DEPLOY_STATUS_DEPLOYED,
         deploy_path=f"/fake/{entity_id}",
     )
+    return entity_id
 
 
 def test_case1_viewport_window_does_not_truncate_snapshot(
@@ -98,10 +100,9 @@ def test_case1_viewport_window_does_not_truncate_snapshot(
     from ui.mod_card import ModCardWidget
 
     db.upsert_game(GameInfo(app_id=CIV6, name=GAME_FOLDER, folder_name=GAME_FOLDER))
-    pks = list(range(101, 125))  # 24 mods
-    assert len(pks) == 24
-    for mid in pks:
-        _seed_deployed(db, mid)
+    workshops = list(range(101, 125))  # 24 mods
+    assert len(workshops) == 24
+    pks = [_seed_deployed(db, mid) for mid in workshops]
 
     # Pre-existing record with a subset — update must expand to full deployed set.
     record = dr.create_or_update_record(
@@ -160,10 +161,9 @@ def test_case2_writes_mod_id_pk_not_workspace_id(
     from ui.library_view import ModLibraryView
 
     db.upsert_game(GameInfo(app_id=CIV6, name=GAME_FOLDER, folder_name=GAME_FOLDER))
-    pk = 466
     workspace = "3793097715"
+    pk = _seed_deployed(db, 466, workspace_id=workspace)
     assert str(pk) != workspace
-    _seed_deployed(db, pk, workspace_id=workspace)
 
     view = ModLibraryView()
     view.current_game_id = CIV6
@@ -201,9 +201,8 @@ def test_case3_empty_card_entries_still_snapshots_game_rows(
     from ui.library_view import ModLibraryView
 
     db.upsert_game(GameInfo(app_id=CIV6, name=GAME_FOLDER, folder_name=GAME_FOLDER))
-    pks = [764, 616, 604, 601]
-    for mid in pks:
-        _seed_deployed(db, mid)
+    workshops = [764, 616, 604, 601]
+    pks = [_seed_deployed(db, mid) for mid in workshops]
 
     view = ModLibraryView()
     view.current_game_id = CIV6

@@ -203,7 +203,11 @@ def test_delete_duplicate_and_rebind_and_fix_info(tmp_path: Path) -> None:
     assert row[3] == "6304"
 
     meta = json.loads((keep / ".info" / "metadata.json").read_text(encoding="utf-8"))
-    assert meta["internal_id"] == db_iid
+    from services.mod_identity import read_entity_key
+
+    assert read_entity_key(meta) == db_iid
+    assert meta.get("internal_id") == db_iid
+    assert "entity_key" not in meta
     assert meta["workspace_id"] == "6304"
 
 

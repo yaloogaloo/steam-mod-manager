@@ -9,7 +9,7 @@ into the managed library, then binds/creates Internal entities::
         → copy / skip_existing (managed folder)
         → sidecar may hold Steam workspace / external ids (not Internal PK)
         → Identity Service create/bind
-        → Database + ``.info.internal_id`` proof
+        → Database + ``.info/entity_key`` proof
         → Library
 
 Import is Identity-first because the user is creating a new entity, then
@@ -349,4 +349,13 @@ def test_identity_failure_leaves_folder_retry_binds_once(
     proof = json.loads(
         (folder / INFO_DIR_NAME / METADATA_FILENAME).read_text(encoding="utf-8")
     )
-    assert read_internal_id(proof) == str(info.mod_id)
+    # entity_key value == Entity.internal_id (not mods.mod_id PK).
+    row = db.get_mod_backup_row(str(info.mod_id)) or {}
+    frozen = str(row.get("internal_id") or "")
+    assert frozen
+    assert read_internal_id(proof) == frozen
+    assert proof.get("internal_id") == frozen
+    assert "entity_key" not in proof
+    assert str(info.workspace_id) == wid
+    assert str(info.mod_id).isdigit()
+    assert frozen != str(info.mod_id)

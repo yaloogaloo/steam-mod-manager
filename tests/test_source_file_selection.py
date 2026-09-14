@@ -87,10 +87,11 @@ def test_selected_for_deploy_prefers_over_enabled_on_load() -> None:
 
 
 def test_manager_set_file_selection_syncs_both(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="9101", title="Pack")
+    created = create_steam_test_mod(db, external_id="9101", title="Pack")
+    pk = str(created.mod_id)
     mgr = ModFileManager(db)
     entry = mgr.add_file(
-        "9101",
+        pk,
         {
             "name": "Main",
             "filename": "main.pak",
@@ -99,15 +100,15 @@ def test_manager_set_file_selection_syncs_both(db: DatabaseManager) -> None:
             "enabled": True,
         },
     )
-    updated = mgr.set_file_selection("9101", entry.id, False)
+    updated = mgr.set_file_selection(pk, entry.id, False)
     assert updated is not None
     assert updated.selected_for_deploy is False
     assert updated.enabled is False
-    again = mgr.get_files("9101")[0]
+    again = mgr.get_files(pk)[0]
     assert again.selected_for_deploy is False
     assert again.enabled is False
 
-    via_enabled = mgr.set_file_enabled("9101", entry.id, True)
+    via_enabled = mgr.set_file_enabled(pk, entry.id, True)
     assert via_enabled is not None
     assert via_enabled.selected_for_deploy is True
     assert via_enabled.enabled is True
@@ -287,7 +288,8 @@ def test_deploy_prefers_selected_for_deploy(db: DatabaseManager, tmp_path: Path)
     source.mkdir()
     (source / "main.pak").write_bytes(b"M")
     (source / "hat.pak").write_bytes(b"H")
-    create_steam_test_mod(db, external_id="9201", title="Multi")
+    created = create_steam_test_mod(db, external_id="9201", title="Multi")
+    pk = str(created.mod_id)
 
     # selected_for_deploy False even if we somehow had enabled True historically —
     # from_dict syncs both; construct via JSON blob that only has selected.
@@ -311,8 +313,8 @@ def test_deploy_prefers_selected_for_deploy(db: DatabaseManager, tmp_path: Path)
             },
         ]
     }
-    db.set_mod_files("9201", ModFilesBundle.from_json(json.dumps(blob)))
-    allowed = resolve_deploy_sources("9201", source, db=db)
+    db.set_mod_files(pk, ModFilesBundle.from_json(json.dumps(blob)))
+    allowed = resolve_deploy_sources(pk, source, db=db)
     assert allowed is not None
     assert "main.pak" in allowed
     assert "hat.pak" not in allowed
@@ -323,11 +325,12 @@ def test_deploy_falls_back_to_enabled(db: DatabaseManager, tmp_path: Path) -> No
     source.mkdir()
     (source / "main.pak").write_bytes(b"M")
     (source / "hat.pak").write_bytes(b"H")
-    create_steam_test_mod(db, external_id="9202", title="Legacy")
+    created = create_steam_test_mod(db, external_id="9202", title="Legacy")
+    pk = str(created.mod_id)
     # Old JSON: only enabled (no selected_for_deploy key in stored dict before load).
     # After from_dict both are set; resolve still treats selection correctly.
     db.set_mod_files(
-        "9202",
+        pk,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -350,12 +353,12 @@ def test_deploy_falls_back_to_enabled(db: DatabaseManager, tmp_path: Path) -> No
         ),
     )
     # Simulate a partially-hydrated entry missing selected_for_deploy (None).
-    bundle = db.get_mod_files("9202")
+    bundle = db.get_mod_files(pk)
     bundle.files[0].selected_for_deploy = None  # type: ignore[assignment]
     bundle.files[0].enabled = True
     bundle.files[1].selected_for_deploy = None  # type: ignore[assignment]
     bundle.files[1].enabled = False
-    db.set_mod_files("9202", bundle)
+    db.set_mod_files(pk, bundle)
     # set_mod_files → to_dict → from_dict will re-sync; test helper path directly:
     from services.deploy import resolve_deploy_sources as resolve
 
@@ -373,24 +376,26 @@ def test_deploy_falls_back_to_enabled(db: DatabaseManager, tmp_path: Path) -> No
     assert is_entry_selected_for_deploy(orphan_on) is True
     assert is_entry_selected_for_deploy(orphan_off) is False
 
-    allowed = resolve("9202", source, db=db)
+    allowed = resolve(pk, source, db=db)
     assert allowed is not None
     assert "main.pak" in allowed
     assert "hat.pak" not in allowed
 
 
 def test_deploy_empty_bundle_still_none(db: DatabaseManager, tmp_path: Path) -> None:
-    create_steam_test_mod(db, external_id="9203", title="Steam")
+    created = create_steam_test_mod(db, external_id="9203", title="Steam")
+    pk = str(created.mod_id)
     source = tmp_path / "mod"
     source.mkdir()
-    assert resolve_deploy_sources("9203", source, db=db) is None
+    assert resolve_deploy_sources(pk, source, db=db) is None
 
 
 def test_reset_default_and_clear_optional(db: DatabaseManager) -> None:
-    create_steam_test_mod(db, external_id="9301", title="NexusPack")
+    created = create_steam_test_mod(db, external_id="9301", title="NexusPack")
+    pk = str(created.mod_id)
     mgr = ModFileManager(db)
     mgr.replace_all(
-        "9301",
+        pk,
         [
             ModFileEntry(
                 id="m",
@@ -414,14 +419,14 @@ def test_reset_default_and_clear_optional(db: DatabaseManager) -> None:
             ),
         ],
     )
-    mgr.reset_default_selection("9301")
-    files = {f.id: f for f in mgr.get_files("9301")}
+    mgr.reset_default_selection(pk)
+    files = {f.id: f for f in mgr.get_files(pk)}
     assert files["m"].selected_for_deploy is True
     assert files["o"].selected_for_deploy is False
 
-    mgr.set_all_selection("9301", True)
-    assert all(f.selected_for_deploy for f in mgr.get_files("9301"))
-    mgr.clear_optional_selection("9301")
-    files = {f.id: f for f in mgr.get_files("9301")}
+    mgr.set_all_selection(pk, True)
+    assert all(f.selected_for_deploy for f in mgr.get_files(pk))
+    mgr.clear_optional_selection(pk)
+    files = {f.id: f for f in mgr.get_files(pk)}
     assert files["m"].selected_for_deploy is True
     assert files["o"].selected_for_deploy is False

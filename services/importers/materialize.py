@@ -18,7 +18,7 @@ from services.importers.importer_base import (
 
 
 def find_managed_mod_path(library_root: str | Path, mod_id: str | int) -> Path | None:
-    """Locate managed folder by Internal ID (``.info.internal_id`` proof only)."""
+    """Locate managed folder by Internal ID (``.info/internal_id`` proof only)."""
     mid = str(mod_id).strip()
     root = Path(library_root)
     if not mid or not root.is_dir():

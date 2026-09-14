@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 pytest.importorskip("PySide6")
 
@@ -18,10 +17,8 @@ from core.db_manager import (
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_apply import ApplyResult
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.deploy_thread import DeployWorker
 from ui.mod_detail_panel import ModDetailPanel
 
@@ -37,7 +34,7 @@ def qapp() -> QApplication:
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "fail_lifecycle.db")
+    manager = DatabaseManager.instance(tmp_path / "fail_lifecycle.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
@@ -50,39 +47,16 @@ def _setup_game(db: DatabaseManager, tmp_path: Path) -> Path:
     return mods
 
 
-def _prove_folder(db: DatabaseManager, mid: str, folder: Path) -> None:
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": str(mid),
-                "published_file_id": str(mid),
-                "title": folder.name,
-                "app_id": 100,
-                "game_name": "SomeGame",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=str(mid),
-        last_known_path=str(folder),
-        folder_present=True,
-    )
-
-
-def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> Path:
+def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> tuple[Path, str]:
     folder = library / "SomeGame" / f"Mod{mid}"
     folder.mkdir(parents=True)
     (folder / "file1.txt").write_text("NEW", encoding="utf-8")
-    _prove_folder(db, mid, folder)
-    create_steam_test_mod(db, external_id=mid, title=folder.name, app_id=100)
-    bind_managed_path(db, mid, folder, title=folder.name)
-
-    return folder
+    created = create_steam_test_mod(db, external_id=mid, title=folder.name, app_id=100)
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db, folder, handle=pk, title=folder.name, app_id=100, game_name="SomeGame"
+    )
+    return folder, pk
 
 
 def test_case1_apply_fail_rollback_ok_persists_failed(
@@ -91,7 +65,7 @@ def test_case1_apply_fail_rollback_ok_persists_failed(
     """Apply failure + successful rollback → DB status=FAILED with error."""
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, db, mid="96001")
+    mod_dir, pk = _make_mod(library, db, mid="96001")
 
     prior = mods / mod_dir.name / "file1.txt"
     prior.parent.mkdir(parents=True)
@@ -106,12 +80,12 @@ def test_case1_apply_fail_rollback_ok_persists_failed(
         )
 
     with patch("services.deploy_apply.apply_file_plan", side_effect=_fail_apply):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("96001")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     assert "simulated apply failure" in str(out.get("error") or "")
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"
-    info = db.get_mod_deploy_info("96001")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
     assert "simulated apply failure" in str(info.deploy_error or "")
@@ -123,9 +97,9 @@ def test_case2_projection_refresh_keeps_failed_ui(
     """After FAILED + deploy_error, _fill_deploy_status_from_db still shows failure."""
     library = tmp_path / "library"
     _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, db, mid="96002")
+    mod_dir, pk = _make_mod(library, db, mid="96002")
     db.update_mod_deploy_status(
-        "96002",
+        pk,
         deploy_status=DEPLOY_STATUS_FAILED,
         deploy_path="",
         deploy_time="",
@@ -135,7 +109,7 @@ def test_case2_projection_refresh_keeps_failed_ui(
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir, mod_id="96002", game_id=100)
+    panel.show_mod(mod_dir, mod_id=pk, game_id=100)
     panel._fill_deploy_status_from_db()
 
     assert "部署失败" in panel.view_deploy.text()
@@ -148,9 +122,9 @@ def test_case3_clean_not_deployed_shows_undepoyed(
     """not_deployed with empty deploy_error → 未部署 (no residual failure UI)."""
     library = tmp_path / "library"
     _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, db, mid="96003")
+    mod_dir, pk = _make_mod(library, db, mid="96003")
     db.update_mod_deploy_status(
-        "96003",
+        pk,
         deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
         deploy_path="",
         deploy_time="",
@@ -160,7 +134,7 @@ def test_case3_clean_not_deployed_shows_undepoyed(
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir, mod_id="96003", game_id=100)
+    panel.show_mod(mod_dir, mod_id=pk, game_id=100)
     panel._fill_deploy_status_from_db()
 
     assert "未部署" in panel.view_deploy.text()
@@ -173,9 +147,9 @@ def test_case3b_legacy_not_deployed_with_error_shows_failed(
     """Legacy row: not_deployed + residual deploy_error still surfaces as failure."""
     library = tmp_path / "library"
     _setup_game(db, tmp_path)
-    mod_dir = _make_mod(library, db, mid="96004")
+    mod_dir, pk = _make_mod(library, db, mid="96004")
     db.update_mod_deploy_status(
-        "96004",
+        pk,
         deploy_status=DEPLOY_STATUS_NOT_DEPLOYED,
         deploy_path="",
         deploy_time="",
@@ -185,7 +159,7 @@ def test_case3b_legacy_not_deployed_with_error_shows_failed(
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir, mod_id="96004", game_id=100)
+    panel.show_mod(mod_dir, mod_id=pk, game_id=100)
     panel._fill_deploy_status_from_db()
 
     assert "部署失败" in panel.view_deploy.text()
@@ -198,14 +172,14 @@ def test_case4_early_gate_persists_failed(
     """Early gate failure (disabled mod) writes FAILED + deploy_error."""
     library = tmp_path / "library"
     _setup_game(db, tmp_path)
-    _make_mod(library, db, mid="96005")
-    db.disable_mod("96005")
-    assert not db.is_mod_enabled("96005")
+    _mod_dir, pk = _make_mod(library, db, mid="96005")
+    db.disable_mod(pk)
+    assert not db.is_mod_enabled(pk)
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("96005")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is False
     assert "disabled" in str(out.get("error") or "").lower()
-    info = db.get_mod_deploy_info("96005")
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_FAILED
     assert str(info.deploy_error or "").strip()

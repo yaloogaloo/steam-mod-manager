@@ -169,7 +169,10 @@ class ResourceRewriter:
         target = Path(output_dir)
         index_path = target / DEFAULT_INDEX_NAME
         manifest_path = target / DEFAULT_MANIFEST_NAME
-        assets_dir = target / DEFAULT_ASSETS_DIR
+        from services.offline.staging import (
+            cleanup_capture_staging,
+            reset_capture_assets_dir,
+        )
 
         if isinstance(capture, PageCapture):
             html_text = capture.html
@@ -208,9 +211,7 @@ class ResourceRewriter:
 
         try:
             target.mkdir(parents=True, exist_ok=True)
-            if assets_dir.exists():
-                shutil.rmtree(assets_dir, ignore_errors=True)
-            assets_dir.mkdir(parents=True, exist_ok=True)
+            assets_dir = reset_capture_assets_dir(target)
 
             seen: dict[str, str] = {}  # absolute url -> ./assets/name
             entries: list[ManifestEntry] = []
@@ -287,6 +288,7 @@ class ResourceRewriter:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Resource rewrite failed: %s", exc)
+            cleanup_capture_staging(target)
             try:
                 self._write_manifest(manifest_path, entries if "entries" in locals() else [])
             except Exception:  # noqa: BLE001

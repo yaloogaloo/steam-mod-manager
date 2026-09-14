@@ -346,7 +346,8 @@ class ModCardWidget(QFrame):
         self.set_selected(False)
         from services.cover_loader import CoverLoaderManager
 
-        CoverLoaderManager.instance().image_ready.connect(self._on_cover_image_ready)
+        # Do NOT connect to CoverLoaderManager.image_ready — that broadcasts to
+        # every cached card and freezes the UI. Delivery is via request(on_ready=).
         CoverLoaderManager.instance().path_release_requested.connect(
             self._on_cover_path_release_requested
         )
@@ -372,11 +373,7 @@ class ModCardWidget(QFrame):
     def _on_cover_path_release_requested_body(self, path_key: str) -> None:
         """Cancel cover token and clear pixmap when this card's folder renames."""
         try:
-            current = str(
-                self.managed_path.expanduser().resolve()
-                if self.managed_path.exists()
-                else self.managed_path
-            )
+            current = str(self.managed_path.expanduser().resolve())
         except OSError:
             current = str(self.managed_path)
         if current.lower().replace("/", "\\") != str(path_key or "").lower().replace(
@@ -404,7 +401,9 @@ class ModCardWidget(QFrame):
                 mgr.cancel(tok)
             self._cover_token = ""
             try:
-                mgr.image_ready.disconnect(self._on_cover_image_ready)
+                mgr.path_release_requested.disconnect(
+                    self._on_cover_path_release_requested
+                )
             except (RuntimeError, TypeError):
                 pass
         except Exception:  # noqa: BLE001
@@ -569,6 +568,8 @@ class ModCardWidget(QFrame):
         data = getattr(self, "_card_data", None)
         if data is not None:
             folder_absent = bool(data.folder_absent)
+        cap_allowed = not folder_absent
+        mid = self._mod_id()
         act_deploy.triggered.connect(self._emit_deploy)
         act_folder.triggered.connect(
             lambda: self.open_folder_requested.emit(self._mod_id())
@@ -584,13 +585,12 @@ class ModCardWidget(QFrame):
         menu.addAction(act_deploy)
         menu.addAction(act_folder)
         menu.addAction(act_steam)
+        act_deploy.setEnabled(cap_allowed)
+        if not cap_allowed:
+            act_deploy.setToolTip("当前部署源不可用")
         if folder_absent:
-            act_deploy.setEnabled(False)
-            act_deploy.setToolTip("内容缺失，无法操作")
             act_folder.setEnabled(False)
-            act_folder.setToolTip("内容缺失，无法操作")
-            act_edit.setEnabled(False)
-            act_edit.setToolTip("内容缺失，无法操作")
+            act_folder.setToolTip("MISS：本地目录不存在")
         menu.addSeparator()
         menu.addAction(act_fav)
         menu.addSeparator()
@@ -749,13 +749,9 @@ class ModCardWidget(QFrame):
         steam_name = ""
         db_display = ""
         data = getattr(self, "_card_data", None)
-        folder_ok = True
-        if data is not None:
-            folder_ok = not bool(data.folder_absent)
         if info is not None:
-            if folder_ok:
-                steam_name = (info.steam_name or "").strip()
-                db_display = (info.user_display_name or "").strip()
+            steam_name = (info.steam_name or "").strip()
+            db_display = (info.user_display_name or "").strip()
         if not steam_name and data is not None:
             steam_name = (data.steam_name or data.title or "").strip()
         meta_display = (
@@ -765,8 +761,8 @@ class ModCardWidget(QFrame):
         display = resolve_mod_library_title(
             metadata_display_name=meta_display if data is None else (db_display or meta_display),
             metadata_title=meta_title if data is None else (steam_name or meta_title),
-            db_display_name=db_display if folder_ok else "",
-            db_steam_name=steam_name if folder_ok else "",
+            db_display_name=db_display,
+            db_steam_name=steam_name,
             folder_name=self.managed_path.name,
         )
         if data is not None and str(data.title or "").strip():
@@ -1069,7 +1065,7 @@ class ModCardWidget(QFrame):
         self.category_badge.raise_()
 
     def _render_missing_content_badge(self) -> None:
-        """User Mod status: content_missing only — never identity/backup/library."""
+        """MISS is presence; content_missing is payload. Never merge them."""
         from services.library_status import (
             CONTENT_CONTENT_MISSING,
             content_status_badge_label,
@@ -1082,6 +1078,19 @@ class ModCardWidget(QFrame):
             self.missing_badge.hide()
             self.missing_badge.clear()
             self.missing_badge.setToolTip("")
+            return
+        if bool(getattr(data, "folder_absent", False)):
+            self.missing_badge.setText("MISS")
+            self.missing_badge.setToolTip("本地 Mod 目录缺失，Backup 为管理侧来源")
+            self.missing_badge.setStyleSheet(
+                "QLabel#modMissingContentBadge {"
+                f"background-color: {ACCENT_WARNING_BG}; color: {ACCENT_WARNING};"
+                f"border: 1px solid {ACCENT_WARNING_BORDER}; border-radius: 3px;"
+                "font-size: 10px; font-weight: 600; padding: 1px 4px;"
+                "}"
+            )
+            self.missing_badge.adjustSize()
+            self.missing_badge.show()
             return
         content_status = normalize_content_axis(
             str(getattr(data, "content_status", "") or "")
@@ -1303,15 +1312,18 @@ class ModCardWidget(QFrame):
 
     def _cover_token_for_current(self) -> str:
         iid = self._internal_entity_id()
+        data = getattr(self, "_card_data", None)
+        cover_ref = (
+            str(getattr(data, "cover", "") or "").strip() if data is not None else ""
+        )
+        if data is not None and bool(getattr(data, "folder_absent", False)):
+            # MISS: token on Backup cover ref — never resolve a deleted folder.
+            return f"{id(self)}:{iid}:miss:{cover_ref}"
         try:
-            path = (
-                str(self.managed_path.resolve())
-                if self.managed_path.exists()
-                else str(self.managed_path)
-            )
+            path = str(self.managed_path.resolve())
         except OSError:
             path = str(self.managed_path)
-        return f"{id(self)}:{iid}:{path}"
+        return f"{id(self)}:{iid}:{path}:{cover_ref}"
 
     def _cover_file_hint(self) -> Path | None:
         data = getattr(self, "_card_data", None)
@@ -1324,6 +1336,9 @@ class ModCardWidget(QFrame):
                 return direct
         except OSError:
             pass
+        data = getattr(self, "_card_data", None)
+        if data is not None and bool(getattr(data, "folder_absent", False)):
+            return None
         rel = self.managed_path / ref
         try:
             if rel.is_file():
@@ -1388,6 +1403,7 @@ class ModCardWidget(QFrame):
             cover_ref=cover_ref,
             width=COVER_WIDTH,
             height=COVER_HEIGHT,
+            on_ready=self._on_cover_image_ready,
         )
 
     def _on_cover_image_ready(self, token: str, image: object) -> None:

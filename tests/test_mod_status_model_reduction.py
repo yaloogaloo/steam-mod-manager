@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.content_status_eval import evaluate_content_status
 from services.library_status import (
     CONTENT_CONTENT_MISSING,
@@ -24,7 +23,7 @@ from services.status_authority import (
 )
 from services.status_recovery import run_status_model_cleanup_v2
 from services.user_annotation import set_conflict_annotation
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from ui.library_query import (
     FILTER_CONFLICT,
     FILTER_CONTENT_MISSING,
@@ -47,7 +46,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _index(**kwargs) -> ModFilterIndex:
     base = dict(
-        internal_id="1",
+        mod_id="1",
         display_name="X",
         steam_name="",
         notes="",
@@ -96,11 +95,12 @@ def test_content_status_only_healthy_or_content_missing() -> None:
 
 def test_writer_rejects_deleted_tokens(db: DatabaseManager) -> None:
     db.update_game_deploy_config(1, name="G")
-    create_steam_test_mod(db, external_id="501", title="T", app_id=1)
+    created = create_steam_test_mod(db, external_id="501", title="T", app_id=1)
+    pk = str(created.mod_id)
     with pytest.raises(ValueError, match="illegal content_status"):
-        db.update_mod_content_status("501", content_status="folder_missing")
+        db.update_mod_content_status(pk, content_status="folder_missing")
     with pytest.raises(ValueError, match="illegal content_status"):
-        db.update_mod_content_status("501", content_status="backup_invalid")
+        db.update_mod_content_status(pk, content_status="backup_invalid")
 
 
 def test_identity_status_does_not_create_mod_conflict() -> None:
@@ -145,27 +145,29 @@ def test_cleanup_v2_reevaluates_without_mapping(
     folder.mkdir(parents=True)
     (folder / "payload.bin").write_bytes(b"x")
     db.update_game_deploy_config(1, name="Game")
-    create_steam_test_mod(db, external_id="601", title="Alive", app_id=1)
-    db.update_mod_identity_fields(
-        "601", folder_present=True, last_known_path=str(folder)
+    created_alive = create_steam_test_mod(db, external_id="601", title="Alive", app_id=1)
+    pk_alive = str(created_alive.mod_id)
+    prove_managed_folder(
+        db, folder, handle=pk_alive, title="Alive", app_id=1, game_name="Game"
     )
-    create_steam_test_mod(db, external_id="602", title="Gone", app_id=1)
+    created_gone = create_steam_test_mod(db, external_id="602", title="Gone", app_id=1)
+    pk_gone = str(created_gone.mod_id)
     db.update_mod_identity_fields(
-        "602",
+        pk_gone,
         folder_present=False,
         last_known_path=str(library / "Game" / "Gone"),
     )
-    db.update_mod_deploy_status("601", deploy_status="deployed")
-    set_conflict_annotation("601", db=db)
+    db.update_mod_deploy_status(pk_alive, deploy_status="deployed")
+    set_conflict_annotation(pk_alive, db=db)
 
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET content_status = ?, deploy_status = ? WHERE mod_id = ?",
-            ("folder_missing", "deployed", 601),
+            ("folder_missing", "deployed", int(pk_alive)),
         )
         db._conn.execute(
             "UPDATE mods SET content_status = ? WHERE mod_id = ?",
-            ("backup_invalid", 602),
+            ("backup_invalid", int(pk_gone)),
         )
         db._conn.execute(
             "DELETE FROM schema_flags WHERE flag = ?",
@@ -173,26 +175,26 @@ def test_cleanup_v2_reevaluates_without_mapping(
         )
         db._conn.commit()
 
-    deploy_before = db.get_mod_deploy_info("601")
+    deploy_before = db.get_mod_deploy_info(pk_alive)
     conflict_before = str(
-        (db.get_mod_backup_row("601") or {}).get("conflict_status") or ""
+        (db.get_mod_backup_row(pk_alive) or {}).get("conflict_status") or ""
     )
 
     result = run_status_model_cleanup_v2(db, library, force=True)
     assert result.content_reevaluated >= 1
 
-    row1 = db.get_mod_backup_row("601") or {}
-    row2 = db.get_mod_backup_row("602") or {}
+    row1 = db.get_mod_backup_row(pk_alive) or {}
+    row2 = db.get_mod_backup_row(pk_gone) or {}
     assert str(row1.get("content_status") or "") in SUPPORTED_CONTENT_STATUSES
     assert str(row2.get("content_status") or "") == CONTENT_CONTENT_MISSING
     assert str(row1.get("content_status") or "") != "folder_missing"
     assert str(row2.get("content_status") or "") != "backup_invalid"
 
-    deploy_after = db.get_mod_deploy_info("601")
+    deploy_after = db.get_mod_deploy_info(pk_alive)
     assert deploy_before is not None and deploy_after is not None
     assert deploy_before.deploy_status == deploy_after.deploy_status == "deployed"
     assert (
-        str((db.get_mod_backup_row("601") or {}).get("conflict_status") or "")
+        str((db.get_mod_backup_row(pk_alive) or {}).get("conflict_status") or "")
         == conflict_before
     )
 

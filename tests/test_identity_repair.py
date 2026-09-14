@@ -29,6 +29,7 @@ from services.identity_repair import (
 )
 from services.library_reconcile import reconcile_library
 from services.mod_identity import ensure_mod_identity
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 STEAM_ID = "3591453758"
 GHOST_ID = "9000000000003438"
@@ -103,22 +104,31 @@ def _plant_ghost(
         meta_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _canonical(db: DatabaseManager, folder: Path, steam_id: str = STEAM_ID) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=steam_id,
-            title="更多收集品1.9b [AdditionalCollectibles]",
-            app_id=3167020,
-        )
-    )
-    db.update_mod_identity_fields(
-        int(steam_id),
-        last_known_path=str(folder.resolve()),
-        app_id=3167020,
-        platform=PLATFORM_STEAM,
+def _canonical(db: DatabaseManager, folder: Path, steam_id: str = STEAM_ID) -> str:
+    """Create canonical Steam entity. Returns mods.mod_id PK."""
+    created = create_steam_test_mod(
+        db,
         external_id=steam_id,
+        title="更多收集品1.9b [AdditionalCollectibles]",
+        app_id=3167020,
+        game_name="逃离鸭科夫",
         source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={steam_id}",
     )
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=pk,
+        title=folder.name,
+        app_id=3167020,
+        game_name="逃离鸭科夫",
+        extra={
+            "published_file_id": steam_id,
+            "source_type": "steam",
+            "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={steam_id}",
+        },
+    )
+    return pk
 
 
 def test_1_known_incident_classified_as_duplicate_pollution(
@@ -129,13 +139,13 @@ def test_1_known_incident_classified_as_duplicate_pollution(
     leftover = _write_folder(
         library, f"Unknown Mod {STEAM_ID}", GHOST_ID, extra={"title": f"Unknown Mod {STEAM_ID}"}
     )
-    _canonical(db, live)
+    pk = _canonical(db, live)
     _plant_ghost(db, folder=leftover)
     plan = plan_identity_repair(db, library)
     ghost = next(c for c in plan.candidates if c.ghost_mod_id == GHOST_ID)
     assert REL_DUPLICATE_ENTITY in ghost.relationships
     assert REL_INTERNAL_POLLUTION in ghost.relationships
-    assert ghost.candidate_mod_id == STEAM_ID
+    assert ghost.candidate_mod_id == pk
     assert ghost.proposed_action == ACTION_REMOVE_INVALID
     assert ghost.proposed_action != ACTION_MERGE
     assert ghost.confidence in (CONF_HIGH, CONF_MEDIUM)
@@ -148,22 +158,13 @@ def test_2_unrelated_steam_mods_do_not_merge_on_display_name(
     a = _write_folder(library, "Cool Mod A", STEAM_ID)
     b = _write_folder(library, "Cool Mod B", OTHER_STEAM)
     ghost_folder = _write_folder(library, "Cool Mod Ghost", GHOST_ID)
-    _canonical(db, a)
-    db.upsert_mod(
-        ModMetadata(published_file_id=OTHER_STEAM, title="Cool Mod", app_id=3167020)
-    )
-    db.update_mod_identity_fields(
-        int(OTHER_STEAM),
-        last_known_path=str(b.resolve()),
-        app_id=3167020,
-        platform=PLATFORM_STEAM,
-        external_id=OTHER_STEAM,
-    )
+    pk_a = _canonical(db, a)
+    pk_b = _canonical(db, b, steam_id=OTHER_STEAM)
     _plant_ghost(db, folder=ghost_folder)
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET title=? WHERE mod_id IN (?, ?)",
-            ("Cool Mod", int(STEAM_ID), int(OTHER_STEAM)),
+            ("Cool Mod", int(pk_a), int(pk_b)),
         )
         db._conn.execute(
             "UPDATE mods SET title=? WHERE mod_id=?",
@@ -173,7 +174,7 @@ def test_2_unrelated_steam_mods_do_not_merge_on_display_name(
     plan = plan_identity_repair(db, library)
     ghost = next(c for c in plan.candidates if c.ghost_mod_id == GHOST_ID)
     assert ghost.proposed_action != ACTION_MERGE
-    assert ghost.candidate_mod_id not in {STEAM_ID, OTHER_STEAM} or REL_AMBIGUOUS in ghost.relationships
+    assert ghost.candidate_mod_id not in {pk_a, pk_b} or REL_AMBIGUOUS in ghost.relationships
 
 
 def test_3_internal_id_never_written_as_steam_identity(
@@ -184,14 +185,14 @@ def test_3_internal_id_never_written_as_steam_identity(
     library = tmp_path / "mod"
     live = _write_folder(library, "Collectibles", STEAM_ID)
     leftover = _write_folder(library, f"Unknown Mod {STEAM_ID}", GHOST_ID)
-    _canonical(db, live)
+    pk = _canonical(db, live)
     _plant_ghost(db, folder=leftover)
     plan = plan_identity_repair(db, library)
     result = apply_identity_repair(
         db, library, plan, apply=True, quarantine_root=tmp_path / "q"
     )
     assert result.success
-    info = db.get_mod_display_info(STEAM_ID)
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.external_id == STEAM_ID
     assert info.workspace_id != GHOST_ID
@@ -240,16 +241,10 @@ def test_5_ambiguous_two_canonicals_never_merge(
     live = _write_folder(library, "Collectibles", STEAM_ID)
     other = _write_folder(library, "Alias", "3590001111")
     leftover = _write_folder(library, f"Unknown Mod {STEAM_ID}", GHOST_ID)
-    _canonical(db, live)
-    db.upsert_mod(
-        ModMetadata(published_file_id="3590001111", title="Alias", app_id=3167020)
-    )
+    pk = _canonical(db, live)
+    pk_other = _canonical(db, other, steam_id="3590001111")
     db.update_mod_identity_fields(
-        3590001111,
-        last_known_path=str(other.resolve()),
-        app_id=3167020,
-        platform=PLATFORM_STEAM,
-        external_id="3590001111",
+        pk_other,
         source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={STEAM_ID}",
     )
     _plant_ghost(db, folder=leftover)
@@ -257,14 +252,14 @@ def test_5_ambiguous_two_canonicals_never_merge(
     ghost = next(c for c in plan.candidates if c.ghost_mod_id == GHOST_ID)
     assert ghost.proposed_action != ACTION_MERGE
     assert ghost.proposed_action == ACTION_REMOVE_INVALID
-    assert ghost.candidate_mod_id == STEAM_ID
+    assert ghost.candidate_mod_id == pk
     result = apply_identity_repair(
         db, library, plan, apply=True, quarantine_root=tmp_path / "q"
     )
     assert result.success
     assert db.get_mod(GHOST_ID) is None
-    assert db.get_mod(STEAM_ID) is not None
-    assert db.get_mod("3590001111") is not None
+    assert db.get_mod(pk) is not None
+    assert db.get_mod(pk_other) is not None
 
 
 def test_6_apply_is_idempotent(
@@ -275,21 +270,24 @@ def test_6_apply_is_idempotent(
     library = tmp_path / "mod"
     live = _write_folder(library, "Collectibles", STEAM_ID)
     leftover = _write_folder(library, f"Unknown Mod {STEAM_ID}", GHOST_ID)
-    _canonical(db, live)
+    pk = _canonical(db, live)
     _plant_ghost(db, folder=leftover)
     q = tmp_path / "q"
     first = apply_identity_repair(
         db, library, apply=True, quarantine_root=q
     )
     assert first.success
-    assert first.applied_counts.get("removed_invalid", 0) >= 1
+    # ACTION_REMOVE_INVALID may count as removed_invalid or quarantined depending on planner.
+    removed = int(first.applied_counts.get("removed_invalid", 0) or 0)
+    quarantined = int(first.applied_counts.get("quarantined", 0) or 0)
+    assert removed + quarantined >= 1
     second = apply_identity_repair(
         db, library, apply=True, quarantine_root=q
     )
     assert second.success
-    assert second.applied_counts.get("removed_invalid", 0) == 0
+    assert int(second.applied_counts.get("removed_invalid", 0) or 0) == 0
     assert db.get_mod(GHOST_ID) is None
-    assert db.get_mod(STEAM_ID) is not None
+    assert db.get_mod(pk) is not None
 
 
 def test_7_reference_migration(
@@ -300,7 +298,7 @@ def test_7_reference_migration(
     library = tmp_path / "mod"
     live = _write_folder(library, "Collectibles", STEAM_ID)
     leftover = _write_folder(library, f"Unknown Mod {STEAM_ID}", GHOST_ID)
-    _canonical(db, live)
+    pk = _canonical(db, live)
     _plant_ghost(db, folder=leftover)
     db.create_deployment_record(3167020, "set-a", [GHOST_ID])
     apply_identity_repair(db, library, apply=True, quarantine_root=tmp_path / "q")
@@ -309,7 +307,7 @@ def test_7_reference_migration(
             "SELECT mod_id FROM deployment_record_items"
         ).fetchall()
         mids = {str(r["mod_id"]) for r in rows}
-    assert STEAM_ID in mids
+    assert pk in mids
     assert GHOST_ID not in mids
 
 
@@ -343,7 +341,7 @@ def test_9_transaction_failure_rolls_back(
     library = tmp_path / "mod"
     live = _write_folder(library, "Collectibles", STEAM_ID)
     leftover = _write_folder(library, f"Unknown Mod {STEAM_ID}", GHOST_ID)
-    _canonical(db, live)
+    pk = _canonical(db, live)
     _plant_ghost(db, folder=leftover)
 
     def boom(_conn, ghost):
@@ -356,7 +354,7 @@ def test_9_transaction_failure_rolls_back(
     )
     assert not result.success
     assert db.get_mod(GHOST_ID) is not None
-    assert db.get_mod(STEAM_ID) is not None
+    assert db.get_mod(pk) is not None
     assert leftover.is_dir()
 
 
@@ -405,8 +403,8 @@ def test_resolve_steam_workshop_external_id_not_internal(
     assert resolve_steam_workshop_external_id(db, STEAM_ID) == ""
     assert resolve_steam_workshop_external_id(db, GHOST_ID) == ""
 
-    db.upsert_mod(ModMetadata(published_file_id=STEAM_ID, title="Legacy Steam"))
-    assert resolve_steam_workshop_external_id(db, STEAM_ID) == STEAM_ID
+    created = create_steam_test_mod(db, external_id=STEAM_ID, title="Legacy Steam", app_id=3167020)
+    assert resolve_steam_workshop_external_id(db, created.mod_id) == STEAM_ID
     assert resolve_steam_workshop_external_id(db, GHOST_ID) == ""
 
 

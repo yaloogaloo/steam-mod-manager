@@ -735,7 +735,7 @@ class ModSyncService:
             managed = existing_index.get(wid)
             if managed is None or not Path(managed).is_dir():
                 continue
-            # Visibility = sidecar internal_id that exists in DB.
+            # Visibility = sidecar entity_key that exists in DB as mods.internal_id.
             # resolve_existing_mod_id is internal_id-only; do not pass
             # workspace / folder name as if they were entity keys.
             payload = dict(read_info_metadata_dict(managed) or {})

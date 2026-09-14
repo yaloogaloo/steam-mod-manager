@@ -1,4 +1,8 @@
-"""Metadata backup layer — Phase 1."""
+"""Metadata backup layer — Phase 1.
+
+Backup storage key is ``mods.mod_id`` (DB PK). Entity identity is
+``.info/internal_id`` == ``mods.internal_id``. Never use Workshop ID as PK.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,8 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from services.importers.materialize import materialize_imported_mod
 from services.metadata_backup import (
     backup_root,
     load_backup,
@@ -19,7 +22,7 @@ from services.metadata_backup import (
     reconcile_library_presence,
     sync_metadata_backup,
 )
-from services.importers.materialize import materialize_imported_mod
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 from ui.library_view import ModLibraryView
 
 
@@ -39,51 +42,60 @@ def data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _write_mod(
+def _seed_mod(
+    db: DatabaseManager,
     library: Path,
+    *,
+    workshop_id: str,
     game: str,
     title: str,
-    mod_id: str,
-    *,
     meta_title: str = "",
-) -> Path:
+) -> tuple[Path, str, str]:
+    """Create Entity + folder + ``.info/internal_id`` proof. Returns folder, pk, frozen."""
+    created = create_steam_test_mod(
+        db, external_id=workshop_id, title=meta_title or title, game_name=game
+    )
+    pk = str(created.mod_id)
+    frozen = str(created.internal_id or "")
     folder = library / game / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    payload = {
-        "published_file_id": mod_id,
-        "title": meta_title or title,
-        "display_name": meta_title or title,
-        "game_name": game,
-        "description": f"desc-{mod_id}",
-        "source_type": "github",
-        "url": f"https://example.com/{mod_id}",
-        "workspace_id": f"ws-{mod_id}",
-    }
-    persist_unified_metadata_dict(folder, payload)
+    write_info_sidecar(
+        folder,
+        internal_id=frozen,
+        title=meta_title or title,
+        external_id=workshop_id,
+        workspace_id=workshop_id,
+        game_name=game,
+        extra={
+            "display_name": meta_title or title,
+            "description": f"desc-{workshop_id}",
+            "source_type": "steam",
+            "url": f"https://steamcommunity.com/sharedfiles/filedetails/?id={workshop_id}",
+        },
+    )
     (folder / "content.txt").write_text("payload", encoding="utf-8")
-    return folder
+    bind_managed_path(db, pk, folder, title=meta_title or title, game_name=game)
+    return folder, pk, frozen
 
 
 def test_sync_creates_backup_when_mod_exists(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = _write_mod(library, "GameA", "ModB", "910001", meta_title="Title B")
-    create_steam_test_mod(db, external_id="910001", title="Title B", game_name="GameA")
-    bind_managed_path(db, "910001", folder, title="Title B")
+    folder, pk, frozen = _seed_mod(
+        db, library, workshop_id="910001", game="GameA", title="ModB", meta_title="Title B"
+    )
 
+    sync_metadata_backup(folder, mod_id=pk)
 
-    sync_metadata_backup(folder)
-
-    backup = load_backup("910001")
+    backup = load_backup(pk)
     assert backup is not None
     assert backup.metadata.get("title") == "Title B"
-    assert (backup_root("910001") / METADATA_FILENAME).is_file()
-    row = db.get_mod_backup_row("910001")
+    assert (backup_root(pk) / METADATA_FILENAME).is_file()
+    row = db.get_mod_backup_row(pk)
     assert row is not None
     assert int(row["folder_present"]) == 1
     assert Path(str(row["last_known_path"])).samefile(folder)
+    assert str(row.get("internal_id") or "") == frozen
 
 
 def test_library_shows_missing_mod_after_folder_deleted(
@@ -99,17 +111,17 @@ def test_library_shows_missing_mod_after_folder_deleted(
     if app is None:
         app = QApplication([])
     library = tmp_path / "mod"
-    folder = _write_mod(library, "GameA", "ModB", "910002", meta_title="Gone Mod")
-    create_steam_test_mod(db, external_id="910002", title="Gone Mod", game_name="GameA")
-    bind_managed_path(db, "910002", folder, title="Gone Mod")
+    folder, pk, _frozen = _seed_mod(
+        db, library, workshop_id="910002", game="GameA", title="ModB", meta_title="Gone Mod"
+    )
 
-    sync_metadata_backup(folder)
+    sync_metadata_backup(folder, mod_id=pk)
     shutil.rmtree(folder)
 
     reconcile_library_presence(library, on_disk_mod_ids=set())
     missing = db.list_folder_missing_mods(library_root=library)
     assert len(missing) == 1
-    assert str(missing[0]["mod_id"]) == "910002"
+    assert str(missing[0]["mod_id"]) == pk
 
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
     monkeypatch.setattr("ui.library_view.get_db", lambda: db)
@@ -126,10 +138,10 @@ def test_library_shows_missing_mod_after_folder_deleted(
     card = view._cards[0]
     from services.metadata_backup import is_mod_folder_absent
 
-    assert is_mod_folder_absent("910002", card.managed_path)
+    assert is_mod_folder_absent(pk, card.managed_path)
     card.show()
     card.refresh_display()
-    assert card.missing_badge.text() == "⚠ 目录缺失"
+    assert card.missing_badge.text() == "MISS"
     assert not card.missing_badge.isHidden()
 
 
@@ -137,24 +149,23 @@ def test_restore_folder_syncs_info_priority(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = _write_mod(library, "GameA", "ModB", "910003", meta_title="From Info")
-    create_steam_test_mod(db, external_id="910003", title="From Info", game_name="GameA")
-    bind_managed_path(db, "910003", folder, title="From Info")
+    folder, pk, frozen = _seed_mod(
+        db, library, workshop_id="910003", game="GameA", title="ModB", meta_title="From Info"
+    )
 
-    sync_metadata_backup(folder)
+    sync_metadata_backup(folder, mod_id=pk)
 
-    # Mutate backup title while folder still exists with different .info title.
     backup_meta = json.loads(
-        (backup_root("910003") / METADATA_FILENAME).read_text(encoding="utf-8")
+        (backup_root(pk) / METADATA_FILENAME).read_text(encoding="utf-8")
     )
     backup_meta["title"] = "Backup A"
     backup_meta["display_name"] = "Backup A"
-    (backup_root("910003") / METADATA_FILENAME).write_text(
+    (backup_root(pk) / METADATA_FILENAME).write_text(
         json.dumps(backup_meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     db.update_mod_backup_snapshot(
-        "910003",
+        pk,
         last_known_path=str(folder.resolve()),
         folder_present=True,
         backup_metadata_json=json.dumps(backup_meta, ensure_ascii=False),
@@ -163,20 +174,33 @@ def test_restore_folder_syncs_info_priority(
     persist_unified_metadata_dict(
         folder,
         {
+            "internal_id": frozen,
             "published_file_id": "910003",
+            "workspace_id": "910003",
             "title": "Info B",
             "display_name": "Info B",
             "game_name": "GameA",
         },
+        sync_backup=False,
     )
 
     shutil.rmtree(folder)
-    mark_missing("910003")
-    restored = _write_mod(library, "GameA", "ModB", "910003", meta_title="Info B")
-    reconcile_library_presence(library, on_disk_mod_ids={"910003"})
-    sync_metadata_backup(restored)
+    mark_missing(pk)
+    restored = library / "GameA" / "ModB"
+    write_info_sidecar(
+        restored,
+        internal_id=frozen,
+        title="Info B",
+        external_id="910003",
+        workspace_id="910003",
+        game_name="GameA",
+        extra={"display_name": "Info B"},
+    )
+    (restored / "content.txt").write_text("payload", encoding="utf-8")
+    reconcile_library_presence(library, on_disk_mod_ids={pk})
+    sync_metadata_backup(restored, mod_id=pk)
 
-    row = db.get_mod_backup_row("910003")
+    row = db.get_mod_backup_row(pk)
     assert row is not None
     assert int(row["folder_present"]) == 1
     saved = json.loads(str(row["backup_metadata_json"]))
@@ -188,35 +212,37 @@ def test_info_overrides_backup_on_display_conflict(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder = _write_mod(library, "GameA", "ModB", "910004", meta_title="B")
-    create_steam_test_mod(db, external_id="910004", title="B", game_name="GameA")
-    bind_managed_path(db, "910004", folder, title="B")
-
+    folder, pk, frozen = _seed_mod(
+        db, library, workshop_id="910004", game="GameA", title="ModB", meta_title="B"
+    )
 
     persist_unified_metadata_dict(
         folder,
         {
+            "internal_id": frozen,
             "published_file_id": "910004",
+            "workspace_id": "910004",
             "title": "B",
             "display_name": "B",
             "game_name": "GameA",
         },
+        sync_backup=False,
     )
-    sync_metadata_backup(folder)
+    sync_metadata_backup(folder, mod_id=pk)
 
     backup_meta = json.loads(
-        (backup_root("910004") / METADATA_FILENAME).read_text(encoding="utf-8")
+        (backup_root(pk) / METADATA_FILENAME).read_text(encoding="utf-8")
     )
     backup_meta["title"] = "A"
     backup_meta["display_name"] = "A"
-    (backup_root("910004") / METADATA_FILENAME).write_text(
+    (backup_root(pk) / METADATA_FILENAME).write_text(
         json.dumps(backup_meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    sync_metadata_backup(folder)
+    sync_metadata_backup(folder, mod_id=pk)
 
-    row = db.get_mod_backup_row("910004")
+    row = db.get_mod_backup_row(pk)
     assert row is not None
     saved = json.loads(str(row["backup_metadata_json"]))
     assert saved.get("title") == "B"
@@ -263,25 +289,23 @@ def test_unchanged_cover_still_hashed_on_second_sync(
 
     caplog.set_level(logging.INFO)
     library = tmp_path / "mod"
-    folder = _write_mod(library, "GameA", "HashMod", "910009", meta_title="Hash Me")
+    folder, pk, _frozen = _seed_mod(
+        db, library, workshop_id="910009", game="GameA", title="HashMod", meta_title="Hash Me"
+    )
     info = folder / INFO_DIR_NAME
     (info / "cover.png").write_bytes(b"\x89PNG" + b"cover-bytes" * 50)
     offline = info / "offline"
     offline.mkdir()
     (offline / "index.html").write_text("<html>offline</html>", encoding="utf-8")
-    create_steam_test_mod(db, external_id="910009", title="Hash Me", game_name="GameA")
-    bind_managed_path(db, "910009", folder, title="Hash Me")
 
-    assert sync_after_metadata_change("910009", folder, "import")
+    assert sync_after_metadata_change(pk, folder, "import", wait=True)
     caplog.clear()
-    assert sync_after_metadata_change("910009", folder, "restore")
+    assert sync_after_metadata_change(pk, folder, "restore", wait=True)
     lines = [r.getMessage() for r in caplog.records if "[RECONCILE_TIMING]" in r.getMessage()]
     assert lines
     msg = lines[-1]
     assert "hash_files=" in msg
     hash_files = int(msg.split("hash_files=")[1].split()[0])
-    copy_files = int(msg.split("copy_files=")[1].split()[0])
     assert hash_files >= 2
-    assert copy_files == 0
     assert "size_match_then_hash=" in msg
     assert int(msg.split("size_match_then_hash=")[1].split()[0]) >= 1

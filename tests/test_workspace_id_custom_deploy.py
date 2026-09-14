@@ -18,7 +18,7 @@ from core.mod_platform import (
 from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.file_ops import INFO_DIR_NAME
-from tests.helpers.identity import create_steam_test_mod, bind_managed_path
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
@@ -54,10 +54,10 @@ def test_resolve_workspace_id_rules() -> None:
 
 def test_steam_upsert_sets_workspace_id(db: DatabaseManager) -> None:
     # Workspace ID is assigned on IdentityService create (not catalog upsert mint).
-    create_steam_test_mod(
+    created = create_steam_test_mod(
         db, external_id="4242", title="Steam Mod", app_id=100, game_name="SomeGame"
     )
-    info = db.get_mod_display_info(4242)
+    info = db.get_mod_display_info(created.mod_id)
     assert info is not None
     assert info.workspace_id == "4242"
 
@@ -200,20 +200,22 @@ def test_custom_deploy_path_copies_contents_not_shell(
     nested = managed / "sub"
     nested.mkdir()
     (nested / "inner.bin").write_text("bin", encoding="utf-8")
-    (managed / INFO_DIR_NAME).mkdir()
-    (managed / INFO_DIR_NAME / "mod.json").write_text(
-        '{"internal_id":"88001","published_file_id":"88001","title":"SpecialMod","app_id":100}',
-        encoding="utf-8",
-    )
 
-    create_steam_test_mod(
+    created = create_steam_test_mod(
         db, external_id="88001", title="SpecialMod", app_id=100, game_name="SomeGame"
     )
-    bind_managed_path(db, "88001", managed.resolve())
+    pk = prove_managed_folder(
+        db,
+        managed.resolve(),
+        handle=created.mod_id,
+        title="SpecialMod",
+        app_id=100,
+        game_name="SomeGame",
+    )
     custom = tmp_path / "game_root" / "custom_target"
     custom.mkdir(parents=True)
     db.update_mod_user_metadata(
-        88001,
+        pk,
         {
             "display_name": "SpecialMod",
             "custom_description": "",
@@ -226,7 +228,7 @@ def test_custom_deploy_path_copies_contents_not_shell(
     # Intentionally leave game mod_path empty — custom path must still deploy.
     db.update_game_deploy_config(100, name="SomeGame", mod_path="")
 
-    result = ModDeployer(library, db=db).deploy_mod(88001)
+    result = ModDeployer(library, db=db).deploy_mod(pk)
     assert result.get("success") is True, result
     assert (custom / "payload.txt").is_file()
     assert (custom / "sub" / "inner.bin").is_file()

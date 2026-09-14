@@ -8,11 +8,7 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from services.deploy import ModDeployer
-from tests.helpers.identity import (
-    bind_managed_path,
-    create_steam_test_mod,
-    write_info_sidecar,
-)
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 from services.deploy_rules import (
     DEPLOY_TYPE_DUCKOV,
     DEPLOY_TYPE_PALWORLD_PAK,
@@ -41,16 +37,14 @@ def _register(
     created = create_steam_test_mod(
         db, external_id=mid, title=title, app_id=app_id, game_name=game
     )
-    write_info_sidecar(
+    prove_managed_folder(
+        db,
         mod_dir,
-        internal_id=str(created.mod_id),
+        handle=created.mod_id,
         title=title,
-        external_id=mid,
-        workspace_id=str(created.workspace_id or mid),
         app_id=app_id,
         game_name=game,
     )
-    bind_managed_path(db, created.mod_id, mod_dir, title=title, game_name=game)
 
 
 def test_palworld_18mb_fixture_pipeline(tmp_path: Path, db: DatabaseManager) -> None:

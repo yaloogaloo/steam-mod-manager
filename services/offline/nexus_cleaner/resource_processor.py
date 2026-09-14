@@ -36,7 +36,9 @@ def process_resources(
     Returns ``(rewritten_html, asset_count)``.
     """
     target = Path(output_dir)
-    assets_root = target / "assets"
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets_root = resolve_capture_assets_dir(target)
     assets_root.mkdir(parents=True, exist_ok=True)
 
     cid_to_href = _build_cid_to_href(document)

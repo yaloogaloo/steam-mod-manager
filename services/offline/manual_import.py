@@ -170,23 +170,35 @@ def import_offline_snapshot(
     if target.exists():
         shutil.rmtree(target, ignore_errors=True)
     target.mkdir(parents=True, exist_ok=True)
-    (target / "assets").mkdir(parents=True, exist_ok=True)
-
-    if source_format == "html":
-        index, count = _import_html(
-            src, target, source_url=source_url, title=title
-        )
-    elif source_format == "mhtml":
-        index, count = _import_mhtml(
-            src, target, source_url=source_url, title=title, clean=clean
-        )
-    else:
-        raise UnsupportedOfflineFormat(source_format)
-
-    logger.info(
-        "[OFFLINE_IMPORT] format=%s assets=%s path=%s",
-        source_format,
-        count,
-        index,
+    from services.offline.staging import (
+        cleanup_capture_staging,
+        resolve_capture_assets_dir,
     )
-    return index, count, source_format
+
+    resolve_capture_assets_dir(target)
+
+    try:
+        if source_format == "html":
+            index, count = _import_html(
+                src, target, source_url=source_url, title=title
+            )
+        elif source_format == "mhtml":
+            index, count = _import_mhtml(
+                src, target, source_url=source_url, title=title, clean=clean
+            )
+        else:
+            raise UnsupportedOfflineFormat(source_format)
+
+        logger.info(
+            "[OFFLINE_IMPORT] format=%s assets=%s path=%s",
+            source_format,
+            count,
+            index,
+        )
+        from services.info_asset_runtime import require_cas_finalize
+
+        require_cas_finalize(target, context=f"import:{source_format}")
+        return index, count, source_format
+    except Exception:
+        cleanup_capture_staging(target)
+        raise

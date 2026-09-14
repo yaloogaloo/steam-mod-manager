@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Literal
 
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from services.metadata_backup import backup_root, sync_metadata_backup
+from services.metadata_backup import (
+    BACKUP_OFFLINE_DIR,
+    backup_root,
+    sync_metadata_backup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,23 +214,55 @@ def _sync_backup_now(
         reason_key = "rescan"
 
     root = Path(managed_path) if managed_path else None
-    mid = str(mod_id or "").strip()
+    hint = str(mod_id or "").strip()
+    from services.metadata_backup import prove_backup_storage_key
 
     if root is None or not root.is_dir():
-        logger.info(
-            "backup sync skipped (folder missing) mod_id=%s path=%s reason=%s",
-            mid or "?",
+        mid = prove_backup_storage_key(hint, managed_path=root)
+        rebound = False
+        if mid.isdigit() and root is not None:
+            try:
+                from services.mod_presence import rediscover_entity_path
+
+                found = rediscover_entity_path(mid)
+                if found.success and found.path:
+                    candidate = Path(found.path)
+                    if candidate.is_dir():
+                        root = candidate
+                        rebound = True
+            except Exception:  # noqa: BLE001
+                rebound = False
+        if not rebound:
+            logger.info(
+                "backup sync skipped (folder missing) mod_id=%s path=%s reason=%s",
+                mid or hint or "?",
+                root,
+                reason_key,
+            )
+            if mid.isdigit():
+                try:
+                    from services.metadata_backup import mark_missing
+
+                    mark_missing(mid)
+                except Exception:  # noqa: BLE001
+                    pass
+                _record_status(mid, status="missing")
+            try:
+                from services.reconcile_observability import note_backup_skipped
+
+                note_backup_skipped()
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+    mid = prove_backup_storage_key(hint, managed_path=root)
+    if not mid.isdigit():
+        logger.warning(
+            "backup sync skipped (entity unresolved) hint=%s path=%s reason=%s",
+            hint or "?",
             root,
             reason_key,
         )
-        if mid.isdigit():
-            try:
-                from services.metadata_backup import mark_missing
-
-                mark_missing(mid)
-            except Exception:  # noqa: BLE001
-                pass
-            _record_status(mid, status="missing")
         try:
             from services.reconcile_observability import note_backup_skipped
 
@@ -234,18 +270,6 @@ def _sync_backup_now(
         except Exception:  # noqa: BLE001
             pass
         return False
-
-    if not mid.isdigit():
-        mid = ""
-        try:
-            from services.file_ops import read_info_metadata_dict
-            from services.metadata_owner_guard import resolve_owner_mod_id_from_info
-
-            data = read_info_metadata_dict(root) or {}
-            # Ownership: internal_id only — never published_file_id / workspace / folder.
-            mid = resolve_owner_mod_id_from_info(data)
-        except Exception:  # noqa: BLE001
-            mid = ""
 
     meta_file = root / INFO_DIR_NAME / METADATA_FILENAME
     if not meta_file.is_file():
@@ -377,8 +401,10 @@ def rebuild_missing_metadata_backup(
     library_root: str | Path | None = None,
 ) -> int:
     """
-    Scan managed Mod folders; create backup when ``.info/metadata.json`` exists
-    but ``data/mod_backup/<id>`` is missing.
+    Scan managed Mod folders; create or repair backup when ``.info/metadata.json``
+    exists but ``data/mod_backup/<id>`` is missing, or when the live folder has
+    an offline page and the Backup Offline Snapshot is missing or not a usable
+    local-dependency closure.
 
     Returns number of backups created/synced.
     """
@@ -403,6 +429,14 @@ def rebuild_missing_metadata_backup(
     created = 0
     scanned = 0
     t_discover = time.perf_counter()
+    try:
+        from services.offline.backup_offline_repair import repair_live_offline_backups
+
+        created += int(
+            repair_live_offline_backups(library_root=root).get("backup_repaired") or 0
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("rebuild_missing_metadata_backup: live offline repair failed")
     for meta_path in root.glob(f"*/*/{INFO_DIR_NAME}/{METADATA_FILENAME}"):
         scanned += 1
         managed = meta_path.parent.parent
@@ -420,10 +454,32 @@ def rebuild_missing_metadata_backup(
             data = {}
         if not mid.isdigit():
             continue
-        backup_meta = backup_root(mid) / "metadata.json"
-        if backup_meta.is_file():
+        dest = backup_root(mid)
+        backup_meta = dest / "metadata.json"
+        live_index = None
+        try:
+            from services.offline.paths import resolve_offline_page
+
+            live_index = resolve_offline_page(managed)
+        except Exception:  # noqa: BLE001
+            live_index = None
+        missing_bucket = not backup_meta.is_file()
+        invalid_offline = False
+        if live_index is not None and live_index.is_file():
+            from services.offline.backup_closure import backup_offline_snapshot_valid
+
+            invalid_offline = not backup_offline_snapshot_valid(
+                dest / BACKUP_OFFLINE_DIR, source_index=live_index
+            )
+        if not missing_bucket and not invalid_offline:
             continue
-        if rebuild_metadata_backup(mid, managed, reason="repair"):
+        if missing_bucket:
+            if rebuild_metadata_backup(mid, managed, reason="repair"):
+                created += 1
+            continue
+        from services.offline.backup_offline_repair import snapshot_live_offline_only
+
+        if snapshot_live_offline_only(mid, managed):
             created += 1
 
     discover_ms = (time.perf_counter() - t_discover) * 1000.0

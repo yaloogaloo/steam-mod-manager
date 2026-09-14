@@ -62,7 +62,8 @@ def _badge_kind(entry: ModFileEntry) -> str | None:
 class InfoSidecar:
     """Portable ``.info`` snapshot.
 
-    Entity proof: ``internal_id`` (required after Sync/Import registration).
+    Filesystem binding: ``internal_id`` (required after Sync/Import registration).
+    Same value as Entity ``mods.internal_id`` — not a separate Mod ID.
     User display: ``workspace_id``.
     Platform identity: ``url`` / ``published_file_id`` (Steam Workshop ID for
     recovery — not a second user-facing Mod ID / not a runtime locator).
@@ -78,7 +79,7 @@ class InfoSidecar:
     cover_path: str = ""
     # Steam Workshop ID for technical recovery only — not a second user Mod ID.
     published_file_id: str = ""
-    # Entity proof — matches mods.internal_id (or mod_id PK when UUID empty).
+    # Same Entity.internal_id persisted on disk (``.info/metadata.json``).
     internal_id: str = ""
     category: str = ""
     # Workspace IDs this Mod depends on (deploy-before list).
@@ -108,6 +109,11 @@ class InfoSidecar:
             data["game_version"] = gv
         else:
             data.pop("game_version", None)
+        # Canonical write: internal_id only (strip temporary legacy entity_key).
+        from services.mod_identity import set_info_internal_id
+
+        key = str(data.pop("internal_id", "") or "").strip()
+        data = set_info_internal_id(data, key)
         return data
 
     @classmethod
@@ -143,6 +149,7 @@ class InfoSidecar:
                 if wid and wid not in dependencies:
                     dependencies.append(wid)
         from core.witcher3_game_version import is_valid_witcher3_game_version
+        from services.mod_identity import read_internal_id
 
         raw_gv = str(raw.get("game_version") or "").strip()
         # Never read Mod.io / Steam ``version`` into this field.
@@ -164,7 +171,7 @@ class InfoSidecar:
             ).strip(),
             cover_path=str(raw.get("cover_path") or "").strip(),
             published_file_id=str(raw.get("published_file_id") or "").strip(),
-            internal_id=str(raw.get("internal_id") or "").strip(),
+            internal_id=read_internal_id(raw),
             category=str(raw.get("category") or "").strip(),
             dependencies=dependencies,
             file_roles=roles,
@@ -401,6 +408,7 @@ def build_sidecar_from_db(
         offline_page_path=offline_page_path,
         cover_path=cover_path,
         published_file_id=published,
+        # Same Entity.internal_id persisted on disk (not a third Mod ID).
         internal_id=proof_internal,
         category=category,
         dependencies=dependencies,
@@ -440,12 +448,13 @@ def write_sidecar_for_mod(
         )
         # Ensure entity proof + registration axes are present on disk.
         from core.db_manager import get_db
+        from services.mod_identity import set_info_internal_id
 
         database = db if db is not None else get_db()
         info = database.get_mod_display_info(mid)
         patch: dict[str, Any] = {}
         if sidecar.internal_id:
-            patch["internal_id"] = sidecar.internal_id
+            patch = set_info_internal_id(patch, sidecar.internal_id)
         if info is not None:
             if int(getattr(info, "app_id", 0) or 0) > 0:
                 patch["app_id"] = int(info.app_id)
@@ -478,11 +487,14 @@ def ensure_registration_info_proof(
     After Sync/Import entity registration: require ``.info`` with
     ``internal_id`` + ``workspace_id`` (when DB has a workspace).
 
+    ``.info/internal_id`` must equal Entity ``mods.internal_id`` — same
+    business identity persisted on disk, not a separate Mod ID.
+
     Raises ``ValueError`` when proof cannot be written — DB entity must not
     remain without disk identity proof. Never writes external/workshop-only
     sidecar as sole identity. Never writes workspace_id / external_id alone.
     """
-    from services.mod_identity import read_internal_id
+    from services.mod_identity import read_internal_id, set_info_internal_id
 
     mid = str(mod_id or "").strip()
     root = Path(managed_path)
@@ -492,8 +504,8 @@ def ensure_registration_info_proof(
         root, mid, db=db, sync_backup=False, sync_reason="import"
     )
     data = read_info_metadata_dict(root) or {}
-    disk_iid = read_internal_id(data)
-    if not disk_iid:
+    disk_key = read_internal_id(data)
+    if not disk_key:
         raise ValueError(
             f"registration failed: .info missing internal_id for mod_id={mid}"
         )
@@ -504,14 +516,13 @@ def ensure_registration_info_proof(
         info = database.get_mod_display_info(mid)
         expected_ws = str(getattr(info, "workspace_id", "") or "").strip() if info else ""
         row = database.get_mod_backup_row(mid) or {}
-        expected_iid = str(row.get("internal_id") or "").strip() or mid
+        expected_key = str(row.get("internal_id") or "").strip() or mid
     except Exception:  # noqa: BLE001
         expected_ws = ""
-        expected_iid = mid
-    if expected_iid and disk_iid != expected_iid:
-        # Force UUID proof onto disk when DB already has entity UUID.
-        patch = dict(data)
-        patch["internal_id"] = expected_iid
+        expected_key = mid
+    if expected_key and disk_key != expected_key:
+        # Force Frozen Entity.internal_id onto disk when mismatched.
+        patch = set_info_internal_id(dict(data), expected_key)
         if expected_ws:
             patch["workspace_id"] = expected_ws
         from services.file_ops import persist_unified_metadata_dict
@@ -520,11 +531,11 @@ def ensure_registration_info_proof(
             root, patch, sync_backup=False, sync_reason="import"
         )
         data = read_info_metadata_dict(root) or {}
-        disk_iid = read_internal_id(data)
-        if disk_iid != expected_iid:
+        disk_key = read_internal_id(data)
+        if disk_key != expected_key:
             raise ValueError(
                 f"registration failed: .info internal_id mismatch "
-                f"disk={disk_iid!r} db={expected_iid!r} for mod_id={mid}"
+                f"disk={disk_key!r} db_internal_id={expected_key!r} for mod_id={mid}"
             )
     disk_ws = str(data.get("workspace_id") or "").strip()
     if expected_ws and disk_ws != expected_ws:
@@ -804,7 +815,10 @@ def rescan_mod_folder(
     if not mid:
         data = read_info_metadata_dict(root)
         if data:
-            mid = str(data.get("internal_id") or "").strip()
+            from services.mod_identity import read_internal_id
+
+            # Prefer ``.info/internal_id``; temporary legacy entity_key accepted.
+            mid = read_internal_id(data)
 
     existing = database.get_mod_files(mid) if mid and mid.isdigit() else ModFilesBundle()
     # Prefer sidecar roles when present (portable copy).

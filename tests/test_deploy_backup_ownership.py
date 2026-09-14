@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,36 +23,17 @@ from services.deploy_rules.manifest import (
     load_manifest,
     save_manifest,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from services.file_ops import INFO_DIR_NAME
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "deploy_backup_ownership.db")
+    manager = DatabaseManager.instance(tmp_path / "deploy_backup_ownership.db")
     yield manager
     manager.close()
     DatabaseManager.reset_instance()
-
-
-def _write_meta(mod_dir: Path, *, mid: str, title: str) -> None:
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": mid,
-                "published_file_id": mid,
-                "title": title,
-                "app_id": 4242,
-                "game_name": "SomeGame",
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
 
 
 def _setup_game(db: DatabaseManager, tmp_path: Path) -> Path:
@@ -75,17 +55,19 @@ def _add_mod(
     mid: str,
     title: str,
     files: dict[str, str] | None = None,
-) -> Path:
+) -> tuple[Path, str]:
     mod = library / "SomeGame" / title
     mod.mkdir(parents=True)
     for rel, text in (files or {"a.txt": "MOD-A"}).items():
         path = mod / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    _write_meta(mod, mid=mid, title=title)
-    create_steam_test_mod(db, external_id=mid, title=title, app_id=4242)
-    bind_managed_path(db, mid, mod, title=title)
-    return mod
+    created = create_steam_test_mod(db, external_id=mid, title=title, app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(
+        db, mod, handle=pk, title=title, app_id=4242, game_name="SomeGame"
+    )
+    return mod, pk
 
 
 def _info_backups(mod: Path) -> Path:
@@ -103,9 +85,9 @@ def test_first_deploy_missing_target_creates_no_backup(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98001", title="Fresh")
+    source, pk = _add_mod(library, db, mid="98001", title="Fresh")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("98001")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
     assert out["success"] is True
     target = mods_root / "Fresh" / "a.txt"
     assert target.read_text(encoding="utf-8") == "MOD-A"
@@ -113,7 +95,7 @@ def test_first_deploy_missing_target_creates_no_backup(
     man = load_manifest(source)
     assert man is not None
     assert all(f.backup is None for f in man.files)
-    mgr = BackupManager(source, internal_id="98001")
+    mgr = BackupManager(source, internal_id=pk)
     assert mgr.listed_backup_files() == []
     assert not _info_backups(source).exists()
     assert not mgr.backups_root().exists()
@@ -126,16 +108,16 @@ def test_redeploy_does_not_backup_own_payload(
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
     payload = {f"f{i:02d}.txt": f"V1-{i}" for i in range(12)}
-    source = _add_mod(library, db, mid="98002", title="Many", files=payload)
+    source, pk = _add_mod(library, db, mid="98002", title="Many", files=payload)
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("98002")["success"] is True
-    mgr = BackupManager(source, internal_id="98002")
+    assert deployer.deploy_mod(pk)["success"] is True
+    mgr = BackupManager(source, internal_id=pk)
     assert mgr.listed_backup_files() == []
 
     for rel in payload:
         (source / rel).write_text("V2", encoding="utf-8")
-    assert deployer.deploy_mod("98002")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
 
     man = load_manifest(source)
     assert man is not None
@@ -151,17 +133,17 @@ def test_external_game_file_is_backed_up(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98003", title="Ext")
+    source, pk = _add_mod(library, db, mid="98003", title="Ext")
     prior = mods_root / "Ext" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME-ORIGINAL", encoding="utf-8")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod("98003")["success"] is True
+    assert ModDeployer(library_root=library, db=db).deploy_mod(pk)["success"] is True
     man = load_manifest(source)
     assert man is not None
     backed = [f for f in man.files if f.backup is not None]
     assert len(backed) == 1
-    mgr = BackupManager(source, internal_id="98003")
+    mgr = BackupManager(source, internal_id=pk)
     bak = mgr.resolve_backup_file(backed[0].backup)  # type: ignore[arg-type]
     assert bak.is_file()
     assert bak.read_text(encoding="utf-8") == "GAME-ORIGINAL"
@@ -175,7 +157,7 @@ def test_rollback_restores_external_original(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98004", title="Roll")
+    source, pk = _add_mod(library, db, mid="98004", title="Roll")
     prior = mods_root / "Roll" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("KEEP-ME", encoding="utf-8")
@@ -184,12 +166,12 @@ def test_rollback_restores_external_original(
         return ApplyResult(success=False, error="simulated apply failure")
 
     with patch("services.deploy_apply.apply_file_plan", _fail_apply):
-        out = ModDeployer(library_root=library, db=db).deploy_mod("98004")
+        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
 
     assert out["success"] is False
     assert prior.read_text(encoding="utf-8") == "KEEP-ME"
     assert load_manifest(source) is None
-    mgr = BackupManager(source, internal_id="98004")
+    mgr = BackupManager(source, internal_id=pk)
     assert mgr.listed_backup_files() == []
     assert not _info_backups(source).exists()
 
@@ -227,16 +209,16 @@ def test_backup_not_in_library_payload_or_info(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98006", title="Store")
+    source, pk = _add_mod(library, db, mid="98006", title="Store")
     prior = mods_root / "Store" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("EXT", encoding="utf-8")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod("98006")["success"] is True
+    assert ModDeployer(library_root=library, db=db).deploy_mod(pk)["success"] is True
     originals = list(source.rglob("*.original"))
     assert originals == []
     assert not _info_backups(source).exists()
-    mgr = BackupManager(source, internal_id="98006")
+    mgr = BackupManager(source, internal_id=pk)
     files = mgr.listed_backup_files()
     assert len(files) == 1
     assert files[0].resolve().is_relative_to(mgr.backups_root().resolve())
@@ -252,7 +234,7 @@ def test_manifest_backup_matches_on_disk_files(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(
+    source, pk = _add_mod(
         library, db, mid="98007", title="HashMe", files={"a.txt": "A", "b.txt": "B"}
     )
     for name, text in (("a.txt", "GA"), ("b.txt", "GB")):
@@ -260,10 +242,10 @@ def test_manifest_backup_matches_on_disk_files(
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text, encoding="utf-8")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod("98007")["success"] is True
+    assert ModDeployer(library_root=library, db=db).deploy_mod(pk)["success"] is True
     man = load_manifest(source)
     assert man is not None
-    mgr = BackupManager(source, internal_id="98007")
+    mgr = BackupManager(source, internal_id=pk)
     on_disk = {p.resolve() for p in mgr.listed_backup_files()}
     resolved: set[Path] = set()
     for entry in man.files:
@@ -280,19 +262,19 @@ def test_undeploy_does_not_restore_own_payload_as_original(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98008", title="Self")
+    source, pk = _add_mod(library, db, mid="98008", title="Self")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("98008")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     target = mods_root / "Self" / "a.txt"
     assert target.read_text(encoding="utf-8") == "MOD-A"
     man = load_manifest(source)
     assert man is not None
     assert all(f.backup is None for f in man.files)
 
-    assert deployer.undeploy_mod("98008")["success"] is True
+    assert deployer.undeploy_mod(pk)["success"] is True
     assert not target.exists()
-    assert BackupManager(source, internal_id="98008").listed_backup_files() == []
+    assert BackupManager(source, internal_id=pk).listed_backup_files() == []
 
 
 def test_owned_external_backup_reused_on_redeploy_then_undeploy_restores(
@@ -300,24 +282,24 @@ def test_owned_external_backup_reused_on_redeploy_then_undeploy_restores(
 ) -> None:
     library = tmp_path / "mod"
     mods_root = _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98009", title="ReuseExt")
+    source, pk = _add_mod(library, db, mid="98009", title="ReuseExt")
     prior = mods_root / "ReuseExt" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME-ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("98009")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     man1 = load_manifest(source)
     assert man1 and man1.files[0].backup
     path1 = man1.files[0].backup.path
     (source / "a.txt").write_text("V2", encoding="utf-8")
-    assert deployer.deploy_mod("98009")["success"] is True
+    assert deployer.deploy_mod(pk)["success"] is True
     man2 = load_manifest(source)
     assert man2 and man2.files[0].backup
     assert man2.files[0].backup.path == path1
-    mgr = BackupManager(source, internal_id="98009")
+    mgr = BackupManager(source, internal_id=pk)
     assert len(mgr.listed_backup_files()) == 1
-    assert deployer.undeploy_mod("98009")["success"] is True
+    assert deployer.undeploy_mod(pk)["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME-ORIGINAL"
 
 
@@ -326,14 +308,14 @@ def test_deploy_does_not_delete_library_payload(
 ) -> None:
     library = tmp_path / "mod"
     _setup_game(db, tmp_path)
-    source = _add_mod(library, db, mid="98010", title="KeepLib")
+    source, pk = _add_mod(library, db, mid="98010", title="KeepLib")
     extra = source / "[Gameplay] KeepMe" / "loose.txt"
     extra.parent.mkdir(parents=True)
     extra.write_text("LIBRARY-PAYLOAD", encoding="utf-8")
     leftover = source / "notes.txt"
     leftover.write_text("do-not-delete", encoding="utf-8")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod("98010")["success"] is True
+    assert ModDeployer(library_root=library, db=db).deploy_mod(pk)["success"] is True
     assert extra.is_file()
     assert extra.read_text(encoding="utf-8") == "LIBRARY-PAYLOAD"
     assert leftover.is_file()
