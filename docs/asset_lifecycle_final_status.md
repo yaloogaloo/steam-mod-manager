@@ -65,10 +65,10 @@ Backup `offline/assets`: **0**.
 
 One-shot leftover GC lives under `tools/archive/legacy_asset_tools/`, not `services/`.
 
-Still in `services/` (not Asset leftover GC; Backup storage-key migration):
+Backup storage-key leftover GC lives under `tools/archive/` (not `services/`):
 
-- `legacy_workspace_backup.py`
-- `legacy_backup_finalize.py`
+- `tools/archive/legacy_workspace_backup.py`
+- `tools/archive/legacy_backup_finalize.py`
 
 ## Acceptance
 

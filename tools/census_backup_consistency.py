@@ -103,7 +103,7 @@ def _validate_backup_metadata_only(mid: str, dest, meta) -> dict:
 def census(*, db=None) -> dict:
     from core.db_manager import get_db
     from core.paths import data_dir, default_mod_library
-    from services.legacy_workspace_backup import (
+    from tools.archive.legacy_workspace_backup import (
         backup_writer_locked_to_mod_id,
         classify_legacy_workspace_buckets,
         inventory_legacy_workspace_buckets,

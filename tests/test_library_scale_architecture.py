@@ -176,7 +176,7 @@ def test_mod_list_item_layer1_contract() -> None:
     for bad in ("description", "html", "hash", "file_list", "payload_scan"):
         assert bad not in names
     item = ModListItem(
-        internal_id="1",
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
         workspace_id="1",
         game_id=1,
         game_folder="G",

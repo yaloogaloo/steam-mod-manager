@@ -5,6 +5,8 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from services.archive_extractor import ArchiveExtractStatus, ArchiveExtractor
 from services.deploy_archive_errors import archive_error_code
 
@@ -83,6 +85,44 @@ def test_extract_members_missing_member_fails(tmp_path: Path) -> None:
     assert result.success is False
     assert result.error_code == "ARCHIVE_MEMBER_MISSING"
     assert not dest.exists()
+
+
+def test_extract_7z_members_bcj2_falls_back_to_7z_exe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = tmp_path / "m.7z"
+    archive.write_bytes(b"7z fake")
+    dest = tmp_path / "out" / "a.txt"
+
+    class _Boom:
+        def __init__(self, *_a, **_k) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def getnames(self):
+            return ["a.txt"]
+
+        def read(self, _names):
+            raise RuntimeError("BCJ2 filter is not supported by py7zr")
+
+    def fake_cli(_src, members):
+        for _member, out in members:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("cli-ok", encoding="utf-8")
+        return len(members), 6
+
+    monkeypatch.setattr("py7zr.SevenZipFile", _Boom)
+    monkeypatch.setattr(
+        "services.archive_extractor._extract_7z_members_cli", fake_cli
+    )
+    result = ArchiveExtractor.extract_members(archive, [("a.txt", dest)])
+    assert result.success is True
+    assert dest.read_text(encoding="utf-8") == "cli-ok"
 
 
 def test_extract_members_rejects_traversal_member(tmp_path: Path) -> None:

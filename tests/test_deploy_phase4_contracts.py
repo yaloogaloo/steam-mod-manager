@@ -109,10 +109,20 @@ def test_folder_deploy_fileplan_apply_verify(tmp_path: Path, db: DatabaseManager
     mods = tmp_path / 'Mods'
     mods.mkdir()
     cfg = GameDeployConfig(app_id=1, name='Game', install_path='', mod_path=str(mods), deploy_type='folder_copy')
-    ctx = DeployContext(internal_id='1', source=src, app_id=1, config=cfg, deploy_type='folder_copy', managed_path=src)
+    ctx = DeployContext(
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
+        mod_pk=296,
+        source=src,
+        app_id=1,
+        config=cfg,
+        deploy_type="folder_copy",
+        managed_path=src,
+    )
     planned = FolderCopyStrategy().plan(ctx)
     assert planned.success, planned.error
     plan = file_plan_from_strategy_result(planned, ctx)
+    assert plan.internal_id == "36834fcf-3cbb-4ffe-8b78-be1921638bd4"
+    assert plan.mod_pk == 296
     assert all((e.op == OP_COPY for e in plan.files))
     assert apply_file_plan(plan, staging_parent=tmp_path / 'stage').success
     assert verify_file_plan(plan).success

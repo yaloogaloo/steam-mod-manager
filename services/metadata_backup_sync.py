@@ -20,9 +20,10 @@ from typing import Literal
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.metadata_backup import (
     BACKUP_OFFLINE_DIR,
-    backup_root,
+    readable_backup_root,
     sync_metadata_backup,
 )
+from services.backup_identity import is_frozen_backup_uuid, resolve_backup_mod_pk
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,15 @@ _backup_queue: queue.Queue[tuple[str, str, str]] = queue.Queue()
 _backup_worker_lock = threading.Lock()
 _backup_worker: threading.Thread | None = None
 _backup_worker_stop = False
+
+
+def _sql_pk(token: str) -> str:
+    text = str(token or "").strip()
+    if text.isdigit():
+        return text
+    if is_frozen_backup_uuid(text):
+        return resolve_backup_mod_pk(internal_id=text)
+    return ""
 
 
 def _ensure_backup_worker() -> None:
@@ -218,13 +228,14 @@ def _sync_backup_now(
     from services.metadata_backup import prove_backup_storage_key
 
     if root is None or not root.is_dir():
-        mid = prove_backup_storage_key(hint, managed_path=root)
+        frozen = prove_backup_storage_key(hint, managed_path=root)
+        pk = _sql_pk(frozen) or _sql_pk(hint)
         rebound = False
-        if mid.isdigit() and root is not None:
+        if pk.isdigit() and root is not None:
             try:
                 from services.mod_presence import rediscover_entity_path
 
-                found = rediscover_entity_path(mid)
+                found = rediscover_entity_path(pk)
                 if found.success and found.path:
                     candidate = Path(found.path)
                     if candidate.is_dir():
@@ -235,18 +246,18 @@ def _sync_backup_now(
         if not rebound:
             logger.info(
                 "backup sync skipped (folder missing) mod_id=%s path=%s reason=%s",
-                mid or hint or "?",
+                frozen or hint or "?",
                 root,
                 reason_key,
             )
-            if mid.isdigit():
+            if pk.isdigit():
                 try:
                     from services.metadata_backup import mark_missing
 
-                    mark_missing(mid)
+                    mark_missing(pk)
                 except Exception:  # noqa: BLE001
                     pass
-                _record_status(mid, status="missing")
+                _record_status(pk, status="missing")
             try:
                 from services.reconcile_observability import note_backup_skipped
 
@@ -255,8 +266,8 @@ def _sync_backup_now(
                 pass
             return False
 
-    mid = prove_backup_storage_key(hint, managed_path=root)
-    if not mid.isdigit():
+    frozen = prove_backup_storage_key(hint, managed_path=root)
+    if not is_frozen_backup_uuid(frozen):
         logger.warning(
             "backup sync skipped (entity unresolved) hint=%s path=%s reason=%s",
             hint or "?",
@@ -270,6 +281,8 @@ def _sync_backup_now(
         except Exception:  # noqa: BLE001
             pass
         return False
+    mid = frozen
+    pk = _sql_pk(frozen)
 
     meta_file = root / INFO_DIR_NAME / METADATA_FILENAME
     if not meta_file.is_file():
@@ -278,8 +291,8 @@ def _sync_backup_now(
             root,
             reason_key,
         )
-        if mid.isdigit():
-            _record_status(mid, status="missing")
+        if pk.isdigit():
+            _record_status(pk, status="missing")
         try:
             from services.reconcile_observability import note_backup_skipped
 
@@ -306,7 +319,7 @@ def _sync_backup_now(
         try:
             note_backup_started()
             note_mod_id(mid)
-            sync_metadata_backup(root, mod_id=mid if mid.isdigit() else None)
+            sync_metadata_backup(root, mod_id=mid)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "backup sync failed mod_id=%s path=%s reason=%s: %s",
@@ -315,24 +328,24 @@ def _sync_backup_now(
                 reason_key,
                 exc,
             )
-            if mid.isdigit():
-                _record_status(mid, status="invalid")
+            if pk.isdigit():
+                _record_status(pk, status="invalid")
             return False
         copy_ms = (time.perf_counter() - t_sync) * 1000.0
         session.copied = True
         session.add("backup", copy_ms, files=1)
 
-        if not mid.isdigit():
+        if not pk.isdigit():
             try:
                 from services.file_ops import read_info_metadata_dict
                 from services.metadata_owner_guard import resolve_owner_mod_id_from_info
 
                 data = read_info_metadata_dict(root) or {}
-                mid = resolve_owner_mod_id_from_info(data)
+                pk = _sql_pk(resolve_owner_mod_id_from_info(data))
             except Exception:  # noqa: BLE001
-                mid = ""
+                pk = ""
 
-        if mid.isdigit():
+        if pk.isdigit():
             try:
                 from services.metadata_backup_validator import (
                     status_from_validation,
@@ -342,7 +355,7 @@ def _sync_backup_now(
                 t_persist = time.perf_counter()
                 result = validate_backup(mid)
                 status = status_from_validation(result)
-                _record_status(mid, status=status, validate=True)
+                _record_status(pk, status=status, validate=True)
                 persist_ms = (time.perf_counter() - t_persist) * 1000.0
                 add_persist_ms(persist_ms)
                 session.add("persist", persist_ms, files=1)
@@ -360,7 +373,7 @@ def _sync_backup_now(
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("backup validate after sync failed: %s", exc)
-                _record_status(mid, status="partial")
+                _record_status(pk, status="partial")
                 logger.info(
                     "backup synced mod_id=%s reason=%s status=partial elapsed_ms=%.1f",
                     mid,
@@ -454,8 +467,8 @@ def rebuild_missing_metadata_backup(
             data = {}
         if not mid.isdigit():
             continue
-        dest = backup_root(mid)
-        backup_meta = dest / "metadata.json"
+        dest = readable_backup_root(mid)
+        backup_meta = (dest / "metadata.json") if dest is not None else None
         live_index = None
         try:
             from services.offline.paths import resolve_offline_page
@@ -463,9 +476,9 @@ def rebuild_missing_metadata_backup(
             live_index = resolve_offline_page(managed)
         except Exception:  # noqa: BLE001
             live_index = None
-        missing_bucket = not backup_meta.is_file()
+        missing_bucket = dest is None or backup_meta is None or not backup_meta.is_file()
         invalid_offline = False
-        if live_index is not None and live_index.is_file():
+        if dest is not None and live_index is not None and live_index.is_file():
             from services.offline.backup_closure import backup_offline_snapshot_valid
 
             invalid_offline = not backup_offline_snapshot_valid(
@@ -495,48 +508,6 @@ def rebuild_missing_metadata_backup(
     )
     log_backup_result(session, status="ok")
     return created
-
-
-def start_rebuild_missing_metadata_backup_async(
-    library_root: str | Path | None = None,
-) -> bool:
-    """
-    Run :func:`rebuild_missing_metadata_backup` on a daemon thread.
-
-    Returns False if a rebuild is already running.
-    """
-    logger.debug("start_rebuild_missing_metadata_backup_async enter")
-    global _rebuild_running, _rebuild_thread
-    with _rebuild_lock:
-        if _rebuild_shutdown:
-            logger.info("rebuild_missing_metadata_backup skipped; shutdown in progress")
-            return False
-        if _rebuild_running:
-            logger.info("rebuild_missing_metadata_backup already running; skip")
-            return False
-        _rebuild_running = True
-
-    root = str(library_root) if library_root else None
-
-    def _worker() -> None:
-        global _rebuild_running
-        try:
-            rebuild_missing_metadata_backup(root)
-        except Exception:  # noqa: BLE001
-            logger.exception("rebuild_missing_metadata_backup crashed")
-        finally:
-            with _rebuild_lock:
-                _rebuild_running = False
-
-    thread = threading.Thread(
-        target=_worker,
-        name="rebuild-missing-metadata-backup",
-        daemon=True,
-    )
-    _rebuild_thread = thread
-    thread.start()
-    logger.info("rebuild_missing_metadata_backup started in background")
-    return True
 
 
 def request_backup_rebuild_shutdown() -> None:

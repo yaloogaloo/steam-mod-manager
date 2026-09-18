@@ -6,7 +6,12 @@ from core.mod_platform import CIVILIZATION_VI_APP_IDS
 from services.deploy_rules.anno import ANNO_1800_APP_ID, Anno1800Strategy
 from services.deploy_rules.base import DeployContext, DeployStrategy, StrategyResult
 from services.deploy_rules.custom import DEPLOY_TYPE_CUSTOM_PATH, CustomPathStrategy
-from services.deploy_rules.generic import FolderCopyStrategy
+from services.deploy_rules.generic import (
+    FolderCopyStrategy,
+    contains_han_characters,
+    deploy_folder_name,
+    deploy_wrapper_folder,
+)
 from services.deploy_rules.manifest import (
     MANIFEST_FILENAME,
     DeployManifest,
@@ -169,6 +174,9 @@ __all__ = [
     "WARHAMMER3_APP_ID",
     "Anno1800Strategy",
     "CustomPathStrategy",
+    "deploy_folder_name",
+    "deploy_wrapper_folder",
+    "contains_han_characters",
     "DeployContext",
     "DeployManifest",
     "DeployStrategy",

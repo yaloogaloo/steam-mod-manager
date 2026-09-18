@@ -40,18 +40,18 @@ def _as_posix_relative(rel: Path) -> str:
 
 
 def _safe_resolve(path: Path | str) -> Path:
-    return Path(path).expanduser().resolve()
+    from services.deploy_op_profile import cached_resolve
+
+    return Path(cached_resolve(path))
 
 
 def resolve_deploy_identity(internal_id: int | str, *, db: Any) -> str:
     """Canonical deploy entry: Frozen ``internal_id`` → ``mods.mod_id``.
 
-    Business callers pass TEXT ``internal_id``. This function is the resolve
-    boundary; subsequent deploy DB/runtime operations use the PK.
+    Business callers pass TEXT ``internal_id``. Digit PK tokens are not
+    resolved here — pass ``mod_pk`` to SQL APIs directly.
 
-    PK-digit compatibility is implemented inside ``resolve_mod_pk`` (in-process
-    handle only) and is not a second Frozen identity. Never resolves via
-    ``workspace_id`` / path / folder name.
+    Never resolves via ``workspace_id`` / path / folder name.
     """
     from services.identity_service import resolve_mod_pk
 
@@ -67,46 +67,47 @@ def resolve_deploy_managed_path(
     explicit: Path | str | None = None,
 ) -> Path | None:
     """
-    Canonical managed-folder lookup for deploy.
+    Deploy source lookup — Path Authority only.
 
-    ``internal_id`` (UUID proof or integer PK) →
-    :func:`services.path_lifecycle.resolve_mod_folder_by_internal_id`.
-
-    Never scans by workspace_id / published_file_id / folder name.
+    Delegates to :func:`services.path_lifecycle.resolve_managed_folder`.
+    Never calls ``resolve_deploy_identity`` / ``resolve_mod_pk`` to locate a
+    folder. Never scans by workspace_id / published_file_id / folder name.
     *file_manager* is unused (kept for call-site compatibility).
-    *explicit* is accepted only as a proven hint (``resolve_managed_folder``).
     """
     _ = file_manager
-    from services.path_lifecycle import (
-        resolve_managed_folder,
-        resolve_mod_folder_by_internal_id,
-    )
+    from services.path_lifecycle import resolve_managed_folder
 
-    mid = resolve_deploy_identity(internal_id, db=db)
-    token = str(mid or "").strip()
+    token = str(internal_id or "").strip()
     if not token:
+        logger.info(
+            "[DEPLOY] source resolve fn=resolve_deploy_managed_path "
+            "input=%s output=None resolved_from=empty_token",
+            token,
+        )
         return None
-
-    # Prefer entity-proof discovery (``.info/entity_key``), not raw path binding.
-    found = resolve_mod_folder_by_internal_id(
+    resolved = resolve_managed_folder(
         token,
+        hint_path=explicit,
         library_root=library_root,
         db=db,
     )
-    if found is not None and found.is_dir():
-        return found.resolve()
-
-    # Optional proven hint from caller (must still match .info).
-    if explicit is not None:
-        resolved = resolve_managed_folder(
-            token if token.isdigit() else (db.find_mod_by_internal_id(token) or ""),
-            hint_path=explicit,
-            library_root=library_root,
-            db=db,
+    path = resolved.path
+    if path is not None and path.is_dir():
+        out = path.resolve()
+        logger.info(
+            "[DEPLOY] source resolve fn=resolve_deploy_managed_path "
+            "input=%s output=%s resolved_from=%s",
+            token,
+            out,
+            resolved.resolved_from,
         )
-        path = resolved.path
-        if path is not None and path.is_dir():
-            return path.resolve()
+        return out
+    logger.info(
+        "[DEPLOY] source resolve fn=resolve_deploy_managed_path "
+        "input=%s output=None resolved_from=%s",
+        token,
+        resolved.resolved_from or "unresolved",
+    )
     return None
 
 
@@ -289,23 +290,43 @@ def canonicalize_entry_target(
 
 def attach_canonical_targets(manifest: DeployManifest, ctx: DeployContext) -> None:
     """Stamp schema v2 fields onto a just-built deploy manifest (current roots)."""
+    from services.deploy_op_profile import cached_resolve
+
     manifest.schema_version = MANIFEST_SCHEMA_VERSION
+    lib = cached_resolve(ctx.library_folder())
+    content = cached_resolve(ctx.content_root())
     for entry in manifest.files:
         canonicalize_entry_target(entry, ctx)
-        _maybe_relativize_source(entry, ctx)
+        _maybe_relativize_source(entry, ctx, lib_root=lib, content_root=content)
 
 
-def _maybe_relativize_source(entry: ManifestFileEntry, ctx: DeployContext) -> None:
+def _maybe_relativize_source(
+    entry: ManifestFileEntry,
+    ctx: DeployContext,
+    *,
+    lib_root: str = "",
+    content_root: str = "",
+) -> None:
     raw = str(entry.source or "").strip()
     if not raw:
         return
+    from services.deploy_op_profile import cached_resolve
+
     try:
-        src = Path(raw).expanduser().resolve()
+        src = Path(cached_resolve(raw))
     except OSError:
         return
-    for root in (ctx.library_folder(), ctx.content_root()):
+    roots = [lib_root, content_root]
+    if not any(roots):
+        roots = [
+            cached_resolve(ctx.library_folder()),
+            cached_resolve(ctx.content_root()),
+        ]
+    for root_s in roots:
+        if not root_s:
+            continue
         try:
-            resolved_root = Path(root).resolve()
+            resolved_root = Path(root_s)
             rel = src.relative_to(resolved_root)
         except (ValueError, OSError):
             continue

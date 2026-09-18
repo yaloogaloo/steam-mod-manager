@@ -26,7 +26,8 @@ def snapshot_live_offline_only(
     root = Path(managed_path)
     if not mid.isdigit() or not root.is_dir():
         return ""
-    from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root
+    from services.metadata_backup import BACKUP_OFFLINE_DIR, write_backup_root_for
+    from services.backup_identity import BackupIdentityError
     from services.offline.backup_closure import (
         backup_offline_snapshot_valid,
         snapshot_offline_closure,
@@ -36,7 +37,14 @@ def snapshot_live_offline_only(
     src = resolve_offline_page(root)
     if src is None or not src.is_file():
         return ""
-    dest_offline = backup_root(mid) / BACKUP_OFFLINE_DIR
+    try:
+        dest_offline = write_backup_root_for(mid) / BACKUP_OFFLINE_DIR
+    except BackupIdentityError:
+        logger.warning(
+            "offline snapshot repair refused: Invalid frozen internal_id mod_id=%s",
+            mid,
+        )
+        return ""
     try:
         copied = snapshot_offline_closure(src, dest_offline)
     except OSError as exc:
@@ -69,7 +77,7 @@ def repair_live_offline_backups(
     ``workspace_id`` as a directory name.
     """
     from core.db_manager import get_db
-    from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root
+    from services.metadata_backup import BACKUP_OFFLINE_DIR, readable_backup_root
     from services.offline.backup_closure import backup_offline_snapshot_valid
     from services.offline.paths import resolve_offline_page
 
@@ -116,17 +124,30 @@ def repair_live_offline_backups(
             src = resolve_offline_page(path)
         except Exception:  # noqa: BLE001
             src = None
-        dest_offline = backup_root(mid) / BACKUP_OFFLINE_DIR
+        dest_root = readable_backup_root(mid)
+        dest_offline = (
+            dest_root / BACKUP_OFFLINE_DIR if dest_root is not None else None
+        )
         if src is None or not src.is_file():
             stats["backup_source_missing"] += 1
             continue
         stats["source_offline_present"] += 1
-        if backup_offline_snapshot_valid(dest_offline, source_index=src):
+        if dest_offline is not None and backup_offline_snapshot_valid(
+            dest_offline, source_index=src
+        ):
             stats["backup_already_valid"] += 1
             stats["backup_valid"] += 1
             continue
         copied = snapshot_live_offline_only(mid, path, db=database)
-        if copied and backup_offline_snapshot_valid(dest_offline, source_index=src):
+        dest_root = readable_backup_root(mid)
+        dest_offline = (
+            dest_root / BACKUP_OFFLINE_DIR if dest_root is not None else None
+        )
+        if (
+            copied
+            and dest_offline is not None
+            and backup_offline_snapshot_valid(dest_offline, source_index=src)
+        ):
             stats["backup_repaired"] += 1
             stats["backup_valid"] += 1
             continue

@@ -1,6 +1,7 @@
 """Mod folder path lifecycle — resolve, commit, and track rename/move transitions.
 
-External callers must pass Internal ID (``mod_id`` / ``internal_id``).
+Path Authority: :func:`resolve_managed_folder` (Frozen ``internal_id`` → folder).
+Deploy / Detail / Backup / Collection must not invent a second locator.
 ``workspace_id`` is display/registration only and never locates a folder.
 Filesystem renames must produce a :class:`PathChangeResult` and
 commit the new path to SQLite + sidecar before treating the operation as
@@ -161,71 +162,14 @@ def resolve_mod_folder_by_internal_id(
     library_root: str | Path | None = None,
     db=None,
 ) -> Path | None:
-    """
-    Runtime folder resolution: entity proof → disk scan of ``.info/internal_id``.
-
-    Accepts UUID ``mods.internal_id`` **or** integer PK ``mods.mod_id``.
-    Never uses workspace_id / folder name / published_file_id / raw path as identity.
-
-    ``last_known_path`` may be used only as a proven cache hint (must match
-    ``.info/internal_id``); on miss, scan the managed library root.
-    """
-    from core.db_manager import get_db
-
-    token = str(internal_id or "").strip()
-    if not token:
-        return None
-    database = db if db is not None else get_db()
-
-    pk = ""
-    proof = token
-    if token.isdigit():
-        pk = token
-        row = database.get_mod_backup_row(pk) or {}
-        proof = str(row.get("internal_id") or "").strip() or pk
-    else:
-        found = database.find_mod_by_internal_id(token)
-        if found:
-            pk = str(found)
-            row = database.get_mod_backup_row(pk) or {}
-            proof = str(row.get("internal_id") or "").strip() or token
-        else:
-            row = {}
-
-    # Proven cache hint only — never trust path without .info proof.
-    if pk:
-        lkp = _path_is_dir((row or {}).get("last_known_path"))
-        if lkp is not None and _folder_proves_mod_entity(lkp, mod_id=pk, db=database):
-            _rebind_last_known_path(database, pk, lkp)
-            return lkp.resolve()
-
-    scan_root = library_root
-    if scan_root is None:
-        try:
-            from core.paths import default_mod_library
-
-            scan_root = Path(default_mod_library())
-        except Exception:  # noqa: BLE001
-            scan_root = None
-    if scan_root is None:
-        return None
-
-    discovered = discover_folder_by_internal_id(
-        proof,
-        library_root=scan_root,
-        expected_mod_id=pk,
-        db=database,
+    """Path-only facade of :func:`resolve_managed_folder` (the Path Authority)."""
+    resolved = resolve_managed_folder(
+        internal_id, library_root=library_root, db=db
     )
-    if discovered is None and pk and proof != pk:
-        discovered = discover_folder_by_internal_id(
-            pk,
-            library_root=scan_root,
-            expected_mod_id=pk,
-            db=database,
-        )
-    if discovered is not None and pk:
-        _rebind_last_known_path(database, pk, discovered)
-    return discovered
+    path = resolved.path
+    if path is not None and path.is_dir():
+        return path.resolve()
+    return None
 
 
 def _folder_proves_mod_entity(
@@ -289,27 +233,40 @@ def resolve_managed_folder(
     db=None,
 ) -> ResolvedModPath:
     """
-    Resolve the on-disk managed folder for *mod_id*.
+    Path Authority: Frozen ``internal_id`` (UUID) → live managed folder.
 
-    Accept a candidate only when ``.info/internal_id`` proves the entity
-    (value == Entity ``mods.internal_id``). Never match via workspace_id /
-    folder name / path invent / published_file_id.
+    Digit SQLite PK is accepted only as a DAL handle. ``workspace_id`` never
+    locates a folder. A candidate is accepted only when ``.info/internal_id``
+    proves the entity.
     """
     from core.db_manager import get_db
+    from services.deploy_identity import is_frozen_internal_uuid
 
-    mid = resolve_mod_id(mod_id, workspace_id=workspace_id, db=db)
+    token = str(mod_id or "").strip()
     database = db if db is not None else get_db()
     wid = str(workspace_id or "").strip()
     stale_hint = False
-    row: dict[str, Any] = {}
 
-    if not mid.isdigit():
+    pk = ""
+    proof_key = token
+    if is_frozen_internal_uuid(token):
+        try:
+            found = database.find_mod_by_internal_id(token)
+        except Exception:  # noqa: BLE001
+            found = None
+        pk = str(found or "").strip()
+        proof_key = token
+    elif token.isdigit():
+        pk = token
+    if not pk.isdigit():
         return ResolvedModPath(
-            mod_id=mid,
+            mod_id=token,
             path=None,
             workspace_id=wid,
             resolved_from="unresolved",
         )
+
+    mid = pk
 
     from services.managed_path_cache import (
         get_cached_managed_path,
@@ -319,10 +276,12 @@ def resolve_managed_folder(
     row = database.get_mod_backup_row(mid) or {}
     if not wid:
         wid = str(row.get("workspace_id") or "").strip()
-    proof_key = str(row.get("internal_id") or "").strip() or mid
+    if not is_frozen_internal_uuid(proof_key):
+        proof_key = str(row.get("internal_id") or "").strip() or mid
 
     live = _path_is_dir(hint_path)
     if live is not None and _folder_proves_mod_entity(live, mod_id=mid, db=database):
+        _rebind_last_known_path(database, mid, live)
         remember_resolved(mid, live, library_root=library_root)
         return ResolvedModPath(
             mod_id=mid,
@@ -353,6 +312,7 @@ def resolve_managed_folder(
     cached = get_cached_managed_path(mid, library_root=library_root)
     if cached is not None:
         if _folder_proves_mod_entity(cached, mod_id=mid, db=database):
+            _rebind_last_known_path(database, mid, cached)
             return ResolvedModPath(
                 mod_id=mid,
                 path=cached,

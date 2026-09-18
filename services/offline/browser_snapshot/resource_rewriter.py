@@ -7,7 +7,6 @@ import json
 import logging
 import mimetypes
 import re
-import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -110,15 +109,6 @@ def _safe_filename(url: str, content_type: str = "") -> str:
     if stem and stem.lower() not in {"index", "main", "app", "bundle"}:
         return f"{stem}_{digest[:8]}{ext}"
     return f"{digest}{ext}"
-
-
-def _parse_srcset(value: str) -> list[str]:
-    urls: list[str] = []
-    for part in str(value or "").split(","):
-        token = part.strip().split()
-        if token:
-            urls.append(token[0])
-    return urls
 
 
 class ResourceRewriter:

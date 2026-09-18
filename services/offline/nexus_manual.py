@@ -111,7 +111,12 @@ class NexusManualOfflineProvider(OfflineProvider):
         clean: bool = True,
     ) -> OfflineUpdateResult:
         """Import a user-saved Nexus HTML/MHTML snapshot into ``.info/offline/``."""
-        mid = str(mod_id).strip()
+        from services.mod_library_cache import dal_mod_pk
+
+        token = str(mod_id or "").strip()
+        mid = dal_mod_pk(token)
+        if not mid:
+            raise ValueError(f"Mod not found in database: {token}")
         root = Path(library_root) if library_root else default_mod_library()
         path = Path(managed_path) if managed_path else find_managed_mod_path(root, mid)
         if path is None:
@@ -119,7 +124,7 @@ class NexusManualOfflineProvider(OfflineProvider):
 
         info = get_db().get_mod_display_info(mid)
         if info is None:
-            raise ValueError(f"Mod not found in database: {mid}")
+            raise ValueError(f"Mod not found in database: {token}")
 
         mgr = ModFileManager(root)
         info_dir = mgr.ensure_info_dir(path)

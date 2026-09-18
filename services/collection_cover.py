@@ -199,9 +199,9 @@ def member_cover_file(
     from services.cover_loader import resolve_cover_path
 
     database: DatabaseManager = db if db is not None else get_db()
-    from services.identity_service import resolve_mod_pk
+    from services.mod_library_cache import dal_mod_pk
 
-    mid = resolve_mod_pk(internal_id, db=database)
+    mid = dal_mod_pk(internal_id)
     if not mid.isdigit():
         return None
     info = database.get_mod_display_info(mid)

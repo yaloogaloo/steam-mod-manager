@@ -238,8 +238,8 @@ def test_7_backup_cannot_restore_entity_via_external_workspace_app(
     data.mkdir()
     monkeypatch.setattr("core.paths.data_dir", lambda: data)
     monkeypatch.setattr("services.metadata_backup.data_dir", lambda: data)
-    orphan_mid = "9000000000888881"
-    bak = backup_root(orphan_mid)
+    orphan_uuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    bak = backup_root(orphan_uuid)
     bak.mkdir(parents=True)
     (bak / "metadata.json").write_text(
         json.dumps(
@@ -256,7 +256,7 @@ def test_7_backup_cannot_restore_entity_via_external_workspace_app(
     folder = tmp_path / "mod" / "Stardew" / "NoEntity"
     folder.mkdir(parents=True)
     before = db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0]
-    assert restore_info_sidecar_from_backup(orphan_mid, folder, db=db) is False
+    assert restore_info_sidecar_from_backup(orphan_uuid, folder, db=db) is False
     after = db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0]
     assert after == before
     src = (ROOT / "services" / "metadata_backup.py").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Optional「分类」metadata for Mod type「拓展」only."""
+"""Optional「分类」metadata for Mod types「拓展」and「美化」."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import MOD_TYPE_EXTENSION, visible_extension_category
+from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION, visible_extension_category
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_type_catalog import get_mod_type_catalog
 from tests.helpers.identity import create_steam_test_mod
@@ -246,11 +246,13 @@ def test_extension_category_not_clipped_when_original_name_present(
 def test_visible_extension_category_uses_type_id_not_name() -> None:
     catalog = get_mod_type_catalog()
     ext = catalog.add_type(100, MOD_TYPE_EXTENSION)
-    other = catalog.add_type(100, "美化")
+    beautify = catalog.add_type(100, MOD_TYPE_BEAUTIFY)
+    other = catalog.add_type(100, "普通")
     assert visible_extension_category("", app_id=100, type_id=ext.type_id) == ""
     assert visible_extension_category("   ", app_id=100, type_id=ext.type_id) == ""
     assert visible_extension_category("动画", app_id=100, type_id=ext.type_id) == "动画"
     assert visible_extension_category("UI", app_id=100, type_id=ext.type_id) == "UI"
+    assert visible_extension_category("角色美化", app_id=100, type_id=beautify.type_id) == "角色美化"
     assert visible_extension_category("动画", app_id=100, type_id=other.type_id) == ""
     assert visible_extension_category("动画", app_id=100, type_id=None) == ""
     assert visible_extension_category("动画", app_id=0, type_id=ext.type_id) == ""
@@ -260,6 +262,7 @@ def test_visible_extension_category_uses_type_id_not_name() -> None:
     assert catalog.extension_type_id(100) == ext.type_id
     assert catalog.find_type_by_name(100, "拓展") is None
     assert visible_extension_category("动画", app_id=100, type_id=ext.type_id) == "动画"
+    assert visible_extension_category("角色美化", app_id=100, type_id=beautify.type_id) == "角色美化"
     assert visible_extension_category("动画", app_id=100, type_id=other.type_id) == ""
 
 
@@ -428,6 +431,68 @@ def test_edit_save_persists_category(db: DatabaseManager) -> None:
     assert again.category == "UI"
 
 
+def test_beautify_category_shows_in_detail(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+) -> None:
+    folder, pk = _seed(tmp_path / "lib", db, external_id="88130", title="BeautifyCat")
+    _bind_named_type(db, pk, 100, MOD_TYPE_BEAUTIFY)
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "",
+            "custom_description": "介绍正文",
+            "user_notes": "",
+            "favorite": False,
+            "category": "角色美化",
+        },
+    )
+    panel = ModDetailPanel()
+    _show(panel, folder, pk)
+    rich, cat, visible = _rich_and_category(panel)
+    assert visible is True
+    assert cat == "分类：角色美化"
+    assert "<b>分类：</b>" in rich
+
+
+def test_beautify_category_save_and_reread(db: DatabaseManager) -> None:
+    db.update_game_deploy_config(100, name="SomeGame", mod_path="")
+    created = create_steam_test_mod(
+        db, external_id="88131", title="BeautifySave", app_id=100, game_name="SomeGame"
+    )
+    pk = str(created.mod_id)
+    _bind_named_type(db, pk, 100, MOD_TYPE_BEAUTIFY)
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "",
+            "custom_description": "",
+            "user_notes": "",
+            "favorite": False,
+            "category": "界面美化",
+        },
+    )
+    again = db.get_mod_display_info(pk)
+    assert again is not None
+    assert again.category == "界面美化"
+    assert visible_extension_category(
+        again.category, app_id=100, type_id=again.type_id
+    ) == "界面美化"
+
+    db.update_mod_user_metadata(
+        pk,
+        {
+            "display_name": "",
+            "custom_description": "",
+            "user_notes": "",
+            "favorite": False,
+            "category": "特效美化",
+        },
+    )
+    reread = db.get_mod_display_info(pk)
+    assert reread is not None
+    assert reread.category == "特效美化"
+
+
 def test_type_switch_hides_then_restores_category(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
@@ -449,12 +514,26 @@ def test_type_switch_hides_then_restores_category(
     assert visible is True
     assert cat == "分类：动画"
 
-    _bind_named_type(db, pk, 100, "美化")
+    _bind_named_type(db, pk, 100, MOD_TYPE_BEAUTIFY)
+    _show(panel, folder, pk)
+    assert db.get_mod_display_info(pk).category == "动画"
+    rich, cat, visible = _rich_and_category(panel)
+    assert visible is True
+    assert cat == "分类：动画"
+
+    _bind_named_type(db, pk, 100, "普通")
     _show(panel, folder, pk)
     assert db.get_mod_display_info(pk).category == "动画"
     rich, _cat, visible = _rich_and_category(panel)
     assert visible is False
     assert "分类" not in rich
+
+    _bind_named_type(db, pk, 100, MOD_TYPE_BEAUTIFY)
+    _show(panel, folder, pk)
+    assert db.get_mod_display_info(pk).category == "动画"
+    rich, cat, visible = _rich_and_category(panel)
+    assert visible is True
+    assert cat == "分类：动画"
 
     _bind_named_type(db, pk, 100, MOD_TYPE_EXTENSION)
     _show(panel, folder, pk)
@@ -467,15 +546,18 @@ def test_type_switch_hides_then_restores_category(
 def test_edit_dialog_category_only_for_extension(qapp: QApplication) -> None:
     catalog = get_mod_type_catalog()
     ext_type = catalog.add_type(100, MOD_TYPE_EXTENSION)
-    other_type = catalog.add_type(100, "美化")
+    beautify_type = catalog.add_type(100, MOD_TYPE_BEAUTIFY)
+    other_type = catalog.add_type(100, "普通")
+    options = [
+        (ext_type.type_id, catalog.resolve_name(100, ext_type.type_id)),
+        (beautify_type.type_id, MOD_TYPE_BEAUTIFY),
+        (other_type.type_id, "普通"),
+    ]
     ext = EditModDialog(
         mod_id="1",
         game_id=100,
         mod_type_id=ext_type.type_id,
-        type_options=[
-            (ext_type.type_id, catalog.resolve_name(100, ext_type.type_id)),
-            (other_type.type_id, "美化"),
-        ],
+        type_options=options,
         category="动画",
         description="介绍正文",
     )
@@ -485,20 +567,35 @@ def test_edit_dialog_category_only_for_extension(qapp: QApplication) -> None:
     assert ext.values()["mod_type"] == MOD_TYPE_EXTENSION
     assert ext.values()["type_id"] == ext_type.type_id
 
+    ext.type_combo.setCurrentIndex(ext.type_combo.findData(beautify_type.type_id))
+    QApplication.processEvents()
+    assert not ext.category_edit.isHidden()
+    assert ext.values()["category"] == "动画"
+    assert ext.values()["type_id"] == beautify_type.type_id
+
     ext.type_combo.setCurrentIndex(ext.type_combo.findData(other_type.type_id))
     QApplication.processEvents()
     assert ext.category_edit.isHidden()
     assert ext.values()["category"] == "动画"
     assert ext.values()["type_id"] == other_type.type_id
 
-    other = EditModDialog(
+    beautify = EditModDialog(
         mod_id="2",
         game_id=100,
+        mod_type_id=beautify_type.type_id,
+        type_options=options,
+        category="角色美化",
+    )
+    assert not beautify.category_edit.isHidden()
+    assert beautify.category_edit.text() == "角色美化"
+    assert beautify.values()["category"] == "角色美化"
+    assert beautify.values()["type_id"] == beautify_type.type_id
+
+    other = EditModDialog(
+        mod_id="3",
+        game_id=100,
         mod_type_id=other_type.type_id,
-        type_options=[
-            (ext_type.type_id, catalog.resolve_name(100, ext_type.type_id)),
-            (other_type.type_id, "美化"),
-        ],
+        type_options=options,
         category="动画",
     )
     assert other.category_edit.isHidden()

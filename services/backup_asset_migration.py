@@ -46,7 +46,8 @@ from services.info_asset_migration import (
     relative_manifest_path,
     resolve_mod_managed_path,
 )
-from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root
+from services.metadata_backup import BACKUP_OFFLINE_DIR, write_backup_root_for
+from services.backup_identity import BackupIdentityError
 from services.offline.paths import resolve_offline_page
 
 logger = logging.getLogger(__name__)
@@ -501,22 +502,6 @@ def restore_backup_assets_from_store(
     return out
 
 
-def repair_info_assets_from_backup_store(
-    managed_path: Path | str,
-    *,
-    mod_id: str | int = "",
-    store: AssetStore | None = None,
-) -> RestoreAssetsResult:
-    """Alias of :func:`services.info_asset_runtime.repair_live_from_cas`.
-
-    Never materializes into LIVE ``.info/assets``. OPEN uses
-    ``cache/offline_view``.
-    """
-    from services.info_asset_runtime import repair_live_from_cas
-
-    return repair_live_from_cas(managed_path, mod_id=mod_id, store=store)
-
-
 def migrate_backup_offline_for_mod_id(
     mod_id: str | int,
     *,
@@ -527,7 +512,12 @@ def migrate_backup_offline_for_mod_id(
     """Migrate one Mod's Backup offline assets → Store + Backup manifest."""
     mid = str(mod_id).strip()
     store = store or AssetStore(root=asset_store_dir())
-    dest = backup_root(mid) / BACKUP_OFFLINE_DIR
+    try:
+        dest = write_backup_root_for(mid) / BACKUP_OFFLINE_DIR
+    except BackupIdentityError:
+        out = BackupAssetMigrationResult(mod_id=mid, dry_run=dry_run, ok=False)
+        out.reason = "Invalid frozen internal_id"
+        return out
     folder = resolve_mod_managed_path(mid, db_path=db_path)
     source_index = resolve_offline_page(folder) if folder is not None else None
     # If LIVE missing, still migrate from Backup assets alone

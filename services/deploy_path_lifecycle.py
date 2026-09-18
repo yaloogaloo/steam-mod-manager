@@ -51,6 +51,7 @@ class PathLifecycleFailure:
     path: str
     app_id: int = 0
     internal_id: str = ""
+    mod_pk: str = ""
     message: str = ""
 
     def as_error_dict(self, *, mod_id: str = "") -> dict[str, Any]:
@@ -62,10 +63,15 @@ class PathLifecycleFailure:
             "error_kind": self.code,
             "path_field": self.field,
             "configured_path": self.path,
+            "source_path": self.path,
             "app_id": int(self.app_id or 0),
         }
         if mid:
             out["mod_id"] = mid
+            out["internal_id"] = mid
+        pk = str(self.mod_pk or "").strip()
+        if pk.isdigit():
+            out["mod_pk"] = int(pk)
         return out
 
 
@@ -206,6 +212,7 @@ def source_mod_path_failure(
     library_root: Path | str,
     internal_id: str,
     path: str | Path | None = None,
+    mod_pk: str | int = "",
 ) -> PathLifecycleFailure:
     mid = str(internal_id or "").strip()
     path_s = _fmt_path(path) if path is not None and str(path).strip() else ""
@@ -215,6 +222,7 @@ def source_mod_path_failure(
         path=path_s,
         app_id=0,
         internal_id=mid,
+        mod_pk=str(mod_pk or "").strip(),
         message=format_source_mod_path_missing(
             library_root=library_root, internal_id=mid, path=path_s or None
         ),
@@ -287,11 +295,11 @@ def is_path_lifecycle_error(error: str) -> bool:
     )
 
 
-def resolve_entity_internal_id(token: Any, *, db: Any) -> tuple[str, str | None]:
+def resolve_entity_mod_pk(token: Any, *, db: Any) -> tuple[str, str | None]:
     """
-    Resolve deploy entity by internal_id only.
+    Resolve deploy entity Frozen UUID → SQLite ``mods.mod_id``.
 
-    Returns ``(mid, error)``. Never looks up by workspace_id / external_id.
+    Returns ``(mod_pk, error)``. Never looks up by workspace_id / external_id.
     """
     from services.deploy_paths import resolve_deploy_identity
 

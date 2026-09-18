@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -282,11 +281,6 @@ def collect_offline_closure_report(src_index: Path) -> ClosureReport:
 def collect_offline_closure(src_index: Path) -> dict[str, Path]:
     """Return ``{relative posix from index parent: source file}`` including index."""
     return collect_offline_closure_report(src_index).files
-
-
-def live_path_leak_refs(src_index: Path) -> list[str]:
-    """Refs that escape the snapshot root (would depend on the live Mod)."""
-    return list(collect_offline_closure_report(src_index).leaks)
 
 
 def _normalize_closure_rel(rel_posix: str) -> str:
@@ -922,9 +916,3 @@ def prune_unreferenced_backup_offline(dest_offline: Path) -> dict[str, int]:
     except OSError:
         pass
     return {"files": removed, "bytes": nbytes}
-
-
-def iter_local_html_refs(src_index: Path) -> Iterator[str]:
-    for ref in _refs_from_file(Path(src_index)):
-        if not is_external_or_non_file_ref(ref):
-            yield ref

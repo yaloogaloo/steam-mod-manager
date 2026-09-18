@@ -1,0 +1,64 @@
+{
+  "games": [
+    {
+      "name": "暗黑地牢",
+      "app_id": "262060",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\262060",
+      "smm_mod_root": "E:\\mod\\暗黑地牢"
+    },
+    {
+      "name": "群星",
+      "app_id": "281990",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\281990",
+      "smm_mod_root": "E:\\mod\\群星"
+    },
+    {
+      "name": "Palworld",
+      "app_id": "1623730",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\1623730",
+      "smm_mod_root": "E:\\mod\\Palworld"
+    },
+    {
+      "name": "全面战争 战锤Ⅲ",
+      "app_id": "1142710",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\1142710",
+      "smm_mod_root": "E:\\mod\\全面战争 战锤Ⅲ"
+    },
+    {
+      "name": "天国拯救Ⅱ",
+      "app_id": "1771300",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\1771300",
+      "smm_mod_root": "D:\\project\\steam-mod-manager\\mod\\天国拯救Ⅱ"
+    },
+    {
+      "name": "巫师三",
+      "app_id": "292030",
+      "workshop_root": "D:\\SteamLibrary\\steamapps\\workshop\\content\\292030",
+      "smm_mod_root": "D:\\project\\steam-mod-manager\\mod\\巫师三"
+    },
+    {
+      "name": "文明Ⅵ",
+      "app_id": "289070",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\289070",
+      "smm_mod_root": "E:\\mod\\文明Ⅵ"
+    },
+    {
+      "name": "杀戮尖塔",
+      "app_id": "646570",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\646570",
+      "smm_mod_root": "E:\\mod\\杀戮尖塔"
+    },
+    {
+      "name": "逃离鸭科夫",
+      "app_id": "3167020",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\3167020",
+      "smm_mod_root": "E:\\mod\\逃离鸭科夫"
+    },
+    {
+      "name": "十字军之王Ⅲ",
+      "app_id": "1158310",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\1158310",
+      "smm_mod_root": "E:\\mod\\十字军之王Ⅲ"
+    }
+  ]
+}

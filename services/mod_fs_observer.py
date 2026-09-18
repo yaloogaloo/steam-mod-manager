@@ -45,7 +45,6 @@ __all__ = [
     "observe_mods_fs_batch",
     "touch_observation_stamp",
     "schedule_observe_mods_fs_batch",
-    "schedule_observe_mod_fs",
     "note_content_status_projection_touch",
     "note_mod_files_projection_touch",
     "begin_projection_defer",
@@ -517,44 +516,4 @@ def schedule_observe_mods_fs_batch(
             return False
         _batch_thread = thread
     thread.start()
-    return True
-
-
-def schedule_observe_mod_fs(
-    internal_id: str | int,
-    level: int,
-    *,
-    managed_path: str | Path | None = None,
-    db: Any = None,
-) -> bool:
-    """Background single-mod observe for L1/L2 (UI must not call L1/L2 inline)."""
-    mid = str(internal_id or "").strip()
-    if not mid:
-        return False
-    if int(level) < LEVEL_STATE:
-        # L0 is cheap — run inline.
-        observe_mod_fs(mid, LEVEL_PROBE, db=db, managed_path=managed_path)
-        return True
-
-    def _worker() -> None:
-        try:
-            observe_mod_fs(
-                mid,
-                int(level),
-                db=db,
-                managed_path=managed_path,
-            )
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "scheduled observe failed internal_id=%s level=%s",
-                mid,
-                level,
-                exc_info=True,
-            )
-
-    threading.Thread(
-        target=_worker,
-        name=f"mod-fs-observe-{mid}-l{int(level)}",
-        daemon=True,
-    ).start()
     return True

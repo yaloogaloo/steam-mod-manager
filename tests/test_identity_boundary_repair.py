@@ -104,7 +104,7 @@ def test_deploy_resolves_uuid_to_current_pk(db: DatabaseManager) -> None:
     pk = str(created.mod_id)
     proof = str((db.get_mod_backup_row(pk) or {}).get("internal_id") or "")
     assert resolve_deploy_identity(proof, db=db) == pk
-    assert resolve_deploy_identity(pk, db=db) == pk
+    assert resolve_deploy_identity(pk, db=db) == ""
 
 
 def test_pk_differing_from_uuid_still_resolves(db: DatabaseManager) -> None:
@@ -151,7 +151,7 @@ def test_workspace_id_cannot_become_entity_key(db: DatabaseManager) -> None:
         db=db,
     ) == ""
     assert resolve_mod_pk(ws, db=db) == ""
-    assert resolve_mod_pk(pk, db=db) == pk
+    assert resolve_mod_pk(pk, db=db) == ""
 
 
 def test_existing_uuid_is_not_rewritten(db: DatabaseManager) -> None:

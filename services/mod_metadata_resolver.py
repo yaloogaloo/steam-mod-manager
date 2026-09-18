@@ -10,7 +10,7 @@ from typing import Any
 from core.mod_platform import PLATFORM_STEAM, normalize_platform, parse_metadata_platform
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, read_info_metadata_dict
-from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root, load_backup
+from services.metadata_backup import BACKUP_OFFLINE_DIR, readable_backup_root, load_backup
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ class ModMetadataResolver:
             if str(bound).isdigit() and str(bound) != str(mid):
                 return None
 
-        backup = load_backup(mid) if str(mid).isdigit() else None
+        backup = load_backup(mid) if mid else None
         sqlite = self._sqlite_row(mid)
         display = self._sqlite_display(mid)
         entity_app = int((sqlite or {}).get("app_id") or 0)
@@ -311,7 +311,7 @@ class ModMetadataResolver:
         if not mid.isdigit():
             return None
         sqlite = self._sqlite_row(mid)
-        backup = load_backup(mid) if mid.isdigit() else None
+        backup = load_backup(mid) if mid else None
         if backup is None and sqlite is None:
             return None
 
@@ -632,8 +632,9 @@ class ModMetadataResolver:
         if backup is not None:
             # Presence only — do not materialize Backup offline closure here.
             mid = str(getattr(backup, "mod_id", "") or "").strip()
-            if mid.isdigit():
-                backup_index = backup_root(mid) / BACKUP_OFFLINE_DIR / "index.html"
+            dest_root = readable_backup_root(mid) if mid else None
+            if dest_root is not None:
+                backup_index = dest_root / BACKUP_OFFLINE_DIR / "index.html"
                 try:
                     if backup_index.is_file():
                         return backup_index.resolve()
@@ -647,10 +648,11 @@ class ModMetadataResolver:
         mid = ""
         if backup is not None:
             mid = str(getattr(backup, "mod_id", "") or "").strip()
-        if not mid.isdigit() and sqlite is not None:
+        if not mid and sqlite is not None:
             mid = str(sqlite.get("mod_id") or "").strip()
-        if mid.isdigit():
-            backup_index = backup_root(mid) / BACKUP_OFFLINE_DIR / "index.html"
+        dest_root = readable_backup_root(mid) if mid else None
+        if dest_root is not None:
+            backup_index = dest_root / BACKUP_OFFLINE_DIR / "index.html"
             try:
                 if backup_index.is_file():
                     return backup_index.resolve()

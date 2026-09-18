@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from core.mod_platform import PLATFORM_STEAM, ModFilesBundle, steam_workshop_url
-from core.models import ModMetadata
 from services.importers.importer_base import (
     ImportContext,
     ImportResult,

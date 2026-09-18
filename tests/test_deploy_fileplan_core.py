@@ -64,7 +64,7 @@ def test_file_plan_folder_apply_verify_manifest(tmp_path: Path) -> None:
     (nested / 'b.txt').write_text('B', encoding='utf-8')
     dest_root = tmp_path / 'dest'
     dest_root.mkdir()
-    plan = DeployFilePlan(internal_id='1', deploy_type='folder_copy', source=str(src), source_kind='folder', content_root=str(src), managed_path=str(src), target_root=str(dest_root), files=[DeployFilePlanEntry(source_relative='a.txt', target_relative='a.txt', target_absolute=str(dest_root / 'a.txt'), source=str(src / 'a.txt'), op=OP_COPY), DeployFilePlanEntry(source_relative='sub/b.txt', target_relative='sub/b.txt', target_absolute=str(dest_root / 'sub' / 'b.txt'), source=str(src / 'sub' / 'b.txt'), op=OP_COPY)])
+    plan = DeployFilePlan(internal_id='36834fcf-3cbb-4ffe-8b78-be1921638bd4', deploy_type='folder_copy', source=str(src), source_kind='folder', content_root=str(src), managed_path=str(src), target_root=str(dest_root), files=[DeployFilePlanEntry(source_relative='a.txt', target_relative='a.txt', target_absolute=str(dest_root / 'a.txt'), source=str(src / 'a.txt'), op=OP_COPY), DeployFilePlanEntry(source_relative='sub/b.txt', target_relative='sub/b.txt', source=str(src / 'sub' / 'b.txt'), target_absolute=str(dest_root / 'sub' / 'b.txt'), op=OP_COPY)])
     plan.refresh_planned_count()
     assert file_plan_core_applicable(plan)
     applied = apply_file_plan(plan, staging_parent=tmp_path / 'stage')
@@ -86,7 +86,7 @@ def test_file_plan_overwrite_existing_identical_is_success(tmp_path: Path) -> No
     dest = tmp_path / 'dest'
     dest.mkdir()
     (dest / 'x.bin').write_bytes(b'same')
-    plan = DeployFilePlan(internal_id='2', deploy_type='folder_copy', source=str(src), target_root=str(dest), files=[DeployFilePlanEntry(source_relative='x.bin', target_relative='x.bin', target_absolute=str(dest / 'x.bin'), source=str(src / 'x.bin'), op=OP_COPY)])
+    plan = DeployFilePlan(internal_id='11111111-1111-4111-8111-111111111111', deploy_type='folder_copy', source=str(src), target_root=str(dest), files=[DeployFilePlanEntry(source_relative='x.bin', target_relative='x.bin', target_absolute=str(dest / 'x.bin'), source=str(src / 'x.bin'), op=OP_COPY)])
     plan.refresh_planned_count()
     assert apply_file_plan(plan, staging_parent=tmp_path / 'stage').success
     assert verify_file_plan(plan).verified == 1
@@ -99,7 +99,7 @@ def test_zip_extract_member_apply_nested(tmp_path: Path) -> None:
     mods = tmp_path / 'mods'
     mods.mkdir()
     entries = [DeployFilePlanEntry(source_relative='[Gameplay] Demo/data/a.txt', target_relative='[Gameplay] Demo/data/a.txt', target_absolute=str(mods / '[Gameplay] Demo' / 'data' / 'a.txt'), source=str(zpath), op=OP_EXTRACT_MEMBER, type='archive'), DeployFilePlanEntry(source_relative='[Gameplay] Demo/data/nested/b.txt', target_relative='[Gameplay] Demo/data/nested/b.txt', target_absolute=str(mods / '[Gameplay] Demo' / 'data' / 'nested' / 'b.txt'), source=str(zpath), op=OP_EXTRACT_MEMBER, type='archive')]
-    plan = DeployFilePlan(internal_id='3', deploy_type='anno_1800', source=str(tmp_path), source_kind='zip', target_root=str(mods), archives=[str(zpath)], files=entries)
+    plan = DeployFilePlan(internal_id='22222222-2222-4222-8222-222222222222', deploy_type='anno_1800', source=str(tmp_path), source_kind='zip', target_root=str(mods), archives=[str(zpath)], files=entries)
     plan.refresh_planned_count()
     assert file_plan_core_applicable(plan)
     assert apply_file_plan(plan, staging_parent=tmp_path / 'stage').success
@@ -185,7 +185,7 @@ def test_folder_deploy_via_moddeployer_uses_fileplan_counts(tmp_path: Path, db: 
     assert (mods / 'ModA' / 'readme.txt').is_file()
 
 def test_apply_failure_keeps_planned_diagnostics(tmp_path: Path) -> None:
-    plan = DeployFilePlan(internal_id='9', deploy_type='folder_copy', source=str(tmp_path), target_root=str(tmp_path / 't'), files=[DeployFilePlanEntry(source_relative='missing.txt', target_relative='missing.txt', target_absolute=str(tmp_path / 't' / 'missing.txt'), source=str(tmp_path / 'nope.txt'), op=OP_COPY)])
+    plan = DeployFilePlan(internal_id='33333333-3333-4333-8333-333333333333', deploy_type='folder_copy', source=str(tmp_path), target_root=str(tmp_path / 't'), files=[DeployFilePlanEntry(source_relative='missing.txt', target_relative='missing.txt', target_absolute=str(tmp_path / 't' / 'missing.txt'), source=str(tmp_path / 'nope.txt'), op=OP_COPY)])
     plan.refresh_planned_count()
     result = apply_file_plan(plan, staging_parent=tmp_path / 'stage')
     assert result.success is False
@@ -203,9 +203,20 @@ def test_conversion_archive_entries_become_extract_member(tmp_path: Path, db: Da
     db.update_game_deploy_config(916440, name='Anno', install_path=str(install), deploy_type='anno_1800')
     cfg = db.get_game_deploy_config(916440)
     assert cfg is not None
-    ctx = DeployContext(internal_id='1', source=tmp_path, managed_path=tmp_path, app_id=916440, config=cfg, deploy_type='anno_1800')
+    ctx = DeployContext(
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
+        mod_pk=296,
+        source=tmp_path,
+        managed_path=tmp_path,
+        app_id=916440,
+        config=cfg,
+        deploy_type="anno_1800",
+    )
     planned = StrategyResult(success=True, target=str(mods.resolve()), deploy_type='anno_1800', files=[ManifestFileEntry(source=str(zpath), target=str((mods / 'Root' / 'x.txt').resolve()), type='archive')])
     plan = file_plan_from_strategy_result(planned, ctx, archives=[zpath])
+    assert plan.internal_id == "36834fcf-3cbb-4ffe-8b78-be1921638bd4"
+    assert plan.mod_pk == 296
+    assert plan.internal_id != str(plan.mod_pk)
     assert len(plan.files) == 1
     assert plan.files[0].op == OP_EXTRACT_MEMBER
     assert plan.files[0].source_relative == 'Root/x.txt'
@@ -353,7 +364,7 @@ def test_large_copy_hashes_during_apply(tmp_path: Path, monkeypatch: pytest.Monk
     dest_root = tmp_path / "dest"
     dest_root.mkdir()
     plan = DeployFilePlan(
-        internal_id="1",
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
         deploy_type="warhammer3_pack",
         source=str(src),
         source_kind="folder",

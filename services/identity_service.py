@@ -245,11 +245,11 @@ def assert_lifecycle_may_allocate(operation: str = "") -> None:
     op = (operation or current_lifecycle()).strip().lower()
     if op in _ALLOCATE_FORBIDDEN:
         logger.error(
-            "[IDENTITY_GUARD] allocate_internal_id forbidden lifecycle=%s",
+            "[IDENTITY_GUARD] allocate_mod_pk forbidden lifecycle=%s",
             op,
         )
         raise IdentityCreateBypassError(
-            f"allocate_internal_id is forbidden in {op} scope"
+            f"allocate_mod_pk is forbidden in {op} scope"
         )
 
 
@@ -434,15 +434,17 @@ def resolve_internal_id_from_workspace_id(
     app_id: int,
     db: Any = None,
 ) -> str:
-    """Map user-facing Workspace ID → Internal ID within one game.
+    """Map user-facing Workspace ID → Frozen ``mods.internal_id`` within one game.
 
     Runtime lookup for user operations (bind dependency). Does **not** change
     Identity bind/create: ``resolve_existing`` / ``resolve_existing_mod_id``
     stay Internal-ID-only.
 
     Never treats the token as a PK. Never falls back to ``get_mod``.
+    Returns Frozen UUID, never ``mods.mod_id``.
     """
     from core.db_manager import get_db as _get_db
+    from services.deploy_identity import is_frozen_internal_uuid
 
     wid = str(workspace_id or "").strip()
     plat = normalize_platform(platform)
@@ -458,40 +460,43 @@ def resolve_internal_id_from_workspace_id(
         app_id=aid,
         workspace_id=wid,
     )
-    return str(found or "").strip()
+    pk = str(found or "").strip()
+    if not pk.isdigit():
+        return ""
+    try:
+        row = manager.get_mod_backup_row(pk) or {}
+    except Exception:  # noqa: BLE001
+        return ""
+    frozen = str(row.get("internal_id") or "").strip()
+    return frozen if is_frozen_internal_uuid(frozen) else ""
 
 
-def resolve_mod_pk(internal_id: int | str, *, db: Any) -> str:
-    """Canonical business resolver: Frozen ``internal_id`` → ``mods.mod_id``.
+def resolve_mod_pk_from_internal_id(internal_id: int | str, *, db: Any) -> str:
+    """DAL: Frozen UUID → SQLite ``mods.mod_id``. Empty when not a UUID row."""
+    from services.deploy_identity import is_frozen_internal_uuid
 
-    Step 1 (canonical): ``mods.internal_id`` TEXT match via
-    ``find_mod_by_internal_id``.
-    Step 2 (compatibility, not Frozen identity): if *internal_id* is a
-    decimal token and that SQLite PK exists, return it. Workers and Layer-1
-    session keys still pass PK handles; this is an in-process handle, not
-    permission to treat ``mods.mod_id`` as Entity Identity.
-
-    Never resolves ``workspace_id`` / ``external_id`` / path / folder name.
-    Returns ``""`` when the token is not a known Mod.
-    """
     token = str(internal_id or "").strip()
-    if not token:
+    if not is_frozen_internal_uuid(token):
         return ""
     try:
         found = db.find_mod_by_internal_id(token)
     except Exception:  # noqa: BLE001
         logger.debug("find_mod_by_internal_id failed token=%s", token, exc_info=True)
-        found = None
+        return ""
     pk = str(found or "").strip()
-    if pk.isdigit():
-        return pk
-    if token.isdigit():
-        try:
-            if db.get_mod(token) is not None:
-                return token
-        except Exception:  # noqa: BLE001
-            logger.debug("get_mod failed for pk handle token=%s", token, exc_info=True)
-    return ""
+    return pk if pk.isdigit() else ""
+
+
+def resolve_mod_pk(internal_id: int | str, *, db: Any) -> str:
+    """Canonical DAL resolver: Frozen ``internal_id`` → ``mods.mod_id``.
+
+    UUID only. Digit PK tokens are not Entity Identity — callers that already
+    hold ``mods.mod_id`` must pass it to SQL APIs directly.
+
+    Never resolves ``workspace_id`` / ``external_id`` / path / folder name.
+    Returns ``""`` when the token is not a known Frozen UUID.
+    """
+    return resolve_mod_pk_from_internal_id(internal_id, db=db)
 
 
 def ensure_durable_internal_id(db: Any, mod_id: int | str) -> str:
@@ -520,7 +525,7 @@ def ensure_durable_internal_id(db: Any, mod_id: int | str) -> str:
     return proof
 
 
-def allocate_internal_id(db: Any) -> int:
+def allocate_mod_pk(db: Any) -> int:
     """Allocate a SQLite ``mods.mod_id`` PK. This is not Frozen Entity Identity."""
     assert_lifecycle_may_allocate()
     with identity_create_scope():
@@ -532,9 +537,19 @@ def allocate_internal_id(db: Any) -> int:
         old_value="",
         new_value=str(mid),
         source="identity_service",
-        reason="allocate_internal",
+        reason="allocate_mod_pk",
     )
     return mid
+
+
+def allocate_internal_id(db: Any) -> str:
+    """Mint a Frozen Entity UUID. Does not allocate SQLite PK.
+
+    PK allocation is :func:`allocate_mod_pk`. Persisting this UUID onto a row
+    is :func:`ensure_durable_internal_id`.
+    """
+    del db
+    return str(uuid.uuid4())
 
 
 def resolve_existing(
@@ -675,7 +690,15 @@ def persist_identity(
     **fields: Any,
 ) -> None:
     """Validate + sanitize + persist identity fields. Never invents a Mod."""
-    mid = resolve_mod_pk(mod_id, db=db)
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    token = str(mod_id or "").strip()
+    if is_frozen_internal_uuid(token):
+        mid = resolve_mod_pk_from_internal_id(token, db=db)
+    elif token.isdigit():
+        mid = token
+    else:
+        mid = ""
     if not mid:
         return
     info = db.get_mod_display_info(mid)

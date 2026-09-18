@@ -342,7 +342,7 @@ def test_self_approve_manifest_targets_rejected(tmp_path: Path, db: DatabaseMana
     mod.mkdir(parents=True)
     (mod / 'a.txt').write_text('A', encoding='utf-8')
     cfg = db.get_game_deploy_config(4242)
-    ctx = DeployContext(internal_id='1', source=mod, app_id=4242, config=cfg, deploy_type='folder_copy', managed_path=mod)
+    ctx = DeployContext(internal_id='36834fcf-3cbb-4ffe-8b78-be1921638bd4', source=mod, app_id=4242, config=cfg, deploy_type='folder_copy', managed_path=mod)
     evil = tmp_path / 'escape.txt'
     man = DeployManifest(mod_id='1', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(mod / 'a.txt'), target=str(evil.resolve()))])
     with pytest.raises(ManifestSecurityError, match='outside allowed'):

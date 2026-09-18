@@ -9,7 +9,7 @@ import pytest
 
 from core.cas_runtime import reset_cas_runtime_cache
 from services.asset_store import AssetStore
-from services.backup_asset_migration import repair_info_assets_from_backup_store
+from services.info_asset_runtime import repair_live_from_cas
 from services.info_asset_runtime import (
     ensure_live_offline_openable,
     finalize_live_offline_to_cas,
@@ -107,7 +107,7 @@ def test_miss_repair_does_not_create_data_offline_view(
     from services.asset_manifest import MANIFEST_FILENAME
 
     (mod / ".info" / MANIFEST_FILENAME).unlink()
-    repair = repair_info_assets_from_backup_store(mod, mod_id="9", store=store)
+    repair = repair_live_from_cas(mod, mod_id="9", store=store)
     assert repair.ok
     assert not legacy.exists()
     assert not (mod / ".info" / "assets").exists()

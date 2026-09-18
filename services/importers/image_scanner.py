@@ -27,7 +27,6 @@ __all__ = [
     "apply_cover_to_mod",
     "cleanup_old_auto_cover",
     "find_cover_candidate",
-    "find_cover_candidate_in_roots",
     "install_cover_file",
     "install_cover_from_source",
     "is_image_path",
@@ -45,17 +44,6 @@ def find_cover_candidate(
 ) -> Path | None:
     """Deprecated: auto cover discovery removed — always returns ``None``."""
     del source_folder, recursive
-    return None
-
-
-def find_cover_candidate_in_roots(
-    roots: Sequence[str | Path],
-    *,
-    recursive_roots: Sequence[str | Path] | None = None,
-    flat_roots: Sequence[str | Path] | None = None,
-) -> Path | None:
-    """Deprecated: auto cover discovery removed — always returns ``None``."""
-    del roots, recursive_roots, flat_roots
     return None
 
 

@@ -1,0 +1,11 @@
+{
+  "_comment": "Per Steam App ID deploy capabilities. Enable a capability for a new game here; do not add Python App ID whitelists. normalize_mod_folder_name maps the library folder name through services.mod_path_normalizer (ASCII pinyin). There is no game-specific folder rename in Python.",
+  "games": {
+    "262060": {
+      "normalize_mod_folder_name": true
+    },
+    "289070": {
+      "normalize_mod_folder_name": true
+    }
+  }
+}

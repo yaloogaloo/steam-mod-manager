@@ -466,7 +466,7 @@ def _verify_after_rebuild(
     assets_before: tuple[int, int],
 ) -> tuple[bool, bool, bool, bool, list[str]]:
     """OPEN / MISS / Repair; prove .info/assets not rewritten."""
-    from services.backup_asset_migration import repair_info_assets_from_backup_store
+    from services.info_asset_runtime import repair_live_from_cas
     from services.info_asset_runtime import ensure_live_offline_openable
 
     issues: list[str] = []
@@ -486,7 +486,7 @@ def _verify_after_rebuild(
         open_ok = False
         issues.append(f"OPEN raised: {exc}")
 
-    repair = repair_info_assets_from_backup_store(
+    repair = repair_live_from_cas(
         folder, mod_id=mod_id, store=store
     )
     repair_ok = bool(repair.ok)

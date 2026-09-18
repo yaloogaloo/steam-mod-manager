@@ -30,6 +30,10 @@ from .source_timestamp import (
     compare_source_timestamps,
     normalize_source_timestamp,
 )
+from .steam_sync_junction import (
+    evaluate_steam_sync_update_copy,
+    log_steam_sync_junction_decision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1151,6 +1155,21 @@ class ModSyncService:
 
             # Force overwrite: re-copy into (possibly renamed) destination
             if existing and force_overwrite:
+                # Correct Workshop→SMM Junction: source and dest are the same
+                # physical tree. copy_mod would rmtree the only real files.
+                junction = evaluate_steam_sync_update_copy(
+                    source=Path(str(meta.source_path or "")),
+                    destination=existing,
+                    workspace_id=str(meta.published_file_id or ""),
+                )
+                log_steam_sync_junction_decision(
+                    junction,
+                    workspace_id=str(meta.published_file_id or ""),
+                )
+                if junction.skip_physical_copy:
+                    meta.managed_path = str(existing)
+                    existing_index[meta.published_file_id] = existing
+                    return "success", existing
                 managed = self.files.copy_mod(
                     meta,
                     overwrite_existing=True,

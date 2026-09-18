@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def log_deploy_file_start(*, source: Path | str, target: Path | str, mode: str) -> None:
-    logger.info(
+    logger.debug(
         "[DEPLOY FILE START] source=%s target=%s mode=%s",
         source,
         target,
@@ -20,7 +20,7 @@ def log_deploy_file_start(*, source: Path | str, target: Path | str, mode: str) 
 def log_deploy_file_success(
     *, source: Path | str, target: Path | str, bytes_written: int
 ) -> None:
-    logger.info(
+    logger.debug(
         "[DEPLOY FILE SUCCESS] source=%s target=%s bytes=%s",
         source,
         target,

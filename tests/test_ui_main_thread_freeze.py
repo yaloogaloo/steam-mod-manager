@@ -96,9 +96,13 @@ def test_card_cache_budget_trims_off_viewport(qapp: QApplication) -> None:
 
 def test_bind_hides_only_previous_live_not_full_cache() -> None:
     src = inspect.getsource(ModLibraryView._bind_viewport_cards)
-    assert "_viewport_live_cards" in src
+    commit = inspect.getsource(ModLibraryView._commit_mod_viewport_bind)
+    assert "_try_incremental_mod_viewport" in src
+    assert "library_layout.setEnabled(False)" in src
+    assert "_trim_card_cache_budget" in commit
+    assert "_viewport_live_cards" in commit
     assert "list(self._card_cache.values())" not in src
-    assert "_trim_card_cache_budget" in src
+    assert "list(self._card_cache.values())" not in commit
 
 
 def test_scroll_is_debounced() -> None:

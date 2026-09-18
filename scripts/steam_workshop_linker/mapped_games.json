@@ -1,0 +1,46 @@
+{
+  "mapped_games": {
+    "262060": {
+      "name": "暗黑地牢",
+      "mapped_at": "2026-09-17T22:15:18+08:00",
+      "smm_mod_root": "E:\\mod\\暗黑地牢",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\262060"
+    },
+    "281990": {
+      "name": "群星",
+      "mapped_at": "2026-09-17T22:44:51+08:00",
+      "smm_mod_root": "E:\\mod\\群星",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\281990"
+    },
+    "1623730": {
+      "name": "Palworld",
+      "mapped_at": "2026-09-17T22:46:30+08:00",
+      "smm_mod_root": "E:\\mod\\Palworld",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\1623730"
+    },
+    "1142710": {
+      "name": "全面战争 战锤Ⅲ",
+      "mapped_at": "2026-09-17T23:33:17+08:00",
+      "smm_mod_root": "E:\\mod\\全面战争 战锤Ⅲ",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\1142710"
+    },
+    "3167020": {
+      "name": "逃离鸭科夫",
+      "mapped_at": "2026-09-18T00:29:32+08:00",
+      "smm_mod_root": "E:\\mod\\逃离鸭科夫",
+      "workshop_root": "E:\\SteamLibrary\\steamapps\\workshop\\content\\3167020"
+    },
+    "646570": {
+      "name": "杀戮尖塔",
+      "mapped_at": "2026-09-18T00:31:41+08:00",
+      "smm_mod_root": "E:\\mod\\杀戮尖塔",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\646570"
+    },
+    "289070": {
+      "name": "文明Ⅵ",
+      "mapped_at": "2026-09-18T10:11:18+08:00",
+      "smm_mod_root": "E:\\mod\\文明Ⅵ",
+      "workshop_root": "F:\\SteamLibrary\\steamapps\\workshop\\content\\289070"
+    }
+  }
+}

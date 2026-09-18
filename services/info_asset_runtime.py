@@ -538,17 +538,20 @@ def require_cas_finalize(
 
 
 def _resolve_mod_id_for_view(managed_path: Path, *, mod_id: str = "") -> str:
-    mid = str(mod_id or "").strip()
-    if mid.isdigit():
-        return mid
+    from services.mod_library_cache import dal_mod_pk
+
+    pk = dal_mod_pk(mod_id)
+    if pk:
+        return pk
     for name in (".info", "info"):
         marker = Path(managed_path) / name / "internal_id"
         try:
             text = marker.read_text(encoding="utf-8").strip()
         except OSError:
             continue
-        if text.isdigit():
-            return text
+        pk = dal_mod_pk(text)
+        if pk:
+            return pk
     return ""
 
 
@@ -613,7 +616,7 @@ def probe_offline_open(
         probe_backup_manifest_exists,
         probe_backup_offline_view_hit,
     )
-    from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root
+    from services.metadata_backup import BACKUP_OFFLINE_DIR, readable_backup_root
 
     out = OfflineOpenProbe()
     root = Path(managed_path) if managed_path is not None else None
@@ -626,14 +629,16 @@ def probe_offline_open(
             return out
         if live_manifest_exists(root):
             out.can_materialize = True
-    if mid.isdigit():
-        dest = backup_root(mid) / BACKUP_OFFLINE_DIR
+    dest_root = readable_backup_root(mid)
+    if dest_root is not None:
+        dest = dest_root / BACKUP_OFFLINE_DIR
         hit = probe_backup_offline_view_hit(dest)
         if hit is not None:
             out.cache_hit = hit
             out.can_materialize = True
             return out
         if probe_backup_manifest_exists(dest):
+            out.can_materialize = True
             out.can_materialize = True
     if not out.can_materialize:
         out.reason = OFFLINE_ASSET_UNAVAILABLE
@@ -655,7 +660,7 @@ def prepare_offline_open(
         ensure_backup_offline_openable,
         probe_backup_offline_view_hit,
     )
-    from services.metadata_backup import BACKUP_OFFLINE_DIR, backup_root, load_backup
+    from services.metadata_backup import BACKUP_OFFLINE_DIR, readable_backup_root, load_backup
     from services.offline_view_cache import require_offline_view_path
 
     mid = str(mod_id or "").strip()
@@ -686,8 +691,9 @@ def prepare_offline_open(
         # Identity may still be on the path marker.
         mid = _resolve_mod_id_for_view(root, mod_id=mid)
 
-    if mid.isdigit():
-        dest = backup_root(mid) / BACKUP_OFFLINE_DIR
+    dest_root = readable_backup_root(mid)
+    if dest_root is not None:
+        dest = dest_root / BACKUP_OFFLINE_DIR
         hit = probe_backup_offline_view_hit(dest) if dest.is_dir() else None
         if hit is not None:
             return OfflineOpenResult(
@@ -705,8 +711,9 @@ def prepare_offline_open(
         backup = load_backup(mid)
         if backup is not None:
             bmid = str(getattr(backup, "mod_id", "") or mid).strip()
-            if bmid.isdigit():
-                dest = backup_root(bmid) / BACKUP_OFFLINE_DIR
+            bdest = readable_backup_root(bmid)
+            if bdest is not None:
+                dest = bdest / BACKUP_OFFLINE_DIR
                 opened = require_offline_view_path(
                     ensure_backup_offline_openable(dest)
                 )
@@ -859,9 +866,8 @@ def repair_live_from_cas(
     from services.backup_asset_migration import (
         RestoreAssetsResult,
         backup_offline_manifest_path,
-        backup_root,
     )
-    from services.metadata_backup import BACKUP_OFFLINE_DIR
+    from services.metadata_backup import BACKUP_OFFLINE_DIR, readable_backup_root
 
     folder = Path(managed_path)
     store = store or AssetStore(root=_asset_store_dir())
@@ -882,10 +888,11 @@ def repair_live_from_cas(
 
     if manifest is None:
         mid = str(mod_id or "").strip()
-        if not mid.isdigit():
+        dest_root = readable_backup_root(mid) if mid else None
+        if dest_root is None:
             out.reason = "no usable LIVE manifest and no mod_id for Backup"
             return out
-        bak = backup_root(mid) / BACKUP_OFFLINE_DIR
+        bak = dest_root / BACKUP_OFFLINE_DIR
         bak_man = backup_offline_manifest_path(bak)
         if not bak_man.is_file():
             out.reason = "backup offline/manifest.json missing"

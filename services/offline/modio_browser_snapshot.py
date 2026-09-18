@@ -6,7 +6,6 @@ import logging
 import os
 import re
 from enum import Enum
-from pathlib import Path
 from typing import Callable
 
 from services.archive import normalize_page_url

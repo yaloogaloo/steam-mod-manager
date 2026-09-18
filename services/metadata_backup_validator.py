@@ -17,7 +17,11 @@ from services.metadata_backup import (
     BACKUP_METADATA_NAME,
     BACKUP_OFFLINE_DIR,
     BACKUP_OFFLINE_INDEX,
-    backup_root,
+    readable_backup_root,
+)
+from services.backup_identity import (
+    is_frozen_backup_uuid,
+    resolve_backup_mod_pk,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,12 +45,16 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
             "issues": list[str],
         }
     """
-    mid = str(mod_id).strip()
+    token = str(mod_id).strip()
     issues: list[str] = []
     cover_ok = True
     offline_ok = True
 
-    if not mid.isdigit():
+    dest = readable_backup_root(token)
+    pk = resolve_backup_mod_pk(
+        internal_id=token, mod_pk=token if token.isdigit() else None
+    )
+    if dest is None and not is_frozen_backup_uuid(token) and not pk.isdigit():
         return {
             "metadata_ok": False,
             "cover_ok": False,
@@ -54,7 +62,14 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
             "issues": ["invalid mod_id"],
         }
 
-    dest = backup_root(mid)
+    if dest is None:
+        return {
+            "metadata_ok": False,
+            "cover_ok": False,
+            "offline_ok": False,
+            "issues": ["metadata.json missing"],
+        }
+
     meta_file = dest / BACKUP_METADATA_NAME
     if not meta_file.is_file():
         return {
@@ -120,14 +135,14 @@ def validate_backup(mod_id: int | str) -> dict[str, Any]:
     try:
         from core.db_manager import get_db
 
-        row = get_db().get_mod_backup_row(mid)
+        row = get_db().get_mod_backup_row(pk) if pk.isdigit() else None
         if row:
             db_cover = str(row.get("backup_cover_path") or "").strip()
             db_offline = str(row.get("backup_offline_path") or "").strip()
             db_offline_status = str(row.get("offline_status") or "").strip()
             db_lkp = str(row.get("last_known_path") or "").strip()
     except Exception:  # noqa: BLE001
-        logger.debug("validate_backup DB peek failed for %s", mid, exc_info=True)
+        logger.debug("validate_backup DB peek failed for %s", token, exc_info=True)
 
     cover_declared = bool(
         str(data.get("cover_path") or "").strip() or db_cover

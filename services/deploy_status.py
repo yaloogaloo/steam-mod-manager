@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -91,12 +92,16 @@ def deploy_block_reason_for_mod_row(row: dict[str, Any] | None) -> str | None:
 
 
 def content_status_for_mod(
-    internal_id: int | str,
+    mod_pk: int | str,
     *,
     db: DatabaseManager | None = None,
 ) -> str:
+    from services.mod_library_cache import dal_mod_pk
+
     database = db if db is not None else get_db()
-    mid = str(internal_id).strip()
+    mid = dal_mod_pk(mod_pk)
+    if not mid:
+        return row_content_status(None)
     try:
         row = database.get_mod_backup_row(mid)
     except Exception:  # noqa: BLE001
@@ -122,21 +127,77 @@ def _iter_deployable_rel_files(source: Path) -> list[Path]:
     return files
 
 
-def content_fingerprint(source: Path) -> str:
+def content_fingerprint(
+    source: Path,
+    *,
+    files: list[tuple[str, Path]] | None = None,
+) -> str:
     """
     Lightweight fingerprint of deployable Library content.
 
     Uses relative path + size + mtime_ns (no full file hash).
+    When *files* is provided (FilePlan sources), do not walk the source tree.
     """
     root = Path(source)
     lines: list[str] = []
-    for path in sorted(_iter_deployable_rel_files(root), key=lambda p: str(p).lower()):
+    stat_count = 0
+    reused_sizes = 0
+    sizes: dict[str, int] = {}
+    if files is not None:
         try:
-            st = path.stat()
-            rel = path.relative_to(root).as_posix()
-            lines.append(f"{rel}|{st.st_size}|{getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9))}")
-        except OSError:
-            continue
+            from services.deploy_apply import current_apply_source_sizes
+
+            sizes = current_apply_source_sizes()
+        except Exception:  # noqa: BLE001
+            sizes = {}
+        items = files
+    else:
+        items = [
+            (path.relative_to(root).as_posix(), path)
+            for path in _iter_deployable_rel_files(root)
+        ]
+    for rel, path in sorted(items, key=lambda item: str(item[0]).lower()):
+        size = None
+        mtime_ns = 0
+        if sizes:
+            key = str(path)
+            if key not in sizes:
+                try:
+                    from services.deploy_op_profile import cached_resolve
+
+                    key = cached_resolve(path)
+                except OSError:
+                    key = str(path)
+            if key in sizes:
+                size = int(sizes[key])
+                reused_sizes += 1
+        if size is None:
+            try:
+                t_stat = time.perf_counter()
+                st = path.stat()
+                stat_count += 1
+                size = int(st.st_size)
+                mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+                from services.deploy_op_profile import record_op
+
+                record_op(
+                    "stat",
+                    (time.perf_counter() - t_stat) * 1000.0,
+                    path=str(path),
+                )
+            except OSError:
+                continue
+        lines.append(f"{rel}|{size}|{mtime_ns}")
+    try:
+        from services.deploy_stage_log import current_deploy_timing
+
+        sess = current_deploy_timing()
+        if sess is not None:
+            sess.diagnostics["fingerprint_stat_count"] = stat_count
+            sess.diagnostics["fingerprint_reused_copy_sizes"] = reused_sizes
+            sess.diagnostics["fingerprint_file_count"] = len(lines)
+    except Exception:  # noqa: BLE001
+        pass
     digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
     return digest
 
@@ -145,8 +206,18 @@ def folder_copy_target_for(
     managed: Path,
     *,
     mod_path: str | Path,
+    workspace_id: str = "",
 ) -> Path:
-    return (Path(mod_path).expanduser() / Path(managed).name).resolve()
+    """Game-mods wrapper for *managed*. Uses deploy_wrapper_folder, never PK."""
+    from services.deploy_rules.generic import deploy_wrapper_folder
+
+    basename = Path(managed).name
+    ws = str(workspace_id or "").strip()
+    try:
+        name = deploy_wrapper_folder(basename, ws) if ws else basename
+    except ValueError:
+        name = basename
+    return (Path(mod_path).expanduser() / name).resolve()
 
 
 def _norm(path: str | Path) -> str:
@@ -200,26 +271,48 @@ def classify_folder_copy_target(
     managed: Path,
     mod_path: str | Path,
     library_root: str | Path | None = None,
+    mod_pk: str | int | None = None,
+    workspace_id: str = "",
 ) -> str:
     """
     Classify the folder_copy destination.
 
     Returns: ``absent`` | ``empty`` | ``ours`` | ``foreign``
+
+    *internal_id* is Frozen UUID. *mod_pk* is SQLite PK for legacy manifests
+    that only store JSON ``mod_id``. Ownership is never inferred from
+    folder.name, Workshop ID, or numeric tokens.
     """
     mid = str(internal_id).strip()
-    target = folder_copy_target_for(managed, mod_path=mod_path)
+    pk = str(mod_pk or "").strip()
+
+    def _ours(manifest) -> bool:
+        frozen = str(manifest.internal_id or "").strip()
+        claimed_pk = str(manifest.mod_id or "").strip()
+        if frozen and frozen == mid:
+            return True
+        if pk and claimed_pk == pk:
+            return True
+        if claimed_pk and claimed_pk == mid:
+            return True
+        return False
+    target = folder_copy_target_for(
+        managed, mod_path=mod_path, workspace_id=workspace_id
+    )
     if not target.exists():
         return "absent"
     if not _target_has_payload(target):
         return "empty"
 
     our = load_manifest(managed)
-    if our is not None and str(our.internal_id or "").strip() in ("", mid):
+    if our is not None and (
+        not str(our.internal_id or our.mod_id or "").strip() or _ours(our)
+    ):
         if manifest_owns_target(our, target):
             return "ours"
         # Manifest for this mod exists but does not claim target — still ours if
         # deploy_path folder name matches and no other owner.
-        if str(our.internal_id or "").strip() == mid and not our.files:
+        if _ours(our) and not our.files:
             pass
 
     # Other Mods' manifests claiming files under target?
@@ -232,21 +325,20 @@ def classify_folder_copy_target(
                 other = load_manifest(folder)
                 if other is None:
                     continue
-                other_id = str(other.internal_id or "").strip()
-                if other_id and other_id == mid:
+                if _ours(other):
                     continue
                 if manifest_owns_target(other, target):
                     return "foreign"
         except Exception:  # noqa: BLE001
             logger.debug("foreign ownership scan failed", exc_info=True)
 
-    if our is not None and str(our.internal_id or "").strip() == mid:
+    if our is not None and _ours(our):
         # Previously deployed by us but fingerprint/targets drifted — allow update
         if any(
             _norm(e.target).startswith(_norm(target)) for e in (our.files or [])
         ):
             return "ours"
-        # Same mod_id on manifest with empty/partial claim: treat as ours for update
+        # Same identity on manifest with empty/partial claim: treat as ours for update
         return "ours"
 
     # Payload present, no safe ownership → conflict
@@ -273,7 +365,8 @@ def resolve_deployment_status(
     )
 
     database = db if db is not None else get_db()
-    mid = resolve_deploy_identity(internal_id, db=database)
+    frozen = str(internal_id or "").strip()
+    mid = resolve_deploy_identity(frozen, db=database)
     info = database.get_mod_deploy_info(mid) if mid.isdigit() else None
     db_status = (
         str(info.deploy_status or "").strip() if info else DEPLOY_STATUS_NOT_DEPLOYED
@@ -289,7 +382,7 @@ def resolve_deployment_status(
     source = managed_path
     if source is None:
         source = resolve_deploy_managed_path(
-            mid,
+            frozen or mid,
             db=database,
             library_root=root,
             file_manager=ModFileManager(root) if root is not None else None,
@@ -304,11 +397,20 @@ def resolve_deployment_status(
             except Exception:  # noqa: BLE001
                 cfg = None
             if cfg and str(cfg.mod_path or "").strip():
+                workspace_id = ""
+                try:
+                    display = database.get_mod_display_info(mid)
+                    if display is not None:
+                        workspace_id = str(display.workspace_id or "").strip()
+                except Exception:  # noqa: BLE001
+                    workspace_id = ""
                 kind = classify_folder_copy_target(
-                    internal_id=mid,
+                    internal_id=frozen,
+                    mod_pk=mid,
                     managed=Path(source),
                     mod_path=cfg.mod_path,
                     library_root=root,
+                    workspace_id=workspace_id,
                 )
                 if kind == "foreign":
                     return DEPLOYMENT_CONFLICT
@@ -364,6 +466,7 @@ def install_path_missing(install_path: str | None) -> bool:
 
 def resolve_game_install_path(
     *,
+    mod_pk: str | int | None = None,
     internal_id: str | int | None = None,
     app_id: int | str | None = None,
     db: DatabaseManager | None = None,
@@ -371,11 +474,16 @@ def resolve_game_install_path(
     """
     Resolve ``games.install_path`` for a Mod.
 
+    ``mod_pk`` is SQLite ``mods.mod_id``. ``internal_id`` remains a compatibility
+    alias for Frozen UUID or digit PK (resolved via ``dal_mod_pk``).
+
     Flow (no game-name / AppID special cases):
       known app_id / mod.app_id → games row → install_path
 
     Returns ``""`` when the game cannot be resolved or install_path is unset.
     """
+    from services.mod_library_cache import dal_mod_pk
+
     database = db if db is not None else get_db()
     aid = 0
     try:
@@ -383,10 +491,11 @@ def resolve_game_install_path(
     except (TypeError, ValueError):
         aid = 0
 
-    mid = str(internal_id or "").strip()
-    if not aid and mid.isdigit():
+    token = str(mod_pk if mod_pk is not None else internal_id or "").strip()
+    pk = dal_mod_pk(token) if token else ""
+    if not aid and pk:
         try:
-            info = database.get_mod_display_info(mid)
+            info = database.get_mod_display_info(pk)
         except Exception:  # noqa: BLE001
             info = None
         if info is not None:
@@ -412,9 +521,23 @@ def enrich_manifest_fingerprint(
     *,
     source: Path,
     managed: Path | None = None,
+    plan_files: list | None = None,
 ) -> DeployManifest:
     """Attach fingerprint / source_path onto an in-memory manifest (mutates)."""
-    fp = content_fingerprint(source)
+    fp_files: list[tuple[str, Path]] | None = None
+    if plan_files:
+        fp_files = []
+        for entry in plan_files:
+            rel = str(
+                getattr(entry, "source_relative", "")
+                or getattr(entry, "relative", "")
+                or ""
+            ).replace("\\", "/").strip()
+            raw = str(getattr(entry, "source", "") or "").strip()
+            if not rel or not raw:
+                continue
+            fp_files.append((rel, Path(raw)))
+    fp = content_fingerprint(source, files=fp_files)
     setattr(manifest, "content_fingerprint", fp)
     root = Path(managed) if managed is not None else Path(source)
     setattr(manifest, "source_path", str(root.resolve()))

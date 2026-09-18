@@ -51,7 +51,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def test_mod_list_item_forbids_heavy_fields() -> None:
     item = ModListItem(
-        internal_id="1",
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
         workspace_id="1",
         game_id=1,
         game_folder="G",

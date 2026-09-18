@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import weakref
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import (
@@ -44,8 +44,6 @@ from PySide6.QtWidgets import (
 )
 
 logger = logging.getLogger("window_lifecycle")
-
-TDialog = TypeVar("TDialog", bound=QDialog)
 
 _ALLOWED_TOPLEVEL_TYPES = (
     QMainWindow,
@@ -102,10 +100,6 @@ def register_toplevel(window: QWidget) -> QWidget:
     return window
 
 
-def is_registered_toplevel(window: QWidget) -> bool:
-    return window in _REGISTERED
-
-
 def is_allowed_toplevel(widget: QWidget) -> bool:
     """True for intentional windows/popups — never for orphan controls."""
     if isinstance(widget, _CONTROL_TYPES):
@@ -138,38 +132,11 @@ def is_illegal_toplevel(widget: QWidget) -> bool:
     return True
 
 
-def create_dialog(
-    dialog_cls: type[TDialog],
-    parent: QWidget | None,
-    *args: Any,
-    **kwargs: Any,
-) -> TDialog:
-    """Construct a dialog with a required parent and register it."""
-    owner = require_dialog_parent(parent, what=dialog_cls.__name__)
-    dialog = dialog_cls(*args, parent=owner, **kwargs)
-    register_toplevel(dialog)
-    return dialog
-
-
 def exec_dialog(dialog: QDialog) -> int:
     """Run a modal dialog that already has a parent; register if needed."""
     require_dialog_parent(dialog.parentWidget(), what=type(dialog).__name__)
     register_toplevel(dialog)
     return int(dialog.exec())
-
-
-def parented_widget(
-    widget_cls: type[QWidget],
-    parent: QWidget,
-    *args: Any,
-    **kwargs: Any,
-) -> QWidget:
-    """Create a child widget that is owned before any visibility change."""
-    if parent is None:  # type: ignore[comparison-overlap]
-        raise WindowOwnershipError(
-            f"{widget_cls.__name__} requires a parent before construction"
-        )
-    return widget_cls(*args, parent=parent, **kwargs)
 
 
 def describe_show_widget(widget: QWidget) -> str:

@@ -74,14 +74,14 @@ def test_cards_same_height_short_vs_long_display_name(
 
     card_a = ModCardWidget(
         short,
-        ModMetadata(published_file_id="1", internal_id="1", title="Short", managed_path=str(short)),
+        ModMetadata(published_file_id="1", internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4", mod_pk="1", title="Short", managed_path=str(short)),
         card_data=_card_data(mid="1", path=short, title="Short", has_offline=True, offline_status="archived"),
     )
     card_b = ModCardWidget(
         long,
         ModMetadata(
             published_file_id="2",
-            internal_id="2",
+            internal_id="22222222-2222-4222-8222-222222222222",
             title="Original Steam Workshop Title That Is Quite Long",
             managed_path=str(long),
             json_display_name=long_display,

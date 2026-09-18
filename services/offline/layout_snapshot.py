@@ -18,7 +18,6 @@ import json
 import logging
 import mimetypes
 import re
-import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,9 +28,6 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from core.mod_platform import (
-    OFFLINE_STATUS_ARCHIVED,
-    OFFLINE_STATUS_FAILED,
-    PLATFORM_GITHUB,
     PLATFORM_NEXUS,
     normalize_platform,
 )
@@ -226,14 +222,6 @@ class LayoutSnapshotProcessor:
         if node_id and _TRACKING_CLASS_RE.search(node_id):
             return True
         return False
-
-
-def process_layout_html(
-    html_text: str,
-    output_dir: Path | str,
-    **kwargs: Any,
-) -> LayoutProcessResult:
-    return LayoutSnapshotProcessor().process(html_text, output_dir, **kwargs)
 
 
 def _esc(value: Any) -> str:
@@ -1127,57 +1115,3 @@ class NexusSnapshotProvider:
             failure_reason=reason,
             asset_count=1,
         )
-
-
-def run_layout_offline_snapshot(
-    *,
-    source_url: str,
-    output_dir: Path | str,
-    platform: str,
-    layout_provider: Any | None = None,
-    title: str = "",
-) -> tuple[LayoutSnapshotResult, str]:
-    """
-    Run layout snapshot for one Mod page.
-
-    Returns ``(result, offline_status)``.
-    - Success → archived
-    - Nexus styled fallback → failed (page still openable)
-    - GitHub never writes a summary fallback — Playwright DOM only
-    """
-    plat = normalize_platform(platform)
-    target = Path(output_dir)
-    page_url = str(source_url or "").strip()
-    provider = layout_provider
-    if provider is None:
-        if plat == PLATFORM_GITHUB:
-            provider = GitHubSnapshotProvider(title=title)
-        else:
-            provider = NexusSnapshotProvider(title=title)
-
-    result = provider.snapshot(page_url, target)
-    if result.success and result.html_path.is_file() and not result.used_fallback:
-        return result, OFFLINE_STATUS_ARCHIVED
-    if result.success and result.html_path.is_file() and result.used_fallback:
-        return result, OFFLINE_STATUS_FAILED
-
-    # GitHub: fail hard — do not invent a summary / LOGIN_REQUIRED page.
-    if plat == PLATFORM_GITHUB:
-        return result, OFFLINE_STATUS_FAILED
-
-    reason = result.error or result.failure_reason or "snapshot failed"
-    index = write_nexus_fallback(
-        target, source_url=page_url, reason=reason, title=title
-    )
-    return (
-        LayoutSnapshotResult(
-            success=True,
-            html_path=index,
-            backend="fallback",
-            used_fallback=True,
-            error=reason,
-            failure_reason=reason,
-            asset_count=1,
-        ),
-        OFFLINE_STATUS_FAILED,
-    )

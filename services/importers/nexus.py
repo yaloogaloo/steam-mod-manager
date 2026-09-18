@@ -7,7 +7,6 @@ Internal PK is allocated separately and must never become Workspace ID.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -62,17 +61,6 @@ def local_nexus_external_id(folder_name: str) -> str:
     """Internal placeholder external_id for imports without a real Nexus Mod ID."""
     name = str(folder_name or "").strip() or "unknown"
     return f"local/{name}"
-
-
-def local_directory_external_id(folder: str | Path) -> str:
-    """
-    REMOVED as an identity key — path must never become external_id.
-
-    Returns empty string so callers fall through to official URL / Sync-only
-    workshop identity. Kept as a named stub so import call sites fail closed.
-    """
-    _ = folder
-    return ""
 
 
 class NexusImporter(ModImporter):

@@ -12,7 +12,7 @@ from services.deploy_rules.base import (
     StrategyResult,
     inert_strategy_deploy,
 )
-from services.deploy_rules.generic import _iter_deployable_files
+from services.deploy_rules.generic import iter_deploy_payload_files
 from services.deploy_rules.manifest import ManifestFileEntry, remove_empty_parents
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
 
@@ -62,18 +62,16 @@ class CustomPathStrategy(DeployStrategy):
         except AttributeError:
             pass
 
-        files = _iter_deployable_files(
-            source, allowed_rel_paths=ctx.allowed_rel_paths
-        )
+        payload = iter_deploy_payload_files(ctx)
         entries = [
             ManifestFileEntry(
                 source=str(src_file),
-                target=str((target / src_file.relative_to(source)).resolve()),
+                target=str((target / rel).resolve()),
                 type=self.deploy_type,
-                source_relative=src_file.relative_to(source).as_posix(),
-                relative=src_file.relative_to(source).as_posix(),
+                source_relative=rel.as_posix(),
+                relative=rel.as_posix(),
             )
-            for src_file in files
+            for src_file, rel in payload
         ]
         return StrategyResult(
             success=True,

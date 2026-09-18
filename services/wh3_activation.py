@@ -519,11 +519,11 @@ def _filter_wh3_selected_archives(
         return list(discovered)
     database = db if db is not None else get_db()
     try:
-        from services.identity_service import resolve_mod_pk
+        from services.mod_library_cache import dal_mod_pk
 
-        pk = resolve_mod_pk(ref.internal_id, db=database) or str(
-            ref.internal_id or ""
-        ).strip()
+        pk = dal_mod_pk(ref.internal_id)
+        if not pk:
+            return list(discovered)
         bundle = database.get_mod_files(pk)
     except Exception:  # noqa: BLE001
         return list(discovered)

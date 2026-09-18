@@ -81,4 +81,4 @@ Cache hit stays on the UI thread (manifest parse + fingerprint, no CAS content h
 - `test_open_cache_miss_background`
 - `test_finalize_failure_cleanup`
 
-in `tests/test_phase11_open_hardening.py`.
+in `tests/contract/test_offline_open_contract.py`.

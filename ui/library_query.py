@@ -133,7 +133,11 @@ SORT_LABELS: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True)
 class ModFilterIndex:
-    """Cached fields used for library search / filter / sort."""
+    """Cached fields used for library search / filter / sort.
+
+    ``mod_id`` is SQLite PK (Deployment Record membership).
+    ``internal_id`` is Frozen UUID (Library selection / card identity).
+    """
 
     mod_id: str
     display_name: str
@@ -162,6 +166,9 @@ class ModFilterIndex:
     source_type: str = ""
     local_size_bytes: int | None = None
     local_size_status: str = "unknown"
+    # Frozen UUID entity identity. ``mod_id`` remains SQLite PK for
+    # Deployment Record membership. Never compare Library selection to ``mod_id``.
+    internal_id: str = ""
 
 
 def normalize_record_mod_id(raw: object) -> str:

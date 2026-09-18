@@ -4,25 +4,36 @@ from __future__ import annotations
 
 import os
 import stat
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 
 def _should_skip_path(path: Path) -> bool:
     """Skip symlinks and Windows reparse points (junctions) during deploy scans."""
+    from services.deploy_op_profile import record_op
+
+    t0 = time.perf_counter()
     try:
-        if path.is_symlink():
-            return True
-    except OSError:
-        return True
-    if os.name == "nt":
         try:
-            attrs = path.lstat().st_file_attributes
-            if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            if path.is_symlink():
                 return True
-        except (AttributeError, OSError):
-            pass
-    return False
+        except OSError:
+            return True
+        if os.name == "nt":
+            try:
+                attrs = path.lstat().st_file_attributes
+                if attrs & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                    return True
+            except (AttributeError, OSError):
+                pass
+        return False
+    finally:
+        record_op(
+            "lstat",
+            (time.perf_counter() - t0) * 1000.0,
+            path=str(path),
+        )
 
 
 def safe_iter_files(
@@ -53,33 +64,49 @@ def safe_iter_files(
     name_l = name.lower() if name else None
     suffix_l = suffix.lower() if suffix else None
 
-    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        current = Path(dirpath)
-        dirnames[:] = [
-            dname
-            for dname in dirnames
-            if not _should_skip_path(current / dname)
-        ]
-        for fname in filenames:
-            path = current / fname
-            if _should_skip_path(path):
-                continue
-            if name_l is not None and fname.lower() != name_l:
-                continue
-            if suffix_l is not None and Path(fname).suffix.lower() != suffix_l:
-                continue
-            try:
-                if not path.is_file():
+    from services.deploy_op_profile import note_tree, record_op
+
+    walk_ms = 0.0
+    file_count = 0
+    dir_count = 0
+    t_seg = time.perf_counter()
+    try:
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            current = Path(dirpath)
+            dir_count += 1
+            dirnames[:] = [
+                dname
+                for dname in dirnames
+                if not _should_skip_path(current / dname)
+            ]
+            for fname in filenames:
+                path = current / fname
+                if _should_skip_path(path):
                     continue
-            except OSError:
-                continue
-            if predicate is not None:
-                try:
-                    if not predicate(path):
+                if name_l is not None and fname.lower() != name_l:
+                    continue
+                if suffix_l is not None and Path(fname).suffix.lower() != suffix_l:
+                    continue
+                if predicate is not None:
+                    try:
+                        if not predicate(path):
+                            continue
+                    except OSError:
                         continue
-                except OSError:
-                    continue
-            yield path
+                file_count += 1
+                walk_ms += (time.perf_counter() - t_seg) * 1000.0
+                yield path
+                t_seg = time.perf_counter()
+        walk_ms += (time.perf_counter() - t_seg) * 1000.0
+    finally:
+        record_op("os.walk", walk_ms, path=str(base))
+        note_tree(
+            stage="walk",
+            kind="source",
+            root=str(base),
+            file_count=file_count,
+            directory_count=dir_count,
+        )
 
 
 def safe_iter_dirs(

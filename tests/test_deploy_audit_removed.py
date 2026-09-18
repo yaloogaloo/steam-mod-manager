@@ -193,4 +193,6 @@ def test_phase8_deploy_surface_still_present() -> None:
     assert DEPLOYMENT_DEPLOYED == "deployed"
     assert DEPLOYMENT_OUTDATED == "outdated"
     assert DEPLOYMENT_CONFLICT == "conflict"
-    assert (Path(__file__).resolve().parents[1] / "services" / "deploy_conflict.py").exists()
+    assert not (
+        Path(__file__).resolve().parents[1] / "services" / "deploy_conflict.py"
+    ).exists()

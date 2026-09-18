@@ -19,9 +19,11 @@ from services.metadata_backup import (
     BACKUP_METADATA_NAME,
     BACKUP_OFFLINE_DIR,
     BACKUP_OFFLINE_INDEX,
-    backup_root,
+    readable_backup_root,
+    write_backup_root_for,
     load_backup,
 )
+from services.backup_identity import BackupIdentityError
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +130,10 @@ def last_rediscovery_stats() -> dict[str, Any]:
 def has_valid_backup(mod_id: int | str, *, db: Any | None = None) -> bool:
     """True when the known Backup bucket has ``metadata.json``. No tree scan."""
     mid = str(mod_id or "").strip()
-    if not mid.isdigit():
-        return False
     del db
     try:
-        return (backup_root(mid) / BACKUP_METADATA_NAME).is_file()
+        dest = readable_backup_root(mid)
+        return dest is not None and (dest / BACKUP_METADATA_NAME).is_file()
     except OSError:
         return False
 
@@ -361,7 +362,11 @@ def persist_entity_metadata_to_backup(
     if row is None or display is None:
         return False
 
-    dest = backup_root(mid)
+    try:
+        dest = write_backup_root_for(mid)
+    except BackupIdentityError:
+        logger.warning("backup write refused: invalid frozen internal_id mid=%s", mid)
+        return False
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -485,7 +490,10 @@ def persist_miss_cover(
         src = validate_cover_image(cover_source)
     except (FileNotFoundError, ValueError):
         return ""
-    dest = backup_root(mid)
+    try:
+        dest = write_backup_root_for(mid)
+    except BackupIdentityError:
+        return ""
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -508,11 +516,14 @@ def persist_miss_cover(
 
 def backup_offline_index(mod_id: int | str) -> Path | None:
     mid = str(mod_id or "").strip()
-    if not mid.isdigit():
+    if not mid:
         return None
     from services.offline.backup_closure import usable_backup_offline_index
 
-    return usable_backup_offline_index(backup_root(mid) / BACKUP_OFFLINE_DIR)
+    dest = readable_backup_root(mid)
+    if dest is None:
+        return None
+    return usable_backup_offline_index(dest / BACKUP_OFFLINE_DIR)
 
 
 def _iso_epoch(value: str | None) -> float:

@@ -55,7 +55,12 @@ def is_rel_path_allowed(
 
 @dataclass
 class DeployContext:
-    """Inputs shared by all deploy strategies."""
+    """Inputs shared by all deploy strategies.
+
+    ``internal_id`` is Frozen Entity Identity (UUID). Never ``str(mod_id)``.
+    ``mod_pk`` is the SQLite ``mods.mod_id`` handle for DAL/SQL only.
+    ``workspace_id`` is platform display identity for game rules (WH3, etc.).
+    """
 
     internal_id: str
     source: Path
@@ -71,6 +76,11 @@ class DeployContext:
     custom_deploy_path: str = ""
     # Optional workspace / Steam file id (used by game-specific rules).
     workspace_id: str = ""
+    # SQLite ``mods.mod_id``. 0 = unset (tests); production always sets PK.
+    mod_pk: int = 0
+    # Extracted archive trees only. Outer managed files stay on content_root
+    # and are never copied into this overlay.
+    extract_overlay_roots: tuple[Path, ...] = ()
 
     def content_root(self) -> Path:
         """Directory whose files are copied (may be an extract staging folder)."""

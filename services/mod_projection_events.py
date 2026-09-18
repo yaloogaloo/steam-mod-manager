@@ -67,27 +67,36 @@ def notify_mods_changed(internal_ids: Iterable[str | int]) -> None:
             seen.append(mid)
     if not seen:
         return
+    frozen_ids: list[str] = []
     try:
         from services.mod_library_cache import get_library_cache
 
         cache = get_library_cache()
         for mid in seen:
+            key = mid
             try:
-                cache.refresh_projection(mid)
+                updated = cache.refresh_projection(mid)
+                if updated is not None:
+                    found = str(getattr(updated, "id", "") or "").strip()
+                    if found:
+                        key = found
             except Exception:  # noqa: BLE001
                 logger.debug("refresh_projection failed internal_id=%s", mid, exc_info=True)
+            if key not in frozen_ids:
+                frozen_ids.append(key)
     except Exception:  # noqa: BLE001
         from services.crash_trace import log_exception
 
         log_exception("notify_mods_changed.refresh_projection")
+        frozen_ids = list(seen)
     if _should_marshal_to_gui():
         bridge = _gui_bridge()
         if bridge is None:
             return
-        for mid in seen:
+        for mid in frozen_ids:
             bridge.changed.emit(mid)
         return
-    for mid in seen:
+    for mid in frozen_ids:
         _invoke_listeners(mid)
 
 
@@ -95,7 +104,8 @@ def notify_mod_changed(internal_id: str | int) -> None:
     """
     Invalidate and refresh one Mod's Library Projection after DB commit.
 
-    Callers must pass the internal Mod id only — never a field list.
+    Callers pass Frozen ``internal_id`` (UUID). Digit PK is resolved to UUID
+    before UI listeners run so Library selection never rebinds on SQLite PK.
 
     ``refresh_projection`` stays synchronous on the caller thread.
     UI listeners are marshaled onto the Qt GUI thread when a QApplication
@@ -104,10 +114,15 @@ def notify_mod_changed(internal_id: str | int) -> None:
     mid = str(internal_id or "").strip()
     if not mid:
         return
+    frozen = mid
     try:
         from services.mod_library_cache import get_library_cache
 
-        get_library_cache().refresh_projection(mid)
+        updated = get_library_cache().refresh_projection(mid)
+        if updated is not None:
+            key = str(getattr(updated, "id", "") or "").strip()
+            if key:
+                frozen = key
     except Exception:  # noqa: BLE001
         from services.crash_trace import log_exception
 
@@ -118,12 +133,12 @@ def notify_mod_changed(internal_id: str | int) -> None:
         if bridge is None:
             logger.warning(
                 "notify_mod_changed skipped UI listeners (no GUI bridge) internal_id=%s",
-                mid,
+                frozen,
             )
             return
-        bridge.changed.emit(mid)
+        bridge.changed.emit(frozen)
         return
-    _invoke_listeners(mid)
+    _invoke_listeners(frozen)
 
 
 def _invoke_listeners(mid: str) -> None:

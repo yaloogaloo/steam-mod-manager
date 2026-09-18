@@ -94,3 +94,49 @@ def test_profile_stages_include_required_names(tmp_path: Path, db: DatabaseManag
     names = [row["stage"] for row in _stage_table(out)]
     for required in ("resolve", "plan", "copy", "validate"):
         assert required in names, names
+    timing = out.get("deploy_timing") or {}
+    for key in (
+        "resolve_ms",
+        "verify_source_ms",
+        "extract_ms",
+        "plan_ms",
+        "backup_ms",
+        "copy_ms",
+        "manifest_ms",
+        "verify_ms",
+        "total_ms",
+    ):
+        assert key in timing, timing
+        assert float(timing[key]) >= 0.0
+    assert timing["total_ms"] > 0.0
+    assert timing.get("slowest_stage")
+
+
+def test_profile_51mb_folder_copy_reports_slowest_stage(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    chunk = b"S" * (1024 * 1024)
+    payload = chunk * 51
+    out = _deploy(tmp_path, db, "37801051", {"payload.bin": payload})
+    assert out.get("success") is True, out
+    timing = out.get("deploy_timing") or {}
+    assert float(timing.get("total_ms") or 0) > 0.0
+    slowest = str(timing.get("slowest_stage") or "")
+    assert slowest.endswith("_ms"), timing
+    diagnostics = timing.get("diagnostics") or {}
+    # After hash-while-copy, the hash stage must not re-read the 51MB payload.
+    assert int(diagnostics.get("hash_from_disk_files") or 0) == 0
+    assert int(diagnostics.get("hashed_during_copy") or 0) >= 1
+    assert float(timing["total_ms"]) < 60_000.0, timing
+
+
+def test_profile_many_small_files_reports_bottleneck(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    files = {f"n{i:04d}.txt": b"x" * 1024 for i in range(400)}
+    out = _deploy(tmp_path, db, "37801400", files)
+    assert out.get("success") is True, out
+    timing = out.get("deploy_timing") or {}
+    slowest = str(timing.get("slowest_stage") or "")
+    assert slowest.endswith("_ms"), timing
+    assert float(timing["total_ms"]) < 60_000.0, timing

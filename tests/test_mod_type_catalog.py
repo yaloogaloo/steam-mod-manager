@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import MOD_TYPE_EXTENSION
+from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION
 from services.mod_type_catalog import (
     ModTypeCatalog,
     ModTypeCatalogError,
@@ -280,7 +280,8 @@ def test_extension_type_id_survives_display_rename(
 
 
 def test_extension_type_id_is_per_game_not_global(catalog: ModTypeCatalog) -> None:
-    other = catalog.add_type(111, "美化")
+    other = catalog.add_type(111, MOD_TYPE_BEAUTIFY)
+    plain = catalog.add_type(111, "普通")
     ext_a = catalog.add_type(111, MOD_TYPE_EXTENSION)
     ext_b = catalog.add_type(222, MOD_TYPE_EXTENSION)
     assert catalog.extension_type_id(111) == ext_a.type_id
@@ -289,6 +290,10 @@ def test_extension_type_id_is_per_game_not_global(catalog: ModTypeCatalog) -> No
     assert not catalog.is_extension_type(111, other.type_id)
     assert not catalog.is_extension_type(111, ext_b.type_id)
     assert catalog.is_extension_type(222, ext_b.type_id)
+    assert catalog.unlocks_subcategory(111, other.type_id)
+    assert catalog.unlocks_subcategory(111, ext_a.type_id)
+    assert not catalog.unlocks_subcategory(111, plain.type_id)
+    assert catalog.unlocks_subcategory(222, ext_b.type_id)
 
 
 def test_extension_type_id_inferred_from_canonical_name(

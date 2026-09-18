@@ -19,7 +19,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from core.paths import data_dir, default_mod_library  # noqa: E402
-from services.library_diagnostics import build_library_diagnostics  # noqa: E402
+from tools.archive.library_diagnostics import build_library_diagnostics  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:

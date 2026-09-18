@@ -32,10 +32,6 @@ _HTTP_URL_RE = re.compile(
 )
 
 
-def is_mhtml_path(path: str | Path) -> bool:
-    return Path(path).suffix.lower() in MHTML_SUFFIXES
-
-
 def _clean_cid(value: str) -> str:
     text = unquote(str(value or "").strip())
     if text.lower().startswith("cid:"):

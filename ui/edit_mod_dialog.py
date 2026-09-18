@@ -97,7 +97,7 @@ class EditModDialog(QDialog):
 
         # Prefer live mod→game→install_path resolution over a stale caller string.
         resolved = resolve_game_install_path(
-            internal_id=(self._mod_ids[0] if self._mod_ids else ""),
+            mod_pk=(self._mod_ids[0] if self._mod_ids else ""),
             app_id=self._game_id,
         )
         if resolved:
@@ -194,7 +194,7 @@ class EditModDialog(QDialog):
         self.category_edit = QLineEdit()
         self.category_edit.setObjectName("editModCategoryEdit")
         self.category_edit.setText(str(category or "").strip())
-        self.category_edit.setPlaceholderText("可选，仅拓展类型显示")
+        self.category_edit.setPlaceholderText("可选，仅拓展、美化类型显示")
         form.addRow("分类", self.category_edit)
         self._category_label = form.labelForField(self.category_edit)
         self._on_mod_type_changed()
@@ -337,9 +337,8 @@ class EditModDialog(QDialog):
             return
         from services.mod_type_catalog import get_mod_type_catalog
 
-        ext_id = get_mod_type_catalog().extension_type_id(self._game_id)
         selected = self.selected_type_id()
-        show = ext_id is not None and selected is not None and selected == ext_id
+        show = get_mod_type_catalog().unlocks_subcategory(self._game_id, selected)
         self._set_form_row_visible(self.category_edit, show)
 
     def selected_platform(self) -> str:
@@ -373,7 +372,7 @@ class EditModDialog(QDialog):
         Falls back to the constructor-injected path only when the game is unknown.
         """
         mid = self._mod_ids[0] if self._mod_ids else ""
-        resolved = resolve_game_install_path(internal_id=mid, app_id=self._game_id)
+        resolved = resolve_game_install_path(mod_pk=mid, app_id=self._game_id)
         if resolved:
             return resolved
         return str(self._game_install_path or "").strip()

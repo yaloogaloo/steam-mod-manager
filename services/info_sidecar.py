@@ -437,12 +437,13 @@ def write_sidecar_for_mod(
             from services.mod_identity import read_internal_id
 
             mid = read_internal_id(data)
-            if not mid.isdigit():
-                mid = ""
-    if not mid or not mid.isdigit():
+    from services.mod_library_cache import dal_mod_pk
+
+    pk = dal_mod_pk(mid) if mid else ""
+    if not pk:
         return None
     try:
-        sidecar = build_sidecar_from_db(mid, root, db=db)
+        sidecar = build_sidecar_from_db(pk, root, db=db)
         path = save_info_sidecar(
             root, sidecar, sync_backup=sync_backup, sync_reason=sync_reason
         )
@@ -451,7 +452,7 @@ def write_sidecar_for_mod(
         from services.mod_identity import set_info_internal_id
 
         database = db if db is not None else get_db()
-        info = database.get_mod_display_info(mid)
+        info = database.get_mod_display_info(pk)
         patch: dict[str, Any] = {}
         if sidecar.internal_id:
             patch = set_info_internal_id(patch, sidecar.internal_id)

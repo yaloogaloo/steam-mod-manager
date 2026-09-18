@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -262,10 +263,18 @@ def verify_file_plan(plan: Any) -> FilePlanVerifyResult:
             missing.append("(empty target_absolute)")
             continue
         target = Path(raw)
-        if target.is_file():
+        from services.deploy_op_profile import record_op
+
+        t0 = time.perf_counter()
+        is_file = target.is_file()
+        record_op("is_file", (time.perf_counter() - t0) * 1000.0, path=raw)
+        if is_file:
             verified += 1
             continue
-        if target.is_dir():
+        t1 = time.perf_counter()
+        is_dir = target.is_dir()
+        record_op("is_dir", (time.perf_counter() - t1) * 1000.0, path=raw)
+        if is_dir:
             # Rare directory targets — treat as present.
             verified += 1
             continue

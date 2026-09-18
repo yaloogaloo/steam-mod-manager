@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -19,6 +20,22 @@ from services.offline.github import GithubOfflineProvider
 from services.offline.modio import ModioOfflineProvider
 from services.offline.nexus_manual import NexusManualOfflineProvider
 from services.offline.steam import SteamOfflineProvider
+
+logger = logging.getLogger(__name__)
+
+
+def _require_offline_html_mod_pk(mod_id: str | int) -> str:
+    """Normalize Frozen UUID or digit PK to SQLite PK for Offline HTML.
+
+    Reuses :func:`dal_mod_pk`. Does not guess workspace_id / folder / URL.
+    """
+    from services.mod_library_cache import dal_mod_pk
+
+    token = str(mod_id or "").strip()
+    pk = dal_mod_pk(token)
+    if not pk:
+        raise ValueError(f"Mod not found in database: {token}")
+    return pk
 
 
 class OfflineManager:
@@ -64,7 +81,12 @@ class OfflineManager:
         raise ValueError(f"No offline provider for platform={plat!r}")
 
     def get_provider_for_mod(self, mod_id: str | int) -> OfflineProvider:
-        info = self.db.get_mod_display_info(mod_id)
+        from services.mod_library_cache import dal_mod_pk
+
+        mid = dal_mod_pk(mod_id)
+        if not mid:
+            raise ValueError(f"Mod not found: {mod_id}")
+        info = self.db.get_mod_display_info(mid)
         if info is None:
             raise ValueError(f"Mod not found: {mod_id}")
         return self.get_provider_for_platform(info.platform)
@@ -81,7 +103,9 @@ class OfflineManager:
     ) -> OfflineUpdateResult:
         """Import a local HTML file as the Nexus offline snapshot."""
         del metadata
-        mid = str(mod_id).strip()
+        token = str(mod_id or "").strip()
+        mid = _require_offline_html_mod_pk(token)
+        logger.info("[NEXUS_OFFLINE] html_entry token=%s mod_pk=%s", token, mid)
         info = self.db.get_mod_display_info(mid)
         plat = normalize_platform(
             platform
@@ -120,8 +144,11 @@ class OfflineManager:
         *force_refresh*: when True (manual UI save), providers must not treat an
         existing page as a successful refresh (Steam: no cache-hit skip).
         """
-        mid = str(mod_id).strip()
-        info = self.db.get_mod_display_info(mid)
+        from services.mod_library_cache import dal_mod_pk
+
+        token = str(mod_id).strip()
+        mid = dal_mod_pk(token)
+        info = self.db.get_mod_display_info(mid) if mid else None
         if info is not None:
             plat = normalize_platform(info.platform)
         else:
@@ -131,7 +158,7 @@ class OfflineManager:
         if info is None and plat != PLATFORM_STEAM:
             # Steam can still archive from filesystem metadata alone.
             if plat in (PLATFORM_NEXUS, PLATFORM_GITHUB, PLATFORM_MODIO):
-                raise ValueError(f"Mod not found: {mid}")
+                raise ValueError(f"Mod not found: {token}")
 
         if managed_path is not None and mid.isdigit():
             from services.path_lifecycle import resolve_managed_folder
@@ -198,8 +225,11 @@ def attach_nexus_offline_page(
     any missing metadata fields.  This is the ONLY legitimate call site for the
     scraper — refresh_mod / reconcile / show_mod MUST NOT call it.
     """
+    token = str(mod_id or "").strip()
+    pk = _require_offline_html_mod_pk(token)
+    logger.info("[NEXUS_OFFLINE] html_attach token=%s mod_pk=%s", token, pk)
     result = OfflineManager(library_root=library_root).import_mod_offline_html(
-        mod_id,
+        pk,
         page_path,
         managed_path=managed_path,
         platform=PLATFORM_NEXUS,
@@ -227,17 +257,17 @@ def attach_nexus_offline_page(
 
     if getattr(result, "status", None) == OFFLINE_STATUS_ARCHIVED and dest is not None:
         parsed_title = _apply_nexus_offline_metadata(
-            mod_id, dest, merge_mode=merge_mode
+            pk, dest, merge_mode=merge_mode
         )
         dest = _maybe_rename_empty_mod_folder_to_parsed_title(
-            mod_id, dest, parsed_title
+            pk, dest, parsed_title
         )
 
     try:
         from services.metadata_backup_sync import sync_after_metadata_change
 
         if dest is not None:
-            sync_after_metadata_change(mod_id, dest, "offline_change")
+            sync_after_metadata_change(pk, dest, "offline_change")
     except Exception:  # noqa: BLE001
         pass
     return result

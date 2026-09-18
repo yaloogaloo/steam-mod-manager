@@ -87,8 +87,8 @@ def test_resolve_game_install_path_from_mod(db: DatabaseManager, tmp_path: Path)
         db, external_id="88001", title="PakMod", app_id=BG3_APP_ID
     )
 
-    assert resolve_game_install_path(internal_id="88001", db=db) == str(install)
-    assert resolve_game_install_path(internal_id=str(created.mod_id), db=db) == str(
+    assert resolve_game_install_path(mod_pk=str(created.mod_id), db=db) == str(install)
+    assert resolve_game_install_path(internal_id=str(created.internal_id), db=db) == str(
         install
     )
     assert resolve_game_install_path(app_id=BG3_APP_ID, db=db) == str(install)
@@ -212,9 +212,9 @@ def test_dialog_resolves_install_path_from_internal_id_alone(
     install = tmp_path / "GameRoot"
     install.mkdir()
     _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
-    create_steam_test_mod(db, external_id="88041", title="OnlyModId", app_id=BG3_APP_ID)
+    created = create_steam_test_mod(db, external_id="88041", title="OnlyModId", app_id=BG3_APP_ID)
 
-    dlg = EditModDialog(mod_id="88041")  # no game_install_path / game_id
+    dlg = EditModDialog(mod_id=str(created.mod_id))  # no game_install_path / game_id
     assert dlg.browse_start_directory() == str(install)
     dlg.close()
 

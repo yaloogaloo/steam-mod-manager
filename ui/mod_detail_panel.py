@@ -66,6 +66,13 @@ from core.db_manager import (
 TAG_TYPE_ABANDONED = "abandoned"
 
 
+def _dal_mod_pk(internal_id: str | int | None) -> str:
+    """UI Frozen UUID (or legacy PK handle) → SQLite PK for DAL only."""
+    from services.mod_library_cache import dal_mod_pk
+
+    return dal_mod_pk(internal_id)
+
+
 def _mod_type_name_from_info(info: object | None) -> str:
     """Type Definition display name from already-loaded display info."""
     if info is None:
@@ -83,11 +90,11 @@ def _mod_type_name_from_info(info: object | None) -> str:
 
 def _primary_mod_type(mod_id: str) -> str:
     """Resolved Type Definition name for this Mod (display only)."""
-    mid = str(mod_id or "").strip()
-    if not mid:
+    pk = _dal_mod_pk(mod_id)
+    if not pk:
         return ""
     try:
-        info = get_db().get_mod_display_info(mid)
+        info = get_db().get_mod_display_info(pk)
     except Exception:  # noqa: BLE001
         return ""
     return _mod_type_name_from_info(info)
@@ -532,10 +539,10 @@ class ModDetailPanel(QWidget):
     metadata_saved = Signal(object)  # Path managed_path after successful save
     tags_saved = Signal(object)  # Path after user tags / conflicts saved
     batch_platform_saved = Signal(object)  # list[str] mod_ids after batch source save
-    deploy_requested = Signal(str)  # mod_id — library_view starts DeployWorker
+    deploy_requested = Signal(str)  # Frozen UUID — library_view starts DeployWorker
     redeploy_requested = Signal(str)
     undeploy_requested = Signal(str)
-    remove_requested = Signal(str)  # mod_id — library confirms then removes
+    remove_requested = Signal(str)  # Frozen UUID — library confirms then removes
     offline_page_updated = Signal(object)  # Path managed_path after offline download
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -551,6 +558,8 @@ class ModDetailPanel(QWidget):
         self._resolved = None
         self._metadata: ModMetadata | None = None
         self._display_info: ModDisplayInfo | None = None
+        self._entity_internal_id: str = ""
+        self._mod_pk: str = ""
         self._mode = MODE_EMPTY
         self._deploy_busy = False
         self._conflict_hint = ""
@@ -691,7 +700,30 @@ class ModDetailPanel(QWidget):
         from services.perf_stage import perf_stage
 
         with perf_stage("detail_resolve_metadata", mod_id=str(mod_id or "")):
-            resolved = resolve_mod_metadata(mod_id, managed_path)
+            token = str(mod_id or "").strip()
+            from services.deploy_identity import is_frozen_internal_uuid
+
+            pk = _dal_mod_pk(token)
+            if is_frozen_internal_uuid(token):
+                frozen = token
+            else:
+                frozen = ""
+                if pk:
+                    try:
+                        from services.mod_library_cache import fetch_mod_list_item
+
+                        item = fetch_mod_list_item(pk)
+                        if item is not None and is_frozen_internal_uuid(
+                            str(item.internal_id or "").strip()
+                        ):
+                            frozen = str(item.internal_id).strip()
+                    except Exception:  # noqa: BLE001
+                        frozen = ""
+                if not frozen:
+                    frozen = token if not token.isdigit() else ""
+            self._entity_internal_id = frozen
+            self._mod_pk = pk
+            resolved = resolve_mod_metadata(pk or None, managed_path)
         path = Path(managed_path) if managed_path is not None else None
         if resolved is not None and resolved.managed_path:
             path = Path(resolved.managed_path)
@@ -712,23 +744,19 @@ class ModDetailPanel(QWidget):
             mid_stub = str(mod_id or "").strip()
             meta = ModMetadata(
                 published_file_id="",
-                internal_id=mid_stub if mid_stub.isdigit() else "",
+                internal_id=self._entity_internal_id or mid_stub,
                 title=self._managed_path.name,
                 managed_path=str(self._managed_path),
             )
         meta.managed_path = str(self._managed_path)
         meta.local_path = str(self._managed_path)
-        if str(mod_id or "").strip().isdigit() and not str(meta.internal_id or "").strip():
-            meta.internal_id = str(mod_id).strip()
+        if self._entity_internal_id and not str(meta.internal_id or "").strip():
+            meta.internal_id = self._entity_internal_id
         self._metadata = meta
 
         self._display_info = None
-        mid = str(
-            mod_id
-            or meta.entity_internal_id()
-            or ""
-        ).strip()
-        if str(mid).isdigit():
+        mid = self._mod_pk
+        if mid:
             perf.phase("database query")
             try:
                 self._display_info = get_db().get_mod_display_info(mid)
@@ -750,10 +778,10 @@ class ModDetailPanel(QWidget):
     ) -> None:
         """Re-bind Detail from DB/resolver projection after a mutation.
 
-        Always reload by ``internal_id`` (mod_id). Path-only ``show_mod``
+        Always reload by Frozen ``internal_id``. Path-only ``show_mod``
         returns empty metadata because the resolver refuses path invention.
         """
-        mid = str(mod_id or self.current_mod_id() or "").strip()
+        mid = str(mod_id or self.current_internal_id() or "").strip()
         path: Path | None
         if managed_path is not None:
             path = Path(managed_path)
@@ -785,6 +813,8 @@ class ModDetailPanel(QWidget):
         self._resolved = None
         self._metadata = None
         self._display_info = None
+        self._entity_internal_id = ""
+        self._mod_pk = ""
         self._batch_mod_ids = []
         self._batch_game_name = ""
         self._batch_game_id = 0
@@ -962,15 +992,9 @@ class ModDetailPanel(QWidget):
             return
         meta = self._metadata
         info = self._display_info
-        # Runtime identity: mods.mod_id PK (= internal_id). Never workspace_id/path.
-        mid = ""
-        if info is not None:
-            mid = str(info.mod_id or "").strip()
-        if not mid and self._resolved is not None:
-            mid = str(self._resolved.internal_id or "").strip()
+        # Runtime identity: Frozen UUID for UI; SQLite PK for EditModDialog / DAL.
+        mid = self.current_mod_pk()
         if not mid:
-            mid = str(self.current_mod_id() or "").strip()
-        if not mid.isdigit():
             logger.warning(
                 "open_edit_info_dialog: missing internal_id "
                 "managed_path=%r display_info=%s resolved=%s",
@@ -1010,7 +1034,7 @@ class ModDetailPanel(QWidget):
 
         try:
             game_install_path = resolve_game_install_path(
-                internal_id=mid, app_id=game_id
+                mod_pk=mid, app_id=game_id
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -1154,7 +1178,8 @@ class ModDetailPanel(QWidget):
     def _open_batch_edit_dialog(self) -> None:
         from core.mod_platform import normalize_platform
 
-        ids = list(self._batch_mod_ids)
+        ids = [_dal_mod_pk(m) or str(m).strip() for m in self._batch_mod_ids]
+        ids = [i for i in ids if i]
         if len(ids) <= 1:
             return
         dlg = EditModDialog(
@@ -2573,21 +2598,9 @@ class ModDetailPanel(QWidget):
             self.view_id.setText(id_value or "—")
             self.btn_copy_id.setEnabled(bool(id_value))
             self.btn_header_copy_id.setEnabled(bool(id_value))
-        from core.debug_config import debug_mode_enabled
-
-        internal_id = str(
-            (info.mod_id if info is not None else "")
-            or (self.current_mod_id() or "")
-            or ""
-        ).strip()
         self.meta_workspace_line.setText(
             f"Workspace ID: {workspace_id or '—'}"
         )
-        if debug_mode_enabled() and internal_id:
-            self.meta_workspace_line.setText(
-                f"Workspace ID: {workspace_id or '—'}  |  "
-                f"Internal Database ID: {internal_id}"
-            )
         self._source_url_value = source_url
         self.view_source_caption.setText(f"{labels.source}：")
         if source_url:
@@ -2666,7 +2679,6 @@ class ModDetailPanel(QWidget):
             desc_text=desc_text,
             platform_name=platform_name,
             workspace_id=workspace_id,
-            internal_id=internal_id if debug_mode_enabled() else "",
             author=author,
             version=version,
             updated=updated,
@@ -2695,7 +2707,7 @@ class ModDetailPanel(QWidget):
         self._sync_flag_tags_from_status()
         self._fill_relationships()
         self._fill_user_tags()
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if mid:
             self._fill_category_tags(mid)
         else:
@@ -2734,7 +2746,7 @@ class ModDetailPanel(QWidget):
             return
         from services.mod_presence import presence_projection
 
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         proj = presence_projection(mid) if mid else None
         folder_ok = bool(proj.open_directory) if proj is not None else False
         if hasattr(self, "btn_folder"):
@@ -2766,7 +2778,7 @@ class ModDetailPanel(QWidget):
         if not root.is_dir():
             self._render_header_size_badge("")
             return
-        mid = self.current_mod_id() or ""
+        mid = self.current_mod_pk() or ""
         token = f"{mid}:{root}"
         self._size_token = token
 
@@ -2959,14 +2971,8 @@ class ModDetailPanel(QWidget):
         self.meta_source_line.setText(f"来源：{platform_name}")
         self.meta_source_line.show()
 
-        ws_text = f"Workspace ID: {workspace_id or '—'}"
-        debug_internal = str(internal_id or "").strip()
-        if debug_internal:
-            ws_text = (
-                f"Workspace ID: {workspace_id or '—'}  |  "
-                f"Internal Database ID: {debug_internal}"
-            )
-        self.meta_workspace_line.setText(ws_text)
+        del internal_id
+        self.meta_workspace_line.setText(f"Workspace ID: {workspace_id or '—'}")
         self.meta_workspace_line.show()
 
         # Witcher 3 ONLY — mapped label, never a raw token / Mod.io version string.
@@ -2997,12 +3003,12 @@ class ModDetailPanel(QWidget):
     def _resolve_cover_path(self) -> Path | None:
         from services.mod_metadata_resolver import resolve_cover_path
 
-        return resolve_cover_path(self.current_mod_id() or None, self._managed_path)
+        return resolve_cover_path(self.current_mod_pk() or None, self._managed_path)
 
     def _change_cover(self) -> None:
         if self._metadata is None:
             return
-        mid = self.current_mod_id() or (
+        mid = self.current_mod_pk() or (
             self._metadata.entity_internal_id() if self._metadata else ""
         )
         if not mid:
@@ -3075,7 +3081,7 @@ class ModDetailPanel(QWidget):
             return
 
         self._set_refresh_button_state("running")
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not str(mid or "").strip().isdigit():
             _log.error(
                 "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 title=%r "
@@ -3196,6 +3202,11 @@ class ModDetailPanel(QWidget):
                 (mid, Path(), getattr(self, "_current_platform", PLATFORM_STEAM) or PLATFORM_STEAM)
                 for mid in (self._batch_mod_ids or [])
             ]
+        entries = [
+            (_dal_mod_pk(mid) or str(mid).strip(), path, plat)
+            for mid, path, plat in entries
+            if _dal_mod_pk(mid) or str(mid).strip().isdigit()
+        ]
         if not entries:
             self._set_refresh_button_state("idle")
             return
@@ -3254,7 +3265,7 @@ class ModDetailPanel(QWidget):
             self._set_refresh_button_state("idle")
             self._clear_op_status()
             return
-        mid = self.current_mod_id()
+        mid = self.current_internal_id() or self.current_mod_pk()
         resolved = resolve_managed_folder(mid, hint_path=result.managed_path) if mid else None
         path = (
             (resolved.path if resolved and resolved.path else None)
@@ -3290,7 +3301,7 @@ class ModDetailPanel(QWidget):
         import logging
 
         err = (error or "").strip() or "元数据刷新失败"
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         ws = ""
         app_id = 0
         title = ""
@@ -3313,7 +3324,7 @@ class ModDetailPanel(QWidget):
         self._set_op_status("⚠ 刷新失败", tone="error", auto_clear_ms=2400)
         from services.path_lifecycle import resolve_managed_folder
 
-        mid = self.current_mod_id()
+        mid = self.current_internal_id() or self.current_mod_pk()
         resolved = resolve_managed_folder(mid, hint_path=self._managed_path) if mid else None
         heal_path = (
             (resolved.path if resolved and resolved.path else None)
@@ -3391,7 +3402,7 @@ class ModDetailPanel(QWidget):
 
     def _persist_info_sidecar(self) -> None:
         """Write ``.info/metadata.json`` when LIVE; Backup when MISS."""
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         if self._managed_path is not None and self._managed_path.is_dir():
@@ -3757,7 +3768,7 @@ class ModDetailPanel(QWidget):
 
     def _apply_nexus_category(self, file_id: str, category: str) -> None:
         """Persist Nexus whitelist category, then refresh badge + checkbox."""
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid or not file_id:
             return
         try:
@@ -3775,7 +3786,7 @@ class ModDetailPanel(QWidget):
         GitHub keeps every other file's role (multiple Main / Source allowed).
         Steam / other platforms keep the previous exclusive mapping.
         """
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid or not file_id:
             return
         platform = str(
@@ -3823,7 +3834,7 @@ class ModDetailPanel(QWidget):
         self._reload_files_after_mutation()
 
     def _on_edit_file_description(self, file_id: str, current: str = "") -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid or not file_id:
             return
         text, ok = QInputDialog.getText(
@@ -3843,7 +3854,7 @@ class ModDetailPanel(QWidget):
         self._reload_files_after_mutation()
 
     def _reload_files_after_mutation(self, *, emit_tags_saved: bool = True) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -3868,7 +3879,7 @@ class ModDetailPanel(QWidget):
             )
         except Exception:  # noqa: BLE001
             pass
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid or not file_id:
             return
         QToolTip.hideText()
@@ -3892,7 +3903,7 @@ class ModDetailPanel(QWidget):
         QToolTip.hideText()
 
     def _on_files_select_all(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -3903,7 +3914,7 @@ class ModDetailPanel(QWidget):
         self._reload_files_after_mutation(emit_tags_saved=False)
 
     def _on_files_main_only(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -3914,7 +3925,7 @@ class ModDetailPanel(QWidget):
         self._reload_files_after_mutation(emit_tags_saved=False)
 
     def _on_files_clear_optional(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -3925,7 +3936,7 @@ class ModDetailPanel(QWidget):
         self._reload_files_after_mutation(emit_tags_saved=False)
 
     def _on_files_reset_default(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -3987,8 +3998,8 @@ class ModDetailPanel(QWidget):
             "addons": [],
             "patches": [],
         }
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             self._refresh_dependency_pill(empty_grouped)
             return
         try:
@@ -4031,7 +4042,7 @@ class ModDetailPanel(QWidget):
         """Render the current dependency projection plus mods.deploy_status."""
         if not hasattr(self, "dep_list_host"):
             return
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         sidecar: list[str] = []
         resolved = getattr(self, "_resolved", None)
         if resolved is not None:
@@ -4055,13 +4066,13 @@ class ModDetailPanel(QWidget):
                 self.dep_summary_label.setText("依赖于 —")
         if hasattr(self, "btn_add_dependency"):
             self.btn_add_dependency.setEnabled(
-                bool(mid and mid.isdigit())
+                bool(self.current_internal_id())
                 and not getattr(self, "_folder_absent", False)
             )
 
     def _on_add_dependency_pill(self) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         if getattr(self, "_folder_absent", False):
             return
@@ -4121,8 +4132,8 @@ class ModDetailPanel(QWidget):
             self.tags_saved.emit(self._managed_path)
 
     def _on_add_relationship(self, relationship_type: str) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         from ui.mod_picker_dialog import ModPickerDialog
 
@@ -4204,8 +4215,8 @@ class ModDetailPanel(QWidget):
         self._update_quick_actions(enabled=True, invalid=False, conflict=False)
 
     def _fill_lifecycle_status(self) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             self._reset_status_widgets()
             return
         try:
@@ -4251,8 +4262,8 @@ class ModDetailPanel(QWidget):
             self.category_tags_label.setText("（无标签）")
 
     def _on_enable_mod(self) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         get_db().enable_mod(mid)
         self._fill_lifecycle_status()
@@ -4261,8 +4272,8 @@ class ModDetailPanel(QWidget):
             self.tags_saved.emit(self._managed_path)
 
     def _on_disable_mod(self) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         get_db().disable_mod(mid)
         self._fill_lifecycle_status()
@@ -4282,9 +4293,9 @@ class ModDetailPanel(QWidget):
             logger.debug("WH3 used_mods sync after enable/disable failed", exc_info=True)
 
     def _on_add_category_tag(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         tag = self.category_tag_edit.text().strip()
-        if not mid or not mid.isdigit() or not tag:
+        if not mid or not tag:
             return
         try:
             get_db().add_category_tag(mid, tag)
@@ -4297,9 +4308,9 @@ class ModDetailPanel(QWidget):
             self.tags_saved.emit(self._managed_path)
 
     def _on_remove_category_tag(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         tag = self.category_tag_edit.text().strip()
-        if not mid or not mid.isdigit() or not tag:
+        if not mid or not tag:
             return
         get_db().remove_category_tag(mid, tag)
         self.category_tag_edit.clear()
@@ -4308,7 +4319,7 @@ class ModDetailPanel(QWidget):
             self.tags_saved.emit(self._managed_path)
 
     def _request_remove(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_internal_id()
         if not mid:
             return
         reply = QMessageBox.question(
@@ -4405,8 +4416,8 @@ class ModDetailPanel(QWidget):
         return self.status_reason_edit.text().strip()
 
     def _persist_status(self, **kwargs) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         try:
             st = get_db().update_mod_status(mid, touch_check_time=True, **kwargs)
@@ -4425,8 +4436,8 @@ class ModDetailPanel(QWidget):
 
     def _persist_conflict_annotation(self, *, conflict: bool, note: str = "") -> None:
         """Sole UI writer path for user conflict marks."""
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         try:
             from services.user_annotation import apply_conflict_annotation
@@ -4530,8 +4541,8 @@ class ModDetailPanel(QWidget):
         self._reorder_flag_chips()
 
     def _is_abandoned_tagged(self) -> bool:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return False
         try:
             return any(
@@ -4542,8 +4553,8 @@ class ModDetailPanel(QWidget):
             return False
 
     def _on_flag_abandoned_toggled(self, checked: bool) -> None:
-        mid = self.current_mod_id()
-        if not mid or not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             return
         try:
             if checked:
@@ -4564,7 +4575,7 @@ class ModDetailPanel(QWidget):
         if not checked:
             self.status_conflict_detail.hide()
             return
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         text = self._format_conflict_detail(mid)
         self.status_conflict_detail.setText(text or "当前无检测到的文件冲突。")
         self.status_conflict_detail.show()
@@ -4694,7 +4705,7 @@ class ModDetailPanel(QWidget):
             self.tag_conflict_list.addItem(item)
 
     def _fill_user_tags(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         invalid = False
         reason = ""
         conflict = False
@@ -4726,7 +4737,7 @@ class ModDetailPanel(QWidget):
         self._rebuild_conflict_list(preselect=conflict_ids)
 
     def _save_user_tags(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -4882,7 +4893,7 @@ class ModDetailPanel(QWidget):
         from services.info_asset_runtime import probe_offline_open
 
         probe = probe_offline_open(
-            self._managed_path, mod_id=self.current_mod_id() or ""
+            self._managed_path, mod_id=self.current_mod_pk() or ""
         )
         if probe.cache_hit is not None:
             return probe.cache_hit
@@ -4936,7 +4947,7 @@ class ModDetailPanel(QWidget):
             return
         from services.cover_loader import CoverLoaderManager
 
-        mid = self.current_mod_id() or "0"
+        mid = self.current_mod_pk() or "0"
         token = f"detail:{mid}:{path}"
         prev = getattr(self, "_cover_token", "") or ""
         mgr = CoverLoaderManager.instance()
@@ -4968,9 +4979,22 @@ class ModDetailPanel(QWidget):
         self.cover_label.setPixmap(pix)
 
     def _open_folder(self) -> None:
-        if self._managed_path is None or not self._managed_path.is_dir():
+        from services.path_lifecycle import resolve_managed_folder
+
+        mid = self.current_internal_id()
+        resolved = (
+            resolve_managed_folder(
+                mid,
+                hint_path=self._managed_path,
+                library_root=self._library_root,
+            )
+            if mid
+            else None
+        )
+        folder = resolved.path if resolved is not None else None
+        if folder is None or not folder.is_dir():
             return
-        folder = self._managed_path.resolve()
+        folder = folder.resolve()
         try:
             if sys.platform.startswith("win"):
                 os.startfile(folder)  # type: ignore[attr-defined]
@@ -5059,7 +5083,8 @@ class ModDetailPanel(QWidget):
         worker = OfflineArchiveWorker(
             self._managed_path,
             platform=self._current_platform,
-            internal_id=self._metadata.entity_internal_id(),
+            internal_id=self.current_internal_id()
+            or (self._metadata.entity_internal_id() if self._metadata else ""),
             metadata=self._metadata,
             library_root=self._library_root,
             force_refresh=True,
@@ -5083,7 +5108,10 @@ class ModDetailPanel(QWidget):
                 continue
             if not path.parts or not path.is_dir():
                 continue
-            queue.append((mid, path, plat))
+            pk = _dal_mod_pk(mid) or str(mid).strip()
+            if not pk:
+                continue
+            queue.append((pk, path, plat))
         if not queue:
             return
         self._offline_batch_queue = queue
@@ -5155,7 +5183,8 @@ class ModDetailPanel(QWidget):
             self._managed_path,
             path,
             platform=plat,
-            internal_id=self._metadata.entity_internal_id(),
+            internal_id=self.current_internal_id()
+            or (self._metadata.entity_internal_id() if self._metadata else ""),
             library_root=self._library_root,
             parent=self,
         )
@@ -5176,7 +5205,7 @@ class ModDetailPanel(QWidget):
 
     def _on_offline_archive_finished(self, path: str) -> None:
         del path
-        mid = self.current_mod_id() or ""
+        mid = self.current_internal_id() or ""
         payload: object = mid if mid else self._managed_path
         if self._offline_batch_active:
             if payload is not None:
@@ -5259,7 +5288,7 @@ class ModDetailPanel(QWidget):
 
         start_detail_offline_open(
             self,
-            mod_id=self.current_mod_id() or "",
+            mod_id=self.current_mod_pk() or "",
             managed_path=self._managed_path,
             open_url=_launch,
             set_status=_status,
@@ -5374,8 +5403,8 @@ class ModDetailPanel(QWidget):
         path = self._managed_path
         if meta is None or path is None:
             return
-        mid = str(meta.entity_internal_id() or "").strip()
-        if not mid.isdigit():
+        mid = self.current_mod_pk()
+        if not mid:
             QMessageBox.warning(self, "保存失败", "缺少有效的 Mod ID。")
             return
         try:
@@ -5402,39 +5431,44 @@ class ModDetailPanel(QWidget):
     # Deploy UI (worker lives in library_view)
     # ------------------------------------------------------------------
 
-    def current_mod_id(self) -> str:
-        """Return ``mods.mod_id`` — never Workshop / workspace axes."""
+    def current_internal_id(self) -> str:
+        """Return Frozen UUID entity identity."""
+        token = str(getattr(self, "_entity_internal_id", "") or "").strip()
+        if token:
+            return token
+        return ""
+
+    def current_mod_pk(self) -> str:
+        """Return SQLite ``mods.mod_id`` for DAL / FK only."""
+        pk = str(getattr(self, "_mod_pk", "") or "").strip()
+        if pk.isdigit():
+            return pk
         info = self._display_info
         if info is not None:
             mid = str(getattr(info, "mod_id", "") or "").strip()
             if mid.isdigit():
+                self._mod_pk = mid
                 return mid
-        resolved = self._resolved
-        if resolved is not None:
-            mid = str(getattr(resolved, "internal_id", "") or "").strip()
-            if mid.isdigit():
-                return mid
-        meta = self._metadata
-        if meta is not None:
-            mid = str(meta.entity_internal_id() or "").strip()
-            if mid.isdigit():
-                return mid
-        return ""
+        return _dal_mod_pk(self.current_internal_id())
+
+    def current_mod_id(self) -> str:
+        """Entity identity for UI — Frozen UUID, not SQLite PK."""
+        return self.current_internal_id()
 
     def _request_deploy(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_internal_id()
         if not mid or self._deploy_busy:
             return
         self.deploy_requested.emit(mid)
 
     def _request_redeploy(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_internal_id()
         if not mid or self._deploy_busy:
             return
         self.redeploy_requested.emit(mid)
 
     def _request_undeploy(self) -> None:
-        mid = self.current_mod_id()
+        mid = self.current_internal_id()
         if not mid or self._deploy_busy:
             return
         self.undeploy_requested.emit(mid)
@@ -5557,7 +5591,7 @@ class ModDetailPanel(QWidget):
             deploy_time = str(result.get("deploy_time") or "")
             if not deploy_time:
                 try:
-                    info = get_db().get_mod_deploy_info(self.current_mod_id())
+                    info = get_db().get_mod_deploy_info(self.current_mod_pk())
                     deploy_time = str(info.deploy_time or "") if info else ""
                 except Exception:  # noqa: BLE001
                     deploy_time = ""
@@ -5646,7 +5680,7 @@ class ModDetailPanel(QWidget):
         identity_blocked = False
         block_tip = ""
         try:
-            mid = self.current_mod_id() or ""
+            mid = self.current_mod_pk() or ""
             if mid:
                 proj = presence_projection(mid)
                 cap_allowed = bool(proj.deployment.allowed)
@@ -5734,7 +5768,9 @@ class ModDetailPanel(QWidget):
         """
         if self._library_root is None:
             return
-        token = f"{mid}:{self._library_root}"
+        entity = self.current_internal_id() or str(mid or "").strip()
+        pk = self.current_mod_pk() or _dal_mod_pk(mid)
+        token = f"{entity}:{self._library_root}"
         self._deploy_runtime_token = token
 
         from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
@@ -5777,7 +5813,7 @@ class ModDetailPanel(QWidget):
         QThreadPool.globalInstance().start(
             _DeployRuntimeTask(
                 token,
-                mid,
+                pk or mid,
                 Path(self._library_root),
                 Path(self._managed_path) if self._managed_path else None,
                 signals,
@@ -5800,7 +5836,7 @@ class ModDetailPanel(QWidget):
         """Apply async runtime status without re-scheduling another worker."""
         from services.deploy_status import DEPLOYMENT_CONFLICT, DEPLOYMENT_OUTDATED
 
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             return
         try:
@@ -5835,7 +5871,7 @@ class ModDetailPanel(QWidget):
         """
         from services.deploy_status import DEPLOYMENT_CONFLICT, DEPLOYMENT_OUTDATED
 
-        mid = self.current_mod_id()
+        mid = self.current_mod_pk()
         if not mid:
             self._hide_status_banner()
             self.view_deploy.setText("[Deploy] 状态：—")

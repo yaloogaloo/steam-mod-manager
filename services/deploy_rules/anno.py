@@ -312,7 +312,7 @@ class Anno1800Strategy(DeployStrategy):
     def _archive_paths(self, ctx: DeployContext) -> list[Path]:
         from services.deploy import collect_deploy_archives
 
-        return collect_deploy_archives(ctx.internal_id, ctx.library_folder())
+        return collect_deploy_archives(ctx.mod_pk, ctx.library_folder())
 
     def _try_stamps_plan(
         self, ctx: DeployContext, archives: list[Path]

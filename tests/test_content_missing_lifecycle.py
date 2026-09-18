@@ -153,7 +153,7 @@ def test_game_switch_projection_keeps_missing(db: DatabaseManager, tmp_path: Pat
     assert filtered[0].content_status == CONTENT_CONTENT_MISSING
 
 def test_list_item_carries_content_status_to_card() -> None:
-    item = ModListItem(internal_id='1', workspace_id='1', game_id=1, game_folder='G', name='N', content_status=CONTENT_CONTENT_MISSING)
+    item = ModListItem(internal_id='36834fcf-3cbb-4ffe-8b78-be1921638bd4', workspace_id='1', game_id=1, game_folder='G', name='N', content_status=CONTENT_CONTENT_MISSING)
     card = list_item_to_card_data(item)
     assert card.content_status == CONTENT_CONTENT_MISSING
     assert card.missing_content is True

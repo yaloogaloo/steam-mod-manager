@@ -15,6 +15,20 @@ from core.sanitize import sanitize_folder_name, unique_destination
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_mod_pk_for_metadata(metadata: ModMetadata | None) -> str:
+    """Frozen UUID or stored PK → SQLite ``mods.mod_id``. Never folder names."""
+    from services.mod_library_cache import dal_mod_pk
+
+    if metadata is None:
+        return ""
+    stored = str(metadata.mod_pk or "").strip()
+    pk = dal_mod_pk(stored) if stored else ""
+    if pk:
+        return pk
+    frozen = str(metadata.entity_internal_id() or "").strip()
+    return dal_mod_pk(frozen) if frozen else ""
+
 INFO_DIR_NAME = ".info"
 LEGACY_INFO_DIR_NAME = "info"
 METADATA_FILENAME = "metadata.json"
@@ -271,29 +285,35 @@ class ModFileManager:
                 continue
 
             meta = self.load_metadata(folder)
-            title = (meta.title if meta else "") or ""
-            entity_id = (
-                meta.entity_internal_id()
-                if meta and meta.entity_internal_id()
-                else folder.name
-            )
+            if meta is None:
+                logger.info(
+                    "Skip numeric folder rename (no .info identity): %s", folder
+                )
+                continue
+            pk = _resolve_mod_pk_for_metadata(meta)
+            if not pk:
+                logger.info(
+                    "Skip numeric folder rename (unresolved identity): %s", folder
+                )
+                continue
 
-            if not title.strip() or title.strip().isdigit():
-                db_meta = db.get_mod(entity_id)
+            title = (meta.title or "").strip()
+            if not title or title.isdigit():
+                try:
+                    db_meta = db.get_mod(pk)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Numeric folder migration get_mod failed pk=%s folder=%s: %s",
+                        pk,
+                        folder,
+                        exc,
+                    )
+                    continue
                 if db_meta and db_meta.title.strip() and not db_meta.title.strip().isdigit():
                     title = db_meta.title.strip()
-                    if meta is None:
-                        meta = ModMetadata(
-                            published_file_id="",
-                            internal_id=str(entity_id),
-                            title=title,
-                        )
-                    else:
-                        meta.title = title
-                        if not str(meta.internal_id or "").strip():
-                            meta.internal_id = str(entity_id)
-                        if db_meta.app_id and not meta.app_id:
-                            meta.app_id = db_meta.app_id
+                    meta.title = title
+                    if db_meta.app_id and not meta.app_id:
+                        meta.app_id = db_meta.app_id
 
             if not title.strip() or title.strip().isdigit():
                 logger.info(
@@ -301,16 +321,7 @@ class ModFileManager:
                 )
                 continue
 
-            if meta is None:
-                meta = ModMetadata(
-                    published_file_id="",
-                    internal_id=str(entity_id),
-                    title=title,
-                )
-            else:
-                meta.title = title
-                if not str(meta.internal_id or "").strip():
-                    meta.internal_id = str(entity_id)
+            meta.title = title
 
             # Keep game folder; only rename the Mod leaf
             desired_name = self.mod_folder_name(meta)
@@ -320,7 +331,7 @@ class ModFileManager:
             target = unique_destination(
                 folder.parent,
                 desired_name,
-                published_file_id=str(meta.published_file_id or entity_id),
+                published_file_id=str(meta.published_file_id or ""),
             )
             # unique_destination skips existing paths — if it picked the
             # current numeric folder somehow, bail
@@ -352,7 +363,10 @@ class ModFileManager:
         try:
             from core.db_manager import get_db
 
-            cached = get_db().get_mod(metadata.entity_internal_id())
+            pk = _resolve_mod_pk_for_metadata(metadata)
+            if not pk:
+                return metadata
+            cached = get_db().get_mod(pk)
         except Exception:  # noqa: BLE001
             return metadata
         if cached and cached.title.strip() and not cached.title.strip().isdigit():
@@ -465,12 +479,13 @@ class ModFileManager:
             try:
                 from services.metadata_backup import prove_backup_storage_key
                 from services.metadata_backup_sync import sync_after_metadata_change
+                from services.backup_identity import is_frozen_backup_uuid
 
                 mid = prove_backup_storage_key(
                     metadata.entity_internal_id(),
                     managed_path=path,
                 )
-                if not mid.isdigit():
+                if not is_frozen_backup_uuid(mid):
                     logger.warning(
                         "save_metadata backup skipped: entity unresolved path=%s",
                         path,
@@ -626,13 +641,25 @@ class ModFileManager:
         return "Unknown Game"
 
     def _list_mod_dirs(self, game_dir: Path) -> list[Path]:
+        import time
+
+        from services.deploy_op_profile import record_op
+
+        t0 = time.perf_counter()
         try:
-            return sorted(
-                (p for p in game_dir.iterdir() if p.is_dir()),
-                key=lambda p: p.name.lower(),
+            try:
+                return sorted(
+                    (p for p in game_dir.iterdir() if p.is_dir()),
+                    key=lambda p: p.name.lower(),
+                )
+            except PermissionError:
+                return []
+        finally:
+            record_op(
+                "iterdir",
+                (time.perf_counter() - t0) * 1000.0,
+                path=str(game_dir),
             )
-        except PermissionError:
-            return []
 
     @staticmethod
     def _is_legacy_flat_mod(path: Path) -> bool:
@@ -724,8 +751,8 @@ def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
     if offline:
         payload["offline_page_path"] = offline
         payload["offline_page"] = offline
-    mid = str(metadata.entity_internal_id() or "").strip()
-    if mid.isdigit():
+    mid = _resolve_mod_pk_for_metadata(metadata)
+    if mid:
         try:
             from core.db_manager import get_db
             from services.info_sidecar import build_sidecar_from_db
@@ -776,13 +803,14 @@ def persist_unified_metadata_dict(
             from services.metadata_backup import prove_backup_storage_key
             from services.metadata_backup_sync import sync_after_metadata_change
             from services.metadata_owner_guard import resolve_owner_mod_id_from_info
+            from services.backup_identity import is_frozen_backup_uuid
 
             mid = prove_backup_storage_key(
                 resolve_owner_mod_id_from_info(dict(payload)),
                 managed_path=root,
                 info=dict(payload),
             )
-            if not mid.isdigit():
+            if not is_frozen_backup_uuid(mid):
                 logger.warning(
                     "persist_unified_metadata_dict backup skipped: "
                     "entity unresolved path=%s",

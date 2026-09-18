@@ -9,6 +9,8 @@ from typing import Any
 # Canonical create / infer label for a game's extension Type.
 # Display text only — never the runtime unlock key for「分类」.
 MOD_TYPE_EXTENSION = "拓展"
+# Display name that also unlocks the same「分类」field as 拓展.
+MOD_TYPE_BEAUTIFY = "美化"
 
 
 def visible_extension_category(
@@ -19,15 +21,15 @@ def visible_extension_category(
 ) -> str:
     """Category text shown in detail UI, or empty to hide the row entirely.
 
-    Unlock is ``mods.type_id == catalog.extension_type_id(app_id)``.
-    Type display names (拓展 / 扩展 / Expansion) must not change this.
+    Unlock is the stamped 拓展 Type ID, or a Type currently named「美化」.
+    Renaming the stamped 拓展 Type (拓展 / 扩展 / Expansion) must not hide this.
     """
     text = str(category or "").strip()
     if not text:
         return ""
     from services.mod_type_catalog import get_mod_type_catalog
 
-    if not get_mod_type_catalog().is_extension_type(app_id, type_id):
+    if not get_mod_type_catalog().unlocks_subcategory(app_id, type_id):
         return ""
     return text
 
@@ -111,9 +113,11 @@ class ModMetadata:
         published_file_id      — Steam Workshop ID only (API + source association)
         workspace_id           — not stored here; platform display lives in DB
 
-    ``ModMetadata.internal_id`` on this DTO is a session/PK handle used by UI
-    adapters. Prefer :func:`services.identity_service.resolve_mod_pk` when a
-    Frozen TEXT identity must become a DB PK.
+    ``ModMetadata.internal_id`` is Frozen Entity UUID (``mods.internal_id``).
+    ``ModMetadata.mod_pk`` is the SQLite ``mods.mod_id`` handle for DAL.
+
+    Prefer :func:`services.identity_service.resolve_mod_pk` when a Frozen
+    TEXT identity must become a DB PK.
 
     Never treat ``published_file_id`` as the internal entity key.
     """
@@ -144,12 +148,13 @@ class ModMetadata:
     source_type: str = ""
     # Portable UI label from JSON ``display_name`` (not the ``display_name`` property).
     json_display_name: str = ""
-    # Entity PK handle (``mods.mod_id``). Empty on pure Steam API stubs until bind.
-    # Frozen business identity is TEXT ``mods.internal_id``, not this field.
+    # Frozen Entity UUID (``mods.internal_id``). Empty on unbound Steam stubs.
     internal_id: str = ""
+    # SQLite ``mods.mod_id`` — DAL / FK only. Empty on unbound Steam stubs.
+    mod_pk: str = ""
 
     def entity_internal_id(self) -> str:
-        """DTO PK handle (``mods.mod_id``) — not Frozen TEXT ``internal_id``.
+        """Frozen Entity UUID (``mods.internal_id``). Never SQLite PK.
 
         Never falls back to ``published_file_id`` / Workspace ID. Unbound
         Steam stubs leave this empty until the entity is bound. Backup

@@ -798,7 +798,7 @@ def _post_delete_verify_deep(
     expected_manifest_assets: int | None = None,
 ) -> tuple[bool, bool, bool, list[str]]:
     """Light checks + CAS materialize via OPEN / MISS / Repair (gate only)."""
-    from services.backup_asset_migration import repair_info_assets_from_backup_store
+    from services.info_asset_runtime import repair_live_from_cas
     from services.info_asset_runtime import ensure_live_offline_openable
 
     light_ok, issues = _post_delete_verify_light(
@@ -821,7 +821,7 @@ def _post_delete_verify_deep(
         issues.append(f"assets present during deep verify: {remaining}")
         return False, open_ok, False, issues
 
-    repair = repair_info_assets_from_backup_store(
+    repair = repair_live_from_cas(
         folder, mod_id=mod_id, store=store
     )
     repair_ok = bool(repair.ok)

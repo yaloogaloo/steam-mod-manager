@@ -228,7 +228,7 @@ def _isolate_production_data(
         raising=False,
     )
     monkeypatch.setattr(
-        "services.legacy_workspace_backup.data_dir",
+        "tools.archive.legacy_workspace_backup.data_dir",
         _data_dir,
         raising=False,
     )
@@ -341,6 +341,7 @@ def _resolve_workspace_handles_to_mod_pk(
             "test_identity_lifecycle",
             "test_identity_minimal",
             "test_identity_boundary",
+            "test_backup_identity",
             "test_lifecycle_boundary",
             "test_published_id_index",
         )
@@ -406,6 +407,14 @@ def _resolve_workspace_handles_to_mod_pk(
             original = getattr(ModDeployer, method_name)
 
             def _bound(self, handle, *args, **kwargs):  # noqa: ANN001
+                from services.deploy_identity import (
+                    frozen_internal_id_for_pk,
+                    is_frozen_internal_uuid,
+                )
+
+                token = str(handle or "").strip()
+                if is_frozen_internal_uuid(token):
+                    return original(self, token, *args, **kwargs)
                 db = getattr(self, "db", None) or getattr(self, "_db", None)
                 if db is None:
                     try:
@@ -414,8 +423,18 @@ def _resolve_workspace_handles_to_mod_pk(
                         db = get_db()
                     except Exception:  # noqa: BLE001
                         db = None
-                pk = soft_resolve_test_mod_pk(db, handle) if db is not None else handle
-                return original(self, pk, *args, **kwargs)
+                if db is None:
+                    return original(self, token, *args, **kwargs)
+                from tests.helpers.identity import _mod_pk_exists
+
+                # Keep digit PK so tests can still assert deploy_mod(PK) is rejected.
+                if _mod_pk_exists(db, token):
+                    return original(self, token, *args, **kwargs)
+                pk = soft_resolve_test_mod_pk(db, handle)
+                frozen = frozen_internal_id_for_pk(pk, db=db) if str(pk).isdigit() else ""
+                if frozen:
+                    return original(self, frozen, *args, **kwargs)
+                return original(self, token, *args, **kwargs)
 
             monkeypatch.setattr(ModDeployer, method_name, _bound)
 
@@ -431,13 +450,24 @@ def _resolve_workspace_handles_to_mod_pk(
         _orig_backup_root = mb.backup_root
 
         def _backup_root(handle, *args, **kwargs):  # noqa: ANN001
+            from services.backup_identity import (
+                frozen_uuid_for_mod_pk,
+                is_frozen_backup_uuid,
+            )
+
+            token = str(handle or "").strip()
+            if is_frozen_backup_uuid(token):
+                return _orig_backup_root(token, *args, **kwargs)
             try:
                 from core.db_manager import get_db
 
                 pk = soft_resolve_test_mod_pk(get_db(), handle)
+                frozen = frozen_uuid_for_mod_pk(pk)
+                if frozen:
+                    return _orig_backup_root(frozen, *args, **kwargs)
+                return _orig_backup_root(pk, *args, **kwargs)
             except Exception:  # noqa: BLE001
-                pk = handle
-            return _orig_backup_root(pk, *args, **kwargs)
+                return _orig_backup_root(handle, *args, **kwargs)
 
         monkeypatch.setattr(mb, "backup_root", _backup_root)
 
@@ -445,6 +475,11 @@ def _resolve_workspace_handles_to_mod_pk(
         _orig_load = mb.load_backup
 
         def _load_backup(handle, *args, **kwargs):  # noqa: ANN001
+            from services.backup_identity import is_frozen_backup_uuid
+
+            token = str(handle or "").strip()
+            if is_frozen_backup_uuid(token):
+                return _orig_load(token, *args, **kwargs)
             try:
                 from core.db_manager import get_db
 

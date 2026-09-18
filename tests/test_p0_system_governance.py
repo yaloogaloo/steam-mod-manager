@@ -24,7 +24,7 @@ from services.identity_invariants import (
 )
 from services.identity_service import (
     IdentityCreateBypassError,
-    allocate_internal_id,
+    allocate_mod_pk,
     create_mod_identity,
     lifecycle_scope,
     repair_no_allocate_scope,
@@ -109,7 +109,7 @@ def test_refresh_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> 
     assert _count_mods(db) == before
     with lifecycle_scope("refresh"):
         with pytest.raises(IdentityCreateBypassError):
-            allocate_internal_id(db)
+            allocate_mod_pk(db)
 
 
 def test_archive_must_not_mint_identity(
@@ -128,7 +128,7 @@ def test_archive_must_not_mint_identity(
     assert _count_mods(db) == before
     with lifecycle_scope("archive"):
         with pytest.raises(IdentityCreateBypassError):
-            allocate_internal_id(db)
+            allocate_mod_pk(db)
 
 
 def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> None:
@@ -151,7 +151,7 @@ def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> N
     assert "resolve" in stages or "copy" in stages or "plan" in stages
     with lifecycle_scope("deploy"):
         with pytest.raises(IdentityCreateBypassError):
-            allocate_internal_id(db)
+            allocate_mod_pk(db)
 
 
 def test_metadata_edit_must_not_mint_identity(db: DatabaseManager) -> None:
@@ -162,7 +162,7 @@ def test_metadata_edit_must_not_mint_identity(db: DatabaseManager) -> None:
     assert _count_mods(db) == before
     with lifecycle_scope("metadata"):
         with pytest.raises(IdentityCreateBypassError):
-            allocate_internal_id(db)
+            allocate_mod_pk(db)
     with pytest.raises(IdentityCreateBypassError):
         db.update_mod_user_metadata(INTERNAL, {"display_name": "ghost"})
     assert db.get_mod(INTERNAL) is None
@@ -179,7 +179,7 @@ def test_sidecar_apply_must_not_mint_identity(db: DatabaseManager, tmp_path: Pat
     assert apply_sidecar_to_db(folder2, mod_id=pk, db=db) is True
     with lifecycle_scope("sidecar"):
         with pytest.raises(IdentityCreateBypassError):
-            allocate_internal_id(db)
+            allocate_mod_pk(db)
 
 
 def test_reconcile_without_official_identity_must_not_mint(
@@ -238,7 +238,7 @@ def test_empty_mod_with_official_identity_strips_title_on_import(
 def test_repair_must_not_allocate(db: DatabaseManager) -> None:
     with repair_no_allocate_scope():
         with pytest.raises(Exception):
-            allocate_internal_id(db)
+            allocate_mod_pk(db)
 
 
 def test_internal_id_must_not_become_steam_workspace_or_published_or_external(
@@ -320,7 +320,7 @@ def test_scanner_empty_mod_with_official_identity_is_review_not_remove(
 def test_scanner_empty_mod_without_official_identity_is_high(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
-    mid = str(allocate_internal_id(db))
+    mid = str(allocate_mod_pk(db))
     with db._lock:
         db._conn.execute(
             "UPDATE mods SET title=?, platform=?, external_id=?, source_url=? WHERE mod_id=?",

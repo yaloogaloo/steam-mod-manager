@@ -48,11 +48,11 @@ def _register(
     title: str,
     app_id: int,
     game_name: str,
-) -> str:
+) -> tuple[str, str]:
     created = create_steam_test_mod(
         db, external_id=external_id, title=title, app_id=app_id, game_name=game_name
     )
-    return prove_managed_folder(
+    pk = prove_managed_folder(
         db,
         folder,
         handle=created.mod_id,
@@ -60,6 +60,7 @@ def _register(
         app_id=app_id,
         game_name=game_name,
     )
+    return pk, str(created.internal_id)
 
 
 def test_generic_deploy_and_manifest(tmp_path: Path, db: DatabaseManager) -> None:
@@ -74,12 +75,12 @@ def test_generic_deploy_and_manifest(tmp_path: Path, db: DatabaseManager) -> Non
         mod_path=str(mods_root),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(
+    pk, frozen = _register(
         db, source, external_id="91001", title="CoolMod", app_id=100, game_name="SomeGame"
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen)
 
     assert result["success"] is True
     assert result["copied_files"] == 2
@@ -111,16 +112,16 @@ def test_generic_undeploy(tmp_path: Path, db: DatabaseManager) -> None:
     source = _generic_mod(library)
 
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(mods_root))
-    pk = _register(
+    pk, frozen = _register(
         db, source, external_id="91002", title="CoolMod", app_id=100, game_name="SomeGame"
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"] is True
+    assert deployer.deploy_mod(frozen)["success"] is True
     target = mods_root / "CoolMod"
     assert (target / "a.txt").is_file()
 
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen)
     assert und["success"] is True
     assert not (target / "a.txt").exists()
     assert not (target / "sub" / "b.txt").exists()
@@ -151,7 +152,7 @@ def test_palworld_logicmods_to_paks(tmp_path: Path, db: DatabaseManager) -> None
         mod_path=str(tmp_path / "unused"),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    pk = _register(
+    pk, frozen = _register(
         db,
         mod,
         external_id="92001",
@@ -161,7 +162,7 @@ def test_palworld_logicmods_to_paks(tmp_path: Path, db: DatabaseManager) -> None
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen)
     assert result["success"] is True
     assert result["deploy_type"] == DEPLOY_TYPE_PALWORLD_PAK
 
@@ -191,7 +192,7 @@ def test_palworld_loose_pak_to_tilde_mods(tmp_path: Path, db: DatabaseManager) -
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    pk = _register(
+    pk, frozen = _register(
         db,
         mod,
         external_id="92002",
@@ -201,7 +202,7 @@ def test_palworld_loose_pak_to_tilde_mods(tmp_path: Path, db: DatabaseManager) -
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen)
     assert result["success"] is True
 
     tilde = install / "Pal" / "Content" / "Paks" / "~mods"
@@ -225,16 +226,16 @@ def test_undeploy_only_own_files_leaves_others(
     (b / "x.txt").write_text("X", encoding="utf-8")
 
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(mods_root))
-    pk_a = _register(
+    pk_a, frozen_a = _register(
         db, a, external_id="93001", title="CoolMod", app_id=100, game_name="SomeGame"
     )
-    pk_b = _register(
+    pk_b, frozen_b = _register(
         db, b, external_id="93002", title="OtherMod", app_id=100, game_name="SomeGame"
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk_a)["success"]
-    assert deployer.deploy_mod(pk_b)["success"]
+    assert deployer.deploy_mod(frozen_a)["success"]
+    assert deployer.deploy_mod(frozen_b)["success"]
 
     # Foreign file sitting next to deployed trees (must survive)
     shared = mods_root / "shared_keep.txt"
@@ -242,7 +243,7 @@ def test_undeploy_only_own_files_leaves_others(
     other_target = mods_root / "OtherMod" / "x.txt"
     assert other_target.is_file()
 
-    und = deployer.undeploy_mod(pk_a)
+    und = deployer.undeploy_mod(frozen_a)
     assert und["success"] is True
     assert not (mods_root / "CoolMod").exists()
     assert other_target.is_file()
@@ -271,15 +272,15 @@ def test_palworld_undeploy_isolation(tmp_path: Path, db: DatabaseManager) -> Non
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    pk = _register(
+    pk, frozen = _register(
         db, mod, external_id="94001", title="Mine", app_id=1623730, game_name="Palworld"
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"]
+    assert deployer.deploy_mod(frozen)["success"]
     assert (tilde / "Mine.pak").is_file()
 
-    assert deployer.undeploy_mod(pk)["success"]
+    assert deployer.undeploy_mod(frozen)["success"]
     assert not (tilde / "Mine.pak").exists()
     assert foreign.read_bytes() == b"foreign"
     # Must not wipe ~mods or Paks
@@ -293,11 +294,11 @@ def test_manifest_json_shape(tmp_path: Path, db: DatabaseManager) -> None:
     mods_root.mkdir()
     source = _generic_mod(library)
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(mods_root))
-    pk = _register(
+    pk, frozen = _register(
         db, source, external_id="95001", title="CoolMod", app_id=100, game_name="SomeGame"
     )
 
-    ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     raw = json.loads(
         (source / INFO_DIR_NAME / MANIFEST_FILENAME).read_text(encoding="utf-8")
     )

@@ -89,12 +89,13 @@ def test_resolver_does_not_treat_internal_id_as_user_input(db: DatabaseManager) 
     row = db.get_mod_backup_row(owner_pk) or {}
     plat = str(row.get("platform") or PLATFORM_NEXUS)
     aid = int(row.get("app_id") or BG3)
+    dep_uuid = str((db.get_mod_backup_row(dep_pk) or {}).get("internal_id") or "")
 
     assert (
         resolve_internal_id_from_workspace_id(
             dep_ws, platform=plat, app_id=aid, db=db
         )
-        == dep_pk
+        == dep_uuid
     )
     # Internal ID is not a Workspace ID token — must not bind.
     assert (

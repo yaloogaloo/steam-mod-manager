@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, TypeVar
@@ -515,8 +515,6 @@ class SteamWorkshopClient:
             # Preserve Workshop axis on the returned stub for callers.
             if not str(row.published_file_id or "").strip():
                 row.published_file_id = wid
-            if not str(row.internal_id or "").strip():
-                row.internal_id = entity
             cached_by_workshop[wid] = row
 
         missing = [
@@ -947,32 +945,3 @@ def _ext_from_content_type(content_type: str) -> str | None:
     }
     mime = content_type.split(";", 1)[0].strip()
     return mapping.get(mime)
-
-
-def enrich_scanned_mods(
-    ids_or_paths: Iterable[str | tuple[str, str | Path]],
-    client: SteamWorkshopClient | None = None,
-    *,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> list[ModMetadata]:
-    pairs: list[tuple[str, str | None]] = []
-    for item in ids_or_paths:
-        if isinstance(item, tuple):
-            pairs.append((str(item[0]), str(item[1]) if item[1] is not None else None))
-        else:
-            pairs.append((str(item), None))
-
-    ids = [pid for pid, _ in pairs]
-    own_client = client is None
-    client = client or SteamWorkshopClient()
-    try:
-        metas = client.get_details_batch(ids, on_progress=on_progress)
-        client.resolve_game_names(metas)
-    finally:
-        if own_client:
-            client.close()
-
-    path_map = {pid: path for pid, path in pairs}
-    for meta in metas:
-        meta.source_path = path_map.get(meta.published_file_id)
-    return metas

@@ -16,6 +16,7 @@ from dataclasses import dataclass, fields
 MOD_LIST_ITEM_ALLOWED_FIELDS: frozenset[str] = frozenset(
     {
         "internal_id",
+        "mod_pk",
         "workspace_id",
         "game_id",
         "game_folder",
@@ -112,6 +113,20 @@ class ModListItem:
     local_size_status: str = "unknown"
     # Game-scoped Type Definition id. None = unbound. Not a type name.
     type_id: int | None = None
+    # SQLite mods.mod_id — DAL / FK only. Never UI entity identity.
+    mod_pk: int | None = None
+
+    @property
+    def entity_internal_id(self) -> str:
+        """Frozen UUID entity identity."""
+        return str(self.internal_id or "").strip()
+
+    @property
+    def mod_id(self) -> str:
+        """SQLite PK for DAL / FK only. Never Frozen identity."""
+        if self.mod_pk is None:
+            return ""
+        return str(self.mod_pk)
 
 
 def assert_mod_list_item_layer1(item: ModListItem) -> None:

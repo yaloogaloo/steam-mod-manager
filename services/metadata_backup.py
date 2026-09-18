@@ -12,17 +12,25 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from core.paths import data_dir
+from services.backup_identity import (  # noqa: F401
+    BACKUP_DIR_NAME,
+    BackupIdentityError,
+    backup_read_root,
+    is_frozen_backup_uuid,
+    prove_frozen_backup_key,
+    resolve_backup_mod_pk,
+    resolve_backup_storage_key,
+    write_backup_root_for,
+)
 from services.file_ops import (
     INFO_DIR_NAME,
     METADATA_FILENAME,
-    ModFileManager,
     read_info_metadata_dict,
 )
 from services.offline.paths import resolve_offline_page
 
 logger = logging.getLogger(__name__)
 
-BACKUP_DIR_NAME = "mod_backup"
 BACKUP_METADATA_NAME = "metadata.json"
 BACKUP_COVER_BASENAME = "cover"
 BACKUP_OFFLINE_DIR = "offline"
@@ -40,9 +48,27 @@ class BackupSnapshot:
     last_known_path: str = ""
 
 
-def backup_root(mod_id: int | str) -> Path:
-    """``data/mod_backup/<mod_id>/``"""
-    return data_dir() / BACKUP_DIR_NAME / str(mod_id).strip()
+def backup_root(internal_id: int | str, *, mod_pk: int | str | None = None) -> Path:
+    """Write root: ``data/mod_backup/<Frozen UUID>/``.
+
+    Raises :class:`BackupIdentityError` when *internal_id* is not a Frozen UUID.
+    Digit PK is never a write directory name.
+    """
+    key = resolve_backup_storage_key(internal_id=internal_id, mod_pk=mod_pk)
+    return data_dir() / BACKUP_DIR_NAME / key
+
+
+def readable_backup_root(
+    internal_id: int | str | None,
+    *,
+    mod_pk: int | str | None = None,
+) -> Path | None:
+    """UUID directory first, legacy ``data/mod_backup/<mod_pk>/`` fallback."""
+    return backup_read_root(
+        internal_id=internal_id,
+        mod_pk=mod_pk,
+        base=data_dir() / BACKUP_DIR_NAME,
+    )
 
 
 def prove_backup_storage_key(
@@ -51,81 +77,25 @@ def prove_backup_storage_key(
     managed_path: str | Path | None = None,
     info: Mapping[str, Any] | None = None,
 ) -> str:
-    """Prove the current Backup storage key (``mods.mod_id``).
+    """Prove the Backup **write** storage key (Frozen UUID).
 
-    Resolution order:
-
-    1. ``internal_id`` / PK handle via ``resolve_mod_pk`` (Frozen TEXT match
-       or an existing SQLite PK).
-    2. Frozen ``.info/internal_id`` → current ``mods.mod_id``
-       (same Entity ``internal_id``; not a third Mod ID).
-
-    Never uses ``published_file_id``, ``workspace_id``, folder name, or
-    ``external_id`` as the backup directory name. Unresolved → ``""``
+    Never returns a digit PK. Unresolved / collapsed / synthetic → ``""``
     (caller must not write).
     """
-    token = str(hint or "").strip()
-    db = None
-    try:
-        from core.db_manager import get_db
-        from services.identity_service import resolve_mod_pk
-
-        db = get_db()
-        if token:
-            pk = resolve_mod_pk(token, db=db)
-            if pk.isdigit():
-                return pk
-    except Exception:  # noqa: BLE001
-        logger.debug("prove_backup_storage_key resolve_mod_pk failed", exc_info=True)
-
-    data = dict(info or {})
-    root = Path(managed_path) if managed_path else None
-    if not data and root is not None:
-        data = read_info_metadata_dict(root) or {}
-    if data or root is not None:
-        found = _resolve_mod_id(root or Path("."), data)
-        if found.isdigit():
-            return found
-
+    key = prove_frozen_backup_key(hint, managed_path=managed_path, info=info)
+    if key:
+        return key
     logger.warning(
         "backup write refused: storage key unresolved hint=%s path=%s",
-        token or "?",
-        root,
+        str(hint or "").strip() or "?",
+        managed_path,
     )
     return ""
 
 
 def _resolve_mod_id(mod_path: Path, data: dict[str, Any] | None) -> str:
-    """Resolve backup target Internal ID — never from directory name."""
-    payload = dict(data or {})
-    from services.mod_identity import read_internal_id
-
-    sidecar_uuid = read_internal_id(payload)
-    if sidecar_uuid:
-        try:
-            from core.db_manager import get_db
-
-            db = get_db()
-            found = db.find_mod_by_internal_id(sidecar_uuid)
-            if found is not None:
-                return str(found)
-            if sidecar_uuid.isdigit() and db.get_mod(sidecar_uuid) is not None:
-                return sidecar_uuid
-        except Exception:  # noqa: BLE001
-            logger.debug("backup internal_id lookup failed", exc_info=True)
-    try:
-        payload.setdefault(
-            "_managed_path",
-            str(mod_path.resolve()) if mod_path.exists() else str(mod_path),
-        )
-        from services.mod_identity import resolve_existing_mod_id
-
-        found = resolve_existing_mod_id(payload)
-        if found.isdigit():
-            return found
-    except Exception:  # noqa: BLE001
-        logger.debug("backup identity resolve failed for %s", mod_path, exc_info=True)
-    return ""
+    """Resolve Frozen UUID for backup write — never a digit PK or folder name."""
+    return prove_frozen_backup_key(managed_path=mod_path, info=data)
 
 
 def _file_sha256(path: Path) -> str:
@@ -314,17 +284,21 @@ def snapshot_from_mod_folder(
 
     t_scan = time.perf_counter()
     data = read_info_metadata_dict(root) or {}
-    mid = prove_backup_storage_key(owner_mod_id, managed_path=root, info=data)
+    frozen = prove_backup_storage_key(owner_mod_id, managed_path=root, info=data)
     try:
         from services.reconcile_observability import add_scan_ms
 
         add_scan_ms((time.perf_counter() - t_scan) * 1000.0)
     except Exception:  # noqa: BLE001
         pass
-    if not mid.isdigit():
+    if not is_frozen_backup_uuid(frozen):
         return None
 
-    dest = backup_root(mid)
+    owner_pk = resolve_backup_mod_pk(
+        internal_id=frozen,
+        mod_pk=str(owner_mod_id or "").strip() or None,
+    )
+    dest = backup_root(frozen, mod_pk=owner_pk or None)
     dest.mkdir(parents=True, exist_ok=True)
 
     meta_file = dest / BACKUP_METADATA_NAME
@@ -368,7 +342,7 @@ def snapshot_from_mod_folder(
             except Exception:  # noqa: BLE001
                 pass
     except OSError as exc:
-        logger.warning("Failed to write backup metadata for %s: %s", mid, exc)
+        logger.warning("Failed to write backup metadata for %s: %s", frozen, exc)
         return None
 
     info_dir = root / INFO_DIR_NAME
@@ -385,7 +359,7 @@ def snapshot_from_mod_folder(
     offline_abs = _copy_offline_index(offline_src, dest / BACKUP_OFFLINE_DIR)
 
     return BackupSnapshot(
-        mod_id=mid,
+        mod_id=owner_pk or frozen,
         metadata=data,
         cover_path=cover_abs,
         offline_path=offline_abs,
@@ -394,18 +368,23 @@ def snapshot_from_mod_folder(
 
 
 def load_backup(mod_id: int | str) -> BackupSnapshot | None:
-    """Load backup metadata + asset paths for a Mod id."""
-    mid = str(mod_id).strip()
-    if not mid.isdigit():
+    """Load backup metadata + asset paths. *mod_id* may be Frozen UUID or PK.
+
+    Prefers ``data/mod_backup/<UUID>/``, then legacy ``data/mod_backup/<PK>/``.
+    """
+    token = str(mod_id).strip()
+    if not token:
         return None
-    dest = backup_root(mid)
+    dest = readable_backup_root(token)
+    if dest is None:
+        return None
     meta_file = dest / BACKUP_METADATA_NAME
     if not meta_file.is_file():
         return None
     try:
         data = json.loads(meta_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Failed to read backup metadata for %s: %s", mid, exc)
+        logger.warning("Failed to read backup metadata for %s: %s", token, exc)
         return None
     if not isinstance(data, dict):
         return None
@@ -421,18 +400,22 @@ def load_backup(mod_id: int | str) -> BackupSnapshot | None:
         str(offline_index.resolve()) if offline_index.is_file() else ""
     )
 
+    pk = resolve_backup_mod_pk(
+        internal_id=token, mod_pk=token if token.isdigit() else None
+    )
     last_known = ""
-    try:
-        from core.db_manager import get_db
+    if pk.isdigit():
+        try:
+            from core.db_manager import get_db
 
-        row = get_db().get_mod_backup_row(mid)
-        if row is not None:
-            last_known = str(row.get("last_known_path") or "").strip()
-    except Exception:  # noqa: BLE001
-        pass
+            row = get_db().get_mod_backup_row(pk)
+            if row is not None:
+                last_known = str(row.get("last_known_path") or "").strip()
+        except Exception:  # noqa: BLE001
+            pass
 
     return BackupSnapshot(
-        mod_id=mid,
+        mod_id=pk or token,
         metadata=data,
         cover_path=cover_abs,
         offline_path=offline_abs,
@@ -442,7 +425,10 @@ def load_backup(mod_id: int | str) -> BackupSnapshot | None:
 
 def mark_missing(mod_id: int | str) -> None:
     """Mark a Mod as folder-absent in SQLite (backup remains)."""
-    mid = str(mod_id).strip()
+    token = str(mod_id).strip()
+    mid = resolve_backup_mod_pk(
+        internal_id=token, mod_pk=token if token.isdigit() else None
+    )
     if not mid.isdigit():
         return
     try:
@@ -461,30 +447,6 @@ def mark_missing(mod_id: int | str) -> None:
         logger.warning("mark_missing failed for %s: %s", mid, exc)
 
 
-def restore_check(
-    mod_id: int | str,
-    *,
-    library_root: str | Path | None = None,
-) -> bool:
-    """
-    If ``last_known_path`` reappeared, run two-evidence recovery.
-    If it is gone, controlled rediscovery may rebind a renamed folder.
-
-    Never scans the whole disk. Never mkdir.
-    """
-    mid = str(mod_id).strip()
-    if not mid.isdigit():
-        return False
-    try:
-        from services.mod_presence import attempt_recovery
-
-        result = attempt_recovery(mid, library_root=library_root)
-        return bool(result.success)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("restore_check failed for %s: %s", mid, exc)
-    return False
-
-
 def restore_info_sidecar_from_backup(
     mod_id: int | str,
     managed_path: str | Path,
@@ -495,9 +457,8 @@ def restore_info_sidecar_from_backup(
     Restore ``.info`` from backup for an **existing** DB entity only.
 
     ``mod_id`` may be Frozen TEXT ``internal_id`` or a PK handle. Restore
-    matches ``backup.internal_id == mods.internal_id``. The backup directory
-    name remains storage organization (``data/mod_backup/<mod_id>/``) and
-    is not Frozen identity.
+    matches ``backup.internal_id == mods.internal_id``. Backup directories
+    are read UUID-first then legacy PK. Writes never create a PK directory.
 
     Refuses when backup identity does not match the DB row (no create, no
     guess, no fallback).
@@ -523,7 +484,13 @@ def restore_info_sidecar_from_backup(
         row = database.get_mod_backup_row(mid)
         if row is None:
             return False
-        bak_root = backup_root(mid)
+        frozen = str(row.get("internal_id") or "").strip()
+        bak_root = readable_backup_root(
+            frozen if is_frozen_backup_uuid(frozen) else None,
+            mod_pk=mid,
+        )
+        if bak_root is None:
+            return False
         bak_meta = bak_root / BACKUP_METADATA_NAME
         if not bak_meta.is_file():
             return False
@@ -602,9 +569,8 @@ def sync_metadata_backup(
     Prefer :func:`services.metadata_backup_sync.sync_after_metadata_change`
     for write-event callers (adds reason logging + validation status).
 
-    ``mod_id`` must be the SQLite PK (or a token ``resolve_mod_pk`` already
-    mapped). Ownership is never taken from workspace_id / external_id /
-    published_file_id / folder name. Frozen restore proof is
+    ``mod_id`` may be Frozen UUID or SQLite PK. Snapshot writes go to the UUID
+    directory. SQL updates still use ``mod_pk``. Frozen restore proof is
     ``backup.internal_id == mods.internal_id``.
 
     When the Mod folder exists: snapshot ``.info`` → backup, mark folder present.
@@ -614,6 +580,10 @@ def sync_metadata_backup(
     if not root.is_dir():
         # Never treat folder/workspace digits as ownership — path → DB row only.
         mid = str(mod_id or "").strip()
+        if is_frozen_backup_uuid(mid):
+            mapped = resolve_backup_mod_pk(internal_id=mid)
+            if mapped.isdigit():
+                mid = mapped
         if not mid.isdigit():
             try:
                 from core.db_manager import get_db
@@ -659,8 +629,13 @@ def sync_metadata_backup(
         from core.db_manager import get_db
 
         t_persist = time.perf_counter()
+        sql_pk = str(snapshot.mod_id or "").strip()
+        if not sql_pk.isdigit():
+            sql_pk = resolve_backup_mod_pk(internal_id=sql_pk)
+        if not sql_pk.isdigit():
+            return
         get_db().update_mod_backup_snapshot(
-            snapshot.mod_id,
+            sql_pk,
             last_known_path=snapshot.last_known_path,
             folder_present=True,
             backup_metadata_json=meta_json,
@@ -706,38 +681,14 @@ def reconcile_library_presence(
     reconcile_folder_presence(library_root)
 
 
-def metadata_dict_for_ui(snapshot: BackupSnapshot) -> dict[str, Any]:
-    """Merge backup JSON with backup asset paths for library / detail display."""
-    data = dict(snapshot.metadata)
-    if snapshot.cover_path:
-        data["cover_path"] = snapshot.cover_path
-    if snapshot.offline_path:
-        data["offline_page_path"] = snapshot.offline_path
-    return data
-
-
-def resolve_backup_cover(mod_id: int | str) -> Path | None:
-    snap = load_backup(mod_id)
-    if snap is None or not snap.cover_path:
-        return None
-    path = Path(snap.cover_path)
-    return path if path.is_file() else None
-
-
-def resolve_backup_offline(mod_id: int | str) -> Path | None:
-    mid = str(mod_id).strip()
-    if not mid.isdigit():
-        return None
-    from services.offline.backup_closure import usable_backup_offline_index
-
-    return usable_backup_offline_index(backup_root(mid) / BACKUP_OFFLINE_DIR)
-
-
 def is_mod_folder_absent(mod_id: int | str, managed_path: str | Path | None = None) -> bool:
     """True when the managed Mod directory does not exist (disk is source of truth)."""
     if managed_path is not None:
         return not Path(managed_path).is_dir()
     mid = str(mod_id).strip()
+    if is_frozen_backup_uuid(mid):
+        mapped = resolve_backup_mod_pk(internal_id=mid)
+        mid = mapped if mapped.isdigit() else ""
     if not mid.isdigit():
         return False
     try:
@@ -752,61 +703,3 @@ def is_mod_folder_absent(mod_id: int | str, managed_path: str | Path | None = No
     if lkp:
         return not Path(lkp).is_dir()
     return not bool(int(row.get("folder_present") or 0))
-
-
-def managed_path_from_backup_row(row: Mapping[str, Any]) -> Path:
-    """Virtual library path for a folder-missing Mod (uses ``last_known_path``)."""
-    lkp = str(row.get("last_known_path") or "").strip()
-    if lkp:
-        return Path(lkp)
-    return Path(f"__missing__/{row.get('mod_id', '')}")
-
-
-def mod_metadata_from_backup_row(row: Mapping[str, Any]) -> ModMetadata:
-    """Build ``ModMetadata`` for library / detail when only backup exists."""
-    from core.models import ModMetadata
-
-    mid = str(row.get("mod_id") or "").strip()
-    raw_json = str(row.get("backup_metadata_json") or "").strip()
-    data: dict[str, Any] = {}
-    if raw_json:
-        try:
-            parsed = json.loads(raw_json)
-            if isinstance(parsed, dict):
-                data = parsed
-        except json.JSONDecodeError:
-            data = {}
-
-    path = managed_path_from_backup_row(row)
-    title = str(
-        data.get("display_name")
-        or data.get("title")
-        or f"Unknown_Mod_{mid}"
-    ).strip()
-    cover = str(row.get("backup_cover_path") or data.get("cover_path") or "").strip()
-    offline = str(
-        row.get("backup_offline_path") or data.get("offline_page_path") or ""
-    ).strip()
-    game_name = str(data.get("game_name") or "").strip()
-    if not game_name and path.parent.name not in ("", "__missing__"):
-        game_name = path.parent.name
-
-    return ModMetadata(
-        published_file_id=mid,
-        title=title,
-        description=str(data.get("description") or "").strip(),
-        preview_url=str(data.get("preview_url") or "").strip(),
-        app_id=int(data.get("app_id") or row.get("app_id") or 0),
-        game_name=game_name,
-        managed_path=str(path),
-        local_path=str(path),
-        url=str(
-            data.get("url") or data.get("source_url") or data.get("website") or ""
-        ).strip(),
-        cover_path=cover or None,
-        offline_page_path=offline or None,
-        source_type=str(
-            data.get("source_type") or data.get("platform") or ""
-        ).strip(),
-        json_display_name=str(data.get("display_name") or "").strip(),
-    )

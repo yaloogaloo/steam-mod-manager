@@ -85,6 +85,9 @@ class DeployFilePlan:
     Authoritative deploy file list for one Mod operation.
 
     ``files`` is the only legal deploy inventory for this run.
+
+    ``internal_id`` is Frozen Entity Identity (UUID). Never ``str(mod_id)``.
+    ``mod_pk`` is the SQLite ``mods.mod_id`` handle for DAL / Manifest storage.
     """
 
     internal_id: str = ""
@@ -100,6 +103,8 @@ class DeployFilePlan:
     diagnostics: DeployFilePlanDiagnostics = field(
         default_factory=DeployFilePlanDiagnostics
     )
+    # SQLite ``mods.mod_id``. 0 = unset (unit fixtures); production always sets PK.
+    mod_pk: int = 0
 
     def target_absolutes(self) -> list[str]:
         return [e.target_absolute for e in self.files if e.target_absolute]
@@ -109,6 +114,9 @@ class DeployFilePlan:
 
     def diagnostics_dict(self) -> dict[str, Any]:
         d = self.diagnostics.as_dict()
+        d["internal_id"] = self.internal_id
+        if self.mod_pk:
+            d["mod_pk"] = int(self.mod_pk)
         d["source"] = self.source
         d["source_kind"] = self.source_kind
         d["target"] = self.target_root
@@ -144,6 +152,21 @@ def _rel_to(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except (ValueError, OSError):
         return ""
+
+
+def _fileplan_identity_from_context(ctx: DeployContext) -> tuple[str, int]:
+    """Frozen UUID + SQL PK from DeployContext. Never ``internal_id = str(mod_pk)``."""
+    frozen = str(getattr(ctx, "internal_id", "") or "").strip()
+    try:
+        pk = int(getattr(ctx, "mod_pk", 0) or 0)
+    except (TypeError, ValueError):
+        pk = 0
+    if pk:
+        from services.deploy_identity import is_frozen_internal_uuid
+
+        if frozen == str(pk) or frozen.isdigit() or not is_frozen_internal_uuid(frozen):
+            raise ValueError("Invalid internal UUID")
+    return frozen, pk
 
 
 def file_plan_from_strategy_result(
@@ -234,8 +257,10 @@ def file_plan_from_strategy_result(
     else:
         source_kind = SOURCE_MIXED
 
+    frozen, pk = _fileplan_identity_from_context(ctx)
     plan = DeployFilePlan(
-        internal_id=str(ctx.internal_id),
+        internal_id=frozen,
+        mod_pk=pk,
         deploy_type=str(planned.deploy_type or ctx.deploy_type or ""),
         source=managed or content_root,
         source_kind=source_kind,
@@ -295,6 +320,10 @@ def manifest_from_file_plan(
     Build DeployManifest strictly from FilePlan.files (no target rescan).
 
     Manifest file count must match planned FilePlan entries on success.
+
+    Manifest schema is NOT migrated here: on-disk ``mod_id`` / ``internal_id``
+    remain the SQLite PK storage key (same as today). FilePlan business
+    identity is Frozen UUID on ``plan.internal_id``.
     """
     files: list[ManifestFileEntry] = []
     for entry in plan.files:
@@ -308,9 +337,11 @@ def manifest_from_file_plan(
                 source_relative=entry.source_relative,
             )
         )
+    storage_pk = str(int(plan.mod_pk)) if int(plan.mod_pk or 0) else ""
+    frozen = str(plan.internal_id or "").strip()
     return DeployManifest(
-        mod_id=plan.internal_id,
-        internal_id=plan.internal_id,
+        mod_id=storage_pk,
+        internal_id=frozen,
         deploy_time=deploy_time,
         deploy_type=plan.deploy_type,
         files=files,

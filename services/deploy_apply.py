@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
 import time
 from collections import defaultdict
@@ -41,11 +42,14 @@ from services.deploy_file_plan import (
 
 logger = logging.getLogger(__name__)
 
-# Files at/above this size are hashed in the same read as copy so the later
-# manifest hash stage does not re-read the same payload (800MB .pack etc.).
-_HASH_WHILE_COPY_MIN_BYTES = 16 * 1024 * 1024
+# Hash during the copy read so the later manifest hash stage does not re-read
+# the same payload. Threshold 0: every copied file is hashed once at apply.
+_HASH_WHILE_COPY_MIN_BYTES = 0
 _APPLY_SOURCE_HASHES: ContextVar[dict[str, str] | None] = ContextVar(
     "apply_source_hashes", default=None
+)
+_APPLY_SOURCE_SIZES: ContextVar[dict[str, int] | None] = ContextVar(
+    "apply_source_sizes", default=None
 )
 
 
@@ -54,9 +58,16 @@ def current_apply_source_hashes() -> dict[str, str]:
     return dict(_APPLY_SOURCE_HASHES.get() or {})
 
 
+def current_apply_source_sizes() -> dict[str, int]:
+    """Byte sizes recorded during the latest ``apply_file_plan`` copy."""
+    return dict(_APPLY_SOURCE_SIZES.get() or {})
+
+
 def _source_hash_key(path: Path) -> str:
+    from services.deploy_op_profile import cached_resolve
+
     try:
-        return str(path.resolve())
+        return cached_resolve(path)
     except OSError:
         return str(path)
 
@@ -75,32 +86,99 @@ class ApplyResult:
     group_timings_ms: list[dict[str, object]] = field(default_factory=list)
 
 
-def _copy_one(entry: DeployFilePlanEntry) -> str | None:
+def _copy_one(entry: DeployFilePlanEntry) -> tuple[str | None, int]:
     """Copy *entry* to its target.
 
-    Returns a sha256 hex digest when the source was hashed during copy;
-    otherwise ``None`` (small files keep ``shutil.copy2``).
+    Returns ``(sha256 or None, source size)``. Size comes from the source
+    stat already required to copy — callers must not re-stat the dest.
     """
+    from services.deploy_op_profile import (
+        CopyFileTrace,
+        ensure_dir,
+        note_copy_file,
+        record_op,
+        volume_id,
+    )
+
     src = Path(entry.source)
     dst = Path(entry.target_absolute)
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    rel = str(entry.source_relative or entry.target_relative or dst.name).replace("\\", "/")
+    mkdir_ms = ensure_dir(dst.parent)
+    size = 0
+    stat_ms = 0.0
     try:
+        t_stat = time.perf_counter()
         size = int(src.stat().st_size)
+        stat_ms = (time.perf_counter() - t_stat) * 1000.0
+        record_op("stat", stat_ms, path=str(src))
     except OSError:
         size = 0
+    src_vol = volume_id(src)
+    dst_vol = volume_id(dst)
     if size >= _HASH_WHILE_COPY_MIN_BYTES:
         digest = hashlib.sha256()
+        hash_ms = 0.0
+        t_loop = time.perf_counter()
         with src.open("rb") as inf, dst.open("wb") as outf:
             while True:
                 block = inf.read(1024 * 1024)
                 if not block:
                     break
+                t_h = time.perf_counter()
                 digest.update(block)
+                hash_ms += (time.perf_counter() - t_h) * 1000.0
                 outf.write(block)
+        loop_ms = (time.perf_counter() - t_loop) * 1000.0
+        t_meta = time.perf_counter()
         shutil.copystat(src, dst, follow_symlinks=True)
-        return digest.hexdigest()
+        copystat_ms = (time.perf_counter() - t_meta) * 1000.0
+        elapsed = loop_ms + copystat_ms
+        record_op("copyfile", loop_ms, bytes_count=size, path=str(src))
+        record_op("hash", hash_ms, bytes_count=size, path=str(src))
+        record_op("copystat", copystat_ms, path=str(dst))
+        note_copy_file(
+            CopyFileTrace(
+                relative=rel,
+                size=size,
+                elapsed_ms=elapsed + mkdir_ms + stat_ms,
+                read_write_ms=max(0.0, loop_ms - hash_ms),
+                hash_ms=hash_ms,
+                copystat_ms=copystat_ms,
+                mkdir_ms=mkdir_ms,
+                stat_ms=stat_ms,
+                source_volume=src_vol,
+                target_volume=dst_vol,
+                source=str(src),
+                target=str(dst),
+                copyfile=True,
+                hashed=True,
+                copystat=True,
+                chmod=os.name != "nt",
+            )
+        )
+        return digest.hexdigest(), size
+    t_copy = time.perf_counter()
     shutil.copy2(src, dst)
-    return None
+    copy2_ms = (time.perf_counter() - t_copy) * 1000.0
+    record_op("copy2", copy2_ms, bytes_count=size, path=str(src))
+    note_copy_file(
+        CopyFileTrace(
+            relative=rel,
+            size=size,
+            elapsed_ms=copy2_ms + mkdir_ms + stat_ms,
+            read_write_ms=copy2_ms,
+            mkdir_ms=mkdir_ms,
+            stat_ms=stat_ms,
+            source_volume=src_vol,
+            target_volume=dst_vol,
+            source=str(src),
+            target=str(dst),
+            copy2=True,
+            copystat=True,
+            chmod=os.name != "nt",
+        )
+    )
+    return None, size
 
 
 def extract_archive_via_core(archive: Path, dest: Path):
@@ -112,8 +190,10 @@ def extract_archive_via_core(archive: Path, dest: Path):
     FilePlan ``OP_EXTRACT_MEMBER`` uses :func:`extract_members_via_core`.
     """
     from services.archive_extractor import ArchiveExtractStatus
+    from services.deploy_op_profile import timed_op
 
-    result = ArchiveExtractor.extract(archive, dest)
+    with timed_op("archive_extraction", path=str(archive)):
+        result = ArchiveExtractor.extract(archive, dest)
     return result, ArchiveExtractStatus
 
 
@@ -144,7 +224,16 @@ def _apply_extract_group(
             raise RuntimeError(f"缺少 archive member：{member}")
         planned.append((member, dest))
 
+    t0 = time.perf_counter()
     extracted = extract_members_via_core(archive, planned)
+    from services.deploy_op_profile import record_op
+
+    record_op(
+        "archive_extraction",
+        (time.perf_counter() - t0) * 1000.0,
+        path=str(archive),
+        bytes_count=int(getattr(extracted, "extracted_bytes", 0) or 0),
+    )
     if not extracted.success:
         err = extracted.error or f"压缩包解压失败：{archive}"
         if extracted.error_code in {"ARCHIVE_NOT_FOUND", "ARCHIVE_MEMBER_MISSING"}:
@@ -206,7 +295,9 @@ def apply_file_plan(
     failed_details: list[str] = []
     group_timings: list[dict[str, object]] = []
     source_hashes: dict[str, str] = {}
+    source_sizes: dict[str, int] = {}
     _APPLY_SOURCE_HASHES.set(source_hashes)
+    _APPLY_SOURCE_SIZES.set(source_sizes)
 
     logger.info(
         "[DEPLOY_APPLY] start planned=%s extract_groups=%s copy_entries=%s",
@@ -264,14 +355,18 @@ def apply_file_plan(
         if copy_entries:
             t0 = time.perf_counter()
             copy_bytes = 0
+            debug_files = logger.isEnabledFor(logging.DEBUG)
             for entry in copy_entries:
                 src = Path(entry.source)
                 dst = Path(entry.target_absolute)
-                log_deploy_file_start(source=src, target=dst, mode="copy")
+                if debug_files:
+                    log_deploy_file_start(source=src, target=dst, mode="copy")
                 try:
-                    digest = _copy_one(entry)
+                    digest, nbytes = _copy_one(entry)
+                    key = str(src)
+                    source_sizes[key] = int(nbytes)
                     if digest:
-                        source_hashes[_source_hash_key(src)] = digest
+                        source_hashes[key] = digest
                 except OSError as exc:
                     log_deploy_file_failed(
                         source=src,
@@ -301,13 +396,10 @@ def apply_file_plan(
                         copied_files=applied,
                         group_timings_ms=group_timings,
                     )
-                try:
-                    nbytes = int(dst.stat().st_size)
-                except OSError:
-                    nbytes = 0
                 copy_bytes += nbytes
                 total_bytes += nbytes
-                log_deploy_file_success(source=src, target=dst, bytes_written=nbytes)
+                if debug_files:
+                    log_deploy_file_success(source=src, target=dst, bytes_written=nbytes)
                 applied += 1
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             group_timings.append(

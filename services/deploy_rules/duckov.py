@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from services.deploy_rules.base import DeployContext, StrategyResult, inert_strategy_deploy
@@ -115,17 +116,7 @@ def validate_duckov_target(target: Path, *, folder_name: str) -> str | None:
 
 
 def _ctx_with_source(ctx: DeployContext, source: Path) -> DeployContext:
-    return DeployContext(
-        internal_id=ctx.internal_id,
-        source=source,
-        app_id=ctx.app_id,
-        config=ctx.config,
-        deploy_type=ctx.deploy_type,
-        allowed_rel_paths=ctx.allowed_rel_paths,
-        managed_path=ctx.managed_path,
-        custom_deploy_path=ctx.custom_deploy_path,
-        workspace_id=ctx.workspace_id,
-    )
+    return replace(ctx, source=source)
 
 
 class DuckovStrategy(FolderCopyStrategy):

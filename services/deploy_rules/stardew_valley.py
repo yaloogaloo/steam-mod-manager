@@ -85,23 +85,14 @@ def _flat_mod_dirname(ctx: DeployContext) -> str:
     """
     Name for a flat archive (manifest at content root).
 
-    Prefer the single archive stem under the managed folder; otherwise the
-    managed library folder name.
+    ASCII library basename stays unchanged. Han basename becomes
+    ``mod_{workspace_id}``. A single archive stem is used only when the
+    library basename is ASCII and matches the archive-only layout.
     """
-    managed = ctx.library_folder()
-    try:
-        from services.importers.archive import is_archive_path
+    from services.deploy_rules.generic import deploy_wrapper_folder
 
-        archives = [
-            p
-            for p in sorted(managed.iterdir())
-            if p.is_file() and is_archive_path(p)
-        ]
-    except OSError:
-        archives = []
-    if len(archives) == 1:
-        return archives[0].stem
-    return managed.name
+    managed = ctx.library_folder()
+    return deploy_wrapper_folder(managed.name, ctx.workspace_id)
 
 
 def _target_dirname(mod_root: Path, content_root: Path, ctx: DeployContext) -> str:

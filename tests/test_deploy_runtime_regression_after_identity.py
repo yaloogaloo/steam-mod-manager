@@ -179,7 +179,7 @@ def test_deploy_large_mod_reports_copy_progress_no_rescan(
             )
         )
     plan = DeployFilePlan(
-        internal_id="1",
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
         deploy_type="anno_1800",
         source=str(archive),
         source_kind="zip",

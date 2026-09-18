@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS mods (
     -- Witcher 3 ONLY: original | next_gen | remake. NULL for every other game.
     -- Not mod_version, not Mod.io version, not Steam revision, not identity.
     game_version TEXT,
-    -- Optional free-text subcategory. Displayed only when type is「拓展」.
+    -- Optional free-text subcategory. Displayed when type is「拓展」or「美化」.
     -- Not a taxonomy / not category_tags / not sidecar.category (type label).
     category TEXT,
     -- Game-scoped Type Definition id. NULL = unbound. Never a type name.
@@ -298,7 +298,7 @@ _MODS_MIGRATIONS: tuple[tuple[str, str], ...] = (
     # Witcher 3 ONLY compatibility edition. NULL = not applicable (non-Witcher 3).
     # Never DEFAULT 'next_gen' — that would stamp every game.
     ("game_version", "TEXT"),
-    # Optional「分类」for type=拓展. NULL/empty = hidden. Not category_tags.
+    # Optional「分类」for type=拓展 or 美化. NULL/empty = hidden. Not category_tags.
     ("category", "TEXT"),
     # Game-scoped Type Definition id. NULL = unbound. Not a type name.
     ("type_id", "INTEGER"),
@@ -350,6 +350,7 @@ _MOD_SELECT_COLS = (
     "offline_status, offline_provider, offline_updated_at, "
     "cover_path, "
     "game_version, "
+    "internal_id, "
     "category, "
     "type_id, "
     "updated_at"
@@ -3162,6 +3163,7 @@ class DatabaseManager:
                 f"""
                 SELECT
                     m.mod_id,
+                    m.internal_id,
                     m.workspace_id,
                     m.app_id,
                     m.title,
@@ -3260,11 +3262,14 @@ class DatabaseManager:
             has_offline = offline_status in ("archived", "generated") or bool(
                 backup_offline
             )
-            # Layer-1 session row key = SQLite PK. Frozen TEXT identity is
-            # mods.internal_id; business APIs must resolve via resolve_mod_pk.
+            # Frozen UUID from mods.internal_id. SQLite PK stays on mod_id
+            # for DAL / JOIN / FK only — never as UI entity identity.
+            frozen = str(row["internal_id"] or "").strip()
             out.append(
                 {
-                    "internal_id": mid,
+                    "internal_id": frozen,
+                    "mod_id": row["mod_id"],
+                    "mod_pk": int(row["mod_id"]),
                     "workspace_id": str(row["workspace_id"] or "").strip(),
                     "game_id": int(row["app_id"] or 0),
                     "game_folder": derived_folder,
@@ -3572,9 +3577,9 @@ class DatabaseManager:
         else:
             mid = int(mod_id) if mod_id is not None else None
             if mid is None:
-                from services.identity_service import allocate_internal_id
+                from services.identity_service import allocate_mod_pk
 
-                mid = int(allocate_internal_id(self))
+                mid = int(allocate_mod_pk(self))
 
         from services.identity_service import identity_create_scope
 
@@ -6632,7 +6637,7 @@ def _mod_from_row(row: sqlite3.Row) -> ModMetadata:
     mid = str(row["mod_id"])
     # Workshop axis only — never invent published_file_id from Internal PK.
     # Steam historical rows may still have PK == Workshop; callers that need
-    # the entity key must use ``internal_id`` / ``entity_internal_id()``.
+        # the entity key must use Frozen ``internal_id`` / ``entity_internal_id()``.
     ext = str(row["external_id"] or "") if "external_id" in keys else ""
     plat = str(row["platform"] or "") if "platform" in keys else ""
     pub = ""
@@ -6647,9 +6652,13 @@ def _mod_from_row(row: sqlite3.Row) -> ModMetadata:
     if not pub and not is_internal_mod_id(mid):
         # Legacy Steam PK==Workshop coincidence — keep Workshop-shaped token.
         pub = mid
+    frozen = ""
+    if "internal_id" in keys:
+        frozen = str(row["internal_id"] or "").strip()
     return ModMetadata(
         published_file_id=pub,
-        internal_id=mid,
+        internal_id=frozen,
+        mod_pk=mid,
         title=str(row["title"] or ""),
         description=str(row["description"] or ""),
         preview_url=str(row["preview_url"] or ""),

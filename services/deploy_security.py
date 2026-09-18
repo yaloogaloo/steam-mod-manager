@@ -21,7 +21,9 @@ class ManifestSecurityError(ValueError):
 
 
 def _resolve(path: Path | str) -> Path:
-    return Path(path).expanduser().resolve()
+    from services.deploy_op_profile import cached_resolve
+
+    return Path(cached_resolve(path))
 
 
 def _is_under(child: Path, root: Path) -> bool:
@@ -68,6 +70,35 @@ def collect_allowed_target_roots(ctx: DeployContext) -> list[Path]:
         except OSError:
             pass
 
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
+
+
+def collect_allowed_source_roots(ctx: DeployContext) -> list[Path]:
+    """Managed folder, content root, and extract overlay trees.
+
+    Nested-archive FilePlan sources live in extract staging. Those roots
+    are not the managed library folder; they must still be legal sources.
+    """
+    roots: list[Path] = []
+    for raw in (
+        ctx.library_folder(),
+        ctx.content_root(),
+        *(getattr(ctx, "extract_overlay_roots", ()) or ()),
+    ):
+        if not raw:
+            continue
+        try:
+            roots.append(_resolve(raw))
+        except OSError:
+            continue
     out: list[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -273,24 +304,27 @@ def validate_manifest_for_save(
     ``planned_targets`` must come from the current ``strategy.plan()``, never
     from ``manifest.files`` (that would let a manifest approve itself).
     """
-    validate_manifest_mod_id(manifest, ctx.internal_id)
+    validate_manifest_mod_id(manifest, str(int(ctx.mod_pk) if ctx.mod_pk else "") or ctx.internal_id)
     roots = collect_allowed_target_roots(ctx)
-    workspace = [
-        _resolve(ctx.library_folder()),
-        _resolve(ctx.content_root()),
-    ]
+    workspace = collect_allowed_source_roots(ctx)
     validate_manifest_targets(
         manifest,
         allowed_roots=roots,
         planned_targets=planned_targets,
     )
+    validate_manifest_sources(manifest, workspace_roots=workspace)
     for entry in manifest.files:
-        validate_entry_for_save(
-            entry,
-            managed=managed,
-            workspace_roots=workspace,
-            allowed_target_roots=roots,
-        )
+        raw_src = str(entry.source or "").strip()
+        entry_type = str(getattr(entry, "type", "") or "").strip().lower()
+        generated = entry_type in {"archive", "generated", "virtual"}
+        if not raw_src and not generated:
+            raise ManifestSecurityError(
+                "source missing and entry is not archive/generated"
+            )
+        if entry.backup is not None:
+            from services.backup_manager import BackupManager
+
+            BackupManager(managed).resolve_backup_file(entry.backup)
 
 
 def validate_planned_sources(
@@ -312,6 +346,7 @@ def validate_planned_sources(
 __all__ = (
     "ManifestSecurityError",
     "collect_allowed_target_roots",
+    "collect_allowed_source_roots",
     "collect_protected_roots",
     "validate_entry_for_save",
     "validate_manifest_for_save",

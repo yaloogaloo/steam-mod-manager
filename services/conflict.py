@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -32,10 +33,9 @@ def _utc_now() -> str:
 
 
 def _norm(path: str | Path) -> str:
-    try:
-        return str(Path(path).expanduser().resolve())
-    except OSError:
-        return str(Path(path))
+    from services.deploy_op_profile import cached_resolve
+
+    return cached_resolve(path)
 
 
 class ConflictType(str, Enum):
@@ -168,7 +168,15 @@ class ConflictDetector:
         try:
             db = self._database()
             with db._lock:  # noqa: SLF001
+                t0 = time.perf_counter()
                 rows = db._conn.execute("SELECT mod_id FROM mods").fetchall()  # noqa: SLF001
+                from services.deploy_op_profile import record_op
+
+                record_op(
+                    "sqlite_execute",
+                    (time.perf_counter() - t0) * 1000.0,
+                    path="SELECT mod_id FROM mods",
+                )
             return {str(row["mod_id"]) for row in rows}
         except Exception:  # noqa: BLE001
             logger.debug("conflict known-id load failed", exc_info=True)
@@ -178,46 +186,143 @@ class ConflictDetector:
         if not mid.isdigit():
             return True
         try:
-            if self._database().get_mod(mid) is None:
+            from services.deploy_op_profile import record_op
+
+            t0 = time.perf_counter()
+            missing = self._database().get_mod(mid) is None
+            record_op(
+                "sqlite_execute",
+                (time.perf_counter() - t0) * 1000.0,
+                path="get_mod",
+            )
+            if missing:
                 return False
-            return bool(self._database().is_mod_enabled(mid))
+            t1 = time.perf_counter()
+            enabled = bool(self._database().is_mod_enabled(mid))
+            record_op(
+                "sqlite_execute",
+                (time.perf_counter() - t1) * 1000.0,
+                path="is_mod_enabled",
+            )
+            return enabled
         except Exception:  # noqa: BLE001
             return False
 
-    def _iter_manifest_targets(self) -> list[tuple[str, str]]:
-        """List of (mod_id, normalized_target) for enabled Mods that exist in DB."""
+    def _library_game_folder(self, mid: str) -> str:
+        """Library child folder for this Mod (``mod/<folder>/...``)."""
+        db = self._database()
+        meta = None
+        if str(mid).strip().isdigit():
+            try:
+                meta = db.get_mod(mid)
+            except Exception:  # noqa: BLE001
+                meta = None
+        app_id = int(getattr(meta, "app_id", 0) or 0) if meta else 0
+        if app_id:
+            try:
+                game = db.get_game(app_id)
+            except Exception:  # noqa: BLE001
+                game = None
+            folder = str(getattr(game, "folder_name", "") or "").strip() if game else ""
+            if folder:
+                return folder
+        return str(getattr(meta, "game_name", "") or "").strip() if meta else ""
+
+    def _iter_manifest_targets(
+        self,
+        *,
+        game_name: str | None = None,
+        skip_folder: Path | None = None,
+    ) -> list[tuple[str, str]]:
+        """List of (mod_id, normalized_target) for enabled Mods that exist in DB.
+
+        When *game_name* is set, only that game's library folder is scanned.
+        Deploy preview uses this so a Darkest Dungeon deploy does not walk
+        Palworld / BG3 / unused games.
+
+        *skip_folder* is the deploying Mod's managed path. Skip it before
+        parsing its deploy manifest.
+        """
         known = self._known_mod_ids()
         pairs: list[tuple[str, str]] = []
-        for folder in self.files.list_managed_mods():
-            manifest = load_manifest(folder)
-            if manifest is None:
-                continue
-            mid = str(manifest.mod_id or "").strip()
-            if not mid:
-                meta = self.files.load_metadata(folder)
-                mid = str(meta.entity_internal_id() or "") if meta else ""
-            if not mid:
-                continue
-            if mid.isdigit() and mid not in known:
-                logger.info(
-                    "[CONFLICT_SKIP] missing identity mod_id=%s folder=%s "
-                    "(will not persist or mint)",
-                    mid,
-                    folder,
-                )
-                continue
-            if not self._is_enabled(mid):
-                continue
-            for entry in manifest.files:
-                if not entry.target:
+        from services.deploy_op_profile import note_tree, timed_op
+
+        folders: list[Path] = []
+        skipped_self = 0
+        with timed_op("conflict_detection"):
+            folders = self.files.list_managed_mods(game_name=game_name or None)
+            skip_res: Path | None = None
+            if skip_folder is not None:
+                try:
+                    skip_res = Path(skip_folder).resolve()
+                except OSError:
+                    skip_res = Path(skip_folder)
+            skipped_self = 0
+            for folder in folders:
+                if skip_res is not None:
+                    try:
+                        if folder.resolve() == skip_res:
+                            skipped_self += 1
+                            continue
+                    except OSError:
+                        if folder == skip_res:
+                            skipped_self += 1
+                            continue
+                with timed_op("manifest_enumeration", path=str(folder)):
+                    manifest = load_manifest(folder)
+                if manifest is None:
                     continue
-                pairs.append((mid, _norm(entry.target)))
+                mid = str(manifest.mod_id or "").strip()
+                if not mid:
+                    meta = self.files.load_metadata(folder)
+                    mid = str(meta.mod_pk or "").strip() if meta else ""
+                if not mid:
+                    continue
+                if mid.isdigit() and mid not in known:
+                    logger.debug(
+                        "[CONFLICT_SKIP] missing identity mod_id=%s folder=%s "
+                        "(will not persist or mint)",
+                        mid,
+                        folder,
+                    )
+                    continue
+                if not self._is_enabled(mid):
+                    continue
+                for entry in manifest.files:
+                    if not entry.target:
+                        continue
+                    pairs.append((mid, _norm(entry.target)))
+        note_tree(
+            stage="conflict_scan",
+            kind="library",
+            root=str(self.library_root / (game_name or "")),
+            file_count=len(pairs),
+            directory_count=len(folders),
+        )
+        try:
+            from services.deploy_stage_log import current_deploy_timing
+
+            sess = current_deploy_timing()
+            if sess is not None:
+                sess.diagnostics["conflict_folders_scanned"] = len(folders)
+                sess.diagnostics["conflict_manifest_pairs"] = len(pairs)
+                sess.diagnostics["conflict_game_name"] = str(game_name or "")
+                sess.diagnostics["conflict_self_skipped"] = skipped_self
+        except Exception:  # noqa: BLE001
+            pass
         return pairs
 
-    def _collect_target_owners(self) -> dict[str, list[str]]:
+    def _collect_target_owners(
+        self,
+        *,
+        game_name: str | None = None,
+        skip_folder: Path | None = None,
+    ) -> dict[str, list[str]]:
         """Map normalized target path → list of mod_ids (order preserved)."""
         owners: dict[str, list[str]] = {}
-        for mid, key in self._iter_manifest_targets():
+        for mid, key in self._iter_manifest_targets(
+            game_name=game_name, skip_folder=skip_folder
+        ):
             bucket = owners.setdefault(key, [])
             if mid not in bucket:
                 bucket.append(mid)
@@ -370,9 +475,31 @@ class ConflictDetector:
         self,
         mod_id: int | str,
         planned_targets: list[str | Path],
+        *,
+        managed: Path | None = None,
+        dest_root: Path | str | None = None,
     ) -> ConflictReport:
         mid = str(mod_id).strip()
-        owners = self._collect_target_owners()
+        if dest_root:
+            from services.backup_manager import _destination_tree_absent
+
+            if _destination_tree_absent(Path(dest_root)):
+                try:
+                    from services.deploy_stage_log import current_deploy_timing
+
+                    sess = current_deploy_timing()
+                    if sess is not None:
+                        sess.diagnostics["conflict_cheap_dest_absent"] = True
+                        sess.diagnostics["conflict_folders_scanned"] = 0
+                        sess.diagnostics["conflict_self_skipped"] = 0
+                        sess.diagnostics["conflict_game_name"] = self._library_game_folder(mid)
+                except Exception:  # noqa: BLE001
+                    pass
+                return ConflictReport(status=CONFLICT_STATUS_NONE, conflicts=[], mod_id=mid)
+        game_name = self._library_game_folder(mid)
+        owners = self._collect_target_owners(
+            game_name=game_name or None, skip_folder=managed
+        )
         conflicts: list[ConflictEntry] = []
         for raw in planned_targets:
             key = _norm(raw)
@@ -514,7 +641,10 @@ class ConflictDetector:
             if manifest is not None and str(manifest.mod_id or "").strip() == mod_id:
                 return folder
             meta = self.files.load_metadata(folder)
-            if meta and str(meta.entity_internal_id() or "").strip() == mod_id:
+            if meta and (
+                str(meta.mod_pk or "").strip() == mod_id
+                or str(meta.entity_internal_id() or "").strip() == mod_id
+            ):
                 return folder
         return None
 

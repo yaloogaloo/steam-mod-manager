@@ -52,7 +52,6 @@ RAR_PYTHON_SUPPORT_MISSING_MSG = (
 RAR_TOOL_UNAVAILABLE_MSG = "部署失败: 未找到 RAR 解压执行组件(UnRAR)"
 # Backward-compatible alias for older tests / persisted deploy_error strings.
 TOOL_UNAVAILABLE_MSG = RAR_TOOL_UNAVAILABLE_MSG
-EMPTY_ARCHIVE_MSG = "压缩包为空"
 # Kept for older imports / tests that still reference the message string.
 NO_MOD_FILES_MSG = "压缩包中未找到 Mod 文件（.pak / .dll / .json / .ini 等）"
 
@@ -179,20 +178,105 @@ def find_system_unrar_executable() -> str | None:
     return None
 
 
+class Py7zrUnsupportedFeatureError(RuntimeError):
+    """py7zr cannot decode this archive (BCJ2 / unsupported filter or method)."""
+
+
+def is_py7zr_unsupported_feature(exc: BaseException) -> bool:
+    """True when py7zr failed due to an unsupported codec/filter, not a corrupt file."""
+    name = type(exc).__name__.lower()
+    if "unsupportedcompression" in name:
+        return True
+    text = str(exc).lower()
+    needles = (
+        "bcj2",
+        "is not supported by py7zr",
+        "filter is not supported",
+        "unsupported compression",
+        "unsupported method",
+        "unsupported filter",
+        "compression method is not supported",
+    )
+    return any(needle in text for needle in needles)
+
+
+def _clear_dir_contents(dest: Path) -> None:
+    """Remove partial extract output so a provider fallback starts clean."""
+    try:
+        for child in dest.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        logger.debug("failed to clear partial extract dest=%s", dest, exc_info=True)
+
+
+SEVEN_ZIP_FALLBACK_MISSING_MSG = (
+    "部署失败：该 7z 使用了 py7zr 不支持的压缩方法（例如 BCJ2）。"
+    "已回退到系统 7-Zip，但未找到 7z.exe。"
+    "请安装 7-Zip 后重试。"
+)
+
+
+def _log_extract_event(**fields: object) -> None:
+    parts = [f"{key}={fields[key]}" for key in fields]
+    logger.info("[DEPLOY_EXTRACT] %s", " ".join(parts))
+
+
+def _7z_from_windows_registry() -> str | None:
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    keys = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\7-Zip"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\7-Zip"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\7-Zip"),
+    )
+    for hive, sub in keys:
+        try:
+            with winreg.OpenKey(hive, sub) as key:
+                for name in ("Path", "Path64"):
+                    try:
+                        value, _ = winreg.QueryValueEx(key, name)
+                    except OSError:
+                        continue
+                    exe = Path(str(value)) / "7z.exe"
+                    if exe.is_file():
+                        return str(exe)
+        except OSError:
+            continue
+    return None
+
+
 def find_7z_executable() -> str | None:
     """Return path to ``7z`` / ``7zz`` if available on PATH or common install dirs."""
+    registered = _7z_from_windows_registry()
     candidates = (
         "7z",
         "7z.exe",
         "7zz",
         "7za",
+        "7za.exe",
         r"C:\Program Files\7-Zip\7z.exe",
         r"C:\Program Files (x86)\7-Zip\7z.exe",
+        r"C:\Program Files\7-Zip\7za.exe",
+        r"C:\Program Files\NanaZip\7z.exe",
+        str(Path.home() / "AppData" / "Local" / "Programs" / "7-Zip" / "7z.exe"),
         "/usr/bin/7z",
         "/usr/local/bin/7z",
         "/opt/homebrew/bin/7z",
+        str(project_root() / "bin" / "tools" / "7z.exe"),
+        str(project_root() / "bin" / "tools" / "7za.exe"),
     )
-    for name in candidates:
+    ordered = (registered,) + candidates if registered else candidates
+    for name in ordered:
+        if not name:
+            continue
         found = shutil.which(name) if "\\" not in name and "/" not in name else (
             name if Path(name).is_file() else None
         )
@@ -416,7 +500,7 @@ def extract_archive(
     Extract *archive_path* into ``cache/import_cache/{uuid}/`` (or *dest_dir*).
 
     ``.zip`` → stdlib ``zipfile``.
-    ``.7z`` → system ``7z`` CLI when present, else ``py7zr``.
+    ``.7z`` → ``py7zr`` first; system ``7z.exe x`` on BCJ2 / unsupported filters.
     ``.rar`` → bundled UnRAR, then system ``unrar``, then ``7z`` CLI fallback.
     """
     src = Path(archive_path).expanduser().resolve()
@@ -437,16 +521,73 @@ def extract_archive(
         _extract_rar(src, out)
         return out
 
-    seven = find_7z_executable()
-    if seven:
-        _extract_with_7z(seven, src, out)
-        return out
-
     if suffix == ".7z":
-        _extract_7z_with_py7zr(src, out)
-        return out
+        return _extract_7z_with_provider_fallback(src, out)
 
     raise RuntimeError(f"{UNSUPPORTED_FMT_MSG} {suffix}")
+
+
+def _extract_7z_with_provider_fallback(src: Path, dest: Path) -> Path:
+    """Prefer py7zr; fall back to ``7z.exe x`` for BCJ2 / unsupported codecs."""
+    _log_extract_event(
+        archive_path=src,
+        archive_type=src.suffix.lower() or ".7z",
+        extractor_selected="py7zr",
+        fallback_triggered=False,
+        seven_executable_path="",
+    )
+    py7zr_exc: BaseException | None = None
+    try:
+        _extract_7z_with_py7zr(src, dest)
+        _log_extract_event(
+            archive_path=src,
+            archive_type=".7z",
+            extractor_selected="py7zr",
+            fallback_triggered=False,
+            result="ok",
+        )
+        return dest
+    except ImportError as exc:
+        logger.warning("py7zr missing; falling back to 7z.exe archive=%s", src)
+        py7zr_exc = exc
+        _log_extract_event(
+            archive_path=src,
+            py7zr_exception=exc,
+            fallback_triggered=True,
+            fallback_reason="py7zr_missing",
+        )
+    except Py7zrUnsupportedFeatureError as exc:
+        logger.warning(
+            "py7zr unsupported feature archive=%s error=%s; falling back to 7z.exe x",
+            src,
+            exc,
+        )
+        py7zr_exc = exc
+        _clear_dir_contents(dest)
+        _log_extract_event(
+            archive_path=src,
+            archive_type=".7z",
+            extractor_selected="py7zr",
+            py7zr_exception=repr(exc),
+            fallback_triggered=True,
+            fallback_reason="unsupported_feature",
+        )
+
+    seven = find_7z_executable()
+    _log_extract_event(
+        archive_path=src,
+        fallback_triggered=True,
+        seven_executable_path=seven or "",
+    )
+    if seven:
+        logger.info("7z extract provider=7z.exe archive=%s dest=%s", src, dest)
+        _extract_with_7z(seven, src, dest)
+        return dest
+    if isinstance(py7zr_exc, ImportError):
+        raise RuntimeError("部署失败：缺少 7z 解压组件（py7zr / 7z.exe）") from py7zr_exc
+    raise RuntimeError(
+        f"{SEVEN_ZIP_FALLBACK_MISSING_MSG} py7zr={py7zr_exc}"
+    ) from py7zr_exc
 
 
 def _extract_zip(src: Path, dest: Path) -> None:
@@ -469,6 +610,14 @@ def _extract_zip(src: Path, dest: Path) -> None:
 
 def _extract_with_7z(seven: str, src: Path, dest: Path) -> None:
     cmd = [seven, "x", str(src), f"-o{dest}", "-y"]
+    _log_extract_event(
+        archive_path=src,
+        archive_type=src.suffix.lower(),
+        extractor_selected="7z.exe",
+        fallback_triggered=True,
+        seven_executable_path=seven,
+        seven_command=" ".join(cmd),
+    )
     try:
         proc = subprocess.run(
             cmd,
@@ -478,27 +627,51 @@ def _extract_with_7z(seven: str, src: Path, dest: Path) -> None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        _log_extract_event(
+            archive_path=src,
+            extractor_selected="7z.exe",
+            seven_executable_path=seven,
+            seven_command=" ".join(cmd),
+            seven_exit_code="spawn_error",
+            seven_stderr=exc,
+        )
         if src.suffix.lower() == ".rar":
             raise RuntimeError(f"RAR 部署失败: {exc}") from exc
         raise RuntimeError(f"解压失败：{exc}") from exc
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    _log_extract_event(
+        archive_path=src,
+        extractor_selected="7z.exe",
+        seven_executable_path=seven,
+        seven_command=" ".join(cmd),
+        seven_exit_code=proc.returncode,
+        seven_stdout=(stdout[:2000] if stdout else ""),
+        seven_stderr=(stderr[:2000] if stderr else ""),
+    )
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+        err = stderr or stdout or f"exit {proc.returncode}"
         if src.suffix.lower() == ".rar":
             raise RuntimeError(_format_rar_failure(err)) from None
         raise RuntimeError(f"解压失败：{err}")
 
 
 def _extract_7z_with_py7zr(src: Path, dest: Path) -> None:
-    """Fallback 7z extract via py7zr — no user install / PATH setup."""
+    """Primary 7z extract via py7zr. Unsupported codecs raise for 7z.exe fallback."""
     try:
         import py7zr
-    except ImportError as exc:  # pragma: no cover - dependency declared in requirements
-        raise RuntimeError(f"部署失败：缺少 7z 解压组件（py7zr）") from exc
+    except ImportError:
+        raise
 
     try:
         with py7zr.SevenZipFile(src, mode="r") as archive:
             archive.extractall(path=dest)
+    except Py7zrUnsupportedFeatureError:
+        raise
     except Exception as exc:  # noqa: BLE001
+        logger.warning("py7zr extract failed archive=%s error=%s", src, exc)
+        if is_py7zr_unsupported_feature(exc):
+            raise Py7zrUnsupportedFeatureError(str(exc)) from exc
         raise RuntimeError(f"解压失败：{exc}") from exc
 
 

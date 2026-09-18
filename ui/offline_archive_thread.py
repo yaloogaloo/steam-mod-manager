@@ -48,7 +48,7 @@ class OfflineArchiveWorker(QThread):
         super().__init__(parent)
         self.managed_path = Path(managed_path)
         self.platform = normalize_platform(platform)
-        # Entity PK only — never Steam Workshop published_file_id.
+        # Frozen Entity UUID — never Steam Workshop published_file_id.
         self.internal_id = str(internal_id or published_file_id or "").strip()
         self.published_file_id = self.internal_id  # back-compat attribute name
         self.metadata = metadata
@@ -63,9 +63,12 @@ class OfflineArchiveWorker(QThread):
             )
             if not mid:
                 mid = self.managed_path.name
+            from services.mod_library_cache import dal_mod_pk
+
+            pk = dal_mod_pk(mid) or (mid if str(mid).isdigit() else "")
             manager = OfflineManager(library_root=self.library_root)
             result = manager.update_mod_offline(
-                mid,
+                pk or mid,
                 managed_path=self.managed_path,
                 metadata=self.metadata,
                 platform=self.platform,

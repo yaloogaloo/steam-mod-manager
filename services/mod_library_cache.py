@@ -88,15 +88,20 @@ class ModCardData:
     relation_conflicts: int = 0
     size_status: str = "unknown"
     type_id: int | None = None
+    # SQLite mods.mod_id — DAL / FK only. Never UI entity identity.
+    mod_pk: int | None = None
 
     @property
     def internal_id(self) -> str:
+        """Frozen UUID entity identity (same as ``id``)."""
         return self.id
 
     @property
     def mod_id(self) -> str:
-        """Legacy UI alias for entity id (same as ``id`` / ``internal_id``)."""
-        return self.id
+        """SQLite PK for DAL only — never Frozen identity."""
+        if self.mod_pk is None:
+            return ""
+        return str(self.mod_pk)
 
 
 @dataclass
@@ -125,23 +130,25 @@ def card_data_to_metadata(data: ModCardData) -> ModMetadata:
 
     Identity axes (never merge)::
 
-        data.id            → ModMetadata.internal_id   (session PK handle)
-        Frozen TEXT identity is ``mods.internal_id``; resolve via resolve_mod_pk.
-        data.external_id   → ModMetadata.published_file_id when Steam Workshop
-        data.workspace_id  → not copied (display-only; lives in DB/sidecar)
+        data.id / data.internal_id → ModMetadata.internal_id  (Frozen UUID)
+        data.mod_pk                 → SQLite PK (DAL only; not copied here)
+        data.external_id            → ModMetadata.published_file_id when Steam Workshop
+        data.workspace_id           → not copied (display-only; lives in DB/sidecar)
     """
     from services.identity_service import sidecar_published_file_id
 
     mid = str(data.id or "").strip()
+    pk = str(data.mod_pk or "").strip()
     plat = normalize_platform(data.platform or PLATFORM_STEAM)
     pub = sidecar_published_file_id(
-        mod_id=mid,
+        mod_id=pk or mid,
         platform=plat,
         external_id=str(data.external_id or "").strip(),
     )
     return ModMetadata(
         published_file_id=pub,
         internal_id=mid,
+        mod_pk=pk,
         title=str(data.metadata_title or data.title or ""),
         description="",  # Layer-1: never ship description on list bind
         managed_path=str(data.managed_path or ""),
@@ -181,6 +188,38 @@ def _row_local_size_status(row: dict[str, Any]) -> str:
     return text
 
 
+def _row_mod_pk(row: dict[str, Any]) -> int | None:
+    raw = row.get("mod_pk", row.get("mod_id"))
+    if raw is None or raw == "":
+        return None
+    try:
+        pk = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return pk if pk > 0 else None
+
+
+def dal_mod_pk(internal_id: str | int | None) -> str:
+    """Map Frozen UUID to SQLite PK. Digit tokens are already SQL PK."""
+    from services.deploy_identity import is_frozen_internal_uuid
+    from services.identity_service import resolve_mod_pk_from_internal_id
+
+    token = str(internal_id or "").strip()
+    if not token:
+        return ""
+    if is_frozen_internal_uuid(token):
+        try:
+            pk = resolve_mod_pk_from_internal_id(token, db=get_db())
+        except Exception:  # noqa: BLE001
+            pk = ""
+    elif token.isdigit():
+        pk = token
+    else:
+        pk = ""
+    pk = str(pk or "").strip()
+    return pk if pk.isdigit() else ""
+
+
 def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
     return ModListItem(
         internal_id=str(row.get("internal_id") or ""),
@@ -218,6 +257,7 @@ def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
         local_size_bytes=_row_local_size_bytes(row),
         local_size_status=_row_local_size_status(row),
         type_id=_row_type_id(row),
+        mod_pk=_row_mod_pk(row),
     )
 
 
@@ -268,6 +308,7 @@ def list_item_to_card_data(item: ModListItem) -> ModCardData:
         relation_conflicts=item.relation_conflicts,
         size_status=status,
         type_id=item.type_id,
+        mod_pk=item.mod_pk,
     )
     if item.type_id:
         try:
@@ -308,9 +349,8 @@ def apply_content_status_to_card_data(
 def fetch_mod_list_item(internal_id: str | int) -> ModListItem | None:
     """Load one Layer-1 row from SQLite (full projection source of truth).
 
-    Accepts Frozen TEXT ``internal_id`` or a PK session handle. The Layer-1
-    ``ModListItem.internal_id`` field remains the session row key
-    (``mods.mod_id``) — not Frozen identity.
+    Accepts Frozen TEXT ``internal_id`` or a PK handle. Returned
+    ``ModListItem.internal_id`` is Frozen UUID; ``mod_pk`` is SQLite PK.
     """
     from services.identity_service import resolve_mod_pk
 
@@ -318,9 +358,12 @@ def fetch_mod_list_item(internal_id: str | int) -> ModListItem | None:
     if not token:
         return None
     try:
-        mid = resolve_mod_pk(token, db=get_db())
+        mid = str(resolve_mod_pk(token, db=get_db()) or "").strip()
     except Exception:  # noqa: BLE001
-        mid = token if token.isdigit() else ""
+        mid = ""
+    # SQL handle only: Frozen UUID resolves to PK; a digit token is already PK.
+    if not mid.isdigit() and token.isdigit():
+        mid = token
     if not mid.isdigit():
         return None
     try:
@@ -402,8 +445,22 @@ class ModLibraryCache:
         self._by_id = {c.id: c for c in self._all if c.id}
         return snapshot
 
+    def _lookup_card(self, token: str) -> ModCardData | None:
+        """Primary cache key is Frozen UUID; PK handle is a DAL fallback."""
+        key = str(token or "").strip()
+        if not key:
+            return None
+        hit = self._by_id.get(key)
+        if hit is not None:
+            return hit
+        if key.isdigit():
+            for card in self._all:
+                if card.mod_pk is not None and str(card.mod_pk) == key:
+                    return card
+        return None
+
     def get_card_data(self, internal_id: str) -> ModCardData | None:
-        return self._by_id.get(str(internal_id or "").strip())
+        return self._lookup_card(str(internal_id or "").strip())
 
     def invalidate(self, internal_id: str | None = None) -> None:
         if internal_id is None:
@@ -412,11 +469,21 @@ class ModLibraryCache:
             self._snapshot = None
             self._root = ""
             return
-        mid = str(internal_id).strip()
+        existing = self._lookup_card(str(internal_id).strip())
+        mid = str(existing.id if existing is not None else internal_id).strip()
+        pk = ""
+        if existing is not None and existing.mod_pk is not None:
+            pk = str(existing.mod_pk)
         self._by_id.pop(mid, None)
-        self._all = [c for c in self._all if c.id != mid]
+        if pk and pk != mid:
+            self._by_id.pop(pk, None)
+        self._all = [c for c in self._all if c.id != mid and str(c.mod_pk or "") != pk]
         if self._snapshot is not None:
-            cards = [c for c in self._snapshot.cards if c.id != mid]
+            cards = [
+                c
+                for c in self._snapshot.cards
+                if c.id != mid and str(c.mod_pk or "") != pk
+            ]
             self._snapshot = LibrarySnapshot(
                 cards=cards,
                 games=self._snapshot.games,
@@ -426,6 +493,7 @@ class ModLibraryCache:
                     i
                     for i in (self._snapshot.list_items or [])
                     if str(getattr(i, "internal_id", "") or "") != mid
+                    and str(getattr(i, "mod_pk", "") or "") != pk
                 ],
             )
 
@@ -452,9 +520,10 @@ class ModLibraryCache:
         mid = str(internal_id or "").strip()
         if not mid:
             return None
-        existing = self._by_id.get(mid)
+        existing = self._lookup_card(mid)
         if existing is None:
             return None
+        key = str(existing.id)
         text = str(status or "unknown").strip() or "unknown"
         measured = size_bytes if text == "ok" else None
         if text == "ok" and measured is not None:
@@ -469,7 +538,7 @@ class ModLibraryCache:
             cards: list[ModCardData] = []
             found = False
             for card in self._snapshot.cards:
-                if str(card.id) == mid:
+                if str(card.id) == key:
                     cards.append(updated)
                     found = True
                 else:
@@ -478,7 +547,7 @@ class ModLibraryCache:
                 cards.append(updated)
             items: list[ModListItem] = []
             for existing_item in list(self._snapshot.list_items or []):
-                if str(existing_item.internal_id) == mid:
+                if str(existing_item.internal_id) == key:
                     items.append(
                         replace(
                             existing_item,
@@ -512,12 +581,18 @@ class ModLibraryCache:
         if item is None:
             return None
         updated = list_item_to_card_data(item)
+        key = str(updated.id)
         self.put_card_data(updated)
         if self._snapshot is not None:
             found = False
             cards: list[ModCardData] = []
             for card in self._snapshot.cards:
-                if str(card.id) == mid:
+                same = str(card.id) == key or (
+                    updated.mod_pk is not None
+                    and card.mod_pk is not None
+                    and int(card.mod_pk) == int(updated.mod_pk)
+                )
+                if same:
                     cards.append(updated)
                     found = True
                 else:
@@ -527,7 +602,12 @@ class ModLibraryCache:
             items: list[ModListItem] = []
             item_found = False
             for existing in list(self._snapshot.list_items or []):
-                if str(existing.internal_id) == mid:
+                same_item = str(existing.internal_id) == key or (
+                    updated.mod_pk is not None
+                    and existing.mod_pk is not None
+                    and int(existing.mod_pk) == int(updated.mod_pk)
+                )
+                if same_item:
                     items.append(item)
                     item_found = True
                 else:
@@ -604,9 +684,9 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
             rows = db.list_mod_list_items()
             qbag["rows"] = len(rows)
             mod_ids = [
-                str(r.get("internal_id") or "")
+                str(r.get("mod_id") or "")
                 for r in rows
-                if str(r.get("internal_id") or "").isdigit()
+                if str(r.get("mod_id") or "").isdigit()
             ]
             cat_map: dict[str, str] = {}
             type_map: dict[str, int | None] = {}
@@ -644,22 +724,22 @@ def build_library_snapshot(library_root: str | Path) -> LibrarySnapshot:
                 warm_paths = False
                 put_managed_path = None  # type: ignore[assignment]
             for row in rows:
-                mid = str(row.get("internal_id") or "")
+                pk = str(row.get("mod_id") or "")
                 row_out = dict(row)
-                if mid in cat_map and cat_map[mid]:
-                    row_out["category_tags"] = cat_map[mid]
-                if mid in type_map:
-                    row_out["type_id"] = type_map[mid]
-                if mid in rel_counts:
-                    deps, confs = rel_counts[mid]
+                if pk in cat_map and cat_map[pk]:
+                    row_out["category_tags"] = cat_map[pk]
+                if pk in type_map:
+                    row_out["type_id"] = type_map[pk]
+                if pk in rel_counts:
+                    deps, confs = rel_counts[pk]
                     row_out["relation_deps"] = int(deps)
                     row_out["relation_conflicts"] = int(confs)
                 item = mod_list_item_from_row(row_out)
                 list_items.append(item)
                 cards.append(list_item_to_card_data(item))
-                if warm_paths and mid.isdigit() and str(item.managed_path or "").strip():
+                if warm_paths and pk.isdigit() and str(item.managed_path or "").strip():
                     try:
-                        put_managed_path(mid, item.managed_path, library_root=root)
+                        put_managed_path(pk, item.managed_path, library_root=root)
                     except Exception:  # noqa: BLE001
                         pass
             vm_ms = (time.perf_counter() - t_vm) * 1000.0

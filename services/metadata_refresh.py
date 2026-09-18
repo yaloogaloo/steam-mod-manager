@@ -19,7 +19,6 @@ from typing import Any, Callable, Iterable, Sequence
 from core.models import ModMetadata, is_unknown_mod_title
 from services.crash_trace import log_exception, traced
 from core.mod_platform import (
-    PLATFORM_MODIO,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
     is_internal_mod_id,

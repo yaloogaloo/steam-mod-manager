@@ -148,14 +148,14 @@ class ModCardWidget(QFrame):
     details live in cover overlays, status strip, and hover tooltip.
     """
 
-    selection_requested = Signal(str)  # internal_id
-    detail_requested = Signal(str)  # internal_id
+    selection_requested = Signal(str)  # Frozen UUID
+    detail_requested = Signal(str)  # Frozen UUID
     metadata_changed = Signal(object)
-    edit_requested = Signal(str)  # internal_id
-    deploy_requested = Signal(str)  # mod_id
-    open_folder_requested = Signal(str)  # internal_id
-    open_steam_requested = Signal(str)  # internal_id
-    favorite_toggle_requested = Signal(str)  # mod_id
+    edit_requested = Signal(str)  # Frozen UUID
+    deploy_requested = Signal(str)  # Frozen UUID
+    open_folder_requested = Signal(str)  # Frozen UUID
+    open_steam_requested = Signal(str)  # Frozen UUID
+    favorite_toggle_requested = Signal(str)  # Frozen UUID
     context_menu_opening = Signal()
     set_category_requested = Signal(str)  # category label; "" = clear
     set_collections_requested = Signal()  # uses Library ``_selected_mod_ids``
@@ -182,7 +182,11 @@ class ModCardWidget(QFrame):
         self.setFixedWidth(CARD_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Selection is visual + selected ids, not QWidget keyboard focus.
+        # StrongFocus put cards on QScrollArea's focusNextPrevChild chain;
+        # hide() during viewport rebind then called ensureWidgetVisible and
+        # yanked the scrollbar (first-wheel jump).
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 8)
@@ -456,8 +460,8 @@ class ModCardWidget(QFrame):
                 "ModCardWidget.mousePressEvent",
                 detail=str(self.managed_path),
             )
-            self.selection_requested.emit(self._mod_id())
-            self.detail_requested.emit(self._mod_id())
+            self.selection_requested.emit(self._entity_internal_id())
+            self.detail_requested.emit(self._entity_internal_id())
             if self._wh3_sort_mode:
                 self._wh3_drag_start = event.position().toPoint()
         super().mousePressEvent(event)
@@ -482,7 +486,7 @@ class ModCardWidget(QFrame):
         super().mouseReleaseEvent(event)
 
     def _start_wh3_sort_drag(self) -> None:
-        mid = self._mod_id()
+        mid = self._entity_internal_id()
         if not mid:
             return
         mime = QMimeData()
@@ -505,7 +509,7 @@ class ModCardWidget(QFrame):
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
         source = self._wh3_drop_source_id(event)
-        target = self._mod_id()
+        target = self._entity_internal_id()
         if source and target and source != target:
             self.sort_drop_requested.emit(source, target)
             event.acceptProposedAction()
@@ -563,19 +567,18 @@ class ModCardWidget(QFrame):
         act_fav = QAction("取消收藏" if fav else "收藏", menu)
 
         act_detail.triggered.connect(self._emit_view_detail)
-        act_edit.triggered.connect(lambda: self.edit_requested.emit(self._mod_id()))
+        act_edit.triggered.connect(lambda: self.edit_requested.emit(self._entity_internal_id()))
         folder_absent = False
         data = getattr(self, "_card_data", None)
         if data is not None:
             folder_absent = bool(data.folder_absent)
         cap_allowed = not folder_absent
-        mid = self._mod_id()
         act_deploy.triggered.connect(self._emit_deploy)
         act_folder.triggered.connect(
-            lambda: self.open_folder_requested.emit(self._mod_id())
+            lambda: self.open_folder_requested.emit(self._entity_internal_id())
         )
         act_steam.triggered.connect(
-            lambda: self.open_steam_requested.emit(self._mod_id())
+            lambda: self.open_steam_requested.emit(self._entity_internal_id())
         )
         act_fav.triggered.connect(self._emit_favorite_toggle)
 
@@ -632,18 +635,18 @@ class ModCardWidget(QFrame):
         event.accept()
 
     def _emit_view_detail(self) -> None:
-        mid = self._mod_id()
+        mid = self._entity_internal_id()
         if mid:
             self.selection_requested.emit(mid)
             self.detail_requested.emit(mid)
 
     def _emit_deploy(self) -> None:
-        mid = self._mod_id()
+        mid = self._entity_internal_id()
         if mid:
             self.deploy_requested.emit(mid)
 
     def _emit_favorite_toggle(self) -> None:
-        mid = self._mod_id()
+        mid = self._entity_internal_id()
         if mid:
             self.favorite_toggle_requested.emit(mid)
 
@@ -719,12 +722,18 @@ class ModCardWidget(QFrame):
     def _apply_relation_badge(self) -> None:
         self._render_relation_badge()
 
-    def _mod_id(self) -> str:
-        """Entity identity from Projection only — never path / published_file_id."""
+    def _entity_internal_id(self) -> str:
+        """Frozen UUID entity identity from Projection — never SQLite PK."""
         data = getattr(self, "_card_data", None)
-        if data is not None and str(getattr(data, "id", "") or "").strip():
-            return str(data.id).strip()
+        if data is not None:
+            token = str(getattr(data, "internal_id", "") or getattr(data, "id", "") or "").strip()
+            if token:
+                return token
         return ""
+
+    def _mod_id(self) -> str:
+        """Deprecated alias of Frozen UUID entity identity (not SQLite PK)."""
+        return self._entity_internal_id()
 
     def _display_info(self):
         """Projection-only display namespace — never live DB for Library paint."""

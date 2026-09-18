@@ -518,7 +518,7 @@ def test_workshop_root_missing_is_explicit_error(
     library = tmp_path / "mod"
     _seed_wh3_mod(library, db, folder="A", workshop_id="77", pack_name="a.pack")
     ref = Wh3ModRef(
-        internal_id="1",
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
         workspace_id="77",
         enabled=True,
         last_known_path=str(library / "Warhammer3" / "A"),

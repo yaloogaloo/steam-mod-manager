@@ -14,7 +14,7 @@ from core.models import ModMetadata
 from core.mod_platform import PLATFORM_STEAM
 from services.file_ops import INFO_DIR_NAME, persist_unified_metadata_dict
 from services.identity_service import identity_create_scope, lifecycle_scope
-from services.legacy_workspace_backup import (
+from tools.archive.legacy_workspace_backup import (
     backup_writer_locked_to_mod_id,
     classify_legacy_workspace_buckets,
     delete_safe_legacy_workspace_buckets,
@@ -440,7 +440,7 @@ def test_other_empty_url_current_backup_pairs_legacy_safe(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     from core.paths import data_dir
-    from services.legacy_backup_finalize import finalize_leftover_legacy_buckets
+    from tools.archive.legacy_backup_finalize import finalize_leftover_legacy_buckets
     from services.metadata_backup_validator import status_from_validation, validate_backup
 
     _folder, pk, frozen = _seed_reminted(db, tmp_path)
@@ -477,7 +477,7 @@ def test_unique_legacy_cover_migrates_then_deletes(
     db: DatabaseManager, tmp_path: Path
 ) -> None:
     from core.paths import data_dir
-    from services.legacy_backup_finalize import finalize_leftover_legacy_buckets
+    from tools.archive.legacy_backup_finalize import finalize_leftover_legacy_buckets
 
     _folder, pk, frozen = _seed_reminted(db, tmp_path)
     payload = _valid_payload(frozen=frozen, workshop=WORKSHOP, title="Reminted")

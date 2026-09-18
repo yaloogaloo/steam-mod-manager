@@ -20,7 +20,7 @@ from services.deploy_path_lifecycle import (
     GAME_CONFIG_PATH_MISSING,
     SOURCE_MOD_PATH_MISSING,
     custom_deploy_path_missing_error,
-    resolve_entity_internal_id,
+    resolve_entity_mod_pk,
     validate_custom_deploy_target,
 )
 from ui.mod_detail_panel import humanize_deploy_error
@@ -51,7 +51,7 @@ def _seed_mod(
     workspace_id: str = "",
     deploy_type: str = "folder_copy",
     create_source: bool = True,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     install.mkdir(parents=True, exist_ok=True)
     mods.mkdir(parents=True, exist_ok=True)
     db.upsert_game(
@@ -85,7 +85,7 @@ def _seed_mod(
         db.update_mod_identity_fields(pk, workspace_id=workspace_id)
     if custom:
         db.update_mod_user_metadata(pk, {"custom_deploy_path": custom})
-    return folder, pk
+    return folder, str(created.internal_id), pk
 
 
 def test_case1_game_mod_path_d_drive_missing_returns_game_config_code(
@@ -98,7 +98,7 @@ def test_case1_game_mod_path_d_drive_missing_returns_game_config_code(
         tmp_path / "D_SteamLibrary" / "steamapps" / "common" / "Baldurs Gate 3" / "Mods"
     )
     install_ok.mkdir(parents=True, exist_ok=True)
-    folder, pk = _seed_mod(
+    folder, frozen, _pk = _seed_mod(
         db,
         library,
         mid="1339",
@@ -121,7 +121,7 @@ def test_case1_game_mod_path_d_drive_missing_returns_game_config_code(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        pk, require_target_exists=True, prepare_archives=False
+        frozen, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -158,7 +158,7 @@ def test_case2_custom_deploy_path_d_drive_missing_returns_custom_code(
         / "Bin"
         / "Win64"
     )
-    folder, pk = _seed_mod(
+    folder, frozen, _pk = _seed_mod(
         db,
         library,
         mid="1238",
@@ -178,7 +178,7 @@ def test_case2_custom_deploy_path_d_drive_missing_returns_custom_code(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        pk, require_target_exists=True, prepare_archives=False
+        frozen, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -221,6 +221,7 @@ def test_case3_source_mod_missing_returns_source_code(
         db, external_id="7100", title="GhostMod", app_id=BG3, game_name="Baldurs Gate 3"
     )
     pk = str(created.mod_id)
+    frozen = str(created.internal_id)
     db.update_mod_identity_fields(
         pk,
         workspace_id="14717",
@@ -231,7 +232,7 @@ def test_case3_source_mod_missing_returns_source_code(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        pk, require_target_exists=True, prepare_archives=False
+        frozen, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -240,7 +241,7 @@ def test_case3_source_mod_missing_returns_source_code(
     assert err.get("path_field") == "source"
     msg = str(err.get("error") or "")
     assert SOURCE_MOD_PATH_MISSING in msg
-    assert f"internal_id={pk}" in msg
+    assert f"internal_id={frozen}" in msg
     assert FORBIDDEN_VAGUE_MOD_PATH_COPY not in msg
     assert GAME_CONFIG_PATH_MISSING not in msg
     assert CUSTOM_DEPLOY_PATH_MISSING not in msg
@@ -260,7 +261,7 @@ def test_game_install_missing_is_distinct_from_custom(
     library = tmp_path / "mod"
     install = tmp_path / "missing_install"
     mods = tmp_path / "missing_mods"
-    _folder, pk = _seed_mod(
+    _folder, frozen, pk = _seed_mod(
         db,
         library,
         mid="9001",
@@ -280,7 +281,7 @@ def test_game_install_missing_is_distinct_from_custom(
 
     deployer = ModDeployer(library_root=library, db=db)
     ctx, err, _ = deployer._resolve_context(
-        pk, require_target_exists=True, prepare_archives=False
+        frozen, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -312,7 +313,7 @@ def test_workspace_id_token_is_identity_failure_not_source(
         workspace_id="ws-17864251756563492",
     )
     orphan_ws = "17864251756563492"
-    mid, err = resolve_entity_internal_id(orphan_ws, db=db)
+    mid, err = resolve_entity_mod_pk(orphan_ws, db=db)
     assert mid == ""
     assert err is not None
     assert err.startswith(DEPLOY_ERR_IDENTITY_PREFIX)
@@ -326,7 +327,7 @@ def test_workspace_id_token_is_identity_failure_not_source(
     assert ctx is None
     assert deploy_err is not None
     msg = str(deploy_err.get("error") or "")
-    assert msg.startswith(DEPLOY_ERR_IDENTITY_PREFIX)
+    assert deploy_err.get("error_code") == "invalid_internal_uuid"
     assert SOURCE_MOD_PATH_MISSING not in msg
     assert FORBIDDEN_VAGUE_MOD_PATH_COPY not in msg
 

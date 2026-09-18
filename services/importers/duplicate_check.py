@@ -8,9 +8,6 @@ from urllib.parse import urlparse, urlunparse
 from core.db_manager import DatabaseManager, ModDisplayInfo
 from core.mod_platform import (
     PLATFORM_NEXUS,
-    is_internal_mod_id,
-    is_modio_external_id_pollution,
-    is_provisional_external_id,
     normalize_platform,
 )
 from services.importers.importer_base import ImportResult
@@ -83,8 +80,8 @@ def find_mod_by_source_url(
     as :func:`find_duplicate_mod` (``platform + app_id + identity``).
 
     DO NOT add ``app_id=0`` / cross-app fallbacks here. Historical dirty-row recovery
-    belongs in identity-repair tooling via :func:`find_mod_by_source_url_relaxed`,
-    never in the real-time import path (regression: 6c64d51).
+    belongs in identity-repair tooling, never in the real-time import path
+    (regression: 6c64d51).
     """
     target = normalize_source_url(source_url)
     if not target:
@@ -110,88 +107,6 @@ def find_mod_by_source_url(
                   AND TRIM(source_url) != ''
                 """,
                 (plat, aid),
-            ).fetchall()
-        else:
-            rows = db._conn.execute(
-                """
-                SELECT mod_id, platform, source_url, external_id, app_id
-                FROM mods
-                WHERE source_url IS NOT NULL
-                  AND TRIM(source_url) != ''
-                """
-            ).fetchall()
-    return _scan_rows(rows)
-
-
-def find_mod_by_source_url_relaxed(
-    db: DatabaseManager,
-    source_url: str,
-    *,
-    platform: str = "",
-    app_id: int = 0,
-    relax_app_id: bool = True,
-) -> ModDisplayInfo | None:
-    """
-    Offline / identity-repair URL lookup (may relax ``app_id``).
-
-    NOT for live import duplicate detection. :func:`find_duplicate_mod` and
-    :func:`check_import_duplicate` must call :func:`find_mod_by_source_url` only.
-    """
-    target = normalize_source_url(source_url)
-    if not target:
-        return None
-    plat = normalize_platform(platform) if platform else ""
-
-    def _scan_rows(rows) -> ModDisplayInfo | None:
-        for row in rows:
-            if normalize_source_url(str(row["source_url"] or "")) == target:
-                return db.get_mod_display_info(row["mod_id"])
-        return None
-
-    with db._lock:
-        if plat:
-            aid = int(app_id or 0)
-            if aid > 0:
-                hit = _scan_rows(
-                    db._conn.execute(
-                        """
-                        SELECT mod_id, platform, source_url, external_id, app_id
-                        FROM mods
-                        WHERE platform = ?
-                          AND app_id = ?
-                          AND source_url IS NOT NULL
-                          AND TRIM(source_url) != ''
-                        """,
-                        (plat, aid),
-                    ).fetchall()
-                )
-                if hit is not None:
-                    return hit
-            if relax_app_id and aid > 0:
-                hit = _scan_rows(
-                    db._conn.execute(
-                        """
-                        SELECT mod_id, platform, source_url, external_id, app_id
-                        FROM mods
-                        WHERE platform = ?
-                          AND (app_id = 0 OR app_id IS NULL)
-                          AND source_url IS NOT NULL
-                          AND TRIM(source_url) != ''
-                        """,
-                        (plat,),
-                    ).fetchall()
-                )
-                if hit is not None:
-                    return hit
-            rows = db._conn.execute(
-                """
-                SELECT mod_id, platform, source_url, external_id, app_id
-                FROM mods
-                WHERE platform = ?
-                  AND source_url IS NOT NULL
-                  AND TRIM(source_url) != ''
-                """,
-                (plat,),
             ).fetchall()
         else:
             rows = db._conn.execute(

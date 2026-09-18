@@ -7,11 +7,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.mod_platform import (
-    CIVILIZATION_VI_APP_IDS,
-    PLATFORM_STEAM,
-    is_civilization_vi_game,
-)
+from core.mod_platform import CIVILIZATION_VI_APP_IDS, PLATFORM_STEAM
 from services.deploy import ModDeployer
 from services.deploy_rules import (
     CIVILIZATION_VI_APP_ID,
@@ -22,6 +18,7 @@ from services.deploy_rules import (
     resolve_strategy,
 )
 from services.deploy_rules.base import DeployContext
+from services.deploy_rules.generic import deploy_folder_name
 from services.file_ops import INFO_DIR_NAME
 from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
@@ -75,7 +72,7 @@ def _register(
     external_id: str,
     title: str,
     folder: Path,
-) -> str:
+) -> tuple[str, str]:
     created = create_steam_test_mod(
         db,
         external_id=str(external_id),
@@ -83,7 +80,7 @@ def _register(
         app_id=CIV6,
         game_name="文明Ⅵ",
     )
-    return prove_managed_folder(
+    pk = prove_managed_folder(
         db,
         folder,
         handle=created.mod_id,
@@ -91,21 +88,12 @@ def _register(
         app_id=CIV6,
         game_name="文明Ⅵ",
     )
+    return pk, str(created.internal_id)
 
 
 # ---------------------------------------------------------------------------
-# Identification / strategy registration
+# Strategy registration
 # ---------------------------------------------------------------------------
-
-
-def test_is_civilization_vi_game() -> None:
-    assert is_civilization_vi_game(game_id=289070)
-    assert is_civilization_vi_game("文明Ⅵ")
-    assert is_civilization_vi_game("Civilization VI")
-    assert is_civilization_vi_game("Sid Meier's Civilization VI")
-    assert not is_civilization_vi_game("Palworld")
-    assert not is_civilization_vi_game(game_id=1623730)
-    assert not is_civilization_vi_game("Civilization V")
 
 
 def test_resolve_deploy_type_forces_folder_copy() -> None:
@@ -121,7 +109,9 @@ def test_resolve_strategy_is_folder_copy(db: DatabaseManager, tmp_path: Path) ->
     source = tmp_path / "src" / "ModA"
     source.mkdir(parents=True)
     (source / "a.txt").write_text("a", encoding="utf-8")
-    ctx = DeployContext(internal_id="289070001",
+    ctx = DeployContext(
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
+        workspace_id="289070001",
         app_id=CIV6,
         source=source,
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
@@ -156,13 +146,13 @@ def test_empty_target_success(tmp_path: Path, db: DatabaseManager) -> None:
             "Assets/y.txt": "y",
         },
     )
-    pk = _register(db, external_id="289070101", title=folder, folder=source)
+    pk, frozen = _register(db, external_id="289070101", title=folder, folder=source)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("289070101")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_FOLDER_COPY
 
-    target = mods / folder
+    target = mods / "ModA"
     assert (target / "file1.txt").is_file()
     assert (target / "file2.txt").is_file()
     assert (target / "Assets" / "x.txt").is_file()
@@ -184,19 +174,19 @@ def test_existing_target_redeploy_success(tmp_path: Path, db: DatabaseManager) -
     files = {f"f{i}.txt": f"v{i}" for i in range(5)}
     files["Assets/nested.txt"] = "n"
     source = _seed_mod(library, folder=folder, files=files)
-    pk = _register(db, external_id="289070102", title=folder, folder=source)
+    pk, frozen = _register(db, external_id="289070102", title=folder, folder=source)
 
     deployer = ModDeployer(library_root=library, db=db)
-    first = deployer.deploy_mod("289070102")
+    first = deployer.deploy_mod(frozen)
     assert first["success"] is True, first
 
     # All targets already present — redeploy must still SUCCESS.
-    second = deployer.deploy_mod("289070102")
+    second = deployer.deploy_mod(frozen)
     assert second["success"] is True, second
     assert second["deploy_type"] == DEPLOY_TYPE_FOLDER_COPY
     assert int(second.get("verified_files") or 0) == len(files)
 
-    target = mods / folder
+    target = mods / "ModExisting"
     for rel in files:
         assert (target / rel).is_file()
     assert load_manifest(source) is not None
@@ -208,18 +198,18 @@ def test_partial_existing_target_success(tmp_path: Path, db: DatabaseManager) ->
     folder = "ModPartial"
     files = {f"f{i}.txt": f"content-{i}" for i in range(10)}
     source = _seed_mod(library, folder=folder, files=files)
-    pk = _register(db, external_id="289070103", title=folder, folder=source)
+    pk, frozen = _register(db, external_id="289070103", title=folder, folder=source)
 
     deployer = ModDeployer(library_root=library, db=db)
-    first = deployer.deploy_mod(pk)
+    first = deployer.deploy_mod(frozen)
     assert first["success"] is True, first
 
-    target = mods / folder
+    target = mods / "ModPartial"
     # Leave a partial set of owned targets (prior deploy), then redeploy.
     for i in range(6):
         (target / f"f{i}.txt").unlink()
 
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen)
     assert result["success"] is True, result
     assert int(result.get("planned_files") or 0) == 10
     assert int(result.get("verified_files") or 0) == 10
@@ -244,9 +234,9 @@ def test_manifest_equals_fileplan(tmp_path: Path, db: DatabaseManager) -> None:
         "Assets/c.txt": "c",
     }
     source = _seed_mod(library, folder=folder, files=files)
-    pk = _register(db, external_id="289070104", title=folder, folder=source)
+    pk, frozen = _register(db, external_id="289070104", title=folder, folder=source)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("289070104")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
 
     man = load_manifest(source)
@@ -278,100 +268,106 @@ def test_uses_configured_mod_path_not_hardcoded(
         folder=folder,
         files={"modinfo": "<Mod/>", "Assets/tex.png": "png"},
     )
-    pk = _register(db, external_id="289070105", title=folder, folder=source)
+    pk, frozen = _register(db, external_id="289070105", title=folder, folder=source)
 
     # Confirm Steam Workshop identity defaults (platform steam).
     display = db.get_mod_display_info(pk)
     assert display is not None
     assert display.platform == PLATFORM_STEAM
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
 
     target = Path(result["target"]).resolve()
-    assert target == (configured / folder).resolve()
+    expected = "SteamWorkshopMod"
+    assert target == (configured / expected).resolve()
     assert str(configured.resolve()) in str(target)
     # Must not invent Steam/Documents Civ VI paths.
     assert "Sid Meier" not in str(target)
     assert "Documents" not in str(target)
-    assert (configured / folder / "modinfo").is_file()
+    assert (configured / expected / "modinfo").is_file()
     assert (source / "modinfo").is_file()  # library untouched
 
 
 # ---------------------------------------------------------------------------
-# Chinese deploy-folder name → workspace_id (library source unchanged)
+# Deploy folder is always mod_{workspace_id} (library folder unchanged)
 # ---------------------------------------------------------------------------
 
 
-def test_chinese_directory_maps_to_workspace_id(
+def test_chinese_directory_maps_to_workspace_folder(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    from services.deploy_rules.generic import contains_chinese
+    from services.mod_path_normalizer import contains_chinese
 
     library = tmp_path / "library"
     mods = _configure_civ6(db, tmp_path / "CivModsCN")
-    # Steam upsert: PK coincidentally equals workspace_id for this fixture only.
     workspace_id = "123456789"
-    folder = "中文 Mod 名"
+    folder = "三国全面战争"
+    expected = deploy_folder_name(workspace_id)
     assert contains_chinese(folder)
+    assert expected == "mod_123456789"
 
     source = _seed_mod(
         library,
         folder=folder,
         files={"file1.modinfo": "<Mod/>", "Assets/a.xml": "<ok/>"},
     )
-    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
+    pk, frozen = _register(db, external_id=workspace_id, title=folder, folder=source)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(workspace_id)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
 
     target = Path(result["target"]).resolve()
-    assert target == (mods / workspace_id).resolve()
+    assert target == (mods / expected).resolve()
+    assert target.name == expected
+    assert target.name != workspace_id
+    assert target.name != pk
     assert (target / "file1.modinfo").is_file()
     assert (target / "Assets" / "a.xml").is_file()
     assert not (mods / folder).exists()
-    # Source library directory must not be renamed.
+    assert not (mods / workspace_id).exists()
     assert source.is_dir()
     assert source.name == folder
     assert (source / "file1.modinfo").is_file()
 
 
-def test_chinese_directory_uses_workspace_id_not_mod_id_pk(
+def test_chinese_directory_uses_workspace_folder_not_pk(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """
-    Real identity layout: mods.mod_id (PK) ≠ mods.workspace_id.
-
-    Deploy folder must be workspace_id, never the SQLite PK.
-    """
-    from services.deploy_rules.generic import contains_chinese
+    """Deploy folder is mod_{workspace_id}, never PK, Frozen UUID, or Chinese."""
+    from services.mod_path_normalizer import contains_chinese
 
     library = tmp_path / "library"
     mods = _configure_civ6(db, tmp_path / "CivModsPkWs")
     workspace_id = "3681020076"
     folder = "测试中文Mod"
+    expected = deploy_folder_name(workspace_id)
     assert contains_chinese(folder)
+    assert expected == "mod_3681020076"
 
     source = _seed_mod(
         library,
         folder=folder,
         files={"file1.modinfo": "<Mod/>", "Assets/a.xml": "<ok/>"},
     )
-    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
+    pk, frozen = _register(db, external_id=workspace_id, title=folder, folder=source)
     info = db.get_mod_display_info(pk)
     assert info is not None
     assert str(info.mod_id) == pk
     assert str(info.workspace_id) == workspace_id
     assert pk != workspace_id
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
 
     target = Path(result["target"]).resolve()
-    assert target == (mods / workspace_id).resolve()
-    assert target.name == workspace_id
+    assert target == (mods / expected).resolve()
+    assert target.name == expected
     assert target.name != pk
+    assert target.name != workspace_id
+    assert target.name != frozen
     assert not (mods / pk).exists()
+    assert not (mods / workspace_id).exists()
     assert not (mods / folder).exists()
     assert source.name == folder
 
@@ -383,42 +379,47 @@ def test_english_directory_keeps_original_name(
     mods = _configure_civ6(db, tmp_path / "CivModsEN")
     mid = "123456789"
     folder = "Better UI"
+    expected = folder
     source = _seed_mod(
         library,
         folder=folder,
         files={"ui.modinfo": "<Mod/>"},
     )
-    pk = _register(db, external_id=mid, title=folder, folder=source)
+    pk, frozen = _register(db, external_id=mid, title=folder, folder=source)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
-    assert Path(result["target"]).resolve() == (mods / folder).resolve()
+    assert Path(result["target"]).resolve() == (mods / expected).resolve()
     assert source.name == folder
+    assert (mods / folder).exists()
     assert not (mods / mid).exists()
+    assert not (mods / deploy_folder_name(mid)).exists()
 
 
-def test_mixed_chinese_english_maps_to_workspace_id(
+def test_mixed_chinese_english_maps_to_workspace_folder(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "library"
     mods = _configure_civ6(db, tmp_path / "CivModsMixed")
     workspace_id = "123456789"
     folder = "Better UI 中文版"
+    expected = deploy_folder_name(workspace_id)
     source = _seed_mod(
         library,
         folder=folder,
         files={"x.modinfo": "<Mod/>"},
     )
-    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
+    pk, frozen = _register(db, external_id=workspace_id, title=folder, folder=source)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(workspace_id)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
-    assert Path(result["target"]).resolve() == (mods / workspace_id).resolve()
+    assert Path(result["target"]).resolve() == (mods / expected).resolve()
+    assert Path(result["target"]).name != workspace_id
     assert source.name == folder
     assert source.is_dir()
 
 
-def test_chinese_fileplan_uses_workspace_id_targets_directly(
+def test_chinese_fileplan_uses_workspace_folder_directly(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "library"
@@ -426,6 +427,7 @@ def test_chinese_fileplan_uses_workspace_id_targets_directly(
     pk = "987654321"
     workspace_id = "111000222"
     folder = "和而不同"
+    expected = deploy_folder_name(workspace_id)
     source = _seed_mod(
         library,
         folder=folder,
@@ -433,9 +435,8 @@ def test_chinese_fileplan_uses_workspace_id_targets_directly(
     )
     cfg = db.get_game_deploy_config(CIV6)
     assert cfg is not None
-    # Plan-only: ctx.internal_id is the PK; workspace_id must drive the folder.
     ctx = DeployContext(
-        internal_id=pk,
+        internal_id="36834fcf-3cbb-4ffe-8b78-be1921638bd4",
         workspace_id=workspace_id,
         app_id=CIV6,
         source=source,
@@ -445,14 +446,15 @@ def test_chinese_fileplan_uses_workspace_id_targets_directly(
     )
     planned = FolderCopyStrategy().plan(ctx)
     assert planned.success is True
-    assert Path(planned.target).resolve() == (mods / workspace_id).resolve()
+    assert Path(planned.target).resolve() == (mods / expected).resolve()
     assert pk not in Path(planned.target).parts
+    assert workspace_id not in Path(planned.target).parts
     assert folder not in planned.target
     for entry in planned.files:
-        assert workspace_id in entry.target.replace("\\", "/")
+        assert expected in entry.target.replace("\\", "/")
         assert pk not in Path(entry.target).parts
+        assert workspace_id not in Path(entry.target).parts
         assert folder not in Path(entry.target).parts
-    # No second-phase rename — library still Chinese-named.
     assert source.name == folder
 
 
@@ -463,19 +465,21 @@ def test_chinese_existing_target_redeploy_success(
     mods = _configure_civ6(db, tmp_path / "CivModsCNExist")
     workspace_id = "2465378070"
     folder = "Civ6 Plus：和而不同"
+    expected = deploy_folder_name(workspace_id)
     files = {f"f{i}.txt": f"v{i}" for i in range(4)}
     source = _seed_mod(library, folder=folder, files=files)
-    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
+    pk, frozen = _register(db, external_id=workspace_id, title=folder, folder=source)
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(workspace_id)["success"] is True
-    second = deployer.deploy_mod(workspace_id)
+    assert deployer.deploy_mod(frozen)["success"] is True
+    second = deployer.deploy_mod(frozen)
     assert second["success"] is True, second
     assert "没有可部署的文件" not in str(second.get("error") or "")
     assert int(second.get("verified_files") or 0) == len(files)
-    target = mods / workspace_id
+    target = mods / expected
     for rel in files:
         assert (target / rel).is_file()
+    assert not (mods / workspace_id).exists()
     assert source.name == folder
 
 
@@ -486,11 +490,12 @@ def test_chinese_manifest_equals_fileplan(
     mods = _configure_civ6(db, tmp_path / "CivModsCNMan")
     workspace_id = "111222333"
     folder = "中文测试Mod"
+    expected = deploy_folder_name(workspace_id)
     files = {"a.modinfo": "<a/>", "Assets/x.xml": "<x/>"}
     source = _seed_mod(library, folder=folder, files=files)
-    pk = _register(db, external_id=workspace_id, title=folder, folder=source)
+    pk, frozen = _register(db, external_id=workspace_id, title=folder, folder=source)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(workspace_id)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
     assert result["success"] is True, result
     man = load_manifest(source)
     assert man is not None
@@ -500,15 +505,16 @@ def test_chinese_manifest_equals_fileplan(
     manifest_targets = {Path(f.target).resolve() for f in man.files}
     assert result_targets == manifest_targets
     for t in manifest_targets:
-        assert t.is_relative_to((mods / workspace_id).resolve())
+        assert t.is_relative_to((mods / expected).resolve())
         assert folder not in t.parts
+        assert workspace_id not in t.parts
     assert source.name == folder
 
 
-def test_non_civ6_chinese_folder_keeps_name(
+def test_non_civ6_chinese_folder_uses_workspace_id(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """Chinese folder rename is Civ VI-only — other folder_copy games unchanged."""
+    """FolderCopy always uses mod_{workspace_id}, including unconfigured games."""
     library = tmp_path / "library"
     mods = tmp_path / "OtherMods"
     mods.mkdir()
@@ -519,8 +525,9 @@ def test_non_civ6_chinese_folder_keeps_name(
         mod_path=str(mods),
         deploy_type="folder_copy",
     )
-    folder = "中文目录"
+    folder = "测试MOD"
     mid = "555666777"
+    expected = deploy_folder_name(mid)
     mod_dir = library / "SomeGame" / folder
     mod_dir.mkdir(parents=True)
     (mod_dir / INFO_DIR_NAME).mkdir()
@@ -528,11 +535,14 @@ def test_non_civ6_chinese_folder_keeps_name(
     created = create_steam_test_mod(
         db, external_id=mid, title=folder, app_id=app_id, game_name="SomeGame"
     )
-    pk = prove_managed_folder(
+    prove_managed_folder(
         db, mod_dir, handle=created.mod_id, title=folder, app_id=app_id, game_name="SomeGame"
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(created.internal_id)
     assert result["success"] is True, result
-    assert Path(result["target"]).resolve() == (mods / folder).resolve()
+    assert Path(result["target"]).resolve() == (mods / expected).resolve()
+    assert Path(result["target"]).name == expected
+    assert not (mods / "ceshi_MOD").exists()
+    assert not (mods / folder).exists()
     assert mod_dir.name == folder

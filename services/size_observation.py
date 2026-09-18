@@ -251,13 +251,16 @@ def _resolve_path(
                 return hint
         except OSError:
             pass
-    if not internal_id.isdigit():
+    from services.mod_library_cache import dal_mod_pk
+
+    pk = dal_mod_pk(internal_id)
+    if not pk:
         return hint
     try:
         from core.db_manager import get_db
 
         database = db if db is not None else get_db()
-        row = database.get_mod_size_observation(internal_id) or {}
+        row = database.get_mod_size_observation(pk) or {}
         raw = str(row.get("last_known_path") or "").strip()
         if raw:
             return Path(raw)

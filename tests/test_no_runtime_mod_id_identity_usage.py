@@ -32,7 +32,6 @@ SCOPED_FILES: tuple[str, ...] = (
     "services/deploy_stage_log.py",
     "services/deploy_result.py",
     "services/deploy_file_plan.py",
-    "services/deploy_conflict.py",
     "services/deploy_security.py",
     "services/deployment_record.py",
     "services/content_status_eval.py",

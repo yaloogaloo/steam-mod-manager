@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QMessageBox, QWidget
 
 from services.info_asset_runtime import (
@@ -237,13 +236,3 @@ def _start_repair_then_open(
     worker.failed.connect(lambda _m: _on_ok(None) if _still_current() else None)
     setattr(owner, "_offline_open_worker", worker)
     worker.start()
-
-
-def cancel_detail_offline_open(owner: QObject) -> None:
-    worker = getattr(owner, "_offline_open_worker", None)
-    if worker is None:
-        return
-    try:
-        worker.request_cancel()
-    except Exception:  # noqa: BLE001
-        pass

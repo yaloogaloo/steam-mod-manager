@@ -192,6 +192,7 @@ def test_nexus_import_with_html_attaches_offline(
         context=PALWORLD,
     )
     assert result.success, result.error
+    assert str(result.mod_id).isdigit()
 
     attach = attach_nexus_offline_page(
         result.mod_id,

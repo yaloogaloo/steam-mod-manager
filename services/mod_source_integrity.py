@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,13 +104,26 @@ class ResolvedDeploySource:
 
 
 def _sha256_file(path: Path, *, chunk: int = 1024 * 1024) -> str:
+    import time
+
+    from services.deploy_op_profile import record_op
+
+    t0 = time.perf_counter()
     digest = hashlib.sha256()
+    nbytes = 0
     with path.open("rb") as fh:
         while True:
             block = fh.read(chunk)
             if not block:
                 break
+            nbytes += len(block)
             digest.update(block)
+    record_op(
+        "hash",
+        (time.perf_counter() - t0) * 1000.0,
+        bytes_count=nbytes,
+        path=str(path),
+    )
     return digest.hexdigest()
 
 
@@ -127,18 +141,17 @@ def _resolve_managed_path(
     managed_path: Path | str | None = None,
     db: DatabaseManager | None = None,
 ) -> Path | None:
-    from services.deploy_paths import resolve_deploy_identity, resolve_deploy_managed_path
+    from services.deploy_paths import resolve_deploy_managed_path
     from core.paths import default_mod_library
 
     database = db if db is not None else get_db()
-    mid = resolve_deploy_identity(mod_id, db=database)
     library_root = None
     try:
         library_root = default_mod_library()
     except Exception:  # noqa: BLE001
         library_root = None
     return resolve_deploy_managed_path(
-        mid,
+        mod_id,
         db=database,
         library_root=library_root,
         explicit=managed_path,
@@ -654,18 +667,28 @@ def enrich_manifest_source_hashes(manifest: Any) -> None:
     hashed_from_disk = 0
     hashed_bytes = 0
     reused = 0
+    from services.deploy_op_profile import cached_resolve, record_op
+
     for entry in list(getattr(manifest, "files", None) or []):
         raw = str(getattr(entry, "source", "") or "").strip()
         if not raw:
             continue
         path = Path(raw)
-        if not path.is_file():
-            continue
+        t_ex = time.perf_counter()
         try:
-            key = str(path.resolve())
+            exists = path.is_file()
         except OSError:
-            key = str(path)
-        digest = cache.get(key)
+            exists = False
+        record_op("is_file", (time.perf_counter() - t_ex) * 1000.0, path=raw)
+        if not exists:
+            continue
+        digest = cache.get(raw) or cache.get(str(path))
+        if digest is None:
+            try:
+                key = cached_resolve(path)
+            except OSError:
+                key = str(path)
+            digest = cache.get(key)
         if digest is None:
             try:
                 hashed_bytes += int(path.stat().st_size)

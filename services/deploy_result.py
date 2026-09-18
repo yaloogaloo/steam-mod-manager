@@ -22,6 +22,7 @@ class DeployResult:
 
     status: DeployStatus
     internal_id: str = ""
+    mod_pk: int = 0
     app_id: int = 0
     source: str = ""
     target: str = ""
@@ -49,6 +50,7 @@ class DeployResult:
         out: dict[str, Any] = {
             "success": self.success,
             "status": self.status.value,
+            "internal_id": self.internal_id,
             "mod_id": self.internal_id,
             "planned_files": self.planned_files,
             "backed_up_files": self.backed_up_files,
@@ -56,6 +58,8 @@ class DeployResult:
             "verified_files": self.verified_files,
             "failed_files": self.failed_files,
         }
+        if self.mod_pk:
+            out["mod_pk"] = int(self.mod_pk)
         if self.app_id:
             out["app_id"] = self.app_id
         if self.source:
@@ -100,10 +104,31 @@ class DeployResult:
         else:
             status = DeployStatus.FAILED
         extra = dict(data)
+        raw_iid = str(data.get("internal_id") or "").strip()
+        raw_alias = str(data.get("mod_id") or "").strip()
+        frozen = ""
+        try:
+            from services.deploy_identity import is_frozen_internal_uuid
+
+            if is_frozen_internal_uuid(raw_iid):
+                frozen = raw_iid
+            elif is_frozen_internal_uuid(raw_alias):
+                frozen = raw_alias
+            elif raw_iid and not raw_iid.isdigit():
+                frozen = raw_iid
+        except Exception:  # noqa: BLE001
+            frozen = raw_iid if raw_iid and not raw_iid.isdigit() else ""
+        pk_val = int(data.get("mod_pk") or 0)
+        if not pk_val and raw_alias.isdigit():
+            pk_val = int(raw_alias)
+        elif not pk_val and raw_iid.isdigit():
+            pk_val = int(raw_iid)
         for key in (
             "success",
             "status",
             "mod_id",
+            "internal_id",
+            "mod_pk",
             "app_id",
             "source",
             "target",
@@ -125,7 +150,8 @@ class DeployResult:
             extra.pop(key, None)
         return cls(
             status=status,
-            internal_id=str(data.get("internal_id") or data.get("mod_id") or ""),
+            internal_id=frozen,
+            mod_pk=pk_val,
             app_id=int(data.get("app_id") or 0),
             source=str(data.get("source") or ""),
             target=str(data.get("target") or ""),
@@ -155,12 +181,14 @@ def terminal_failed(
     error: str,
     *,
     internal_id: str = "",
+    mod_pk: int = 0,
     error_code: str = "deploy_failed",
     **extra: Any,
 ) -> dict[str, Any]:
     return DeployResult(
         status=DeployStatus.FAILED,
         internal_id=internal_id,
+        mod_pk=int(mod_pk or 0),
         error=error,
         error_code=error_code,
         extra=extra,

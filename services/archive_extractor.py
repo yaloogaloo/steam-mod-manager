@@ -319,33 +319,73 @@ def _extract_7z_members(
     src: Path,
     members: list[tuple[str, Path]],
 ) -> tuple[int, int]:
-    try:
-        import py7zr
-    except ImportError:
-        return _extract_7z_members_cli(src, members)
+    from services.importers.archive import is_py7zr_unsupported_feature
 
-    copied = 0
-    nbytes = 0
-    # Re-open per member: py7zr ``read()`` is single-pass on one handle.
-    for member, dest in members:
-        out = _prepare_member_dest(member, dest, archive=src)
-        key = _normalize_member_name(member)
-        with py7zr.SevenZipFile(src, mode="r") as archive:
-            names = {
-                _normalize_member_name(name): name
-                for name in archive.getnames()
-                if _normalize_member_name(name)
-                and not _normalize_member_name(name).endswith("/")
-            }
+    try:
+        import py7zr as _py7zr
+    except ImportError:
+        logger.warning("py7zr missing; extracting 7z members via 7z.exe archive=%s", src)
+        return _extract_7z_members_cli(src, members)
+    del _py7zr
+
+    try:
+        return _extract_7z_members_py7zr(src, members)
+    except FileNotFoundError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if is_py7zr_unsupported_feature(exc):
+            from services.importers.archive import _log_extract_event
+
+            logger.warning(
+                "py7zr unsupported feature archive=%s error=%s; falling back to 7z.exe x",
+                src,
+                exc,
+            )
+            _log_extract_event(
+                archive_path=src,
+                archive_type=".7z",
+                extractor_selected="py7zr",
+                py7zr_exception=repr(exc),
+                fallback_triggered=True,
+                fallback_reason="unsupported_feature",
+            )
+            return _extract_7z_members_cli(src, members)
+        raise
+
+
+def _extract_7z_members_py7zr(
+    src: Path,
+    members: list[tuple[str, Path]],
+) -> tuple[int, int]:
+    import py7zr
+
+    prepared: list[tuple[str, Path]] = []
+    with py7zr.SevenZipFile(src, mode="r") as archive:
+        names = {
+            _normalize_member_name(name): name
+            for name in archive.getnames()
+            if _normalize_member_name(name)
+            and not _normalize_member_name(name).endswith("/")
+        }
+        raws: list[str] = []
+        for member, dest in members:
+            out = _prepare_member_dest(member, dest, archive=src)
+            key = _normalize_member_name(member)
             raw = names.get(key)
             if raw is None:
                 raise FileNotFoundError(f"压缩包缺少成员：{key} (archive={src})")
-            blobs = archive.read([raw])
-            payload = blobs.get(raw)
-            if payload is None:
-                raise FileNotFoundError(f"压缩包缺少成员：{key} (archive={src})")
-            with out.open("wb") as outf:
-                shutil.copyfileobj(payload, outf)
+            prepared.append((raw, out))
+            raws.append(raw)
+        # One read() pass — re-opening per member re-decompresses solid 7z archives.
+        blobs = archive.read(raws)
+    copied = 0
+    nbytes = 0
+    for raw, out in prepared:
+        payload = blobs.get(raw)
+        if payload is None:
+            raise FileNotFoundError(f"压缩包缺少成员：{raw} (archive={src})")
+        with out.open("wb") as outf:
+            shutil.copyfileobj(payload, outf)
         copied += 1
         try:
             nbytes += int(out.stat().st_size)
@@ -359,17 +399,110 @@ def _extract_7z_members_cli(
     members: list[tuple[str, Path]],
 ) -> tuple[int, int]:
     import subprocess
+    import tempfile
 
     from services.importers.archive import find_7z_executable
 
     seven = find_7z_executable()
     if not seven:
-        raise RuntimeError("缺少 py7zr，无法提取 7z 成员")
-    copied = 0
-    nbytes = 0
+        from services.importers.archive import SEVEN_ZIP_FALLBACK_MISSING_MSG, _log_extract_event
+
+        _log_extract_event(
+            archive_path=src,
+            archive_type=".7z",
+            extractor_selected="7z.exe",
+            fallback_triggered=True,
+            seven_executable_path="",
+            result="missing_executable",
+        )
+        raise RuntimeError(SEVEN_ZIP_FALLBACK_MISSING_MSG)
+    prepared: list[tuple[str, Path]] = []
+    keys: list[str] = []
     for member, dest in members:
         out = _prepare_member_dest(member, dest, archive=src)
         key = _normalize_member_name(member)
+        prepared.append((key, out))
+        keys.append(key)
+
+    tmp = Path(tempfile.mkdtemp(prefix="smm_7z_x_"))
+    try:
+        list_file = tmp / "members.txt"
+        list_file.write_text("\n".join(keys), encoding="utf-8")
+        extract_root = tmp / "out"
+        extract_root.mkdir()
+        cmd = [seven, "x", str(src), f"-o{extract_root}", "-y", f"@{list_file}"]
+        from services.importers.archive import _log_extract_event
+
+        _log_extract_event(
+            archive_path=src,
+            archive_type=".7z",
+            extractor_selected="7z.exe",
+            fallback_triggered=True,
+            seven_executable_path=seven,
+            seven_command=" ".join(cmd),
+            members=len(keys),
+        )
+        logger.info("7z member extract provider=7z.exe archive=%s members=%s", src, len(keys))
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=600,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log_extract_event(
+                archive_path=src,
+                extractor_selected="7z.exe",
+                seven_command=" ".join(cmd),
+                seven_exit_code="spawn_error",
+                seven_stderr=exc,
+            )
+            raise RuntimeError(f"解压失败：{exc}") from exc
+        stdout = (proc.stdout or b"").decode("utf-8", "replace").strip()
+        stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        _log_extract_event(
+            archive_path=src,
+            extractor_selected="7z.exe",
+            seven_executable_path=seven,
+            seven_command=" ".join(cmd),
+            seven_exit_code=proc.returncode,
+            seven_stdout=stdout[:2000],
+            seven_stderr=stderr[:2000],
+        )
+        if proc.returncode != 0:
+            err = stderr or stdout or f"exit {proc.returncode}"
+            logger.warning("7z.exe x member extract failed archive=%s error=%s", src, err)
+            return _extract_7z_members_cli_stdout(src, prepared, seven)
+        copied = 0
+        nbytes = 0
+        for key, out in prepared:
+            extracted = extract_root.joinpath(*key.split("/"))
+            if not extracted.is_file():
+                extracted = extract_root / Path(key).name
+            if not extracted.is_file():
+                raise FileNotFoundError(f"压缩包缺少成员：{key} (archive={src})")
+            shutil.copy2(extracted, out)
+            copied += 1
+            try:
+                nbytes += int(out.stat().st_size)
+            except OSError:
+                pass
+        return copied, nbytes
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _extract_7z_members_cli_stdout(
+    src: Path,
+    prepared: list[tuple[str, Path]],
+    seven: str,
+) -> tuple[int, int]:
+    import subprocess
+
+    copied = 0
+    nbytes = 0
+    for key, out in prepared:
         cmd = [seven, "e", "-so", "-y", str(src), key]
         try:
             proc = subprocess.run(

@@ -14,10 +14,11 @@ Identity boundary (Frozen Minimal Model)::
     mods.mod_id        = SQLite PK / collection_mods.mod_id FK
     workspace_id       = platform identity — never membership
 
-Public APIs accept Frozen ``internal_id`` (UUID TEXT). The service resolves
-``internal_id → mods.mod_id`` and writes INTEGER ``collection_mods.mod_id``.
-``list_collection_member_ids`` returns those FK PK values (DB readout, not
-Frozen identity). Library viewport session keys may still be PK.
+Public membership APIs accept Frozen ``internal_id`` (UUID TEXT).
+Digit SQLite PK is accepted only as an already-resolved DAL handle.
+Entry conversion is always ``internal_id → dal_mod_pk() → mods.mod_id``.
+Never workspace_id / folder name / published_file_id.
+``list_collection_member_ids`` returns FK PK values (DB readout, not Frozen identity).
 
 Future Collection Content must call ``ui.library_query.filter_sort_entries``
 on the existing Library Mod projection (membership filter only). Do not add
@@ -42,13 +43,16 @@ def _member_pks(
     *,
     db: DatabaseManager,
 ) -> list[int]:
-    """Resolve Frozen ``internal_id`` (or PK handle) → ``mods.mod_id`` FKs."""
-    from services.identity_service import resolve_mod_pk
+    """Frozen ``internal_id`` UUID (or digit PK handle) → ``mods.mod_id`` FKs."""
+    from services.mod_library_cache import dal_mod_pk
 
+    _ = db
     pks: list[int] = []
     seen: set[int] = set()
     for raw in internal_ids or ():
-        pk = resolve_mod_pk(raw, db=db)
+        if not str(raw).strip():
+            continue
+        pk = dal_mod_pk(raw)
         if not pk:
             raise ValueError(f"invalid mod_id: {raw!r}")
         value = int(pk)
@@ -170,18 +174,16 @@ def set_collection_cover_from_member(
     *,
     db: DatabaseManager | None = None,
 ):
-    """Copy a member Mod's Cover file into Collection storage. Never writes Mod Cover."""
+    """Copy a member Mod's Cover file into Collection storage. Never writes Mod Cover.
+
+    ``internal_id`` is Frozen UUID. Digit PK is accepted as a DAL handle.
+    """
     from services.collection_cover import member_cover_file
+    from services.mod_library_cache import dal_mod_pk
 
     database = _db(db)
     members = list_collection_member_ids(collection_id, db=database)
-    pk = ""
-    try:
-        from services.identity_service import resolve_mod_pk
-
-        pk = resolve_mod_pk(internal_id, db=database)
-    except Exception:  # noqa: BLE001
-        pk = str(internal_id).strip()
+    pk = dal_mod_pk(internal_id)
     if not pk or pk not in {str(x).strip() for x in members}:
         raise ValueError("mod is not a member of this collection")
     src = member_cover_file(pk, db=database)
@@ -223,6 +225,7 @@ def add_mod_to_collection(
     *,
     db: DatabaseManager | None = None,
 ) -> bool:
+    """Add one Mod. ``internal_id`` is Frozen UUID (digit PK also accepted)."""
     database = _db(db)
     pks = _member_pks([internal_id], db=database)
     return database.add_mod_to_collection(collection_id, pks[0])
@@ -234,7 +237,7 @@ def add_mods_to_collection(
     *,
     db: DatabaseManager | None = None,
 ) -> int:
-    """One-transaction batch insert. Accepts Frozen ``internal_id`` or PK handles."""
+    """One-transaction batch insert. Frozen UUID → ``dal_mod_pk`` → FK PK."""
     database = _db(db)
     pks = _member_pks(internal_ids, db=database)
     if not pks:
@@ -301,8 +304,10 @@ def list_collection_ids_for_mods(
     *,
     db: DatabaseManager | None = None,
 ) -> dict[str, set[int]]:
-    """Internal ID → Collection ids. Keys are ``str(mods.mod_id)``."""
-    return _db(db).list_collection_ids_for_mods(internal_ids)
+    """Frozen UUID (or digit PK) → Collection ids. Keys are ``str(mods.mod_id)``."""
+    database = _db(db)
+    pks = _member_pks(internal_ids, db=database)
+    return database.list_collection_ids_for_mods(pks)
 
 
 def membership_check_states(
@@ -311,10 +316,14 @@ def membership_check_states(
     *,
     db: DatabaseManager | None = None,
 ) -> list[tuple[CollectionRecord, str]]:
-    """Per-collection checklist state for a Mod selection: ``all`` / ``none`` / ``mixed``."""
-    ids = [str(raw).strip() for raw in (internal_ids or ()) if str(raw).strip()]
-    collections = list_collections(app_id, db=db)
-    mapping = list_collection_ids_for_mods(ids, db=db)
+    """Per-collection checklist state for a Mod selection: ``all`` / ``none`` / ``mixed``.
+
+    ``internal_ids`` are Frozen UUIDs (digit PK also accepted).
+    """
+    database = _db(db)
+    ids = [str(pk) for pk in _member_pks(internal_ids, db=database)]
+    collections = list_collections(app_id, db=database)
+    mapping = database.list_collection_ids_for_mods(ids)
     n = len(ids)
     out: list[tuple[CollectionRecord, str]] = []
     for rec in collections:
@@ -360,9 +369,14 @@ def apply_collection_memberships(
     *,
     db: DatabaseManager | None = None,
 ) -> tuple[int, int]:
-    """One-transaction batch membership apply. Does not write Mod rows."""
-    return _db(db).apply_collection_memberships(
-        app_id, internal_ids, add_collection_ids, remove_collection_ids
+    """One-transaction batch membership apply. Does not write Mod rows.
+
+    ``internal_ids`` are Frozen UUIDs (digit PK also accepted).
+    """
+    database = _db(db)
+    pks = _member_pks(internal_ids, db=database)
+    return database.apply_collection_memberships(
+        app_id, pks, add_collection_ids, remove_collection_ids
     )
 
 

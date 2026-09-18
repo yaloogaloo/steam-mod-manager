@@ -23,7 +23,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,26 +51,54 @@ from services.deployment_lifecycle import (
     resolve_from_transaction,
 )
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
+from services.backup_identity import (
+    DEPLOY_BACKUP_DIR_NAME,
+    INVALID_FROZEN_INTERNAL_ID,
+    BackupIdentityError,
+)
 
 logger = logging.getLogger(__name__)
 
 BACKUPS_DIRNAME = "backups"
-DEPLOY_BACKUP_DIR_NAME = "deploy_backup"
 TRANSACTION_FILENAME = "deploy_transaction.json"
+
+
+def _destination_tree_absent(root: Path | None) -> bool:
+    """True when the common destination folder is missing or empty.
+
+    First deploy into a new wrapper must not ``is_file()`` thousands of
+    planned targets (or parse a prior 2k-file manifest) just to back up
+    zero originals.
+    """
+    from services.deploy_op_profile import record_op
+
+    if root is None:
+        return False
+    t0 = time.perf_counter()
+    try:
+        try:
+            if not root.exists():
+                return True
+            if root.is_file():
+                return False
+            with os.scandir(root) as it:
+                for _entry in it:
+                    return False
+            return True
+        except OSError:
+            return False
+    finally:
+        record_op(
+            "exists",
+            (time.perf_counter() - t0) * 1000.0,
+            path=str(root),
+        )
 
 
 def _data_dir() -> Path:
     from core.paths import data_dir
 
     return data_dir()
-
-
-def deploy_backup_root(internal_id: str | int) -> Path:
-    """``data/deploy_backup/<internal_id>/`` — never under the Library Mod tree."""
-    mid = str(internal_id or "").strip()
-    if not mid:
-        raise ValueError("deploy backup requires internal_id")
-    return _data_dir() / DEPLOY_BACKUP_DIR_NAME / mid
 
 
 class BackupIntegrityError(Exception):
@@ -88,53 +118,38 @@ def _utc_now() -> str:
 
 
 def _file_sha256(path: Path, *, chunk: int = 1024 * 1024) -> str:
+    from services.deploy_op_profile import record_op
+
+    t0 = time.perf_counter()
     digest = hashlib.sha256()
+    nbytes = 0
     with path.open("rb") as fh:
         while True:
             block = fh.read(chunk)
             if not block:
                 break
+            nbytes += len(block)
             digest.update(block)
+    record_op(
+        "hash",
+        (time.perf_counter() - t0) * 1000.0,
+        bytes_count=nbytes,
+        path=str(path),
+    )
     return digest.hexdigest()
 
 
-def backups_dir_for(managed: Path) -> Path:
-    """Legacy Library-local overwrite dir (read/cleanup only; new writes go elsewhere)."""
-    root = Path(managed)
-    modern = root / INFO_DIR_NAME
-    legacy = root / LEGACY_INFO_DIR_NAME
-    if modern.is_dir() or not legacy.is_dir():
-        return modern / BACKUPS_DIRNAME
-    return legacy / BACKUPS_DIRNAME
-
-
 def _infer_internal_id(managed: Path) -> str:
-    """Return ``mods.mod_id`` PK for deploy-backup storage (never workspace_id).
-
-    ``.info/internal_id`` is Entity UUID proof. Resolve it to the SQLite PK so
-    ``data/deploy_backup/<mod_id>/`` stays aligned with Deploy's ``ctx.internal_id``.
-    """
+    """Return Frozen UUID from ``.info`` (never a digit PK / workspace_id)."""
     try:
         from services.file_ops import read_info_metadata_dict
         from services.mod_identity import read_internal_id
+        from services.backup_identity import is_frozen_backup_uuid
 
         proof = str(read_internal_id(read_info_metadata_dict(managed) or {}) or "").strip()
-        if not proof:
-            return ""
-        try:
-            from core.db_manager import get_db
-
-            db = get_db()
-            found = db.find_mod_by_internal_id(proof)
-            if found is not None and str(found).strip():
-                return str(found).strip()
-            if proof.isdigit() and db.get_mod(proof) is not None:
-                return proof
-        except Exception:  # noqa: BLE001
-            logger.debug(
-                "infer deploy-backup storage key failed for %s", managed, exc_info=True
-            )
-        return proof
+        if is_frozen_backup_uuid(proof):
+            return proof
+        return ""
     except Exception:  # noqa: BLE001
         return ""
 
@@ -166,6 +181,8 @@ class OverwritePrep:
     managed: Path
     # Resolved absolute target path → backup metadata (None = target did not exist)
     by_target: dict[str, ManifestBackupInfo | None] = field(default_factory=dict)
+    # First-deploy wrapper that did not exist; rollback may rmtree it.
+    absent_dest_root: Path | None = None
 
     def backup_for(self, target: str | Path) -> ManifestBackupInfo | None:
         key = _norm_target(target)
@@ -183,37 +200,96 @@ class OverwritePrep:
 
 
 def _norm_target(target: str | Path) -> str:
-    path = Path(target)
-    try:
-        return str(path.resolve())
-    except OSError:
-        return str(path)
+    from services.deploy_op_profile import cached_resolve
+
+    return cached_resolve(target)
 
 
 class BackupManager:
     """Prepare / restore / clean overwrite backups for one managed Mod folder."""
 
-    def __init__(self, managed: Path, *, internal_id: str = "") -> None:
+    def __init__(
+        self,
+        managed: Path,
+        *,
+        internal_id: str = "",
+        mod_pk: str | int | None = None,
+    ) -> None:
+        from services.backup_identity import (
+            frozen_uuid_for_mod_pk,
+            is_frozen_backup_uuid,
+            resolve_backup_mod_pk,
+        )
+
         self.managed = Path(managed)
-        self.internal_id = str(internal_id or "").strip()
+        raw = str(internal_id or "").strip()
+        pk_arg = str(mod_pk or "").strip()
+        if pk_arg.isdigit():
+            self.mod_pk = pk_arg
+        elif raw.isdigit():
+            self.mod_pk = raw
+        else:
+            self.mod_pk = ""
+
+        if is_frozen_backup_uuid(raw):
+            frozen = raw
+        else:
+            frozen = _infer_internal_id(self.managed)
+            if not is_frozen_backup_uuid(frozen) and self.mod_pk:
+                frozen = frozen_uuid_for_mod_pk(self.mod_pk)
+        self.internal_id = frozen if is_frozen_backup_uuid(frozen) else ""
+        if not self.mod_pk and self.internal_id:
+            mapped = resolve_backup_mod_pk(internal_id=self.internal_id)
+            if mapped.isdigit():
+                self.mod_pk = mapped
 
     def storage_key(self) -> str:
+        """Frozen UUID only. Digit ``mod_pk`` is never a storage key."""
+        from services.backup_identity import resolve_backup_storage_key
+
         if self.internal_id:
-            return self.internal_id
-        inferred = _infer_internal_id(self.managed)
-        if inferred:
-            return inferred
-        return _orphan_storage_key(self.managed)
+            key = resolve_backup_storage_key(
+                internal_id=self.internal_id, mod_pk=self.mod_pk or None
+            )
+        else:
+            inferred = _infer_internal_id(self.managed)
+            key = resolve_backup_storage_key(
+                internal_id=inferred, mod_pk=self.mod_pk or None
+            )
+        if key.isdigit():
+            raise BackupIdentityError(INVALID_FROZEN_INTERNAL_ID)
+        return key
 
     # ------------------------------------------------------------------
     # Path safety
     # ------------------------------------------------------------------
 
     def backups_root(self) -> Path:
-        return _data_dir() / DEPLOY_BACKUP_DIR_NAME / self.storage_key()
+        """New writes: ``data/deploy_backup/<UUID>/``."""
+        from services.backup_identity import deploy_backup_write_root
+
+        return deploy_backup_write_root(
+            self.internal_id or self.storage_key(),
+            mod_pk=self.mod_pk or None,
+        )
 
     def _allowed_backup_roots(self) -> list[Path]:
-        roots = [self.backups_root()]
+        from services.backup_identity import deploy_backup_read_root
+
+        roots: list[Path] = []
+        try:
+            roots.append(self.backups_root())
+        except BackupIdentityError:
+            pass
+        read = deploy_backup_read_root(
+            self.internal_id or None,
+            mod_pk=self.mod_pk or None,
+        )
+        if read is not None:
+            roots.append(read)
+        pk = str(self.mod_pk or "").strip()
+        if pk.isdigit():
+            roots.append(_data_dir() / DEPLOY_BACKUP_DIR_NAME / pk)
         roots.append(self.managed / INFO_DIR_NAME / BACKUPS_DIRNAME)
         roots.append(self.managed / LEGACY_INFO_DIR_NAME / BACKUPS_DIRNAME)
         out: list[Path] = []
@@ -243,7 +319,7 @@ class BackupManager:
         if candidate.is_absolute():
             candidate = candidate.resolve()
         elif posix.startswith(DEPLOY_BACKUP_DIR_NAME + "/"):
-            candidate = (_data_dir() / posix).resolve()
+            candidate = self._resolve_deploy_backup_posix(posix)
         elif posix.startswith(f"{INFO_DIR_NAME}/{BACKUPS_DIRNAME}/") or posix.startswith(
             f"{LEGACY_INFO_DIR_NAME}/{BACKUPS_DIRNAME}/"
         ):
@@ -258,6 +334,34 @@ class BackupManager:
             except ValueError:
                 continue
         raise BackupIntegrityError(f"backup path escapes deploy backup store: {raw}")
+
+    def _resolve_deploy_backup_posix(self, posix: str) -> Path:
+        """UUID tree first, then legacy ``deploy_backup/<mod_pk>/``."""
+        from services.backup_identity import is_frozen_backup_uuid
+
+        prefix = DEPLOY_BACKUP_DIR_NAME + "/"
+        rest = posix[len(prefix) :] if posix.startswith(prefix) else posix
+        key, _sep, tail = rest.partition("/")
+        names: list[str] = []
+        frozen = str(self.internal_id or "").strip()
+        pk = str(self.mod_pk or "").strip()
+        if is_frozen_backup_uuid(frozen):
+            names.append(frozen)
+        if key and key not in names:
+            names.append(key)
+        if pk.isdigit() and pk not in names:
+            names.append(pk)
+        chosen: Path | None = None
+        first: Path | None = None
+        for name in names:
+            rel = f"{DEPLOY_BACKUP_DIR_NAME}/{name}" + (f"/{tail}" if tail else "")
+            path = (_data_dir() / rel).resolve()
+            if first is None:
+                first = path
+            if path.is_file() or path.exists():
+                chosen = path
+                break
+        return chosen if chosen is not None else (first or (_data_dir() / posix).resolve())
 
     def relative_backup_path(self, absolute: Path) -> str:
         """Store backup path relative to ``data/`` when possible (posix)."""
@@ -300,6 +404,7 @@ class BackupManager:
         targets: Iterable[str | Path],
         *,
         mod_id: str = "",
+        dest_root: Path | str | None = None,
     ) -> OverwritePrep:
         """
         Snapshot *external* game files that a deploy is about to overwrite.
@@ -335,10 +440,91 @@ class BackupManager:
         target_keys = [_norm_target(t) for t in unique_targets]
         recorded: list[dict[str, Any]] = []
         mid = str(mod_id or "").strip()
+        frozen = str(self.internal_id or "").strip() or mid
         lifecycle: DeploymentLifecycleState | None = None
+        exists_checks = 0
+        skipped_missing_tree = False
+
+        dest_tree: Path | None = None
+        if dest_root is not None and str(dest_root).strip():
+            dest_tree = Path(dest_root)
+        elif unique_targets:
+            try:
+                dest_tree = Path(
+                    os.path.commonpath([str(t) for t in unique_targets])
+                )
+            except ValueError:
+                dest_tree = None
+        dest_missing = bool(dest_tree is not None and _destination_tree_absent(dest_tree))
 
         try:
-            register_active_deploy_transaction(self.managed, internal_id=mid)
+            register_active_deploy_transaction(self.managed, internal_id=frozen)
+            if dest_missing:
+                skipped_missing_tree = True
+                prep.absent_dest_root = dest_tree
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.PREPARED,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BEGIN, internal_id=frozen, managed=self.managed)
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.BACKUP_DONE,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BACKUP_DONE, internal_id=frozen, managed=self.managed)
+                try:
+                    from services.deploy_stage_log import current_deploy_timing
+
+                    sess = current_deploy_timing()
+                    if sess is not None:
+                        sess.diagnostics["backup_exists_checks"] = 0
+                        sess.diagnostics["backup_skipped_missing_tree"] = True
+                        sess.diagnostics["backup_target_count"] = len(unique_targets)
+                        sess.diagnostics["backup_prior_manifest_loaded"] = False
+                except Exception:  # noqa: BLE001
+                    pass
+                return prep
+            if not unique_targets:
+                skipped_missing_tree = True
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.PREPARED,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BEGIN, internal_id=frozen, managed=self.managed)
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.BACKUP_DONE,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BACKUP_DONE, internal_id=frozen, managed=self.managed)
+                try:
+                    from services.deploy_stage_log import current_deploy_timing
+
+                    sess = current_deploy_timing()
+                    if sess is not None:
+                        sess.diagnostics["backup_exists_checks"] = 0
+                        sess.diagnostics["backup_skipped_missing_tree"] = True
+                        sess.diagnostics["backup_target_count"] = len(unique_targets)
+                        sess.diagnostics["backup_prior_manifest_loaded"] = False
+                except Exception:  # noqa: BLE001
+                    pass
+                return prep
+
             lifecycle = persist_lifecycle_transaction(
                 self,
                 DeploymentLifecycleState.PREPARED,
@@ -347,10 +533,13 @@ class BackupManager:
                 backups=[],
                 mod_id=mid,
             )
-            log_txn_phase(PHASE_BEGIN, internal_id=mid, managed=self.managed)
+            log_txn_phase(PHASE_BEGIN, internal_id=frozen, managed=self.managed)
 
-            prior_by_target = self._prior_valid_backups()
-            owned_targets = self._owned_targets_from_last_success()
+            from services.deploy_op_profile import timed_op
+
+            with timed_op("backup_enumeration"):
+                prior_by_target = self._prior_valid_backups()
+                owned_targets = self._owned_targets_from_last_success()
             backup_root = self.backups_root()
 
             for target in unique_targets:
@@ -375,10 +564,25 @@ class BackupManager:
                     prep.by_target[key] = None
                     continue
 
+                if dest_missing:
+                    prep.by_target[key] = None
+                    skipped_missing_tree = True
+                    continue
+
                 try:
+                    t_ex = time.perf_counter()
                     exists = target.is_file()
+                    exists_checks += 1
+                    from services.deploy_op_profile import record_op
+
+                    record_op(
+                        "is_file",
+                        (time.perf_counter() - t_ex) * 1000.0,
+                        path=str(target),
+                    )
                 except OSError:
                     exists = False
+                    exists_checks += 1
                 if not exists:
                     # Missing destination is a valid deploy state (first deploy /
                     # partial game tree). Skip backup — do not fail the stage.
@@ -413,9 +617,19 @@ class BackupManager:
                 backups=recorded,
                 mod_id=mid,
             )
-            log_txn_phase(PHASE_BACKUP_DONE, internal_id=mid, managed=self.managed)
+            log_txn_phase(PHASE_BACKUP_DONE, internal_id=frozen, managed=self.managed)
+            try:
+                from services.deploy_stage_log import current_deploy_timing
+
+                sess = current_deploy_timing()
+                if sess is not None:
+                    sess.diagnostics["backup_exists_checks"] = exists_checks
+                    sess.diagnostics["backup_skipped_missing_tree"] = skipped_missing_tree
+                    sess.diagnostics["backup_target_count"] = len(unique_targets)
+            except Exception:  # noqa: BLE001
+                pass
             return prep
-        except (OSError, BackupIntegrityError, BackupRestoreError):
+        except (OSError, BackupIntegrityError, BackupRestoreError, BackupIdentityError):
             try:
                 persist_lifecycle_transaction(
                     self,
@@ -480,7 +694,10 @@ class BackupManager:
         return owned
 
     def _backup_one(self, target: Path, backup_root: Path) -> ManifestBackupInfo:
-        backup_root.mkdir(parents=True, exist_ok=True)
+        from services.deploy_op_profile import record_op, timed_op
+
+        with timed_op("mkdir", path=str(backup_root)):
+            backup_root.mkdir(parents=True, exist_ok=True)
         content_hash = _file_sha256(target)
         short = content_hash[:12]
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -493,7 +710,9 @@ class BackupManager:
             token = uuid.uuid4().hex[:8]
             backup_name = f"{safe_name}.{short}.{stamp}.{token}.original"
             dest = backup_root / backup_name
+        t_copy = time.perf_counter()
         shutil.copy2(target, dest)
+        record_op("copy2", (time.perf_counter() - t_copy) * 1000.0, path=str(target))
 
         # Integrity: hash the written backup (not only the source)
         written_hash = _file_sha256(dest)
@@ -541,6 +760,17 @@ class BackupManager:
         does **not** delete backup files.
         """
         failures: list[str] = []
+        absent_root = getattr(prep, "absent_dest_root", None)
+        if absent_root is not None:
+            root = Path(absent_root)
+            try:
+                if root.is_dir():
+                    shutil.rmtree(root)
+                elif root.is_file():
+                    root.unlink()
+            except OSError as exc:
+                failures.append(f"{root} rmtree: {exc}")
+                logger.warning("rollback remove new dest failed root=%s: %s", root, exc)
         for target_key, backup in prep.by_target.items():
             target = Path(target_key)
             if backup is not None:
@@ -669,11 +899,7 @@ class BackupManager:
         return out
 
     def _scan_backup_roots(self) -> list[Path]:
-        return [
-            self.backups_root(),
-            self.managed / INFO_DIR_NAME / BACKUPS_DIRNAME,
-            self.managed / LEGACY_INFO_DIR_NAME / BACKUPS_DIRNAME,
-        ]
+        return self._allowed_backup_roots()
 
     def _drop_empty_backup_roots(self) -> None:
         for root in self._scan_backup_roots():
@@ -714,8 +940,11 @@ class BackupManager:
         phase: str = "",
     ) -> Path:
         """Low-level wire sink. Prefer :func:`persist_lifecycle_transaction`."""
+        from services.deploy_op_profile import timed_op
+
         path = transaction_path_for(self.managed)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        with timed_op("mkdir", path=str(path.parent)):
+            path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = {
             "mod_id": str(mod_id or ""),
             "status": str(status or ""),
@@ -726,10 +955,11 @@ class BackupManager:
         phase_s = str(phase or "").strip()
         if phase_s:
             payload["phase"] = phase_s
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with timed_op("manifest_write", path=str(path), count=1):
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         return path
 
     def clear_transaction(self) -> None:
@@ -779,7 +1009,9 @@ class BackupManager:
             mod_id=mod_id,
         )
         log_txn_phase(
-            PHASE_COMMITTED, internal_id=str(mod_id or ""), managed=self.managed
+            PHASE_COMMITTED,
+            internal_id=str(self.internal_id or mod_id or ""),
+            managed=self.managed,
         )
         # Successful deploy keeps referenced backups for undeploy; drop txn + orphans.
         self.clear_transaction()
@@ -938,7 +1170,7 @@ class BackupManager:
 
             log_txn_phase(
                 PHASE_ROLLBACK,
-                internal_id=str(txn.get("mod_id") or ""),
+                internal_id=str(self.internal_id or txn.get("mod_id") or ""),
                 managed=self.managed,
                 extra=f"from_status={status} lifecycle={state.value}",
             )
@@ -971,7 +1203,5 @@ __all__ = (
     "BackupManager",
     "BackupRestoreError",
     "OverwritePrep",
-    "backups_dir_for",
-    "deploy_backup_root",
     "transaction_path_for",
 )

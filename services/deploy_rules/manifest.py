@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -193,6 +194,7 @@ def load_manifest(
     logging — caller must not undeploy).
     """
     path = manifest_path_for(managed_path)
+    t0 = time.perf_counter()
     if not path.is_file():
         return None
     try:
@@ -200,6 +202,13 @@ def load_manifest(
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to read deploy manifest %s: %s", path, exc)
         return None
+    from services.deploy_op_profile import record_op
+
+    record_op(
+        "manifest_enumeration",
+        (time.perf_counter() - t0) * 1000.0,
+        path=str(path),
+    )
     if not isinstance(data, dict):
         return None
     manifest = DeployManifest.from_dict(data)
@@ -223,11 +232,22 @@ def load_manifest(
 
 
 def save_manifest(managed_path: Path, manifest: DeployManifest) -> Path:
+    from services.deploy_op_profile import note_tree, timed_op
+
     path = manifest_path_for(managed_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    with timed_op("mkdir", path=str(path.parent)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    nfiles = len(manifest.files or [])
+    with timed_op("manifest_write", path=str(path)):
+        path.write_text(
+            json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    note_tree(
+        stage="manifest",
+        kind="managed",
+        root=str(managed_path),
+        file_count=nfiles,
     )
     return path
 
