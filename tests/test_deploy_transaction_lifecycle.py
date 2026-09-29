@@ -26,7 +26,7 @@ from services.deploy_txn import (
     register_active_deploy_transaction,
     unregister_active_deploy_transaction,
 )
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 
 
 @pytest.fixture()
@@ -45,7 +45,7 @@ def _setup_game(db: DatabaseManager, tmp_path: Path) -> Path:
     return mods
 
 
-def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> tuple[Path, str]:
+def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> tuple[Path, str, str]:
     folder = library / "SomeGame" / f"Mod{mid}"
     folder.mkdir(parents=True)
     (folder / "file1.txt").write_text("NEW", encoding="utf-8")
@@ -57,6 +57,7 @@ def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> tuple[Path, st
         game_name="SomeGame",
     )
     pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
     prove_managed_folder(
         db,
         folder,
@@ -65,7 +66,7 @@ def _make_mod(library: Path, db: DatabaseManager, *, mid: str) -> tuple[Path, st
         app_id=100,
         game_name="SomeGame",
     )
-    return folder, pk
+    return folder, pk, iid
 
 
 def test_compose_recover_preserves_original_error() -> None:
@@ -84,7 +85,7 @@ def test_case1_manifest_failure_keeps_original_deploy_error(
     """Manifest stage failure must keep the concrete error (not interrupted recover)."""
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir, pk = _make_mod(library, db, mid="97001")
+    mod_dir, pk, iid = _make_mod(library, db, mid="97001")
     prior = mods / mod_dir.name / "file1.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("ORIGINAL", encoding="utf-8")
@@ -93,7 +94,7 @@ def test_case1_manifest_failure_keeps_original_deploy_error(
         "services.deploy.validate_manifest_for_save",
         side_effect=ManifestSecurityError("path escape: simulated"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
 
     assert out["success"] is False
     assert "部署清单校验失败" in str(out.get("error") or "")
@@ -114,7 +115,7 @@ def test_case2_residual_txn_recover_does_not_overwrite_error(
     """Stale txn rollback appends note only; original FAILED error stays."""
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir, pk = _make_mod(library, db, mid="97002")
+    mod_dir, pk, _iid = _make_mod(library, db, mid="97002")
     original_error = "部署清单校验失败：path escape: simulated"
 
     prior = mods / mod_dir.name / "file1.txt"
@@ -162,7 +163,7 @@ def test_case3_deployed_only_after_transaction_commit(
     """DB DEPLOYED is written only after mark_deployed / txn cleared."""
     library = tmp_path / "library"
     _setup_game(db, tmp_path)
-    mod_dir, pk = _make_mod(library, db, mid="97003")
+    mod_dir, pk, iid = _make_mod(library, db, mid="97003")
 
     order: list[str] = []
     real_mark = BackupManager.mark_deployed
@@ -191,7 +192,7 @@ def test_case3_deployed_only_after_transaction_commit(
         patch.object(BackupManager, "mark_deployed", _mark),
         patch.object(db, "update_mod_deploy_status", _update),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
 
     assert out["success"] is True
     assert order.index("mark_deployed") < order.index("db_deployed")
@@ -208,7 +209,7 @@ def test_active_txn_skipped_by_stale_recover(
     """Startup reconcile must not recover a currently active deploy txn."""
     library = tmp_path / "library"
     mods = _setup_game(db, tmp_path)
-    mod_dir, pk = _make_mod(library, db, mid="97004")
+    mod_dir, pk, _iid = _make_mod(library, db, mid="97004")
     prior = mods / mod_dir.name / "file1.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME", encoding="utf-8")

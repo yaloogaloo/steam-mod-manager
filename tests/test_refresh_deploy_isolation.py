@@ -23,7 +23,11 @@ from services.local_file_index import has_local_mod_payload
 from services.metadata_refresh import MetadataRefreshResult
 from services.mod_refresh import refresh_mod, reconcile_local_state
 from services.mod_source_integrity import has_deployable_source, validate_source
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 
 @pytest.fixture()
@@ -45,7 +49,7 @@ def _modio_folder(
     *,
     mid: str,
     folder: str = "IsoMod",
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     library = tmp_path / "library"
     mod = library / "BG3" / folder
     mod.mkdir(parents=True)
@@ -66,14 +70,14 @@ def _modio_folder(
         },
     )
     db.update_mod_identity_fields(pk, platform=PLATFORM_MODIO)
-    return mod, pk
+    return mod, pk, frozen_deploy_id(created)
 
 
 def test_case1_metadata_refresh_without_local_files_succeeds(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     """Metadata-only folder: refresh must succeed; content_status may be missing."""
-    mod, pk = _modio_folder(tmp_path, db, mid="98001")
+    mod, pk, _iid = _modio_folder(tmp_path, db, mid="98001")
     provider_ok = MetadataRefreshResult(
         mod_id=pk,
         success=True,
@@ -103,7 +107,7 @@ def test_case1_metadata_refresh_without_local_files_succeeds(
 
 
 def test_case2_invalid_zip_refresh_succeeds(tmp_path: Path, db: DatabaseManager) -> None:
-    mod, pk = _modio_folder(tmp_path, db, mid="98002")
+    mod, pk, _iid = _modio_folder(tmp_path, db, mid="98002")
     (mod / "broken.zip").write_bytes(b"not-a-zip")
     db.set_mod_files(
         pk,
@@ -148,7 +152,7 @@ def test_case2_invalid_zip_refresh_succeeds(tmp_path: Path, db: DatabaseManager)
 
 
 def test_case3_invalid_zip_deploy_fails(tmp_path: Path, db: DatabaseManager) -> None:
-    mod, pk = _modio_folder(tmp_path, db, mid="98003")
+    mod, pk, iid = _modio_folder(tmp_path, db, mid="98003")
     (mod / "broken.zip").write_bytes(b"not-a-zip")
     db.set_mod_files(
         pk,
@@ -167,8 +171,7 @@ def test_case3_invalid_zip_deploy_fails(tmp_path: Path, db: DatabaseManager) -> 
     db.update_game_deploy_config(100, name="Game", mod_path=str(tmp_path / "mods"))
     (tmp_path / "mods").mkdir()
 
-    # Workshop handle soft-resolves for deploy
-    out = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod("98003")
+    out = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(iid)
     assert out["success"] is False
     assert out.get("reason") == "source_integrity"
 
@@ -180,7 +183,7 @@ def test_case3_invalid_zip_deploy_fails(tmp_path: Path, db: DatabaseManager) -> 
 def test_case4_deploy_source_error_does_not_enter_refresh_worker(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod, pk = _modio_folder(tmp_path, db, mid="98004")
+    mod, pk, _iid = _modio_folder(tmp_path, db, mid="98004")
     provider_ok = MetadataRefreshResult(
         mod_id=pk,
         success=True,
@@ -217,7 +220,7 @@ def test_case4_deploy_source_error_does_not_enter_refresh_worker(
 def test_case5_local_file_exception_does_not_fail_metadata_refresh(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod, pk = _modio_folder(tmp_path, db, mid="98005")
+    mod, pk, _iid = _modio_folder(tmp_path, db, mid="98005")
     provider_ok = MetadataRefreshResult(
         mod_id=pk,
         success=True,

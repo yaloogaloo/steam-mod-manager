@@ -23,7 +23,7 @@ from services.backup_manager import (
 )
 from services.deploy import ModDeployer
 from services.deploy_rules.manifest import load_manifest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 
 
 @pytest.fixture()
@@ -91,7 +91,7 @@ def test_case1_deploy_fail_rollback_ok_cleans_state(
         return ApplyResult(success=False, error="simulated strategy failure")
 
     with patch("services.deploy_apply.apply_file_plan", _fail_apply):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert load_manifest(mod_dir) is None
@@ -116,7 +116,7 @@ def test_case2_deploy_fail_rollback_fail_keeps_recovery(
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     # First successful deploy establishes manifest + backups.
-    first = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    first = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert first["success"] is True
     assert load_manifest(mod_dir) is not None
     backups_after_first = _backup_files(mod_dir)
@@ -132,7 +132,7 @@ def test_case2_deploy_fail_rollback_fail_keeps_recovery(
         "restore_one",
         side_effect=BackupIntegrityError("simulated restore failure"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     # Recovery data must survive.
@@ -163,7 +163,7 @@ def test_case3_db_update_fail_still_success_with_warning(
         return real_update(mod_id, **kwargs)
 
     with patch.object(db, "update_mod_deploy_status", side_effect=_update_fail):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is True
     assert out.get("warning") == "database_update_failed"
@@ -187,7 +187,7 @@ def test_case4_prepare_overwrite_error_marks_txn_failed(
         "_backup_one",
         side_effect=BackupIntegrityError("backup write broken"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     txn = BackupManager(mod_dir).load_transaction()
@@ -212,7 +212,7 @@ def test_case5_redeploy_reuses_backup_undeploy_restores(
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     man1 = load_manifest(mod_dir)
     assert man1 is not None
     assert man1.files and man1.files[0].backup is not None
@@ -221,7 +221,7 @@ def test_case5_redeploy_reuses_backup_undeploy_restores(
 
     # Change source and deploy again (overwrite without undeploy).
     (mod_dir / "file1.txt").write_text("NEWER", encoding="utf-8")
-    assert deployer.deploy_mod(pk)["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     man2 = load_manifest(mod_dir)
     assert man2 is not None
     assert man2.files and man2.files[0].backup is not None
@@ -230,6 +230,6 @@ def test_case5_redeploy_reuses_backup_undeploy_restores(
     assert man2.files[0].backup.hash == man1.files[0].backup.hash
     assert prior.read_text(encoding="utf-8") == "NEWER"
 
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen_from_pk(db, pk))
     assert und["success"] is True
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"

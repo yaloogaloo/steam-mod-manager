@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import webbrowser
+from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
@@ -607,6 +608,22 @@ class ModDetailPanel(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _canonical_detail_sync(self):
+        """One logical mutation → one Detail ``show_mod``.
+
+        Projection flush still updates Library cards. While this block runs,
+        ``notify_mod_changed`` records the id so the flush does not call
+        ``show_mod`` again. Direct ``_reload_current_detail_from_projection``
+        inside the block is the canonical UI rebuild.
+        """
+        prev = bool(getattr(self, "_suppress_projection_detail_rebuild", False))
+        self._suppress_projection_detail_rebuild = True
+        try:
+            yield
+        finally:
+            self._suppress_projection_detail_rebuild = prev
+
     def show_mod(
         self,
         managed_path: str | Path | None = None,
@@ -616,11 +633,14 @@ class ModDetailPanel(QWidget):
         game_name: str = "",
     ) -> None:
         from services.crash_trace import log_exception
+        from services.deploy_e2e import e2e_count, e2e_span
 
+        e2e_count("show_mod_count")
         try:
-            self._show_mod_body(
-                managed_path, mod_id=mod_id, game_id=game_id, game_name=game_name
-            )
+            with e2e_span("show_mod", mod_id=str(mod_id or "")):
+                self._show_mod_body(
+                    managed_path, mod_id=mod_id, game_id=game_id, game_name=game_name
+                )
         except Exception:
             log_exception(
                 "ModDetailPanel.show_mod",
@@ -637,7 +657,13 @@ class ModDetailPanel(QWidget):
         game_id: int | str | None = None,
         game_name: str = "",
     ) -> None:
-        """Load metadata via the unified resolver (no Steam I/O)."""
+        """DATA LOAD + UI REBUILD for one Mod. Not a projection flush.
+
+        ``show_mod`` loads resolver data and rebuilds the panel, including
+        relationships. Library cards update via ``notify_mod_changed``. A
+        success path that already reloads Detail must suppress a second
+        ``show_mod`` from that flush (``_canonical_detail_sync``).
+        """
         from ui.popup_trace import log_popup
         from services.mod_metadata_resolver import resolve_mod_metadata
         from services.ui_perf_log import PerfScope
@@ -2788,10 +2814,22 @@ class ModDetailPanel(QWidget):
             observe_mod_size,
         )
 
-        def _apply(obs: SizeObservation) -> None:
-            self._on_size_observation_ready(token, obs)
-
         if mid.isdigit():
+            from services.deploy_e2e import e2e_task_started
+
+            task_key = e2e_task_started("size_observe")
+
+            def _apply(obs: SizeObservation, _task=task_key) -> None:
+                try:
+                    from services.deploy_e2e import e2e_task_finished, maybe_end
+
+                    if _task:
+                        e2e_task_finished(_task)
+                    maybe_end()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._on_size_observation_ready(token, obs)
+
             enqueue_mod_size(mid, root, force=True, on_done=_apply)
             return
 
@@ -3023,23 +3061,26 @@ class ModDetailPanel(QWidget):
             return
         folder_live = self._managed_path is not None and self._managed_path.is_dir()
         try:
-            if folder_live:
-                from services.importers.image_picker import apply_cover_to_mod
+            with self._canonical_detail_sync():
+                if folder_live:
+                    from services.importers.image_picker import apply_cover_to_mod
 
-                rel = apply_cover_to_mod(
-                    self._managed_path, chosen, mod_id=mid, update_db=True
+                    rel = apply_cover_to_mod(
+                        self._managed_path, chosen, mod_id=mid, update_db=True
+                    )
+                else:
+                    from services.mod_presence import persist_miss_cover
+
+                    rel = persist_miss_cover(mid, chosen)
+                if not rel:
+                    QMessageBox.warning(self, "更换封面", "无法保存封面图片")
+                    return
+                self._reload_current_detail_from_projection(
+                    self._managed_path, mod_id=mid
                 )
-            else:
-                from services.mod_presence import persist_miss_cover
-
-                rel = persist_miss_cover(mid, chosen)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "更换封面", str(exc))
             return
-        if not rel:
-            QMessageBox.warning(self, "更换封面", "无法保存封面图片")
-            return
-        self._reload_current_detail_from_projection(self._managed_path, mod_id=mid)
 
     def _recheck_missing_content(self, managed_path: Path | None = None) -> bool:
         """If payload files exist, clear ``is_missing_content`` and persist."""
@@ -3284,9 +3325,10 @@ class ModDetailPanel(QWidget):
                     "ModDetailPanel._on_metadata_refresh_finished.invalidate_directory_size"
                 )
             self._recheck_missing_content(path)
-            self._reload_current_detail_from_projection(path, mod_id=mid)
-            self.metadata_saved.emit(path)
-            self.tags_saved.emit(path)
+            with self._canonical_detail_sync():
+                self._reload_current_detail_from_projection(path, mod_id=mid)
+                self.metadata_saved.emit(path)
+                self.tags_saved.emit(path)
         if result.success or result.skipped:
             self._set_refresh_button_state("success")
             self._set_op_status("✓ 刷新完成", tone="success", auto_clear_ms=1800)
@@ -3427,9 +3469,9 @@ class ModDetailPanel(QWidget):
             if widget is not None:
                 # Detach immediately so findChildren / layout refresh
                 # cannot see stale rows still pending deleteLater.
-                widget.hide()
-                widget.setParent(None)
-                widget.deleteLater()
+                from ui.window_lifecycle import detach_owned_widget
+
+                detach_owned_widget(widget)
 
     def _set_files_summary(
         self,
@@ -5213,11 +5255,13 @@ class ModDetailPanel(QWidget):
             self._update_offline_download_button()
             return
         if payload is not None:
-            self.offline_page_updated.emit(payload)
-            # Mutation → projection → view: reload by internal_id, never path alone.
-            self._reload_current_detail_from_projection(
-                self._managed_path, mod_id=mid or None
-            )
+            with self._canonical_detail_sync():
+                self.offline_page_updated.emit(payload)
+                # Mutation → one Detail rebuild. Projection cards update from
+                # the signal; that flush must not call show_mod again.
+                self._reload_current_detail_from_projection(
+                    self._managed_path, mod_id=mid or None
+                )
         else:
             self._refresh_offline_status_label()
         self._update_offline_download_button()
@@ -5795,20 +5839,28 @@ class ModDetailPanel(QWidget):
                 self._signals = signals
 
             def run(self) -> None:  # noqa: D401
+                from services.deploy_e2e import e2e_span
                 from services.deploy_status import resolve_deployment_status
 
                 try:
-                    runtime = resolve_deployment_status(
-                        self._mod_id,
-                        library_root=self._library_root,
-                        managed_path=self._managed_path,
-                    )
+                    with e2e_span("resolve_deployment_status"):
+                        runtime = resolve_deployment_status(
+                            self._mod_id,
+                            library_root=self._library_root,
+                            managed_path=self._managed_path,
+                        )
                 except Exception:  # noqa: BLE001
                     runtime = ""
                 self._signals.finished.emit(self._tok, str(runtime or ""))
 
         signals = _DeployRuntimeSignals(self)
         self._deploy_runtime_signals = signals
+        try:
+            from services.deploy_e2e import e2e_task_started
+
+            self._e2e_runtime_task = e2e_task_started("deploy_runtime_status")
+        except Exception:  # noqa: BLE001
+            self._e2e_runtime_task = ""
         signals.finished.connect(self._on_deploy_runtime_status_ready)
         QThreadPool.globalInstance().start(
             _DeployRuntimeTask(
@@ -5822,6 +5874,16 @@ class ModDetailPanel(QWidget):
 
     def _on_deploy_runtime_status_ready(self, token: str, runtime: str) -> None:
         from services.deploy_status import DEPLOYMENT_CONFLICT, DEPLOYMENT_OUTDATED
+        try:
+            from services.deploy_e2e import e2e_task_finished, maybe_end
+
+            key = str(getattr(self, "_e2e_runtime_task", "") or "")
+            self._e2e_runtime_task = ""
+            if key:
+                e2e_task_finished(key)
+            maybe_end()
+        except Exception:  # noqa: BLE001
+            pass
 
         if str(token) != getattr(self, "_deploy_runtime_token", ""):
             return

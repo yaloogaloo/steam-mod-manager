@@ -20,6 +20,7 @@ from services.local_file_index import has_local_mod_payload
 from services.metadata_refresh import MetadataRefreshResult
 from services.mod_refresh import refresh_mod, reconcile_local_state
 from services.mod_source_integrity import has_deployable_source, validate_source
+from tests.helpers.identity import frozen_from_pk
 
 
 @pytest.fixture()
@@ -133,7 +134,9 @@ def test_case2_metadata_only_library_healthy_deploy_blocked(
 
     db.update_game_deploy_config(100, name="Game", mod_path=str(tmp_path / "mods"))
     (tmp_path / "mods").mkdir()
-    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(pk)
+    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(
+        frozen_from_pk(db, pk)
+    )
     assert deploy["success"] is False
     assert deploy.get("is_missing_content") or deploy.get("reason") in {
         "source_integrity",
@@ -170,7 +173,9 @@ def test_case3_invalid_zip_refresh_ok_deploy_fails(
 
     db.update_game_deploy_config(100, name="Game", mod_path=str(tmp_path / "mods"))
     (tmp_path / "mods").mkdir()
-    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(pk)
+    deploy = ModDeployer(library_root=tmp_path / "library", db=db).deploy_mod(
+        frozen_from_pk(db, pk)
+    )
     assert deploy["success"] is False
 
     with pytest.raises(DeploySourceError):

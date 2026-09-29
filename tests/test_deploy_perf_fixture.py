@@ -12,6 +12,7 @@ from services.deploy import ModDeployer
 from tests.helpers.identity import (
     bind_managed_path,
     create_steam_test_mod,
+    frozen_deploy_id,
     write_info_sidecar,
 )
 
@@ -25,16 +26,17 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _make_fixture(db: DatabaseManager, library: Path, *, size_mb: int, mid: str) -> Path:
+def _make_fixture(db: DatabaseManager, library: Path, *, size_mb: int, mid: str) -> str:
     folder = library / "Palworld" / f"Perf{size_mb}MB"
     folder.mkdir(parents=True)
     (folder / "data.bin").write_bytes(b"x" * (size_mb * 1024 * 1024))
     created = create_steam_test_mod(
         db, external_id=mid, title=f"Perf{size_mb}", app_id=1623730, game_name="Palworld"
     )
+    iid = frozen_deploy_id(created)
     write_info_sidecar(
         folder,
-        internal_id=str(created.mod_id),
+        internal_id=iid,
         title=f"Perf{size_mb}MB",
         external_id=mid,
         workspace_id=str(created.workspace_id or mid),
@@ -44,7 +46,7 @@ def _make_fixture(db: DatabaseManager, library: Path, *, size_mb: int, mid: str)
     bind_managed_path(
         db, created.mod_id, folder, title=f"Perf{size_mb}MB", game_name="Palworld"
     )
-    return folder
+    return iid
 
 
 @pytest.mark.parametrize("size_mb", [10, 18])
@@ -61,11 +63,11 @@ def test_folder_copy_fixture_seconds_level(
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    _make_fixture(db, library, size_mb=size_mb, mid=mid)
+    iid = _make_fixture(db, library, size_mb=size_mb, mid=mid)
 
     deployer = ModDeployer(library_root=library, db=db)
     t0 = time.perf_counter()
-    out = deployer.deploy_mod(mid)
+    out = deployer.deploy_mod(iid)
     elapsed = time.perf_counter() - t0
     assert out.get("success") is True, out
     # Structural fix: no unbounded rglob — 18MB should finish quickly on tmpfs.

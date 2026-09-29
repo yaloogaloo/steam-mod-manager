@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION
+from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION, MOD_TYPE_SKIN
 from services.mod_type_catalog import (
     ModTypeCatalog,
     ModTypeCatalogError,
@@ -294,6 +294,9 @@ def test_extension_type_id_is_per_game_not_global(catalog: ModTypeCatalog) -> No
     assert catalog.unlocks_subcategory(111, ext_a.type_id)
     assert not catalog.unlocks_subcategory(111, plain.type_id)
     assert catalog.unlocks_subcategory(222, ext_b.type_id)
+    skin = catalog.add_type(111, MOD_TYPE_SKIN)
+    assert catalog.unlocks_subcategory(111, skin.type_id)
+    assert not catalog.is_extension_type(111, skin.type_id)
 
 
 def test_extension_type_id_inferred_from_canonical_name(

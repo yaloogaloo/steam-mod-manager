@@ -156,14 +156,15 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
         created = create_steam_test_mod(
             db, external_id=mid, title=title, app_id=1623730, game_name="Palworld"
         )
-        internal_id = str(created.mod_id)
-        pks[mid] = internal_id
+        pk = str(created.mod_id)
+        frozen = str(created.internal_id)
+        pks[mid] = frozen
         mod = library / "Palworld" / folder
         mod.mkdir(parents=True, exist_ok=True)
         (mod / "file.txt").write_text("x", encoding="utf-8")
         write_info_sidecar(
             mod,
-            internal_id=internal_id,
+            internal_id=frozen,
             title=title,
             external_id=mid,
             workspace_id=mid,
@@ -174,12 +175,12 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
             (mod / INFO_DIR_NAME / "index.html").write_text(
                 "<html></html>", encoding="utf-8"
             )
-            db.update_mod_offline_status(internal_id, status="generated")
+            db.update_mod_offline_status(pk, status="generated")
         bind_managed_path(
-            db, internal_id, mod, game_name="Palworld", title=title
+            db, pk, mod, game_name="Palworld", title=title
         )
         db.update_mod_user_metadata(
-            internal_id,
+            pk,
             {
                 "display_name": folder if folder != title else "",
                 "user_notes": notes,
@@ -188,7 +189,7 @@ def _seed_library(library: Path, db: DatabaseManager) -> dict[str, Path]:
         )
         if deployed:
             db.update_mod_deploy_status(
-                internal_id,
+                pk,
                 deploy_status=DEPLOY_STATUS_DEPLOYED,
                 deploy_path="/tmp/out",
             )
@@ -337,3 +338,91 @@ def test_get_mods_search_fields_batch(db: DatabaseManager) -> None:
     assert row.user_notes == "hello"
     assert row.favorite is True
     assert row.deploy_status == DEPLOY_STATUS_DEPLOYED
+
+
+def test_matches_search_includes_mods_category() -> None:
+    nun = _idx(display_name="Cloud Leper Skin", category="修女")
+    empty = _idx(display_name="Plain Mod", category="")
+    titled = _idx(display_name="自定义名", steam_name="Workshop Title", category="")
+    assert matches_search(nun, "修女")
+    assert matches_search(nun, "修")
+    assert matches_search(_idx(category="Nun Skin"), "nun")
+    assert matches_search(_idx(category="修女皮肤"), "修女")
+    assert matches_search(_idx(category="黑色修女"), "修女")
+    assert not matches_search(empty, "修女")
+    assert matches_search(titled, "自定义")
+    assert matches_search(titled, "workshop")
+    assert not matches_search(titled, "修女")
+
+
+def test_category_search_via_list_projection(
+    db: DatabaseManager, tmp_path: Path, monkeypatch
+) -> None:
+    from services.mod_library_cache import (
+        build_library_snapshot,
+        list_item_to_card_data,
+        mod_list_item_from_row,
+    )
+    from services.mod_list_item import assert_mod_list_item_layer1
+
+    library = tmp_path / "mod"
+    db.update_game_deploy_config(262060, name="Darkest Dungeon", mod_path="")
+    created = create_steam_test_mod(
+        db,
+        external_id="3129401071",
+        title="Cloud Leper Skin",
+        app_id=262060,
+        game_name="Darkest Dungeon",
+    )
+    pk = str(created.mod_id)
+    folder = library / "Darkest Dungeon" / "Cloud Leper Skin"
+    folder.mkdir(parents=True)
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.internal_id),
+        title="Cloud Leper Skin",
+        external_id="3129401071",
+        workspace_id="3129401071",
+        app_id=262060,
+        game_name="Darkest Dungeon",
+    )
+    bind_managed_path(
+        db, pk, folder, game_name="Darkest Dungeon", title="Cloud Leper Skin"
+    )
+    db.update_mod_user_metadata(pk, {"category": "修女", "display_name": "麻风病人皮肤"})
+    patch_library_get_db(monkeypatch, db)
+    rows = db.list_mod_list_items()
+    assert rows
+    item = mod_list_item_from_row(rows[0])
+    assert_mod_list_item_layer1(item)
+    assert item.category == "修女"
+    fields = db.get_mods_search_fields([pk])[pk]
+    assert fields.category == "修女"
+    card = list_item_to_card_data(item)
+    assert card.category == "修女"
+    snap = build_library_snapshot(library)
+    assert any(c.category == "修女" for c in snap.cards)
+    idx = ModFilterIndex(
+        mod_id=pk,
+        display_name=item.name,
+        steam_name=item.steam_name,
+        notes=item.notes_preview,
+        game_name="Darkest Dungeon",
+        favorite=False,
+        deployed=False,
+        has_offline=False,
+        mtime=1.0,
+        sort_name=item.name,
+        category=item.category,
+        workspace_id=item.workspace_id,
+    )
+    assert matches_search(idx, "修女")
+    assert matches_search(idx, "修")
+    ranked = filter_and_sort([(idx, pk)], query="修女")
+    assert ranked == [pk]
+    ranked_partial = filter_and_sort([(idx, pk)], query="修")
+    assert ranked_partial == [pk]
+    empty_idx = _idx(display_name="Shown", category="")
+    assert matches_search(empty_idx, "Shown")
+    assert not matches_search(empty_idx, "修女")
+

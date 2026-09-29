@@ -9,7 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
@@ -78,6 +82,7 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
         app_id=APP_ID,
         game_name="Palworld",
     )
+    iid = frozen_deploy_id(created)
 
     # Foreign file that must survive undeploy
     foreign_dir = install / "Pal" / "Content" / "Paks" / "~mods"
@@ -87,8 +92,8 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
 
     deployer = ModDeployer(library_root=library, db=db)
 
-    # --- deploy_mod() — workshop soft-resolve OK ---
-    result = deployer.deploy_mod(MOD_ID)
+    # --- deploy_mod() — public token is Frozen internal_id ---
+    result = deployer.deploy_mod(iid)
     assert result["success"] is True, result
 
     normal_target = install / "Pal" / "Content" / "Paks" / "~mods" / "test_normal.pak"
@@ -124,8 +129,8 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     assert info_row is not None
     assert info_row.deploy_status == DEPLOY_STATUS_DEPLOYED
 
-    # --- undeploy_mod() — workshop soft-resolve OK ---
-    und = deployer.undeploy_mod(MOD_ID)
+    # --- undeploy_mod() — public token is Frozen internal_id ---
+    und = deployer.undeploy_mod(iid)
     assert und["success"] is True, und
 
     # 5. Both paks removed

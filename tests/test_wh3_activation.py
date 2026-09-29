@@ -10,11 +10,15 @@ import pytest
 from core.db_manager import DEPLOY_STATUS_DEPLOYED, DatabaseManager
 from core.game_info import GameInfo
 from core.mod_platform import PLATFORM_STEAM, WARHAMMER3_APP_IDS
+from services.deploy_identity import is_frozen_internal_uuid
 from services.identity_service import create_mod_identity, identity_create_scope
 from services.wh3_activation import (
     WH3_APP_ID,
     WH3_LAUNCH_ARG,
+    Wh3OrderError,
     apply_card_drop,
+    apply_order_move,
+    canonicalize_wh3_order_tokens,
     collect_enabled_pack_lines,
     display_numbers,
     is_wh3_activation_app,
@@ -28,10 +32,17 @@ from services.wh3_activation import (
     set_wh3_enabled,
     sync_used_mods_txt,
 )
+from tests.helpers.identity import patch_library_get_db
 
 WH3 = 1142710
 assert WH3 == WH3_APP_ID
 assert WH3 in WARHAMMER3_APP_IDS
+
+
+def _pk(db: DatabaseManager, internal_id: str) -> str:
+    found = db.find_mod_by_internal_id(str(internal_id))
+    assert found and str(found).isdigit()
+    return str(found)
 
 
 @pytest.fixture()
@@ -96,6 +107,7 @@ def _seed_wh3_mod(
             operation="import",
         )
     pk = str(created.mod_id)
+    iid = str(created.internal_id or "")
     mod_dir = library / "Warhammer3" / folder
     mod_dir.mkdir(parents=True)
     (mod_dir / pack_name).write_bytes(pack_bytes)
@@ -119,7 +131,7 @@ def _seed_wh3_mod(
         )
     if not enabled:
         db.disable_mod(pk)
-    return pk
+    return iid
 
 
 def test_wh3_app_id_enters_activation() -> None:
@@ -156,9 +168,9 @@ def test_enable_disable_persist_and_used_mods(
     persist_load_order([a, b], db, library_root=library)
 
     assert set_wh3_enabled(a, True, db) is True
-    assert db.is_mod_enabled(a) is True
+    assert db.is_mod_enabled(_pk(db, a)) is True
     assert set_wh3_enabled(b, False, db) is True
-    assert db.is_mod_enabled(b) is False
+    assert db.is_mod_enabled(_pk(db, b)) is False
 
     path, wrote = sync_used_mods_txt(db, library_root=library, install_path=install)
     assert path is not None
@@ -274,7 +286,6 @@ def test_used_mods_enabled_order_no_duplicates(
         library, db, folder="B", workshop_id="52", pack_name="b.pack", enabled=False
     )
     c = _seed_wh3_mod(library, db, folder="C", workshop_id="53", pack_name="c.pack")
-    persist_load_order([c, a, "unused"], db, library_root=library)
     persist_load_order([c, a], db, library_root=library)
     lines = collect_enabled_pack_lines(db, library_root=library)
     text = render_used_mods_text(lines)
@@ -733,12 +744,13 @@ def _visible_button_texts(view) -> list[str]:
 
 
 def test_sort_mode_library_order_and_viewport(
-    qapp, tmp_path: Path, db: DatabaseManager
+    qapp, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from PySide6.QtWidgets import QLabel, QWidget
     from ui.library_query import FILTER_ALL, FILTER_FAVORITE, STATUS_FILTER_LABELS
     from ui.library_view import LIBRARY_ACTION_BTN_H, LIBRARY_ACTION_BTN_W, ModLibraryView
 
+    patch_library_get_db(monkeypatch, db)
     _configure_wh3(db, tmp_path)
     library = tmp_path / "mod"
     ids = [
@@ -760,11 +772,13 @@ def test_sort_mode_library_order_and_viewport(
         deployed=False,
     )
     persist_load_order(list(reversed(ids)), db, library_root=library)
+    assert all(is_frozen_internal_uuid(tok) for tok in ids)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.set_preferred_filter("Warhammer3")
     view.refresh()
+    view._set_current_game_context("Warhammer3", game_id=WH3)
     assert view._is_wh3_current_game() is True
     assert not view.btn_wh3_sort_mode.isHidden()
     assert view.btn_wh3_sort_mode.parent() is view._record_actions
@@ -813,8 +827,12 @@ def test_sort_mode_library_order_and_viewport(
     assert view._status_filter == FILTER_FAVORITE
     assert view.search_box.text() == "Mod00"
     filtered_ids = [
-        str(index.mod_id) for index, _payload in view._filtered_row_entries
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
     ]
+    assert all(is_frozen_internal_uuid(tok) for tok in filtered_ids)
+    for index, _payload in view._filtered_row_entries:
+        assert str(index.mod_id).isdigit()
+        assert str(index.internal_id) != str(index.mod_id)
     assert undeployed not in filtered_ids
     assert filtered_ids == list(reversed(ids))
     numbers = [int(card.load_order_badge.text()) for card in view._cards]
@@ -824,10 +842,15 @@ def test_sort_mode_library_order_and_viewport(
 
     view._on_wh3_sort_drop(ids[0], ids[-1])
     filtered_ids = [
-        str(index.mod_id) for index, _payload in view._filtered_row_entries
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
     ]
     assert filtered_ids[0] == ids[0]
     assert set(filtered_ids) == set(ids)
+    view._on_wh3_sort_move(ids[0], "bottom")
+    filtered_ids = [
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
+    ]
+    assert filtered_ids[-1] == ids[0]
     shown = [int(card.load_order_badge.text()) for card in view._cards]
     assert shown == list(range(1, len(shown) + 1))
     assert len(set(shown)) == len(shown)
@@ -835,7 +858,7 @@ def test_sort_mode_library_order_and_viewport(
     view._last_filter_sig = None
     view._apply_view_filter()
     assert filtered_ids == [
-        str(index.mod_id) for index, _payload in view._filtered_row_entries
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
     ]
     assert view._status_filter == FILTER_FAVORITE
     assert view.search_box.text() == "Mod00"
@@ -845,7 +868,7 @@ def test_sort_mode_library_order_and_viewport(
     assert view._status_filter == FILTER_FAVORITE
     assert view.search_box.text() == "Mod00"
     restored_ids = [
-        str(index.mod_id) for index, _payload in view._filtered_row_entries
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
     ]
     assert restored_ids != filtered_ids
 
@@ -857,10 +880,11 @@ def test_sort_mode_library_order_and_viewport(
 
 
 def test_wh3_sort_mode_keeps_disabled_deployed_excludes_undeployed(
-    qapp, tmp_path: Path, db: DatabaseManager
+    qapp, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ui.library_view import ModLibraryView
 
+    patch_library_get_db(monkeypatch, db)
     _configure_wh3(db, tmp_path)
     library = tmp_path / "mod"
     deployed_on = _seed_wh3_mod(
@@ -887,13 +911,19 @@ def test_wh3_sort_mode_keeps_disabled_deployed_excludes_undeployed(
     view.set_target_root(str(library))
     view.set_preferred_filter("Warhammer3")
     view.refresh()
+    view._set_current_game_context("Warhammer3", game_id=WH3)
     view.btn_wh3_sort_mode.setChecked(True)
-    filtered = [str(index.mod_id) for index, _payload in view._filtered_row_entries]
+    filtered = [
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
+    ]
+    assert all(is_frozen_internal_uuid(tok) for tok in filtered)
     assert deployed_on in filtered
     assert deployed_off in filtered
     assert undeployed not in filtered
     view.btn_wh3_sort_mode.setChecked(False)
-    restored = [str(index.mod_id) for index, _payload in view._filtered_row_entries]
+    restored = [
+        str(index.internal_id) for index, _payload in view._filtered_row_entries
+    ]
     assert undeployed in restored
     view.deleteLater()
 
@@ -909,7 +939,9 @@ def test_new_mod_appended_missing_dropped(tmp_path: Path, db: DatabaseManager) -
     c = _seed_wh3_mod(library, db, folder="C", workshop_id="33", pack_name="c.pack")
     order = persist_load_order(load_saved_order(), db, library_root=library)
     assert order == [a, b, c]
-    db.update_mod_deploy_status(b, deploy_status=DEPLOY_STATUS_NOT_DEPLOYED, app_id=WH3)
+    db.update_mod_deploy_status(
+        _pk(db, b), deploy_status=DEPLOY_STATUS_NOT_DEPLOYED, app_id=WH3
+    )
     order = persist_load_order(load_saved_order(), db, library_root=library)
     assert order == [a, c]
     assert b not in order
@@ -942,6 +974,8 @@ def test_reorder_does_not_copy_or_hash_packs(
 def test_load_order_writes_config_not_data_wh3(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
+    import json
+
     from core.paths import data_dir, load_order_dir
     from services.wh3_activation import (
         WH3_CANONICAL_ORDER_FILENAME,
@@ -961,6 +995,9 @@ def test_load_order_writes_config_not_data_wh3(
     assert not old_dir.exists()
     assert not legacy.exists()
     assert load_saved_order() == [a]
+    assert all(is_frozen_internal_uuid(tok) for tok in load_saved_order())
+    assert json.loads(new_path.read_text(encoding="utf-8")) == {"order": [a]}
+    assert _pk(db, a) not in json.loads(new_path.read_text(encoding="utf-8"))["order"]
 
 
 def test_legacy_wh3_load_order_json_migrates_once(
@@ -1144,5 +1181,95 @@ def test_filter_row_does_not_keep_phantom_height(qapp) -> None:
     assert names.count("libraryFilterBar") == 0
     assert "来源" not in names
     view.deleteLater()
+
+
+def test_wh3_json_persists_internal_id_not_pk(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    import json
+
+    from core.paths import load_order_dir
+    from services.paradox_activation import ORDER_MOVE_TOP
+    from services.wh3_activation import WH3_CANONICAL_ORDER_FILENAME
+
+    _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    a = _seed_wh3_mod(library, db, folder="A", workshop_id="201", pack_name="a.pack")
+    b = _seed_wh3_mod(library, db, folder="B", workshop_id="202", pack_name="b.pack")
+    persist_load_order([a, b], db, library_root=library)
+    payload = json.loads(
+        (load_order_dir() / WH3_CANONICAL_ORDER_FILENAME).read_text(encoding="utf-8")
+    )
+    assert payload["order"] == [a, b]
+    assert all(is_frozen_internal_uuid(tok) for tok in payload["order"])
+    assert _pk(db, a) not in payload["order"]
+    assert _pk(db, b) not in payload["order"]
+    moved = apply_order_move(b, ORDER_MOVE_TOP, db, library_root=library)
+    assert moved == [b, a]
+    assert load_saved_order() == [b, a]
+
+
+def test_legacy_pk_tokens_migrate_once(tmp_path: Path, db: DatabaseManager) -> None:
+    import json
+
+    from core.paths import load_order_dir
+    from services.wh3_activation import WH3_CANONICAL_ORDER_FILENAME
+
+    _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    a = _seed_wh3_mod(library, db, folder="A", workshop_id="211", pack_name="a.pack")
+    b = _seed_wh3_mod(library, db, folder="B", workshop_id="212", pack_name="b.pack")
+    path = load_order_dir() / WH3_CANONICAL_ORDER_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"order": [_pk(db, b), _pk(db, a)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    migrated, changed = canonicalize_wh3_order_tokens(
+        [_pk(db, b), _pk(db, a)], db
+    )
+    assert changed is True
+    assert migrated == [b, a]
+    assert load_saved_order(db) == [b, a]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {"order": [b, a]}
+    again, changed_again = canonicalize_wh3_order_tokens(payload["order"], db)
+    assert changed_again is False
+    assert again == [b, a]
+    assert load_saved_order(db) == [b, a]
+
+
+def test_unknown_pk_and_invalid_token_fail_closed(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    _configure_wh3(db, tmp_path)
+    with pytest.raises(Wh3OrderError) as unknown:
+        canonicalize_wh3_order_tokens(["999999"], db)
+    assert unknown.value.code == "UnknownLegacyPk"
+    with pytest.raises(Wh3OrderError) as invalid:
+        canonicalize_wh3_order_tokens(["not-a-token"], db)
+    assert invalid.value.code == "InvalidOrderToken"
+    a = _seed_wh3_mod(
+        tmp_path / "mod", db, folder="A", workshop_id="221", pack_name="a.pack"
+    )
+    kept, changed = canonicalize_wh3_order_tokens([a], db)
+    assert kept == [a]
+    assert changed is False
+
+
+def test_save_saved_order_drops_digit_pk(tmp_path: Path, db: DatabaseManager) -> None:
+    import json
+
+    from core.paths import load_order_dir
+    from services.wh3_activation import WH3_CANONICAL_ORDER_FILENAME, save_saved_order
+
+    _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    a = _seed_wh3_mod(library, db, folder="A", workshop_id="231", pack_name="a.pack")
+    save_saved_order([_pk(db, a), a])
+    payload = json.loads(
+        (load_order_dir() / WH3_CANONICAL_ORDER_FILENAME).read_text(encoding="utf-8")
+    )
+    assert payload == {"order": [a]}
 
 

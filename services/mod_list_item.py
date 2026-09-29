@@ -38,6 +38,7 @@ MOD_LIST_ITEM_ALLOWED_FIELDS: frozenset[str] = frozenset(
         "has_offline",
         "mtime",
         "category_tags",
+        "category",
         "external_id",
         "source_url",
         "source_type",
@@ -97,6 +98,8 @@ class ModListItem:
     has_offline: bool = False
     mtime: float = 0.0
     category_tags: str = ""
+    # Secondary classification from mods.category. Search only on Layer-1.
+    category: str = ""
     external_id: str = ""
     source_url: str = ""
     source_type: str = ""

@@ -18,7 +18,7 @@ from services.deploy_rules.manifest import (
     ManifestFileEntry,
     save_manifest,
 )
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 
 
 @pytest.fixture()
@@ -36,11 +36,12 @@ def _seed_mod(
     *,
     workshop_id: str,
     title: str | None = None,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     created = create_steam_test_mod(
         db, external_id=workshop_id, title=title or f"M{workshop_id}", app_id=1
     )
     pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
     folder = library / "Game" / workshop_id
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "payload.txt").write_text("x", encoding="utf-8")
@@ -52,7 +53,7 @@ def _seed_mod(
         app_id=1,
         game_name="Game",
     )
-    return folder, pk
+    return folder, pk, iid
 
 
 def test_check_conflict_preview_reports_conflict(
@@ -63,7 +64,7 @@ def test_check_conflict_preview_reports_conflict(
     db.update_game_deploy_config(
         1, name="Game", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
-    a, pk_a = _seed_mod(library, db, workshop_id="501")
+    a, pk_a, _iid_a = _seed_mod(library, db, workshop_id="501")
     save_manifest(
         a,
         DeployManifest(
@@ -111,8 +112,8 @@ def test_post_deploy_runs_check_all(
         mod_path=str(dest),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    a, pk_a = _seed_mod(library, db, workshop_id="601", title="A")
-    b, pk_b = _seed_mod(library, db, workshop_id="602", title="B")
+    a, pk_a, _iid_a = _seed_mod(library, db, workshop_id="601", title="A")
+    b, pk_b, iid_b = _seed_mod(library, db, workshop_id="602", title="B")
     save_manifest(
         a,
         DeployManifest(
@@ -192,7 +193,8 @@ def test_post_deploy_runs_check_all(
     assert cfg is not None
 
     ctx = DeployContext(
-        internal_id=pk_b,
+        internal_id=iid_b,
+        mod_pk=int(pk_b),
         app_id=1,
         source=b,
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
@@ -209,7 +211,7 @@ def test_post_deploy_runs_check_all(
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.deploy_mod(pk_b)
+    out = deployer.deploy_mod(iid_b)
     assert out.get("success") is True
     assert called["ok"] is True
     assert db.get_mod_status(pk_b).conflict_status == "none"

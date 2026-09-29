@@ -235,6 +235,7 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
         # Optional deferred Identity Reconcile (default off — DB projection only).
         QTimer.singleShot(0, self._refresh_system_proxy_on_startup)
         QTimer.singleShot(0, self._run_startup_library_reconcile)
+        QTimer.singleShot(0, self._notify_paradox_playset_resilience)
 
     def _refresh_system_proxy_on_startup(self) -> None:
         try:
@@ -258,6 +259,22 @@ class MainWindow(StartupLifecycleMixin, QMainWindow):
                 "[startup-timeline] system proxy refresh skip: %s", exc
             )
             log_startup(f"system proxy refresh skip: {exc}")
+
+    def _notify_paradox_playset_resilience(self) -> None:
+        """Startup read of Launcher effective state. No playset writes."""
+        import os
+
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        try:
+            from PySide6.QtWidgets import QMessageBox
+
+            from services.paradox_activation import collect_paradox_playset_notices
+
+            for message in collect_paradox_playset_notices():
+                QMessageBox.information(self, "Paradox Launcher", message)
+        except Exception as exc:  # noqa: BLE001
+            log_startup(f"paradox playset notice skip: {exc}")
 
     def _run_startup_library_reconcile(self) -> None:
         """Startup Identity Reconcile gate (default: skipped).

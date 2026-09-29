@@ -12,8 +12,10 @@ from services.deploy_rules import (
     DEPLOY_TYPE_DUCKOV,
     DEPLOY_TYPE_FOLDER_COPY,
     DEPLOY_TYPE_PALWORLD_PAK,
+    DEPLOY_TYPE_PARADOX_LAUNCHER,
     DEPLOY_TYPE_SLAY_THE_SPIRE,
     DEPLOY_TYPE_STARDEW_VALLEY,
+    DEPLOY_TYPE_STELLARIS,
     DEPLOY_TYPE_WARHAMMER3,
     get_strategy,
     supported_deploy_types,
@@ -73,6 +75,8 @@ def test_all_strategies_registered() -> None:
         DEPLOY_TYPE_STARDEW_VALLEY,
         DEPLOY_TYPE_DUCKOV,
         DEPLOY_TYPE_WARHAMMER3,
+        DEPLOY_TYPE_PARADOX_LAUNCHER,
+        DEPLOY_TYPE_STELLARIS,
     ):
         assert key in types
         assert get_strategy(key) is not None

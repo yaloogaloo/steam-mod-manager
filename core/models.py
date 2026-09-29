@@ -9,8 +9,9 @@ from typing import Any
 # Canonical create / infer label for a game's extension Type.
 # Display text only — never the runtime unlock key for「分类」.
 MOD_TYPE_EXTENSION = "拓展"
-# Display name that also unlocks the same「分类」field as 拓展.
+# Display names that also unlock the same「分类」field as 拓展.
 MOD_TYPE_BEAUTIFY = "美化"
+MOD_TYPE_SKIN = "皮肤"
 
 
 def visible_extension_category(
@@ -21,8 +22,8 @@ def visible_extension_category(
 ) -> str:
     """Category text shown in detail UI, or empty to hide the row entirely.
 
-    Unlock is the stamped 拓展 Type ID, or a Type currently named「美化」.
-    Renaming the stamped 拓展 Type (拓展 / 扩展 / Expansion) must not hide this.
+    Unlock is the stamped 拓展 Type ID, or a Type currently named「美化」
+    or「皮肤」. Renaming the stamped 拓展 Type must not hide this.
     """
     text = str(category or "").strip()
     if not text:

@@ -160,6 +160,7 @@ class ModCardWidget(QFrame):
     set_category_requested = Signal(str)  # category label; "" = clear
     set_collections_requested = Signal()  # uses Library ``_selected_mod_ids``
     sort_drop_requested = Signal(str, str)  # source internal_id, target internal_id
+    sort_move_requested = Signal(str, str)  # internal_id, top|up|down|bottom
 
     def __init__(
         self,
@@ -490,7 +491,9 @@ class ModCardWidget(QFrame):
         if not mid:
             return
         mime = QMimeData()
-        mime.setData("application/x-smm-wh3-internal-id", mid.encode("utf-8"))
+        token = mid.encode("utf-8")
+        mime.setData("application/x-smm-load-order-token", token)
+        mime.setData("application/x-smm-wh3-internal-id", token)
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.MoveAction)
@@ -522,10 +525,16 @@ class ModCardWidget(QFrame):
     @staticmethod
     def _wh3_drop_source_id(event: QDropEvent) -> str:
         mime = event.mimeData()
-        if mime is None or not mime.hasFormat("application/x-smm-wh3-internal-id"):
+        if mime is None:
             return ""
-        raw = bytes(mime.data("application/x-smm-wh3-internal-id"))
-        return raw.decode("utf-8", errors="replace").strip()
+        for fmt in (
+            "application/x-smm-load-order-token",
+            "application/x-smm-wh3-internal-id",
+        ):
+            if mime.hasFormat(fmt):
+                raw = bytes(mime.data(fmt))
+                return raw.decode("utf-8", errors="replace").strip()
+        return ""
 
     def set_wh3_sort_mode(self, enabled: bool, *, number: int = 0) -> None:
         self._wh3_sort_mode = bool(enabled)
@@ -596,6 +605,22 @@ class ModCardWidget(QFrame):
             act_folder.setToolTip("MISS：本地目录不存在")
         menu.addSeparator()
         menu.addAction(act_fav)
+        if self._wh3_sort_mode:
+            menu.addSeparator()
+            for label, action, object_name in (
+                ("置顶", "top", "sortMoveTop"),
+                ("上移", "up", "sortMoveUp"),
+                ("下移", "down", "sortMoveDown"),
+                ("置底", "bottom", "sortMoveBottom"),
+            ):
+                act_move = QAction(label, menu)
+                act_move.setObjectName(object_name)
+                act_move.triggered.connect(
+                    lambda _checked=False, move=action: self.sort_move_requested.emit(
+                        self._entity_internal_id(), move
+                    )
+                )
+                menu.addAction(act_move)
         menu.addSeparator()
 
         cat_menu = menu.addMenu("设置分类")

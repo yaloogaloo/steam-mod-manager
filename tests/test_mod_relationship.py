@@ -18,7 +18,7 @@ from core.db_manager import (
     DatabaseManager,
 )
 from services.deploy import ModDeployer
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 
 
 @pytest.fixture()
@@ -116,6 +116,7 @@ def test_deploy_dependency_disabled_warning(
         1, name="G", install_path=str(tmp_path / "g"), mod_path=str(tmp_path / "g")
     )
     pk_child = _steam(db, "50", "Child", app_id=1)
+    iid_child = frozen_from_pk(db, pk_child)
     prove_managed_folder(db, folder, handle=pk_child, title="Child", app_id=1, game_name="G")
     pk_ue = _steam(db, "51", "UE4SS", app_id=1)
     db.add_mod_relationship(pk_child, pk_ue, RELATIONSHIP_DEPENDENCY)
@@ -158,7 +159,8 @@ def test_deploy_dependency_disabled_warning(
 
     class Ctx:
         mod_id = pk_child
-        internal_id = pk_child
+        internal_id = iid_child
+        mod_pk = int(pk_child)
         app_id = 1
         source = folder
         managed_path = folder
@@ -184,7 +186,7 @@ def test_deploy_dependency_disabled_warning(
         ),
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk_child)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid_child)
     assert out.get("success") is True
     warns = out.get("relationship_warnings") or []
     assert any(w.get("type") == "dependency_disabled" for w in warns)

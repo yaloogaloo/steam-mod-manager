@@ -1,38 +1,27 @@
-"""Stellaris (AppID 281990) — launcher enable/order sync, never copy Workshop files."""
+"""Stellaris (AppID 281990) — compatibility alias for Paradox Launcher activation."""
 
 from __future__ import annotations
 
 from core.mod_platform import STELLARIS_APP_IDS
-from services.deploy_rules.base import (
-    DeployContext,
-    DeployStrategy,
-    StrategyResult,
-    inert_strategy_deploy,
+from services.deploy_rules.paradox import (
+    DEPLOY_TYPE_PARADOX_LAUNCHER,
+    ParadoxLauncherStrategy,
 )
 
 STELLARIS_APP_ID = next(iter(STELLARIS_APP_IDS))
 DEPLOY_TYPE_STELLARIS = "stellaris_launcher"
 
 
-class StellarisStrategy(DeployStrategy):
-    """Confirm the library folder exists. Core Apply must not copy Workshop files."""
+class StellarisStrategy(ParadoxLauncherStrategy):
+    """Compatibility alias. Same inert mapping; deploy_type kept for old configs."""
 
     deploy_type = DEPLOY_TYPE_STELLARIS
 
-    def plan(self, ctx: DeployContext) -> StrategyResult:
-        library = ctx.library_folder()
-        return StrategyResult(
-            success=True,
-            target=str(library),
-            copied_files=0,
-            deploy_type=self.deploy_type,
-            files=[],
-        )
 
-    def deploy(self, ctx: DeployContext) -> StrategyResult:
-        del ctx
-        return inert_strategy_deploy(self.deploy_type)
-
-    def undeploy(self, ctx: DeployContext, manifest: object | None) -> StrategyResult:
-        del ctx, manifest
-        return StrategyResult(success=True, deploy_type=self.deploy_type)
+__all__ = [
+    "DEPLOY_TYPE_PARADOX_LAUNCHER",
+    "DEPLOY_TYPE_STELLARIS",
+    "STELLARIS_APP_ID",
+    "ParadoxLauncherStrategy",
+    "StellarisStrategy",
+]

@@ -223,8 +223,12 @@ def _run_gui() -> int:
         install_syscommand_probe,
     )
 
-    # Ensure SQLite schema exists before any sync / UI lookup
+    # Ensure SQLite schema exists before any sync / UI lookup.
+    # Production mutations are refused until this process opts in.
     get_db()
+    from services.mutation_context import activate_production_context
+
+    activate_production_context()
 
     reset_startup_timeline()
     app = QApplication(sys.argv)

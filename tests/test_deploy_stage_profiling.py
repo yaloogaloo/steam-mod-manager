@@ -9,7 +9,7 @@ import pytest
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
 from core.game_info import GameInfo
 from services.deploy import ModDeployer
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 
 
 @pytest.fixture()
@@ -23,7 +23,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _mod_folder(
     db: DatabaseManager, library: Path, mid: str, *, files: dict[str, bytes]
-) -> Path:
+) -> str:
     folder = library / "Palworld" / f"Mod{mid}"
     folder.mkdir(parents=True)
     for name, payload in files.items():
@@ -41,14 +41,14 @@ def _mod_folder(
         app_id=1623730,
         game_name="Palworld",
     )
-    return folder
+    return frozen_deploy_id(created)
 
 
 def _deploy(tmp_path: Path, db: DatabaseManager, mid: str, files: dict[str, bytes]):
     library = tmp_path / "mod"
     target = tmp_path / "Mods"
     target.mkdir(exist_ok=True)
-    _mod_folder(db, library, mid, files=files)
+    frozen = _mod_folder(db, library, mid, files=files)
     db.update_game_deploy_config(
         1623730,
         name="Palworld",
@@ -57,8 +57,8 @@ def _deploy(tmp_path: Path, db: DatabaseManager, mid: str, files: dict[str, byte
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(mid)
-    return out
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen)
+    return out, frozen
 
 
 def _stage_table(out: dict) -> list[dict]:
@@ -67,7 +67,7 @@ def _stage_table(out: dict) -> list[dict]:
 
 
 def test_profile_kb_mod(tmp_path: Path, db: DatabaseManager) -> None:
-    out = _deploy(tmp_path, db, "37801001", {"a.txt": b"x" * 2048})
+    out, _iid = _deploy(tmp_path, db, "37801001", {"a.txt": b"x" * 2048})
     assert out.get("success") is True, out
     stages = {row["stage"] for row in _stage_table(out)}
     assert "copy" in stages
@@ -78,9 +78,9 @@ def test_profile_kb_mod(tmp_path: Path, db: DatabaseManager) -> None:
 
 def test_profile_multifile_and_overwrite(tmp_path: Path, db: DatabaseManager) -> None:
     files = {f"f{i}.bin": b"y" * 512 for i in range(12)}
-    out1 = _deploy(tmp_path, db, "37801002", files)
+    out1, iid = _deploy(tmp_path, db, "37801002", files)
     assert out1.get("success") is True, out1
-    out2 = ModDeployer(library_root=tmp_path / "mod", db=db).deploy_mod("37801002")
+    out2 = ModDeployer(library_root=tmp_path / "mod", db=db).deploy_mod(iid)
     assert out2.get("success") is True, out2
     names = [row["stage"] for row in _stage_table(out2)]
     assert "backup" in names
@@ -89,7 +89,7 @@ def test_profile_multifile_and_overwrite(tmp_path: Path, db: DatabaseManager) ->
 
 
 def test_profile_stages_include_required_names(tmp_path: Path, db: DatabaseManager) -> None:
-    out = _deploy(tmp_path, db, "37801003", {"z.txt": b"hello"})
+    out, _iid = _deploy(tmp_path, db, "37801003", {"z.txt": b"hello"})
     assert out.get("success") is True, out
     names = [row["stage"] for row in _stage_table(out)]
     for required in ("resolve", "plan", "copy", "validate"):
@@ -117,7 +117,7 @@ def test_profile_51mb_folder_copy_reports_slowest_stage(
 ) -> None:
     chunk = b"S" * (1024 * 1024)
     payload = chunk * 51
-    out = _deploy(tmp_path, db, "37801051", {"payload.bin": payload})
+    out, _iid = _deploy(tmp_path, db, "37801051", {"payload.bin": payload})
     assert out.get("success") is True, out
     timing = out.get("deploy_timing") or {}
     assert float(timing.get("total_ms") or 0) > 0.0
@@ -134,7 +134,7 @@ def test_profile_many_small_files_reports_bottleneck(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     files = {f"n{i:04d}.txt": b"x" * 1024 for i in range(400)}
-    out = _deploy(tmp_path, db, "37801400", files)
+    out, _iid = _deploy(tmp_path, db, "37801400", files)
     assert out.get("success") is True, out
     timing = out.get("deploy_timing") or {}
     slowest = str(timing.get("slowest_stage") or "")

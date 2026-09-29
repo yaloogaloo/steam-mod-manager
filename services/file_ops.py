@@ -461,6 +461,9 @@ class ModFileManager:
         path = Path(managed_path or metadata.managed_path or "")
         if not path:
             raise ValueError("managed_path is required to save metadata")
+        from services.mutation_context import assert_mutation_allowed
+
+        assert_mutation_allowed(path)
 
         existing = read_info_metadata_dict(path) or {}
         info = self.ensure_info_dir(path)
@@ -474,8 +477,8 @@ class ModFileManager:
             if value in (None, "", {}, []):
                 continue
             merged[key] = value
-        written = _write_unified_metadata(info, merged)
-        if sync_backup:
+        written, wrote = _commit_unified_metadata(info, merged)
+        if sync_backup and wrote:
             try:
                 from services.metadata_backup import prove_backup_storage_key
                 from services.metadata_backup_sync import sync_after_metadata_change
@@ -693,7 +696,37 @@ def _remove_legacy_mod_json(info_dir: Path) -> None:
             logger.warning("Failed to remove legacy mod.json %s: %s", legacy, exc)
 
 
-def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
+_UNREADABLE_METADATA = object()
+
+
+def _canonical_metadata_json(payload: Mapping[str, Any]) -> str:
+    """Stable JSON for semantic equality (not the on-disk indent-2 serializer)."""
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _read_existing_metadata_object(meta_file: Path) -> Any:
+    """Parsed metadata dict, ``None`` if missing, or unreadable sentinel."""
+    if not meta_file.is_file():
+        return None
+    try:
+        parsed = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _UNREADABLE_METADATA
+    if not isinstance(parsed, dict):
+        return _UNREADABLE_METADATA
+    return parsed
+
+
+def _commit_unified_metadata(
+    info_dir: Path, payload: Mapping[str, Any]
+) -> tuple[Path, bool]:
+    """Write ``metadata.json`` only when semantic content would change.
+
+    Returns ``(path, wrote)``. Missing or unreadable files always write
+    (create / recover). Identical normalized JSON does not touch mtime.
+    """
     info_dir.mkdir(parents=True, exist_ok=True)
     meta_file = info_dir / METADATA_FILENAME
     # Canonical filesystem Entity proof: ``.info/internal_id`` == Entity.internal_id.
@@ -701,6 +734,17 @@ def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
     from services.mod_identity import normalize_info_identity_payload
 
     normalized, _changed = normalize_info_identity_payload(dict(payload))
+    existing = _read_existing_metadata_object(meta_file)
+    if existing is not None and existing is not _UNREADABLE_METADATA:
+        existing_norm, existing_changed = normalize_info_identity_payload(existing)
+        if (
+            not existing_changed
+            and _canonical_metadata_json(existing_norm)
+            == _canonical_metadata_json(normalized)
+        ):
+            _remove_legacy_mod_json(info_dir)
+            return meta_file, False
+
     meta_file.write_text(
         json.dumps(normalized, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -712,7 +756,12 @@ def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
         invalidate_metadata(info_dir.parent)
     except Exception:  # noqa: BLE001
         pass
-    return meta_file
+    return meta_file, True
+
+
+def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
+    path, _wrote = _commit_unified_metadata(info_dir, payload)
+    return path
 
 
 def _backfill_mod_runtime_paths(metadata: ModMetadata, managed_path: Path) -> None:
@@ -770,6 +819,19 @@ def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
                     continue
                 if key in ("url", "offline_page_path", "offline_page"):
                     continue
+                # Never clobber an in-memory cover_path with a stale DB/sidecar
+                # fallback. apply_cover_to_mod saves metadata BEFORE the DB row
+                # is updated; the sidecar snapshot still holds the previous
+                # (often absolute, other-tree) cover_path.
+                if key == "cover_path":
+                    if str(payload.get("cover_path") or "").strip():
+                        continue
+                    from services.metadata_ownership import cover_reference_is_foreign
+
+                    if cover_reference_is_foreign(
+                        metadata.managed_path, str(value or "")
+                    ):
+                        continue
                 if value not in (None, "", {}, []):
                     payload[key] = value
             if sidecar.url and not url:
@@ -797,8 +859,8 @@ def persist_unified_metadata_dict(
     """Write ``metadata.json`` at *managed_path* and optionally sync backup."""
     root = Path(managed_path)
     info = root / INFO_DIR_NAME
-    written = _write_unified_metadata(info, payload)
-    if sync_backup:
+    written, wrote = _commit_unified_metadata(info, payload)
+    if sync_backup and wrote:
         try:
             from services.metadata_backup import prove_backup_storage_key
             from services.metadata_backup_sync import sync_after_metadata_change

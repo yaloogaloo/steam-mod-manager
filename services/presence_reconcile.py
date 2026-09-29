@@ -443,6 +443,14 @@ def schedule_presence_reconcile(
             reconcile_presence(root or None, game_folder=folder or None, db=db)
         except Exception:  # noqa: BLE001
             logger.exception("scheduled presence reconcile failed")
+        finally:
+            try:
+                from services.deploy_e2e import e2e_task_finished, maybe_end
+
+                e2e_task_finished("presence_reconcile")
+                maybe_end()
+            except Exception:  # noqa: BLE001
+                pass
         nxt: tuple[str, str] | None = None
         with _LOCK:
             nxt = _pending
@@ -464,6 +472,14 @@ def schedule_presence_reconcile(
             _worker = thread
             started = True
     if started:
+        try:
+            from services.deploy_e2e import e2e_count, e2e_event, e2e_task_started
+
+            e2e_count("presence_reconcile_count")
+            e2e_event("presence_reconcile started")
+            e2e_task_started("presence_reconcile")
+        except Exception:  # noqa: BLE001
+            pass
         thread.start()
     record_schedule_ui_ms((time.perf_counter() - t0) * 1000.0)
     return started

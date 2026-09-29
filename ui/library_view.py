@@ -961,6 +961,13 @@ class ModLibraryView(QWidget):
         """
         del reconcile
         do_reconcile = False
+        try:
+            from services.deploy_e2e import e2e_count, e2e_event
+
+            e2e_count("library_refresh_count")
+            e2e_event("library refresh", force=int(bool(force)))
+        except Exception:  # noqa: BLE001
+            pass
         self._refresh_t0 = time.perf_counter()
         scroll = self._capture_scroll()
         keep_mod_id = str(self._selected_mod_id or "").strip()
@@ -1074,6 +1081,13 @@ class ModLibraryView(QWidget):
         worker.loaded.connect(lambda snap, g=gen: self._on_library_loaded(snap, g))
         worker.failed.connect(lambda msg, g=gen: self._on_library_failed(msg, g))
         self._load_worker = worker
+        try:
+            from services.deploy_e2e import e2e_count, e2e_task_started
+
+            e2e_count("library_load_worker_count")
+            self._e2e_library_load_task = e2e_task_started("LibraryLoadWorker")
+        except Exception:  # noqa: BLE001
+            self._e2e_library_load_task = ""
         worker.start()
 
     def cancel_pending_library_load(self) -> None:
@@ -1169,6 +1183,16 @@ class ModLibraryView(QWidget):
         try:
             self._apply_library_snapshot(snapshot)
         finally:
+            try:
+                from services.deploy_e2e import e2e_task_finished, maybe_end
+
+                key = str(getattr(self, "_e2e_library_load_task", "") or "")
+                self._e2e_library_load_task = ""
+                if key:
+                    e2e_task_finished(key)
+                maybe_end()
+            except Exception:  # noqa: BLE001
+                pass
             self._finish_library_load()
             try:
                 from services.library_perf_metrics import get_library_perf_metrics
@@ -1304,18 +1328,45 @@ class ModLibraryView(QWidget):
         if prev == "full":
             kind = "full"
         self._pending_projection[mid] = kind
+        panel = getattr(self, "detail_panel", None)
+        if panel is not None and getattr(
+            panel, "_suppress_projection_detail_rebuild", False
+        ):
+            skip = getattr(self, "_projection_skip_detail", None)
+            if skip is None:
+                skip = set()
+                self._projection_skip_detail = skip
+            skip.add(mid)
         timer = getattr(self, "_projection_coalesce", None)
         if timer is None:
             self._flush_projection_patches()
             return
         if not timer.isActive():
+            from services.deploy_e2e import e2e_task_started
+
+            if not getattr(self, "_e2e_projection_task", ""):
+                self._e2e_projection_task = e2e_task_started("projection_coalesce")
             timer.start()
 
     def _flush_projection_patches(self) -> None:
+        from services.deploy_e2e import e2e_span, e2e_task_finished, maybe_end
+
         pending = dict(self._pending_projection)
         self._pending_projection.clear()
+        task_key = str(getattr(self, "_e2e_projection_task", "") or "")
+        self._e2e_projection_task = ""
         if not pending:
+            if task_key:
+                e2e_task_finished(task_key)
+                maybe_end()
             return
+        with e2e_span("projection_flush", patched=len(pending)):
+            self._flush_projection_patches_body(pending)
+        if task_key:
+            e2e_task_finished(task_key)
+        maybe_end()
+
+    def _flush_projection_patches_body(self, pending: dict[str, str]) -> None:
         if self._is_collection_list_mode():
             return
         from services.mod_library_cache import (
@@ -1459,11 +1510,13 @@ class ModLibraryView(QWidget):
                 )
         if selected_refresh:
             selected = self._selected_card
+            skip_detail = getattr(self, "_projection_skip_detail", None) or set()
             if (
                 selected is not None
                 and selected._mod_id() == selected_refresh
                 and not selected.isHidden()
                 and not getattr(self.detail_panel, "_deploy_busy", False)
+                and selected_refresh not in skip_detail
             ):
                 self._sync_peer_mods_to_panel(exclude=selected_refresh)
                 self.detail_panel.show_mod(
@@ -1472,6 +1525,7 @@ class ModLibraryView(QWidget):
                     game_id=int(self.current_game_id or 0),
                     game_name=str(self.current_game_name or "").strip(),
                 )
+        self._projection_skip_detail = set()
         try:
             from services.library_perf_metrics import get_library_perf_metrics
 
@@ -2078,14 +2132,13 @@ class ModLibraryView(QWidget):
 
     def _on_remove_mod(self, mod_id: str) -> None:
         """Handle DetailPanel remove_requested after user already confirmed."""
-        mid = str(mod_id or "").strip()
+        mid = _frozen_internal_id(mod_id)
         if not mid:
             return
-        pk = _dal_mod_pk(mid)
         try:
             from services.mod_remove import ModRemover
 
-            result = ModRemover(self._target_root).remove_mod(pk or mid)
+            result = ModRemover(self._target_root).remove_mod(mid)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "移除失败", str(exc))
             return
@@ -2257,48 +2310,88 @@ class ModLibraryView(QWidget):
             return False
         return any(is_stellaris_activation_app(app) for app in app_ids.values())
 
+    def _is_paradox_current_game(self) -> bool:
+        from services.paradox_activation import is_paradox_activation_app
+
+        if is_paradox_activation_app(
+            self.current_game_id or 0,
+            self.current_game_name or "",
+        ):
+            return True
+        if not self._current_game_filter:
+            return False
+        ids = [
+            str(getattr(index, "mod_id", "") or "")
+            for index, _payload in self._game_row_entries
+            if str(getattr(index, "mod_id", "") or "").isdigit()
+        ]
+        if not ids:
+            return False
+        try:
+            app_ids = get_db().get_mods_app_ids(ids)
+        except Exception:  # noqa: BLE001
+            return False
+        return any(is_paradox_activation_app(app) for app in app_ids.values())
+
+    def _paradox_sort_app_id(self) -> int:
+        from services.paradox_activation import (
+            paradox_game_for_app_id,
+            paradox_game_for_name,
+        )
+
+        game = paradox_game_for_app_id(self.current_game_id or 0)
+        if game is None:
+            game = paradox_game_for_name(self.current_game_name or "")
+        if game is not None:
+            return int(game.app_id)
+        return int(self.current_game_id or 0)
+
+    def _order_backend(self):
+        from services.order_backend import get_order_backend
+
+        key = (int(self.current_game_id or 0), str(self.current_game_name or ""))
+        cached = getattr(self, "_order_backend_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        backend = get_order_backend(
+            self.current_game_id or 0,
+            self.current_game_name or "",
+        )
+        if backend is None and self._is_paradox_current_game():
+            backend = get_order_backend(
+                self._paradox_sort_app_id(),
+                self.current_game_name or "",
+            )
+        if backend is None and self._is_wh3_current_game():
+            from services.wh3_activation import WH3_APP_ID
+
+            backend = get_order_backend(WH3_APP_ID, self.current_game_name or "")
+        self._order_backend_cache = (key, backend)
+        return backend
+
+    def _order_kwargs(self) -> dict:
+        return {
+            "db": get_db(),
+            "library_root": self._wh3_library_root(),
+        }
+
     def _is_load_order_sort_game(self) -> bool:
-        return self._is_wh3_current_game() or self._is_stellaris_current_game()
+        return self._order_backend() is not None
 
     def _wh3_library_root(self) -> Path:
         return Path(self._target_root)
 
     def _persist_wh3_activation_state(self) -> None:
-        """After deploy/remove: append/drop load-order ids and rewrite used_mods.txt.
-
-        Never copies ``.pack`` files.
-        """
-        if self._is_stellaris_current_game():
-            from services.stellaris_activation import (
-                load_saved_order,
-                persist_load_order,
-                sync_stellaris_launcher,
-            )
-
-            try:
-                persist_load_order(load_saved_order())
-                sync_stellaris_launcher()
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "Stellaris activation persist after inventory change failed",
-                    exc_info=True,
-                )
+        """After deploy/remove: append/drop load-order ids and sync projection."""
+        self._order_backend_cache = None
+        backend = self._order_backend()
+        if backend is None:
             return
-        if not self._is_wh3_current_game():
-            return
-        from services.wh3_activation import (
-            load_saved_order,
-            persist_load_order,
-            sync_used_mods_txt,
-        )
-
         try:
-            persist_load_order(
-                load_saved_order(), library_root=self._wh3_library_root()
-            )
-            sync_used_mods_txt(library_root=self._wh3_library_root())
+            backend.persist_order(None, **self._order_kwargs())
+            backend.sync_projection(**self._order_kwargs())
         except Exception:  # noqa: BLE001
-            logger.debug("WH3 activation persist after inventory change failed", exc_info=True)
+            logger.debug("Load-order persist after inventory change failed", exc_info=True)
 
     def _filter_chip_row_height(self) -> int:
         """Single Filter-chip row height. Independent of Mode column."""
@@ -2323,17 +2416,11 @@ class ModLibraryView(QWidget):
     def _sync_wh3_activation_bar(self) -> None:
         if not hasattr(self, "btn_wh3_sort_mode"):
             return
-        visible = self._is_load_order_sort_game()
+        backend = self._order_backend()
+        visible = backend is not None
         self.btn_wh3_sort_mode.setVisible(visible)
-        stellaris = self._is_stellaris_current_game()
-        if visible and stellaris:
-            self.btn_wh3_sort_mode.setToolTip(
-                "进入 Stellaris 已启用 Mod 的 Load Order 排序工作区"
-            )
-        elif visible:
-            self.btn_wh3_sort_mode.setToolTip(
-                "进入 WH3 已部署 Mod 的 Load Order 排序工作区"
-            )
+        if visible:
+            self.btn_wh3_sort_mode.setToolTip(backend.sort_mode_tooltip())
         if getattr(self, "_record_actions", None) is not None:
             self._record_actions.updateGeometry()
         if not visible and getattr(self, "_wh3_sort_mode", False):
@@ -2536,81 +2623,33 @@ class ModLibraryView(QWidget):
     def _wh3_order_fingerprint(self) -> tuple[str, ...]:
         if not getattr(self, "_wh3_sort_mode", False):
             return ()
-        if self._is_stellaris_current_game():
-            from services.stellaris_activation import resolved_load_order
-
-            try:
-                return tuple(resolved_load_order())
-            except Exception:  # noqa: BLE001
-                logger.debug("Stellaris load-order fingerprint failed", exc_info=True)
-                return ()
-        from services.wh3_activation import resolved_load_order
-
+        backend = self._order_backend()
+        if backend is None:
+            return ()
         try:
-            return tuple(
-                resolved_load_order(library_root=self._wh3_library_root())
-            )
+            return tuple(backend.get_current_order(**self._order_kwargs()))
         except Exception:  # noqa: BLE001
-            logger.debug("WH3 load-order fingerprint failed", exc_info=True)
+            logger.debug("Load-order fingerprint failed", exc_info=True)
             return ()
 
     def _apply_wh3_sort_order(self) -> None:
         if not getattr(self, "_wh3_sort_mode", False):
             return
-        if self._is_stellaris_current_game():
-            from services.stellaris_activation import (
-                canon_internal_id,
-                display_numbers,
-                load_saved_order,
-                persist_load_order,
-            )
-
-            order = persist_load_order(load_saved_order())
-            rank = {mid: i for i, mid in enumerate(order)}
-            self._filtered_row_entries.sort(
-                key=lambda pair: rank.get(
-                    canon_internal_id(getattr(pair[0], "mod_id", "") or ""),
-                    10**9,
-                )
-            )
-            visible = [
-                canon_internal_id(getattr(pair[0], "mod_id", "") or "")
-                for pair in self._filtered_row_entries
-            ]
-            self._wh3_display_numbers = display_numbers(visible)
+        backend = self._order_backend()
+        if backend is None:
             return
-        if not self._is_wh3_current_game():
-            return
-        from services.wh3_activation import (
-            canon_internal_id,
-            display_numbers,
-            load_saved_order,
-            persist_load_order,
+        entries, numbers = backend.sort_entries(
+            self._filtered_row_entries, **self._order_kwargs()
         )
-
-        order = persist_load_order(
-            load_saved_order(), library_root=self._wh3_library_root()
-        )
-        self._wh3_display_numbers = display_numbers(order)
-        rank = {mid: i for i, mid in enumerate(order)}
-        self._filtered_row_entries.sort(
-            key=lambda pair: rank.get(
-                canon_internal_id(getattr(pair[0], "mod_id", "") or ""),
-                10**9,
-            )
-        )
+        self._filtered_row_entries = entries
+        self._wh3_display_numbers = numbers
 
     def _bind_wh3_sort_card(self, card, data) -> None:
-        from services.wh3_activation import canon_internal_id
-
-        sort_mode = bool(getattr(self, "_wh3_sort_mode", False)) and (
-            self._is_wh3_current_game() or self._is_stellaris_current_game()
-        )
+        backend = self._order_backend()
+        sort_mode = bool(getattr(self, "_wh3_sort_mode", False)) and backend is not None
         number = 0
         if sort_mode:
-            mid = canon_internal_id(
-                getattr(data, "mod_pk", None) or getattr(data, "id", "") or ""
-            )
+            mid = backend.bind_token(data)
             numbers = getattr(self, "_wh3_display_numbers", {}) or {}
             number = int(numbers.get(mid, 0) or 0)
         card.set_wh3_sort_mode(sort_mode, number=number)
@@ -2618,31 +2657,33 @@ class ModLibraryView(QWidget):
     def _on_wh3_sort_drop(self, source_id: str, target_id: str) -> None:
         if not getattr(self, "_wh3_sort_mode", False):
             return
-        if self._is_stellaris_current_game():
-            from services.stellaris_activation import apply_card_drop, sync_stellaris_launcher
-
-            apply_card_drop(
-                _dal_mod_pk(source_id) or source_id,
-                _dal_mod_pk(target_id) or target_id,
-            )
-            try:
-                sync_stellaris_launcher()
-            except Exception:  # noqa: BLE001
-                logger.debug("Stellaris launcher sync after sort failed", exc_info=True)
-            self._last_filter_sig = None
-            self._apply_view_filter()
+        backend = self._order_backend()
+        if backend is None:
             return
-        from services.wh3_activation import apply_card_drop, sync_used_mods_txt
-
-        apply_card_drop(
-            _dal_mod_pk(source_id) or source_id,
-            _dal_mod_pk(target_id) or target_id,
-            library_root=self._wh3_library_root(),
-        )
         try:
-            sync_used_mods_txt(library_root=self._wh3_library_root())
+            backend.apply_card_drop(source_id, target_id, **self._order_kwargs())
+            self._paradox_effective_report = backend.sync_projection(
+                **self._order_kwargs()
+            )
         except Exception:  # noqa: BLE001
-            logger.debug("WH3 used_mods sync after sort failed", exc_info=True)
+            logger.debug("Load-order drop failed", exc_info=True)
+        self._last_filter_sig = None
+        self._apply_view_filter()
+
+    def _on_wh3_sort_move(self, token: str, action: str) -> None:
+        """Top / Up / Down / Bottom. Token is the common load-order token."""
+        if not getattr(self, "_wh3_sort_mode", False):
+            return
+        backend = self._order_backend()
+        if backend is None:
+            return
+        try:
+            backend.apply_order_move(token, action, **self._order_kwargs())
+            self._paradox_effective_report = backend.sync_projection(
+                **self._order_kwargs()
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Load-order move failed", exc_info=True)
         self._last_filter_sig = None
         self._apply_view_filter()
 
@@ -3325,25 +3366,20 @@ class ModLibraryView(QWidget):
                     restore_scroll = self._legalize_viewport_scroll(stale_scroll, n_vis)
                     self._sync_viewport_cards(scroll_y=restore_scroll)
                     assert id(self.detail_panel) == detail_id
-            elif getattr(self, "_wh3_sort_mode", False) and self._is_stellaris_current_game():
+            elif getattr(self, "_wh3_sort_mode", False) and self._order_backend() is not None:
+                backend = self._order_backend()
+                kwargs = self._order_kwargs()
                 self._filtered_row_entries = [
                     (index, payload)
                     for index, payload in self._game_row_entries
-                    if bool(getattr(index, "deployed", False))
+                    if backend.is_sortable_member(index, **kwargs)
                 ]
-                if str(query or "").strip():
+                if str(query or "").strip() and backend.search_in_sort_mode():
                     self._filtered_row_entries = [
                         pair
                         for pair in self._filtered_row_entries
                         if matches_search(pair[0], query)
                     ]
-                self._apply_wh3_sort_order()
-            elif getattr(self, "_wh3_sort_mode", False) and self._is_wh3_current_game():
-                self._filtered_row_entries = [
-                    (index, payload)
-                    for index, payload in self._game_row_entries
-                    if bool(getattr(index, "deployed", False))
-                ]
                 self._apply_wh3_sort_order()
             else:
                 self._filtered_row_entries = filter_sort_entries(
@@ -4004,12 +4040,19 @@ class ModLibraryView(QWidget):
             self._apply_tag_deploy_hint(mid)
 
         self._deploy_mod_id = mid
+        from services.deploy_e2e import e2e_event, e2e_mark, start_deploy_job
+
+        job = start_deploy_job(internal_id=mid, action=action, source="ui_click")
         worker = DeployWorker(
             mid,
             library_root=self._target_root,
             parent=self,
             action=action,  # type: ignore[arg-type]
         )
+        worker._e2e_job_id = job.job_id  # noqa: SLF001 — tracer bind
+        job.count("worker_count")
+        e2e_event("worker created")
+        e2e_mark("worker_created")
         # Immediate UI feedback (do not wait for queued deploy_started).
         self.detail_panel.set_deploy_busy(True, action=action)
         worker.deploy_started.connect(
@@ -4022,6 +4065,7 @@ class ModLibraryView(QWidget):
         self._deploy_worker = worker
         self._deploy_ui_timed_out = False
         worker.start()
+        e2e_event("worker start requested")
         self._deploy_watchdog.start()
 
     def _on_deploy_watchdog_timeout(self) -> None:
@@ -4048,14 +4092,12 @@ class ModLibraryView(QWidget):
             self._deploy_watchdog.stop()
 
     def _on_remove_mod(self, mod_id: str) -> None:
-        mid = str(mod_id).strip()
+        mid = _frozen_internal_id(mod_id)
         if not mid:
             return
         from services.mod_remove import ModRemover
 
-        result = ModRemover(self._target_root, db=get_db()).remove_mod(
-            _dal_mod_pk(mid) or mid
-        )
+        result = ModRemover(self._target_root, db=get_db()).remove_mod(mid)
         if not result.get("success"):
             from PySide6.QtWidgets import QMessageBox
 
@@ -4106,7 +4148,24 @@ class ModLibraryView(QWidget):
     def _on_deploy_started(self, action: str = "deploy") -> None:
         self.detail_panel.set_deploy_busy(True, action=action)
 
+    def _present_paradox_playset_notice(self, data: dict) -> None:
+        """One factual notice when Deploy finds no active playset."""
+        message = str(data.get("playset_notice") or "").strip()
+        if not message or os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        parent = self.window() or self
+        QMessageBox.information(parent, "Paradox Launcher", message)
+
     def _on_deploy_finished(self, result: object) -> None:
+        from services.deploy_e2e import (
+            e2e_event,
+            e2e_mark,
+            e2e_span,
+            note_ui_slot_returned,
+        )
+
+        e2e_event("UI finished slot entered")
+        e2e_mark("ui_finished_entered")
         self._stop_deploy_watchdog()
         data = result if isinstance(result, dict) else {"success": False, "error": str(result)}
         mid = _frozen_internal_id(
@@ -4136,14 +4195,19 @@ class ModLibraryView(QWidget):
                 if self._status_filter == FILTER_DEPLOYMENT_RECORD:
                     self._cached_record_mod_ids = None
                     self._sync_record_overlays()
+            note_ui_slot_returned()
             return
-        self.detail_panel.apply_deploy_result(data)
-        # Status stays in DetailPanel — no modal dialogs.
+        with e2e_span("apply_deploy_result"):
+            self.detail_panel.apply_deploy_result(data)
+        # Deploy status stays in DetailPanel. A playset notice is a separate fact.
         if data.get("success"):
-            self._persist_wh3_activation_state()
+            with e2e_span("persist_wh3_activation_state"):
+                self._persist_wh3_activation_state()
         focus = mid if data.get("success") else ""
         self._refresh_mod_ui(mid, focus_mod_id=focus)
         self._keep_deploy_selection(mid)
+        self._present_paradox_playset_notice(data)
+        note_ui_slot_returned()
 
     def _keep_deploy_selection(self, internal_id: str) -> None:
         """Deploy must not drop Library selection or close Detail."""
@@ -4173,6 +4237,14 @@ class ModLibraryView(QWidget):
         )
 
     def _on_deploy_failed(self, error: object) -> None:
+        from services.deploy_e2e import (
+            e2e_event,
+            e2e_mark,
+            note_ui_slot_returned,
+        )
+
+        e2e_event("UI finished slot entered")
+        e2e_mark("ui_finished_entered")
         self._stop_deploy_watchdog()
         if getattr(self, "_deploy_ui_timed_out", False):
             mid = _frozen_internal_id(self._deploy_mod_id or "")
@@ -4180,6 +4252,7 @@ class ModLibraryView(QWidget):
                 from services.mod_projection_events import notify_mod_changed
 
                 notify_mod_changed(str(mid))
+            note_ui_slot_returned()
             return
         # Failure terminal: paint once from the result payload, then single refresh.
         if isinstance(error, dict):
@@ -4193,17 +4266,24 @@ class ModLibraryView(QWidget):
             self.detail_panel.apply_deploy_result(data)
             self._refresh_mod_ui(mid)
             self._keep_deploy_selection(mid)
+            note_ui_slot_returned()
             return
         mid = _frozen_internal_id(self._deploy_mod_id or "")
         self.detail_panel.apply_deploy_failure(str(error or "部署失败"))
         self._refresh_mod_ui(mid)
         self._keep_deploy_selection(mid)
+        note_ui_slot_returned()
 
     def _on_deploy_thread_finished(self) -> None:
+        from services.deploy_e2e import e2e_count, e2e_event, note_worker_thread_finished
+
+        e2e_event("QThread finished")
+        e2e_count("qthread_finished_count")
         self._stop_deploy_watchdog()
         self._deploy_worker = None
         self._deploy_mod_id = None
         self._deploy_ui_timed_out = False
+        note_worker_thread_finished()
 
     def _refresh_mod_ui(self, mod_id: str, *, focus_mod_id: str = "") -> None:
         """Update only the matching card + detail panel (no library.refresh)."""
@@ -4219,9 +4299,12 @@ class ModLibraryView(QWidget):
         anchor_id = _frozen_internal_id(focus_mod_id) or str(
             focus_mod_id or selected_id or token
         ).strip()
+        from services.deploy_e2e import e2e_count, e2e_span
         from services.mod_projection_events import notify_mod_changed
 
-        notify_mod_changed(str(token))
+        e2e_count("post_refresh_count")
+        with e2e_span("post_refresh"):
+            notify_mod_changed(str(token))
         if self._status_filter == FILTER_DEPLOYMENT_RECORD:
             # Re-resolve record membership after deploy mutation.
             self._cached_record_mod_ids = None
@@ -5595,6 +5678,7 @@ class ModLibraryView(QWidget):
             conflict_status=data.conflict_status,
             enabled=data.enabled,
             category_tags=data.category_tags,
+            category=str(getattr(data, "category", "") or ""),
             type_id=getattr(data, "type_id", None),
             content_status=content_status,
             identity_status=identity_status,
@@ -5626,6 +5710,7 @@ class ModLibraryView(QWidget):
         card.set_category_requested.connect(self._on_batch_set_category)
         card.set_collections_requested.connect(self._on_set_collections_requested)
         card.sort_drop_requested.connect(self._on_wh3_sort_drop)
+        card.sort_move_requested.connect(self._on_wh3_sort_move)
 
     def _detach_active_cards(self) -> None:
         """Hide / detach from layout without destroying widgets (card cache reuse)."""

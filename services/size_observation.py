@@ -357,6 +357,28 @@ def observe_mod_size(
     Must not run on the UI thread. Missing directories are ``missing``, not ``0``.
     """
     _assert_not_ui_thread()
+    from services.deploy_e2e import e2e_span
+
+    with e2e_span("observe_mod_size", internal_id=str(internal_id or "")):
+        return _observe_mod_size_body(
+            internal_id,
+            managed_path,
+            force=force,
+            db=db,
+            cancel_check=cancel_check,
+            persist=persist,
+        )
+
+
+def _observe_mod_size_body(
+    internal_id: str | int,
+    managed_path: str | Path | None = None,
+    *,
+    force: bool = False,
+    db: Any = None,
+    cancel_check: Callable[[], bool] | None = None,
+    persist: bool = True,
+) -> SizeObservation:
     mid = str(internal_id or "").strip()
     from core.db_manager import get_db
 

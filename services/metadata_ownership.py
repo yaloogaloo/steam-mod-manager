@@ -1,9 +1,19 @@
-"""Metadata ownership — user overrides vs official provider fields (SQLite only)."""
+"""Metadata ownership — user overrides vs official provider fields (SQLite only).
+
+Cover domains (one pointer, ``mods.cover_path`` — not a second identity):
+
+- USER OWNED: ``user_override_fields.cover`` is set. Generic refresh, official
+  sync, and sidecar rescan must not change the pointer or the live file.
+- OFFICIAL / REFRESH OWNED: no user override and no live cover. A provider may
+  fill ``.info/cover.*`` once.
+- DERIVED / CACHE: decoded ``QImage`` in ``cover_cache``. Never a source of truth.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from core.models import is_unknown_mod_title
@@ -48,6 +58,27 @@ def serialize_user_override_fields(fields: dict[str, bool]) -> str:
 
 def user_has_override(overrides: dict[str, bool], field: str) -> bool:
     return bool(overrides.get(str(field or "").strip()))
+
+
+def cover_reference_is_foreign(managed_path: str | Path | None, cover_ref: str | None) -> bool:
+    """True when *cover_ref* is an absolute path outside the managed Mod folder.
+
+    Relative references (``.info/cover.png``) belong to the Mod. An absolute
+    path inside that folder is the same file. An absolute path in another
+    tree is a stale/foreign pointer and must not be written to ``mods.cover_path``.
+    """
+    ref = str(cover_ref or "").strip()
+    if not ref or managed_path is None:
+        return False
+    path = Path(ref)
+    if not path.is_absolute():
+        return False
+    try:
+        root = Path(managed_path).expanduser().resolve()
+        path.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return True
+    return False
 
 
 def is_placeholder_display_name(value: str | None, *, mod_id: str = "") -> bool:

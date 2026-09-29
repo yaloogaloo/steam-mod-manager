@@ -6,7 +6,6 @@ Reuses ``safe_directory_rename`` and existing cover install helpers.
 
 from __future__ import annotations
 
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -17,8 +16,8 @@ from core.models import ModMetadata
 from core.mod_platform import PLATFORM_MODIO, coerce_modio_api_mod_id
 from core.sanitize import sanitize_folder_name
 from services.file_ops import (
-    INFO_DIR_NAME,
     ModFileManager,
+    persist_unified_metadata_dict,
     read_info_metadata_dict,
 )
 from services.metadata_refresh import (
@@ -259,11 +258,8 @@ def _patch_metadata_json(
                 if raw.startswith(old_prefix):
                     data[key] = new_prefix + raw[len(old_prefix) :]
 
-    info = final / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / "metadata.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    persist_unified_metadata_dict(
+        final, data, sync_backup=False, sync_reason="refresh"
     )
 
 
@@ -711,9 +707,11 @@ def refresh_modio_mod_metadata(
                             official_preview_url=details.logo_url,
                             cover_rel=cover_rel,
                         )
-                        (new_path / INFO_DIR_NAME / "metadata.json").write_text(
-                            json.dumps(merged, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
+                        persist_unified_metadata_dict(
+                            new_path,
+                            merged,
+                            sync_backup=False,
+                            sync_reason="refresh",
                         )
                         try:
                             database.update_mod_cover_path(mid, cover_rel)

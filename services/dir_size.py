@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -66,6 +67,16 @@ def directory_size(
                 return int(hit[1])
 
     total = 0
+    t0 = time.perf_counter()
+    files = 0
+    dirs = 0
+    ui = False
+    try:
+        from services.deploy_e2e import e2e_op, is_ui_thread
+
+        ui = is_ui_thread()
+    except Exception:  # noqa: BLE001
+        e2e_op = None  # type: ignore[assignment]
     try:
         for dirpath, dirnames, filenames in os.walk(root, topdown=True):
             if cancel_check is not None and cancel_check():
@@ -76,7 +87,9 @@ def directory_size(
                 for name in dirnames
                 if not _should_skip_dir(name, parent_name)
             ]
+            dirs += 1
             for name in filenames:
+                files += 1
                 file_path = os.path.join(dirpath, name)
                 try:
                     total += os.path.getsize(file_path)
@@ -86,6 +99,27 @@ def directory_size(
         raise
     except OSError:
         pass
+    if e2e_op is not None:
+        try:
+            e2e_op(
+                "directory_size",
+                (time.perf_counter() - t0) * 1000.0,
+                files=files,
+                dirs=dirs,
+                bytes_count=int(total),
+            )
+            if ui:
+                from services.deploy_e2e import e2e_event
+
+                e2e_event(
+                    "UI_THREAD_FS",
+                    operation="directory_size",
+                    path=str(root),
+                    files=files,
+                    bytes=int(total),
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
     with _LOCK:
         _CACHE[key] = (root_mtime, int(total))

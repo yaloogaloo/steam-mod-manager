@@ -130,6 +130,14 @@ def test_deploy_mod_uuid_ok_pk_rejected(
     assert rejected.get("error_code") == "invalid_internal_uuid"
     assert not str(rejected.get("internal_id") or "").isdigit()
 
+    und_rejected = deployer.undeploy_mod(pk)
+    assert und_rejected.get("success") is False
+    assert und_rejected.get("error_code") == "invalid_internal_uuid"
+
+    red_rejected = deployer.redeploy_mod(pk)
+    assert red_rejected.get("success") is False
+    assert red_rejected.get("error_code") == "invalid_internal_uuid"
+
     received: list[str] = []
     real = ModDeployer.deploy_mod
 

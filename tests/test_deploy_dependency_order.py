@@ -11,6 +11,7 @@ from services.deploy import ModDeployer
 from tests.helpers.identity import (
     bind_managed_path,
     create_steam_test_mod,
+    frozen_deploy_id,
     write_info_sidecar,
 )
 
@@ -33,18 +34,18 @@ def _seed_mod(
     mid: str,
     title: str,
     workspace_id: str | None = None,
-) -> tuple[Path, str]:
-    """Create Entity + proven folder. Returns (folder, mods.mod_id PK)."""
+) -> tuple[Path, str, str]:
+    """Create Entity + proven folder. Returns (folder, mods.mod_id PK, Frozen iid)."""
     folder = library / "Game" / title
     folder.mkdir(parents=True)
     (folder / "payload.txt").write_text(title, encoding="utf-8")
     created = create_steam_test_mod(db, external_id=mid, title=title, app_id=APP)
     pk = str(created.mod_id)
-    frozen = str(created.internal_id or "")
+    iid = frozen_deploy_id(created)
     wid = workspace_id or str(created.workspace_id or mid)
     write_info_sidecar(
         folder,
-        internal_id=frozen,
+        internal_id=iid,
         title=title,
         external_id=mid,
         workspace_id=wid,
@@ -52,7 +53,7 @@ def _seed_mod(
         game_name="Game",
     )
     bind_managed_path(db, pk, folder, title=title, game_name="Game")
-    return folder, pk
+    return folder, pk, iid
 
 
 def test_deploy_runs_dependency_before_main(
@@ -64,10 +65,10 @@ def test_deploy_runs_dependency_before_main(
     db.update_game_deploy_config(
         APP, name="Game", mod_path=str(install), deploy_type="folder_copy"
     )
-    _folder_dep, pk_dep = _seed_mod(
+    _folder_dep, pk_dep, iid_dep = _seed_mod(
         db, library, mid="2001", title="DepMod", workspace_id="ws-dep"
     )
-    _folder_main, pk_main = _seed_mod(
+    _folder_main, pk_main, iid_main = _seed_mod(
         db, library, mid="2002", title="MainMod", workspace_id="ws-main"
     )
 
@@ -76,11 +77,12 @@ def test_deploy_runs_dependency_before_main(
     order: list[str] = []
     real = ModDeployer._deploy_with_context
 
-    def _track(self, *, mid, log_prefix, ctx, early, relationship_warnings, **_kwargs):
-        order.append(str(mid))
+    def _track(self, *, internal_id, mod_pk, log_prefix, ctx, early, relationship_warnings, **_kwargs):
+        order.append(str(internal_id))
         return real(
             self,
-            mid=mid,
+            internal_id=internal_id,
+            mod_pk=mod_pk,
             log_prefix=log_prefix,
             ctx=ctx,
             early=early,
@@ -90,9 +92,9 @@ def test_deploy_runs_dependency_before_main(
 
     monkeypatch.setattr(ModDeployer, "_deploy_with_context", _track)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk_main)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid_main)
     assert result["success"] is True, result
-    assert order == [pk_dep, pk_main]
+    assert order == [iid_dep, iid_main]
     assert (install / "DepMod" / "payload.txt").is_file()
     assert (install / "MainMod" / "payload.txt").is_file()
     _ = _folder_dep, _folder_main

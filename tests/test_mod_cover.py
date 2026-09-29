@@ -183,11 +183,11 @@ def test_replace_cover_updates_db(tmp_path: Path, db: DatabaseManager) -> None:
     _write_png(c1)
     c2.write_bytes(b"RIFF....WEBP")
 
-    rel1 = apply_cover_to_mod(dest, c1, mod_id=info.mod_id)
+    rel1 = apply_cover_to_mod(dest, c1, mod_id=info.mod_id, sync_backup=False)
     assert rel1.endswith(".png")
     assert db.get_mod_display_info(info.mod_id).cover_path == rel1
 
-    rel2 = apply_cover_to_mod(dest, c2, mod_id=info.mod_id)
+    rel2 = apply_cover_to_mod(dest, c2, mod_id=info.mod_id, sync_backup=False)
     assert rel2.endswith(".webp")
     assert db.get_mod_display_info(info.mod_id).cover_path == rel2
     assert (dest / INFO_DIR_NAME / f"{COVER_BASENAME}.webp").is_file()

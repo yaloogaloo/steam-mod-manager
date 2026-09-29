@@ -2,7 +2,12 @@
 
 ARCHITECTURE RULE
 -----------------
-Backup is **not** part of the business critical path. Callers mark dirty and
+Backup is a protection copy, not a Live mirror.
+
+User-initiated ``cover_change`` / ``offline_change`` must finish Backup
+inline before the operation reports success.
+
+Bulk ``refresh`` / ``reconcile`` / ``edit`` / ``import`` still mark dirty and
 return; a background worker copies metadata/cover/offline only.
 
 Never backup Mod payloads / Workshop files / hashes / deploy caches.
@@ -53,9 +58,12 @@ VALID_REASONS: frozenset[str] = frozenset(
     }
 )
 
-# Only explicit repair may run inline. import / restore / edit / refresh / sync /
-# reconcile must mark dirty and return (BackupWorker). Use wait=True in tests.
-_INLINE_REASONS: frozenset[str] = frozenset({"repair"})
+# User cover/offline writes must complete Backup before reporting success.
+# import / restore / edit / refresh / sync / reconcile stay async (BackupWorker).
+# Use wait=True in tests for non-inline reasons.
+_INLINE_REASONS: frozenset[str] = frozenset(
+    {"repair", "cover_change", "offline_change"}
+)
 
 _rebuild_lock = threading.Lock()
 _rebuild_running = False
@@ -191,6 +199,10 @@ def drain_backup_queue(*, timeout: float = 5.0) -> None:
         time.sleep(0.05)
 
 
+class BackupSyncError(RuntimeError):
+    """Live write succeeded but Backup did not complete."""
+
+
 def sync_after_metadata_change(
     mod_id: int | str | None,
     managed_path: str | Path | None,
@@ -202,7 +214,7 @@ def sync_after_metadata_change(
     Protect user metadata after a write.
 
     Default lifecycle: mark dirty → BackupWorker (non-blocking).
-    Inline only for restore/repair or ``wait=True`` (tests / explicit repair).
+    Inline for repair, cover_change, offline_change, or ``wait=True``.
     """
     reason_key = str(reason or "").strip() or "rescan"
     if reason_key not in VALID_REASONS:
@@ -223,7 +235,13 @@ def _sync_backup_now(
         logger.debug("Unknown backup sync reason %r; treating as rescan", reason_key)
         reason_key = "rescan"
 
+    from services.mutation_context import assert_mutation_allowed
+
     root = Path(managed_path) if managed_path else None
+    if root is None:
+        assert_mutation_allowed()
+    else:
+        assert_mutation_allowed(root)
     hint = str(mod_id or "").strip()
     from services.metadata_backup import prove_backup_storage_key
 
@@ -239,6 +257,7 @@ def _sync_backup_now(
                 if found.success and found.path:
                     candidate = Path(found.path)
                     if candidate.is_dir():
+                        assert_mutation_allowed(candidate)
                         root = candidate
                         rebound = True
             except Exception:  # noqa: BLE001
@@ -319,7 +338,17 @@ def _sync_backup_now(
         try:
             note_backup_started()
             note_mod_id(mid)
-            sync_metadata_backup(root, mod_id=mid)
+            synced = sync_metadata_backup(root, mod_id=mid)
+            if not synced:
+                logger.warning(
+                    "backup sync failed mod_id=%s path=%s reason=%s",
+                    mid or "?",
+                    root,
+                    reason_key,
+                )
+                if pk.isdigit():
+                    _record_status(pk, status="invalid")
+                return False
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "backup sync failed mod_id=%s path=%s reason=%s: %s",

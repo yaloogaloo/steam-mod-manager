@@ -258,6 +258,12 @@ def _isolate_production_data(
         raising=False,
     )
 
+    from services.mutation_context import (
+        activate_test_context,
+        reset_mutation_context,
+    )
+
+    mutation_token = activate_test_context([tmp_path])
     DatabaseManager.reset_instance()
     DatabaseManager.instance(db_file)
     try:
@@ -312,6 +318,7 @@ def _isolate_production_data(
     except Exception:  # noqa: BLE001
         pass
     DatabaseManager.reset_instance()
+    reset_mutation_context(mutation_token)
     monkeypatch.delenv("SMM_TEST_DB", raising=False)
 
 

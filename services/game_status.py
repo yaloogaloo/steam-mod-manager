@@ -91,7 +91,8 @@ def aggregate_game_status(
     name = str(game_name or "").strip()
     gstatus = str(game_status or "").strip() or GAME_STATUS_HEALTHY
     statuses = [normalize_content_status(s) for s in content_statuses]
-    absent = list(folder_absent_flags or [])
+    # folder_absent is presence. It must not rewrite the content axis.
+    del folder_absent_flags
     conflicts = [str(c or "").strip().lower() for c in conflict_statuses]
 
     healthy = 0
@@ -99,9 +100,6 @@ def aggregate_game_status(
     conflict = 0
 
     for i, cs in enumerate(statuses):
-        is_absent = bool(absent[i]) if i < len(absent) else False
-        if is_absent and cs == CONTENT_HEALTHY:
-            cs = CONTENT_CONTENT_MISSING
         if i < len(conflicts) and conflicts[i] == "conflict":
             conflict += 1
         if cs == CONTENT_CONTENT_MISSING:

@@ -165,16 +165,37 @@ def materialize_imported_mod(
                 effective_cover = sidecars.cover
         except Exception:  # noqa: BLE001
             pass
+        planned = mgr.allocate_destination(meta)
+        created_live = not planned.exists()
         dest = mgr.copy_mod(
             meta,
             overwrite_existing=False,
+            destination=planned,
             ignore_files=ignore_files or None,
         )
     else:
         dest = mgr.allocate_destination(meta)
+        created_live = not dest.exists()
         dest.mkdir(parents=True, exist_ok=True)
     meta.managed_path = str(dest)
     mgr.save_metadata(meta, dest, sync_backup=False)
+
+    try:
+        from services.sidecar_hydration import hydrate_managed_sidecar
+
+        hydrated = hydrate_managed_sidecar(
+            dest,
+            owner_mod_id=mid,
+            source="import",
+            backup_wins=created_live,
+            commit_backup=False,
+        )
+        if not hydrated.ok:
+            raise ValueError("sidecar hydration failed after import materialize")
+    except ValueError:
+        raise
+    except Exception:  # noqa: BLE001
+        hydrated = None
 
     if effective_cover is not None:
         rel = apply_cover_to_mod(
@@ -191,7 +212,13 @@ def materialize_imported_mod(
         try:
             from core.db_manager import get_db
 
-            get_db().update_mod_cover_path(mid, "")
+            live_cover = mgr.find_local_cover(dest)
+            if live_cover is not None:
+                get_db().update_mod_cover_path(
+                    mid, f"{live_cover.parent.name}/{live_cover.name}"
+                )
+            else:
+                get_db().update_mod_cover_path(mid, "")
         except Exception:  # noqa: BLE001
             pass
 

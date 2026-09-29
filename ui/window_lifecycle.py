@@ -10,7 +10,8 @@ widget. That accident is a Window ownership failure, not a stylesheet bug.
 Forbidden forever:
 - ``QDialog`` / ``QMessageBox`` / ``QProgressDialog`` without an explicit parent
 - ``show()`` / ``setVisible(True)`` on control widgets while ``parent() is None``
-- Local hide/close "workarounds" that paper over orphan top-level HWNDs
+- Detaching a **visible** child with ``setParent(None)`` (maps a top-level HWND)
+- Local hide/close / sleep "workarounds" that paper over orphan top-level HWNDs
 - Creating UI widgets from services or worker threads
 
 Required:
@@ -18,6 +19,8 @@ Required:
 - Every intentional top-level window is registered here
 - Controls are parented (or their layout is on a parented widget) **before**
   any visibility change
+- Visible child detach: ``hide()`` → ``setParent(None)`` → ``deleteLater()``
+  via :func:`detach_owned_widget` (never raw ``takeAt`` + unparent)
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ _CONTROL_TYPES = (
 
 _ORIG_SHOW: Callable[..., Any] | None = None
 _ORIG_SET_VISIBLE: Callable[..., Any] | None = None
+_ORIG_SET_PARENT: Callable[..., Any] | None = None
 _GUARD_STATE: WindowOwnershipState | None = None  # type: ignore[name-defined]
 _REGISTERED: weakref.WeakSet[QWidget] = weakref.WeakSet()
 
@@ -139,6 +143,33 @@ def exec_dialog(dialog: QDialog) -> int:
     return int(dialog.exec())
 
 
+def detach_owned_widget(widget: QWidget | None, *, delete_later: bool = True) -> None:
+    """Hide a child, then unparent it. Optional ``deleteLater``.
+
+    ARCHITECTURE RULE: a visible QWidget whose parent becomes ``None`` is a
+    top-level window (HWND on Windows). Success-path list rebuilds must never
+    ``takeAt`` + ``setParent(None)`` while the row is still shown.
+
+    This is the only supported detach sequence for Detail-owned children.
+    """
+    if widget is None:
+        return
+    try:
+        if widget.isVisible():
+            widget.hide()
+    except RuntimeError:
+        return
+    try:
+        widget.setParent(None)
+    except RuntimeError:
+        return
+    if delete_later:
+        try:
+            widget.deleteLater()
+        except RuntimeError:
+            pass
+
+
 def describe_show_widget(widget: QWidget) -> str:
     text = ""
     try:
@@ -184,9 +215,9 @@ def install_window_ownership_guard(
     Enforce ownership: parentless controls must not become visible top-levels.
 
     This is lifecycle enforcement, not a post-hoc hide/close workaround.
-    Safe to call more than once; installs show/setVisible wrappers once.
+    Safe to call more than once; installs show/setVisible/setParent wrappers once.
     """
-    global _ORIG_SHOW, _ORIG_SET_VISIBLE, _GUARD_STATE
+    global _ORIG_SHOW, _ORIG_SET_VISIBLE, _ORIG_SET_PARENT, _GUARD_STATE
     application = app or QApplication.instance()
     if application is None:
         raise RuntimeError("QApplication required")
@@ -201,6 +232,7 @@ def install_window_ownership_guard(
     if _ORIG_SHOW is None:
         _ORIG_SHOW = QWidget.show
         _ORIG_SET_VISIBLE = QWidget.setVisible
+        _ORIG_SET_PARENT = QWidget.setParent
 
         def _guarded_show(self: QWidget) -> None:
             if _block_illegal_show(self):
@@ -213,6 +245,20 @@ def install_window_ownership_guard(
                 return None
             assert _ORIG_SET_VISIBLE is not None
             return _ORIG_SET_VISIBLE(self, visible)
+
+        def _guarded_set_parent(
+            self: QWidget, parent: Any = None, *args: Any, **kwargs: Any
+        ) -> Any:
+            """Hide a visible child before detach. Does not ban ``setParent(None)``."""
+            if parent is None:
+                try:
+                    if self.isVisible() and not is_allowed_toplevel(self):
+                        if _ORIG_SET_VISIBLE is not None:
+                            _ORIG_SET_VISIBLE(self, False)
+                except RuntimeError:
+                    pass
+            assert _ORIG_SET_PARENT is not None
+            return _ORIG_SET_PARENT(self, parent, *args, **kwargs)
 
         for cls in (
             QWidget,
@@ -229,6 +275,7 @@ def install_window_ownership_guard(
         ):
             cls.show = _guarded_show  # type: ignore[method-assign, assignment]
             cls.setVisible = _guarded_set_visible  # type: ignore[method-assign, assignment]
+            cls.setParent = _guarded_set_parent  # type: ignore[method-assign, assignment]
 
     logger.info("window_ownership_guard installed")
     return state

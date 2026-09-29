@@ -49,6 +49,11 @@ class SeededMod:
         """Deprecated alias of :attr:`mod_id` (historical misname). Prefer ``mod_id``."""
         return self.mod_id
 
+    @property
+    def mod_pk(self) -> str:
+        """SQLite PK / FK handle. Not a Deploy identity."""
+        return self.mod_id
+
 
 def create_test_mod_identity(
     db: Any,
@@ -446,3 +451,35 @@ def seed_steam_managed_mod(
         external_id=str(external_id),
         identity=created,
     )
+
+
+def frozen_deploy_id(created: Any) -> str:
+    """Public Deploy token: Frozen UUID from IdentityService / SeededMod.
+
+    Never returns ``mods.mod_id``. ``SeededMod.internal_id`` is a historical
+    PK alias and must not be used as the Deploy token.
+    """
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    if isinstance(created, SeededMod):
+        token = str(created.entity_internal_id or "").strip()
+    else:
+        token = str(getattr(created, "internal_id", "") or "").strip()
+    if not is_frozen_internal_uuid(token):
+        raise AssertionError(f"fixture missing Frozen internal_id, got {token!r}")
+    return token
+
+
+def frozen_from_pk(db: Any, mod_pk: str | int) -> str:
+    """DAL: SQLite PK → Frozen UUID for test Deploy callers.
+
+    Lookup only. Does not stringify PK into a fake internal_id.
+    """
+    from services.deploy_identity import frozen_internal_id_for_pk, is_frozen_internal_uuid
+
+    token = frozen_internal_id_for_pk(mod_pk, db=db)
+    if not is_frozen_internal_uuid(token):
+        raise AssertionError(
+            f"no Frozen internal_id for mod_pk={mod_pk!r} (got {token!r})"
+        )
+    return token

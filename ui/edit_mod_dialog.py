@@ -194,7 +194,7 @@ class EditModDialog(QDialog):
         self.category_edit = QLineEdit()
         self.category_edit.setObjectName("editModCategoryEdit")
         self.category_edit.setText(str(category or "").strip())
-        self.category_edit.setPlaceholderText("可选，仅拓展、美化类型显示")
+        self.category_edit.setPlaceholderText("可选，仅拓展、美化、皮肤类型显示")
         form.addRow("分类", self.category_edit)
         self._category_label = form.labelForField(self.category_edit)
         self._on_mod_type_changed()

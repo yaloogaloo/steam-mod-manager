@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 CONFIG_REL = Path("config") / "game_capabilities.json"
 CAPABILITY_NORMALIZE_MOD_FOLDER_NAME = "normalize_mod_folder_name"
+CAPABILITY_SYNC_PROJECT_XML_TITLE = "sync_project_xml_title"
+CAPABILITY_PARADOX_LAUNCHER_ACTIVATION = "paradox_launcher_activation"
+CAPABILITY_NATIVE_MODSETTINGS_ORDER = "native_modsettings_order"
+CAPABILITY_FLAT_PAK_LAYOUT = "flat_pak_layout"
+CAPABILITY_KCD2_MOD_MANIFEST_ROOT = "kcd2_mod_manifest_root"
 
 _CACHED: dict[str, Mapping[str, Any]] | None = None
 _CONFIG_PATH: Path | None = None
@@ -116,6 +121,11 @@ def supports_game_capability(app_id: int | str, capability_name: str) -> bool:
 
 __all__ = [
     "CAPABILITY_NORMALIZE_MOD_FOLDER_NAME",
+    "CAPABILITY_SYNC_PROJECT_XML_TITLE",
+    "CAPABILITY_PARADOX_LAUNCHER_ACTIVATION",
+    "CAPABILITY_FLAT_PAK_LAYOUT",
+    "CAPABILITY_KCD2_MOD_MANIFEST_ROOT",
+    "CAPABILITY_NATIVE_MODSETTINGS_ORDER",
     "game_capabilities_config_path",
     "reset_game_capabilities_cache",
     "set_game_capabilities_config_path",

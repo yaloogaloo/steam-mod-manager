@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 from tests.helpers.deploy import patch_apply_then_unlink_targets
 
 from core.db_manager import (
@@ -113,7 +113,7 @@ def test_case1_normal_deploy_targets_exist_success(
     _install, mods = _setup_game(db, tmp_path)
     _mod_dir, pk = _make_mod(library, db)
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is True
     assert out.get("validated") == 2
@@ -133,7 +133,7 @@ def test_case2_missing_targets_fail_deploy(
     mod_dir, pk = _make_mod(library, db)
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
@@ -165,7 +165,7 @@ def test_case3_partial_missing_fails_entire_deploy(
 
     victim = mods / "TestMod" / "file2.txt"
     with patch_apply_then_unlink_targets(only=victim):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
@@ -186,7 +186,7 @@ def test_case4_validation_failure_triggers_rollback(
     (mods / "TestMod" / "file2.txt").write_text("ORIGINAL2", encoding="utf-8")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
@@ -206,7 +206,7 @@ def test_case5_legacy_folder_copy_unaffected(
     _install, mods = _setup_game(db, tmp_path)
     mod_dir, pk = _make_mod(library, db, mod_id="92005", folder="LegacyMod")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is True
     assert out["deploy_type"] == "folder_copy"

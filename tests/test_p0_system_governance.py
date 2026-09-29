@@ -32,7 +32,7 @@ from services.identity_service import (
 from services.info_sidecar import apply_sidecar_to_db
 from services.library_reconcile import reconcile_library
 from services.mod_refresh import refresh_mod
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 from services.verification_result import (
     APPLY_EXECUTED,
     APPLY_UNVERIFIED,
@@ -75,7 +75,7 @@ def _steam_folder(library: Path, *, name: str = "Collectibles", pub: str = STEAM
 
 
 
-def _seed_steam(db: DatabaseManager, library: Path, *, name: str = "Collectibles", pub: str = STEAM_ID) -> tuple[Path, str]:
+def _seed_steam(db: DatabaseManager, library: Path, *, name: str = "Collectibles", pub: str = STEAM_ID) -> tuple[Path, str, str]:
     folder = _steam_folder(library, name=name, pub=pub)
     created = create_steam_test_mod(
         db,
@@ -86,6 +86,7 @@ def _seed_steam(db: DatabaseManager, library: Path, *, name: str = "Collectibles
         source_url=f"https://steamcommunity.com/sharedfiles/filedetails/?id={pub}",
     )
     pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
     prove_managed_folder(
         db,
         folder,
@@ -95,7 +96,7 @@ def _seed_steam(db: DatabaseManager, library: Path, *, name: str = "Collectibles
         game_name="逃离鸭科夫",
         extra={"published_file_id": pub, "source_type": "steam"},
     )
-    return folder, pk
+    return folder, pk, iid
 
 def _count_mods(db: DatabaseManager) -> int:
     return int(db._conn.execute("SELECT COUNT(*) FROM mods").fetchone()[0])
@@ -103,7 +104,7 @@ def _count_mods(db: DatabaseManager) -> int:
 
 def test_refresh_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    folder, pk = _seed_steam(db, library)
+    folder, pk, _iid = _seed_steam(db, library)
     before = _count_mods(db)
     refresh_mod(pk, folder, platform=PLATFORM_STEAM, library_root=library, db=db)
     assert _count_mods(db) == before
@@ -115,7 +116,7 @@ def test_refresh_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> 
 def test_archive_must_not_mint_identity(
     db: DatabaseManager, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    folder, pk = _seed_steam(db, tmp_path / "mod", name="X")
+    folder, pk, _iid = _seed_steam(db, tmp_path / "mod", name="X")
     before = _count_mods(db)
 
     def _boom(*_a, **_k):
@@ -133,7 +134,7 @@ def test_archive_must_not_mint_identity(
 
 def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    folder, pk = _seed_steam(db, library)
+    folder, pk, iid = _seed_steam(db, library)
     game = tmp_path / "game" / "Duckov_Data" / "Mods"
     game.mkdir(parents=True)
     db.update_game_deploy_config(
@@ -143,10 +144,10 @@ def test_deploy_must_not_mint_identity(db: DatabaseManager, tmp_path: Path) -> N
         mod_path=str(game),
     )
     before = _count_mods(db)
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert _count_mods(db) == before
     assert "deploy_timing" in out
-    assert out["deploy_timing"]["mod_id"] == pk
+    assert out["deploy_timing"]["mod_id"] == iid
     stages = {row["stage"] for row in out["deploy_timing"]["stages"]}
     assert "resolve" in stages or "copy" in stages or "plan" in stages
     with lifecycle_scope("deploy"):
@@ -174,7 +175,7 @@ def test_sidecar_apply_must_not_mint_identity(db: DatabaseManager, tmp_path: Pat
     before = _count_mods(db)
     assert apply_sidecar_to_db(folder, mod_id=STEAM_ID, db=db) is False
     assert _count_mods(db) == before
-    folder2, pk = _seed_steam(db, library, name="Collectibles2", pub=STEAM_ID)
+    folder2, pk, _iid = _seed_steam(db, library, name="Collectibles2", pub=STEAM_ID)
     # Re-point apply at the seeded folder with Entity proof
     assert apply_sidecar_to_db(folder2, mod_id=pk, db=db) is True
     with lifecycle_scope("sidecar"):
@@ -422,7 +423,7 @@ def test_archive_timeout_logs_archive_failure(
 
 def test_deploy_emits_source_target_stage_timing(db: DatabaseManager, tmp_path: Path) -> None:
     library = tmp_path / "mod"
-    folder, pk = _seed_steam(db, library)
+    folder, pk, iid = _seed_steam(db, library)
     game = tmp_path / "game" / "Duckov_Data" / "Mods"
     game.mkdir(parents=True)
     db.update_game_deploy_config(
@@ -431,9 +432,9 @@ def test_deploy_emits_source_target_stage_timing(db: DatabaseManager, tmp_path: 
         install_path=str(tmp_path / "game"),
         mod_path=str(game),
     )
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     timing = out.get("deploy_timing") or {}
-    assert timing.get("mod_id") == pk
+    assert timing.get("mod_id") == iid
     assert "stages" in timing
     assert out.get("source") or timing.get("source")
 

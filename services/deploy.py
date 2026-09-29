@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ from services.deploy_rules import (
     DEPLOY_TYPE_PALWORLD_PAK,
     DEPLOY_TYPE_SLAY_THE_SPIRE,
     DEPLOY_TYPE_STARDEW_VALLEY,
+    DEPLOY_TYPE_PARADOX_LAUNCHER,
     DEPLOY_TYPE_STELLARIS,
     DEPLOY_TYPE_WARHAMMER3,
     PALWORLD_APP_ID,
@@ -71,6 +73,7 @@ from services.deploy_rules import (
     DeployContext,
     delete_manifest,
     get_strategy,
+    is_paradox_launcher_deploy_type,
     load_manifest,
     resolve_deploy_type,
     resolve_strategy,
@@ -255,7 +258,9 @@ def _merge_tree(src: Path, dest: Path) -> int:
     racing. Returns how many existing files were overwritten.
     """
     from services.deploy_fs import safe_iter_files
+    from services.mutation_context import assert_mutation_allowed
 
+    assert_mutation_allowed(dest)
     dest.mkdir(parents=True, exist_ok=True)
     overwrites = 0
     for path in safe_iter_files(src):
@@ -1764,7 +1769,12 @@ class ModDeployer:
         _deploy_stack: frozenset[str] | None = None,
         _skip_target_ownership_check: bool = False,
     ) -> dict[str, Any]:
-        """Deploy one Mod by Frozen Internal UUID."""
+        """Deploy one Mod by Frozen Internal UUID.
+
+        Public business identity is ``internal_id`` (hyphenated UUID). Digit
+        SQLite ``mod_pk`` is not a legal entry token. After
+        ``resolve_deploy_entity``, ``mod_pk`` is used only as a DAL/SQL handle.
+        """
         from services.deploy_lock import deploy_operation_lock
         from services.deploy_result import normalize_deploy_dict, terminal_failed
 
@@ -1795,11 +1805,25 @@ class ModDeployer:
                 with deploy_timing_session(
                     internal_id=frozen, mod_pk=entity.mod_pk
                 ) as sess:
-                    out = self._deploy_mod_body(
-                        entity,
-                        _deploy_stack=_deploy_stack,
-                        _skip_target_ownership_check=_skip_target_ownership_check,
+                    from services.deploy_e2e import (
+                        e2e_core_deploy_ms,
+                        e2e_count,
+                        e2e_event,
+                        e2e_span,
                     )
+
+                    e2e_count("deploy_mod_count")
+                    e2e_event("deploy_mod entered", internal_id=frozen)
+                    t_core = time.perf_counter()
+                    with e2e_span("core_deploy_mod"):
+                        out = self._deploy_mod_body(
+                            entity,
+                            _deploy_stack=_deploy_stack,
+                            _skip_target_ownership_check=_skip_target_ownership_check,
+                        )
+                    core_ms = (time.perf_counter() - t_core) * 1000.0
+                    e2e_core_deploy_ms(core_ms)
+                    e2e_event("deploy_mod returned", duration_ms=round(core_ms, 3))
                     status = "ok" if out.get("success") else "failed"
                     sess.source = str(out.get("source") or sess.source or "")
                     sess.target = str(out.get("target") or sess.target or "")
@@ -1851,7 +1875,7 @@ class ModDeployer:
 
         log_archive_runtime_identity(logger, prefix="[DEPLOY_RUNTIME]")
 
-        from services.stellaris_activation import is_stellaris_activation_app
+        from services.paradox_activation import is_paradox_activation_app
         from services.wh3_activation import is_wh3_activation_app
 
         app_id_hint = 0
@@ -1862,12 +1886,12 @@ class ModDeployer:
         except Exception:  # noqa: BLE001
             app_id_hint = 0
         wh3_activation = is_wh3_activation_app(app_id_hint)
-        stellaris_activation = is_stellaris_activation_app(app_id_hint)
+        paradox_activation = is_paradox_activation_app(app_id_hint)
 
         if (
             not db.is_mod_enabled(pk)
             and not wh3_activation
-            and not stellaris_activation
+            and not paradox_activation
         ):
             error = "Mod disabled"
             logger.warning(
@@ -2337,7 +2361,11 @@ class ModDeployer:
                             "压缩包源缺失："
                             + ", ".join(str(p) for p in missing_zips[:3])
                         )
-                elif ctx.deploy_type in (DEPLOY_TYPE_WARHAMMER3, DEPLOY_TYPE_STELLARIS):
+                elif ctx.deploy_type in (
+                    DEPLOY_TYPE_WARHAMMER3,
+                    DEPLOY_TYPE_PARADOX_LAUNCHER,
+                    DEPLOY_TYPE_STELLARIS,
+                ):
                     # Workshop-source activation does not copy the library folder.
                     pass
                 else:
@@ -2418,12 +2446,12 @@ class ModDeployer:
         if (
             planned.success
             and not str(ctx.custom_deploy_path or "").strip()
-            and ctx.deploy_type == DEPLOY_TYPE_STELLARIS
+            and is_paradox_launcher_deploy_type(ctx.deploy_type)
         ):
-            from services.stellaris_activation import is_stellaris_activation_app
+            from services.paradox_activation import is_paradox_activation_app
 
-            if is_stellaris_activation_app(ctx.app_id):
-                return self._finish_stellaris_activation_deploy(
+            if is_paradox_activation_app(ctx.app_id):
+                return self._finish_paradox_activation_deploy(
                     ctx,
                     relationship_warnings,
                     log_prefix,
@@ -2861,6 +2889,25 @@ class ModDeployer:
                     logger.debug(
                         "deploy txn COPY_DONE phase write failed", exc_info=True
                     )
+
+            try:
+                with deploy_stage(
+                    "project_title_sync", internal_id=frozen, mod_pk=pk
+                ):
+                    from services.deploy_project_title import (
+                        sync_deployed_project_title,
+                    )
+
+                    sync_deployed_project_title(
+                        app_id=ctx.app_id,
+                        file_plan=file_plan,
+                        managed_path=manifest_root,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "DarkestDungeon Project Title sync failed",
+                    exc_info=True,
+                )
 
             with deploy_stage("validate", internal_id=frozen, mod_pk=pk):
                 verify_out = verify_file_plan(file_plan)
@@ -3415,17 +3462,17 @@ class ModDeployer:
             "deploy_type": result.deploy_type or ctx.deploy_type,
         }
 
-    def _finish_stellaris_activation_deploy(
+    def _finish_paradox_activation_deploy(
         self,
         ctx: DeployContext,
         relationship_warnings: list[dict[str, Any]],
         log_prefix: str,
     ) -> dict[str, Any]:
-        """Stellaris deploy: record status + sync launcher enable/order. Never copy."""
-        from services.stellaris_activation import (
+        """Paradox Launcher deploy: record status + sync enable/order. Never copy."""
+        from services.paradox_activation import (
             persist_load_order,
             load_saved_order,
-            sync_stellaris_launcher,
+            sync_paradox_launcher,
         )
 
         library = ctx.library_folder()
@@ -3444,7 +3491,7 @@ class ModDeployer:
                 self._database().enable_mod(ctx.mod_pk)
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "Stellaris enable after deploy failed internal_id=%s",
+                    "Paradox enable after deploy failed internal_id=%s",
                     ctx.internal_id,
                     exc_info=True,
                 )
@@ -3454,23 +3501,28 @@ class ModDeployer:
                 notify_mod_changed(ctx.internal_id)
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "notify_mod_changed after Stellaris deploy failed internal_id=%s",
+                    "notify_mod_changed after Paradox deploy failed internal_id=%s",
                     ctx.internal_id,
                     exc_info=True,
                 )
         except Exception as exc:  # noqa: BLE001
             db_warning = "database_update_failed"
             logger.warning(
-                "[DEPLOY] Stellaris database status update failed internal_id=%s error=%s",
+                "[DEPLOY] Paradox database status update failed internal_id=%s error=%s",
                 ctx.internal_id,
                 exc,
             )
+        paradox_report = None
         try:
-            persist_load_order(load_saved_order(), db=self._database())
-            sync_stellaris_launcher(db=self._database())
+            persist_load_order(
+                load_saved_order(app_id=ctx.app_id),
+                db=self._database(),
+                app_id=ctx.app_id,
+            )
+            paradox_report = sync_paradox_launcher(db=self._database(), app_id=ctx.app_id)
         except Exception:  # noqa: BLE001
             logger.warning(
-                "%s Stellaris launcher sync after deploy failed",
+                "%s Paradox launcher sync after deploy failed",
                 log_prefix,
                 exc_info=True,
             )
@@ -3503,15 +3555,54 @@ class ModDeployer:
             out["warning"] = db_warning
         if relationship_warnings:
             out["relationship_warnings"] = relationship_warnings
+        self._annotate_paradox_launcher_result(out, ctx.app_id, paradox_report)
         return out
 
-    def _undeploy_stellaris_activation(
+    def _annotate_paradox_launcher_result(
+        self,
+        out: dict[str, Any],
+        app_id: int,
+        report: object,
+    ) -> None:
+        """Attach projection vs effective fields. Does not change success."""
+        if report is not None:
+            direct_written = bool(getattr(report, "direct_dlc_load_written", False))
+            out["direct_dlc_load_written"] = direct_written
+            out["playset_written"] = bool(getattr(report, "playset_written", False))
+            out["launcher_projection_written"] = direct_written
+            out["launcher_effective"] = bool(getattr(report, "is_effective", False))
+            out["active_playset_id"] = getattr(report, "active_playset_id", None) or ""
+        try:
+            from services.paradox_activation import consider_paradox_playset_notice
+
+            notice = consider_paradox_playset_notice(self._database(), app_id=app_id)
+            if notice.should_prompt and notice.message:
+                out["playset_notice"] = notice.message
+        except Exception:  # noqa: BLE001
+            logger.debug("Paradox playset notice skipped", exc_info=True)
+
+    def _finish_stellaris_activation_deploy(
+        self,
+        ctx: DeployContext,
+        relationship_warnings: list[dict[str, Any]],
+        log_prefix: str,
+    ) -> dict[str, Any]:
+        """Compatibility alias for ``_finish_paradox_activation_deploy``."""
+        return self._finish_paradox_activation_deploy(
+            ctx, relationship_warnings, log_prefix
+        )
+
+    def _undeploy_paradox_activation(
         self,
         ctx: DeployContext,
         log_prefix: str,
     ) -> dict[str, Any]:
-        """Clear Stellaris deploy status without deleting Workshop or library files."""
-        from services.stellaris_activation import persist_load_order, load_saved_order, sync_stellaris_launcher
+        """Clear Paradox deploy status without deleting Workshop or library files."""
+        from services.paradox_activation import (
+            persist_load_order,
+            load_saved_order,
+            sync_paradox_launcher,
+        )
 
         try:
             self._database().update_mod_deploy_status(
@@ -3528,7 +3619,7 @@ class ModDeployer:
                 notify_mod_changed(ctx.internal_id)
             except Exception:  # noqa: BLE001
                 logger.debug(
-                    "notify_mod_changed after Stellaris undeploy failed internal_id=%s",
+                    "notify_mod_changed after Paradox undeploy failed internal_id=%s",
                     ctx.internal_id,
                     exc_info=True,
                 )
@@ -3536,22 +3627,37 @@ class ModDeployer:
             error = f"更新部署状态失败：{exc}"
             logger.warning("%s result=fail error=%s", log_prefix, error)
             return {"success": False, "error": error, "mod_id": ctx.internal_id}
+        paradox_report = None
         try:
-            persist_load_order(load_saved_order(), db=self._database())
-            sync_stellaris_launcher(db=self._database())
+            persist_load_order(
+                load_saved_order(app_id=ctx.app_id),
+                db=self._database(),
+                app_id=ctx.app_id,
+            )
+            paradox_report = sync_paradox_launcher(db=self._database(), app_id=ctx.app_id)
         except Exception:  # noqa: BLE001
             logger.warning(
-                "%s Stellaris launcher sync after undeploy failed",
+                "%s Paradox launcher sync after undeploy failed",
                 log_prefix,
                 exc_info=True,
             )
         logger.info("%s source=%s result=ok removed=0", log_prefix, ctx.source)
-        return {
+        out = {
             "success": True,
             "mod_id": ctx.internal_id,
             "removed_files": 0,
             "deploy_type": ctx.deploy_type,
         }
+        self._annotate_paradox_launcher_result(out, ctx.app_id, paradox_report)
+        return out
+
+    def _undeploy_stellaris_activation(
+        self,
+        ctx: DeployContext,
+        log_prefix: str,
+    ) -> dict[str, Any]:
+        """Compatibility alias for ``_undeploy_paradox_activation``."""
+        return self._undeploy_paradox_activation(ctx, log_prefix)
 
     def deployment_status(self, internal_id: int | str) -> str:
         """Phase 8 runtime deployment_status (not content_status)."""
@@ -3611,7 +3717,12 @@ class ModDeployer:
         }
 
     def undeploy_mod(self, internal_id: int | str) -> dict[str, Any]:
-        """Remove files listed in deploy_manifest and clear DB status."""
+        """Undeploy one Mod by Frozen Internal UUID.
+
+        Public business identity is ``internal_id``. Digit SQLite ``mod_pk``
+        is not a legal entry token; it is resolved only after
+        ``resolve_deploy_entity``.
+        """
         from services.deploy_lock import deploy_operation_lock
         from services.deploy_result import normalize_deploy_dict, terminal_failed
 
@@ -3685,12 +3796,12 @@ class ModDeployer:
                 return self._undeploy_wh3_activation(ctx, log_prefix)
         if (
             not str(ctx.custom_deploy_path or "").strip()
-            and ctx.deploy_type == DEPLOY_TYPE_STELLARIS
+            and is_paradox_launcher_deploy_type(ctx.deploy_type)
         ):
-            from services.stellaris_activation import is_stellaris_activation_app
+            from services.paradox_activation import is_paradox_activation_app
 
-            if is_stellaris_activation_app(ctx.app_id):
-                return self._undeploy_stellaris_activation(ctx, log_prefix)
+            if is_paradox_activation_app(ctx.app_id):
+                return self._undeploy_paradox_activation(ctx, log_prefix)
 
         manifest_root = ctx.library_folder()
         manifest = load_manifest(manifest_root, expected_mod_id=pk)
@@ -3773,6 +3884,40 @@ class ModDeployer:
                     "error": f"取消部署中止：备份校验失败（未删除已部署文件）— {exc}",
                     "mod_id": ctx.internal_id,
                 }
+
+        # BG3: drop this entity from bg3.json / modsettings.lsx while the
+        # deployed pak still exists so UUID resolution cannot guess.
+        if not str(ctx.custom_deploy_path or "").strip():
+            from services.bg3_activation import (
+                Bg3OrderError,
+                apply_bg3_undeploy_order,
+                is_bg3_order_app,
+            )
+            from services.bg3_modsettings import Bg3ModsettingsError
+            from services.bg3_pak import Bg3PakError
+
+            if is_bg3_order_app(ctx.app_id):
+                try:
+                    apply_bg3_undeploy_order(
+                        frozen,
+                        managed_path=manifest_root,
+                        db=db,
+                        library_root=self.library_root,
+                    )
+                except (Bg3OrderError, Bg3ModsettingsError, Bg3PakError) as exc:
+                    code = str(getattr(exc, "code", "") or "bg3_undeploy_order")
+                    logger.warning(
+                        "%s result=fail error=%s code=%s",
+                        log_prefix,
+                        exc,
+                        code,
+                    )
+                    return {
+                        "success": False,
+                        "error": f"取消部署中止：BG3 load order 未能同步删除 — {exc}",
+                        "error_code": code,
+                        **ids,
+                    }
 
         with prune_protection(collect_protected_roots(ctx)):
             result = strategy.undeploy(ctx, manifest)

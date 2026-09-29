@@ -63,6 +63,22 @@ def current_apply_source_sizes() -> dict[str, int]:
     return dict(_APPLY_SOURCE_SIZES.get() or {})
 
 
+def update_apply_source_hash(source: str | Path, digest: str) -> None:
+    """Replace a hash-while-copy digest after a single-file post-apply rewrite."""
+    cache = _APPLY_SOURCE_HASHES.get()
+    if cache is None:
+        return
+    text = str(digest or "").strip()
+    if not text:
+        return
+    raw = str(source)
+    cache[raw] = text
+    try:
+        cache[_source_hash_key(Path(source))] = text
+    except OSError:
+        pass
+
+
 def _source_hash_key(path: Path) -> str:
     from services.deploy_op_profile import cached_resolve
 

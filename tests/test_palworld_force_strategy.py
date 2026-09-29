@@ -15,7 +15,11 @@ from services.deploy_rules import (
     resolve_deploy_type,
 )
 from services.deploy_rules.palworld import PalworldStrategy
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 APP_ID = 1623730
 
@@ -35,11 +39,11 @@ def _register(
     *,
     external_id: str,
     title: str,
-) -> str:
+) -> tuple[str, str]:
     created = create_steam_test_mod(
         db, external_id=external_id, title=title, app_id=APP_ID, game_name="Palworld"
     )
-    return prove_managed_folder(
+    pk = prove_managed_folder(
         db,
         mod,
         handle=created.mod_id,
@@ -47,6 +51,7 @@ def _register(
         app_id=APP_ID,
         game_name="Palworld",
     )
+    return pk, frozen_deploy_id(created)
 
 
 def test_resolve_deploy_type_uses_palworld_strategy() -> None:
@@ -78,9 +83,9 @@ def test_case_a_folder_mod_fallback(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(db, mod, external_id="3704000001", title="FolderOnly")
+    _pk, iid = _register(db, mod, external_id="3704000001", title="FolderOnly")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_PALWORLD_PAK
 
@@ -116,9 +121,9 @@ def test_case_b_ordinary_pak(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(db, mod, external_id="3704000002", title="PakOnly")
+    _pk, iid = _register(db, mod, external_id="3704000002", title="PakOnly")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
 
     target = install / "Pal" / "Content" / "Paks" / "~mods" / "test.pak"
@@ -149,9 +154,9 @@ def test_case_c_logicmods(tmp_path: Path, db: DatabaseManager) -> None:
         install_path=str(install),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(db, mod, external_id="3704000003", title="LogicOnly")
+    _pk, iid = _register(db, mod, external_id="3704000003", title="LogicOnly")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod(pk)["success"]
+    assert ModDeployer(library_root=library, db=db).deploy_mod(iid)["success"]
     target = install / "Pal" / "Content" / "Paks" / "LogicMods" / "test.pak"
     assert target.read_bytes() == b"LOGIC"
     man = load_manifest(mod)
@@ -184,9 +189,9 @@ def test_case_d_mixed_pak_and_folder(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(db, mod, external_id="3704000004", title="Mixed")
+    _pk, iid = _register(db, mod, external_id="3704000004", title="Mixed")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
 
     assert (
@@ -238,10 +243,10 @@ def test_case_e_undeploy_only_manifest_targets(
         mod_path=str(mod_path),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(db, mod, external_id="3704000005", title="MixedUndeploy")
+    _pk, iid = _register(db, mod, external_id="3704000005", title="MixedUndeploy")
 
     dep = ModDeployer(library_root=library, db=db)
-    assert dep.deploy_mod(pk)["success"]
+    assert dep.deploy_mod(iid)["success"]
 
     foreign_pak = install / "Pal" / "Content" / "Paks" / "~mods" / "Other.pak"
     foreign_pak.write_bytes(b"keep")
@@ -249,7 +254,7 @@ def test_case_e_undeploy_only_manifest_targets(
     foreign_folder.parent.mkdir(parents=True)
     foreign_folder.write_text("keep", encoding="utf-8")
 
-    assert dep.undeploy_mod(pk)["success"]
+    assert dep.undeploy_mod(iid)["success"]
 
     assert not (
         install / "Pal" / "Content" / "Paks" / "LogicMods" / "a.pak"
@@ -285,9 +290,9 @@ def test_auto_pick_up_style_paks_subdir(
         mod_path=str(ue4ss_mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    pk = _register(db, mod, external_id="3703542467", title="Auto PickUp")
+    _pk, iid = _register(db, mod, external_id="3703542467", title="Auto PickUp")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True
     assert (install / "Pal" / "Content" / "Paks" / "~mods" / "test.pak").is_file()
     assert not (ue4ss_mods / "Auto PickUp" / "Paks").exists()

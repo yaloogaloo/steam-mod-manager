@@ -24,7 +24,7 @@ from services.mod_source_integrity import (
     validate_archive_content,
     validate_source,
 )
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 
 HISTORY = "历史版本"
 
@@ -56,7 +56,7 @@ def _setup_mod(
     mid: str = "97001",
     folder: str = "IntegrityMod",
     app_id: int = 100,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     library = tmp_path / "library"
     mod = library / "Game" / folder
     mod.mkdir(parents=True, exist_ok=True)
@@ -64,6 +64,7 @@ def _setup_mod(
         db, external_id=mid, title=folder, app_id=app_id, game_name="Game"
     )
     pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
     prove_managed_folder(
         db, mod, handle=pk, title=folder, app_id=app_id, game_name="Game"
     )
@@ -73,7 +74,7 @@ def _setup_mod(
         mod_path=str(tmp_path / "game_mods"),
     )
     (tmp_path / "game_mods").mkdir(parents=True, exist_ok=True)
-    return mod, pk
+    return mod, pk, iid
 
 
 def _entry(
@@ -103,7 +104,7 @@ def _set_files(db: DatabaseManager, mid: str, entries: list[ModFileEntry]) -> No
 def test_case1_rename_archive_hash_match_auto_fixes(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97001", folder="Rename")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97001", folder="Rename")
     _write_zip(mod / "renamed.zip", data=b"rename-payload")
     hist = mod / HISTORY
     hist.mkdir()
@@ -121,7 +122,7 @@ def test_case1_rename_archive_hash_match_auto_fixes(
 def test_case2_move_archive_hash_match_auto_fixes(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97002", folder="Move")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97002", folder="Move")
     _write_zip(mod / "at-root.zip", data=b"move-payload")
     hist = mod / HISTORY
     hist.mkdir()
@@ -138,7 +139,7 @@ def test_case2_move_archive_hash_match_auto_fixes(
 def test_case3_changed_hash_updates_metadata(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97003", folder="Changed")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97003", folder="Changed")
     _write_zip(mod / "mod.zip", data=b"version-one")
     old_hash = _sha256(mod / "mod.zip")
     entry = _entry(
@@ -158,7 +159,7 @@ def test_case3_changed_hash_updates_metadata(
 def test_case4_multiple_versions_user_selection_not_auto_pick(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97004", folder="Multi")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97004", folder="Multi")
     _write_zip(mod / "v1.zip", data=b"version-one")
     time.sleep(0.02)
     _write_zip(mod / "v2.zip", data=b"version-two-bigger-not-auto")
@@ -188,7 +189,7 @@ def test_case4_multiple_versions_user_selection_not_auto_pick(
 
 
 def test_case5_empty_zip_rejected(tmp_path: Path, db: DatabaseManager) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97005", folder="EmptyZip")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97005", folder="EmptyZip")
     empty = mod / "empty.zip"
     with zipfile.ZipFile(empty, "w"):
         pass
@@ -212,7 +213,7 @@ def test_case6_invalid_zip_rejected(tmp_path: Path) -> None:
 
 
 def test_case7_history_version_excluded(tmp_path: Path, db: DatabaseManager) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97007", folder="HistoryOnly")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97007", folder="HistoryOnly")
     hist = mod / HISTORY
     hist.mkdir()
     _write_zip(hist / "old.zip", data=b"history-only")
@@ -223,7 +224,7 @@ def test_case7_history_version_excluded(tmp_path: Path, db: DatabaseManager) -> 
 
 
 def test_case8_import_cache_excluded(tmp_path: Path, db: DatabaseManager) -> None:
-    mod, pk = _setup_mod(tmp_path, db, mid="97008", folder="CacheOnly")
+    mod, pk, _iid = _setup_mod(tmp_path, db, mid="97008", folder="CacheOnly")
     cache = mod / "import_cache"
     cache.mkdir()
     _write_zip(cache / "cached.zip", data=b"cache-only")
@@ -241,7 +242,7 @@ def test_case9_direct_deploy_without_refresh(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "library"
-    mod, pk = _setup_mod(tmp_path, db, mid="97009", folder="DirectDeploy")
+    mod, pk, iid = _setup_mod(tmp_path, db, mid="97009", folder="DirectDeploy")
     _write_zip(mod / "live.zip", inner="content/mod.txt", data=b"deploy-me")
     hist = mod / HISTORY
     hist.mkdir()
@@ -251,7 +252,7 @@ def test_case9_direct_deploy_without_refresh(
     assert db.get_mod_files(pk).files[0].path == "stale.zip"
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.deploy_mod(pk)
+    out = deployer.deploy_mod(iid)
     assert out["success"] is True
     assert db.get_mod_files(pk).files[0].path == "live.zip"
 
@@ -263,12 +264,12 @@ def test_case10_deployed_source_changed_hash_in_manifest(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     library = tmp_path / "library"
-    mod, pk = _setup_mod(tmp_path, db, mid="97010", folder="ManifestHash")
+    mod, pk, iid = _setup_mod(tmp_path, db, mid="97010", folder="ManifestHash")
     (mod / "payload.txt").write_text("hello", encoding="utf-8")
     _set_files(db, pk, [])
 
     deployer = ModDeployer(library_root=library, db=db)
-    first = deployer.deploy_mod(pk)
+    first = deployer.deploy_mod(iid)
     assert first["success"] is True
 
     manifest = load_manifest(mod, expected_mod_id=pk)

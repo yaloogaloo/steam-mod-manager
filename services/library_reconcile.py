@@ -1119,6 +1119,14 @@ def start_reconcile_library_async(
         _reconcile_running = True
         _reconcile_pending_root = None
         _reconcile_pending_pacing = None
+    try:
+        from services.deploy_e2e import e2e_count, e2e_event, e2e_task_started
+
+        e2e_count("reconcile_count")
+        e2e_event("reconcile_library started")
+        e2e_task_started("reconcile_library")
+    except Exception:  # noqa: BLE001
+        pass
 
     def _worker() -> None:
         global _reconcile_running, _reconcile_pending_root, _reconcile_pending_pacing
@@ -1148,6 +1156,13 @@ def start_reconcile_library_async(
                 current_pacing = pending_pacing
                 if current_pacing is not None and current_pacing.low_priority:
                     _set_current_thread_low_priority()
+        try:
+            from services.deploy_e2e import e2e_task_finished, maybe_end
+
+            e2e_task_finished("reconcile_library")
+            maybe_end()
+        except Exception:  # noqa: BLE001
+            pass
         _notify_reconcile_idle()
 
     thread = threading.Thread(

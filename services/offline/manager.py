@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from core.db_manager import DatabaseManager, get_db
 from core.mod_platform import (
+    OFFLINE_STATUS_ARCHIVED,
+    OFFLINE_STATUS_FAILED,
     PLATFORM_GITHUB,
     PLATFORM_MODIO,
     PLATFORM_NEXUS,
@@ -15,13 +18,44 @@ from core.mod_platform import (
     normalize_platform,
 )
 from core.paths import default_mod_library
-from services.offline.base import OfflineProvider, OfflineUpdateResult
+from services.offline.base import (
+    OFFLINE_OUTCOME_FAILED,
+    OFFLINE_OUTCOME_SUCCESS,
+    OfflineProvider,
+    OfflineUpdateResult,
+)
 from services.offline.github import GithubOfflineProvider
 from services.offline.modio import ModioOfflineProvider
 from services.offline.nexus_manual import NexusManualOfflineProvider
 from services.offline.steam import SteamOfflineProvider
 
 logger = logging.getLogger(__name__)
+
+_BACKUP_OFFLINE_FAIL = "Backup 离线网页同步失败"
+
+
+def _managed_root_from_index(index: Path) -> Path:
+    idx = Path(index)
+    if idx.parent.name == "offline":
+        return idx.parent.parent.parent
+    return idx.parent.parent
+
+
+def _commit_offline_backup(mod_id: str | int, dest: Path | None) -> bool:
+    if dest is None:
+        return False
+    from services.metadata_backup_sync import sync_after_metadata_change
+
+    return bool(sync_after_metadata_change(mod_id, dest, "offline_change"))
+
+
+def _backup_failed_result(result: OfflineUpdateResult) -> OfflineUpdateResult:
+    return replace(
+        result,
+        outcome=OFFLINE_OUTCOME_FAILED,
+        status=OFFLINE_STATUS_FAILED,
+        error=_BACKUP_OFFLINE_FAIL,
+    )
 
 
 def _require_offline_html_mod_pk(mod_id: str | int) -> str:
@@ -183,23 +217,19 @@ class OfflineManager:
             metadata=metadata,
             force_refresh=bool(force_refresh),
         )
-        try:
-            from services.metadata_backup_sync import sync_after_metadata_change
-
-            dest = Path(managed_path) if managed_path else None
-            if dest is None:
-                index = getattr(result, "index_path", None)
-                if index is not None:
-                    idx = Path(index)
-                    # .info/offline/index.html → mod root; .info/index.html → mod root
-                    if idx.parent.name == "offline":
-                        dest = idx.parent.parent.parent
-                    else:
-                        dest = idx.parent.parent
-            if dest is not None:
-                sync_after_metadata_change(mid, dest, "offline_change")
-        except Exception:  # noqa: BLE001
-            pass
+        dest = Path(managed_path) if managed_path else None
+        if dest is None:
+            index = getattr(result, "index_path", None)
+            if index is not None:
+                dest = _managed_root_from_index(Path(index))
+        if result.outcome == OFFLINE_OUTCOME_SUCCESS:
+            if not _commit_offline_backup(mid, dest):
+                logger.error(
+                    "offline backup failed after live save mod_id=%s path=%s",
+                    mid,
+                    dest,
+                )
+                return _backup_failed_result(result)
         return result
 
 
@@ -241,12 +271,7 @@ def attach_nexus_offline_page(
     if dest is None:
         index = getattr(result, "index_path", None)
         if index is not None:
-            idx = Path(index)
-            dest = (
-                idx.parent.parent.parent
-                if idx.parent.name == "offline"
-                else idx.parent.parent
-            )
+            dest = _managed_root_from_index(Path(index))
 
     # ------------------------------------------------------------------
     # Nexus Offline Metadata Scraper
@@ -263,13 +288,14 @@ def attach_nexus_offline_page(
             pk, dest, parsed_title
         )
 
-    try:
-        from services.metadata_backup_sync import sync_after_metadata_change
-
-        if dest is not None:
-            sync_after_metadata_change(pk, dest, "offline_change")
-    except Exception:  # noqa: BLE001
-        pass
+    if getattr(result, "status", None) == OFFLINE_STATUS_ARCHIVED:
+        if not _commit_offline_backup(pk, dest):
+            logger.error(
+                "offline backup failed after nexus import mod_id=%s path=%s",
+                pk,
+                dest,
+            )
+            return _backup_failed_result(result)
     return result
 
 

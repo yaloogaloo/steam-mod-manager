@@ -363,6 +363,8 @@ def test_backup_default_is_enqueue_not_inline() -> None:
 
     assert "import" not in mbs._INLINE_REASONS
     assert "restore" not in mbs._INLINE_REASONS
+    assert "cover_change" in mbs._INLINE_REASONS
+    assert "offline_change" in mbs._INLINE_REASONS
     assert "sync" in mbs.VALID_REASONS
     src = inspect.getsource(mbs.sync_after_metadata_change)
     assert "mark_backup_dirty" in src
@@ -379,6 +381,8 @@ def test_reconcile_must_not_inline_backup_for_bulk() -> None:
     assert "mark_backup_dirty" in src
     assert "import" not in mbs._INLINE_REASONS
     assert "restore" not in mbs._INLINE_REASONS
+    assert "cover_change" in mbs._INLINE_REASONS
+    assert "offline_change" in mbs._INLINE_REASONS
 
 
 @pytest.fixture(scope="module")

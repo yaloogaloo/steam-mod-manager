@@ -2,13 +2,15 @@
 """
 Deploy System smoke runner — real DeployWorker / DeployResult call chain.
 
-Creates an isolated library + game target, exercises:
+Identity contract:
 
-  SUCCESS  — folder-copy mod deploys to target
-  FAILED   — source missing must terminate FAILED
-  REDEPLOY — second deploy is idempotent (no nested duplicate dirs)
+  workspace_id  = Steam Workshop ID (platform / display identity)
+  internal_id   = Frozen UUID — the only DeployWorker / deploy_mod token
+  mod_pk        = SQLite handle, never passed to DeployWorker
 
-Does not redesign DeployResult / Manifest / Strategy / Worker lifecycle.
+Workshop digit is resolved:
+
+  workspace_id → unique SMM entity → internal_id → DeployWorker
 
 Usage:
   python tools/deploy_smoke_runner.py
@@ -35,16 +37,26 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager  # noqa: E402
-from core.models import ModMetadata  # noqa: E402
+from core.mod_platform import PLATFORM_STEAM  # noqa: E402
 from services.deploy import ModDeployer  # noqa: E402
 from services.deploy_fs import safe_iter_files  # noqa: E402
+from services.deploy_identity import is_frozen_internal_uuid  # noqa: E402
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME  # noqa: E402
 from services.deploy_rules.manifest import load_manifest  # noqa: E402
+from services.identity_service import (  # noqa: E402
+    create_mod_identity,
+    identity_create_scope,
+    resolve_internal_id_from_workspace_id,
+)
+from services.mod_identity import set_info_internal_id  # noqa: E402
 
 logger = logging.getLogger("deploy_smoke")
 
-SUCCESS_MOD_ID = "3780425019"
-FAILED_MOD_ID = "3780425099"
+# Platform / display identity (Steam Workshop ID). Never a DeployWorker token.
+SUCCESS_WORKSPACE_ID = "3780425019"
+FAILED_WORKSPACE_ID = "3780425099"
+SUCCESS_MOD_ID = SUCCESS_WORKSPACE_ID  # report alias: platform workspace_id
+FAILED_MOD_ID = FAILED_WORKSPACE_ID
 APP_ID = 1623730
 GAME_NAME = "Palworld"
 STRATEGY = DEPLOY_TYPE_FOLDER_COPY
@@ -114,13 +126,46 @@ def _parse_stages(log_lines: list[str]) -> list[str]:
     return finished or started
 
 
+def _internal_id_for_workspace(db: DatabaseManager, workspace_id: str) -> str:
+    """workspace_id → unique SMM entity → Frozen internal_id."""
+    frozen = resolve_internal_id_from_workspace_id(
+        str(workspace_id),
+        platform=PLATFORM_STEAM,
+        app_id=APP_ID,
+        db=db,
+    )
+    if not is_frozen_internal_uuid(frozen):
+        raise RuntimeError(
+            f"no Frozen internal_id for workspace_id={workspace_id!r} "
+            f"(got {frozen!r})"
+        )
+    return frozen
+
+
 def _seed_folder_mod(
+    db: DatabaseManager,
     library: Path,
     *,
-    mod_id: str,
+    workspace_id: str,
     title: str,
     payload_bytes: int = 256 * 1024,
-) -> Path:
+) -> tuple[Path, str, str]:
+    """Create identity + folder. Returns (folder, mod_pk, internal_id)."""
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(workspace_id),
+            workshop_id=str(workspace_id),
+            title=title,
+            app_id=APP_ID,
+            game_name=GAME_NAME,
+            operation="import",
+        )
+    frozen = str(created.internal_id or "").strip()
+    pk = str(created.mod_id)
+    if not is_frozen_internal_uuid(frozen):
+        raise RuntimeError(f"create_mod_identity did not mint Frozen UUID: {frozen!r}")
     folder = library / GAME_NAME / title
     folder.mkdir(parents=True, exist_ok=True)
     info = folder / INFO_DIR_NAME
@@ -129,20 +174,34 @@ def _seed_folder_mod(
     nested = folder / "nested"
     nested.mkdir(exist_ok=True)
     (nested / "note.txt").write_text("smoke-ok\n", encoding="utf-8")
+    payload = set_info_internal_id(
+        {
+            "published_file_id": str(workspace_id),
+            "external_id": str(workspace_id),
+            "workspace_id": str(workspace_id),
+            "title": title,
+            "app_id": APP_ID,
+            "game_name": GAME_NAME,
+            "platform": PLATFORM_STEAM,
+        },
+        frozen,
+    )
     (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mod_id,
-                "title": title,
-                "app_id": APP_ID,
-                "game_name": GAME_NAME,
-            },
-            indent=2,
-        )
-        + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    return folder
+    db.update_mod_identity_fields(
+        pk,
+        last_known_path=str(folder),
+        folder_present=True,
+    )
+    logger.info(
+        "[SMOKE] registered workspace_id=%s internal_id=%s mod_pk=%s",
+        workspace_id,
+        frozen,
+        pk,
+    )
+    return folder, pk, frozen
 
 
 def _setup_workspace(workspace: Path) -> tuple[Path, Path, Path, DatabaseManager]:
@@ -171,16 +230,21 @@ def _setup_workspace(workspace: Path) -> tuple[Path, Path, Path, DatabaseManager
 
 def _run_worker(
     *,
-    mod_id: str,
+    internal_id: str,
     library: Path,
     deployer: ModDeployer,
     action: str = "deploy",
     timeout_s: float = 120.0,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Drive real DeployWorker; return (result_dict, captured_log_lines)."""
+    """Drive real DeployWorker with Frozen internal_id."""
     from PySide6.QtCore import QCoreApplication
 
     from ui.deploy_thread import DeployWorker
+
+    if not is_frozen_internal_uuid(internal_id):
+        raise RuntimeError(
+            f"DeployWorker requires Frozen internal_id, got {internal_id!r}"
+        )
 
     app = _ensure_qapp()
     capture = LogCapture()
@@ -192,8 +256,9 @@ def _run_worker(
 
     holder: dict[str, Any] = {"result": None, "failed": None}
 
+    logger.info("[SMOKE] DeployWorker(internal_id=%s) action=%s", internal_id, action)
     worker = DeployWorker(
-        mod_id,
+        internal_id,
         library_root=library,
         action=action,  # type: ignore[arg-type]
         deployer=deployer,
@@ -227,7 +292,8 @@ def _run_worker(
         result = {
             "success": False,
             "status": "FAILED",
-            "mod_id": mod_id,
+            "internal_id": internal_id,
+            "mod_id": internal_id,
             "error": str(failed or "smoke: no terminal DeployWorker result"),
             "error_code": "smoke_no_result",
         }
@@ -288,22 +354,18 @@ def _case_report(
 
 
 def run_success(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str, Any]:
-    source = _seed_folder_mod(library, mod_id=SUCCESS_MOD_ID, title="SmokeMod")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=SUCCESS_MOD_ID,
-            title="SmokeMod",
-            app_id=APP_ID,
-            managed_path=str(source),
-            game_name=GAME_NAME,
-        )
+    source, _pk, _frozen = _seed_folder_mod(
+        db, library, workspace_id=SUCCESS_WORKSPACE_ID, title="SmokeMod"
     )
+    internal_id = _internal_id_for_workspace(db, SUCCESS_WORKSPACE_ID)
     target = game_mods / "SmokeMod"
     files_before, bytes_before = _tree_stats(target)
     deployer = ModDeployer(library_root=library, db=db)
 
     t0 = time.perf_counter()
-    result, logs = _run_worker(mod_id=SUCCESS_MOD_ID, library=library, deployer=deployer)
+    result, logs = _run_worker(
+        internal_id=internal_id, library=library, deployer=deployer
+    )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     files_after, bytes_after = _tree_stats(target)
 
@@ -316,6 +378,10 @@ def run_success(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str
         if not cond:
             ok = False
 
+    check(is_frozen_internal_uuid(internal_id), "resolved Frozen internal_id")
+    check(internal_id != SUCCESS_WORKSPACE_ID, "internal_id is not workspace_id")
+    check(not internal_id.isdigit(), "internal_id is not digit PK")
+    check(str(result.get("internal_id") or "") == internal_id, "result.internal_id == Frozen UUID")
     check(str(result.get("status")) == "SUCCESS", "status == SUCCESS")
     check(bool(result.get("success")), "success == True")
     check(target.is_dir(), f"target exists: {target}")
@@ -345,22 +411,21 @@ def run_success(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str
         elapsed_ms=elapsed_ms,
         passed=ok,
         assertions=assertions,
-        extra={"source": str(source), "target": str(target)},
+        extra={
+            "source": str(source),
+            "target": str(target),
+            "workspace_id": SUCCESS_WORKSPACE_ID,
+            "internal_id": internal_id,
+        },
     )
 
 
 def run_failed(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str, Any]:
     """Source-missing failure must terminate FAILED (never SUCCESS)."""
-    source = _seed_folder_mod(library, mod_id=FAILED_MOD_ID, title="MissingSourceMod")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=FAILED_MOD_ID,
-            title="MissingSourceMod",
-            app_id=APP_ID,
-            managed_path=str(source),
-            game_name=GAME_NAME,
-        )
+    source, _pk, _frozen = _seed_folder_mod(
+        db, library, workspace_id=FAILED_WORKSPACE_ID, title="MissingSourceMod"
     )
+    internal_id = _internal_id_for_workspace(db, FAILED_WORKSPACE_ID)
     # Remove managed folder after DB registration — forces missing-source path.
     shutil.rmtree(source)
     target = game_mods / "MissingSourceMod"
@@ -368,7 +433,9 @@ def run_failed(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str,
     deployer = ModDeployer(library_root=library, db=db)
 
     t0 = time.perf_counter()
-    result, logs = _run_worker(mod_id=FAILED_MOD_ID, library=library, deployer=deployer)
+    result, logs = _run_worker(
+        internal_id=internal_id, library=library, deployer=deployer
+    )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     files_after, bytes_after = _tree_stats(target)
 
@@ -381,6 +448,7 @@ def run_failed(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str,
         if not cond:
             ok = False
 
+    check(is_frozen_internal_uuid(internal_id), "resolved Frozen internal_id")
     check(str(result.get("status")) == "FAILED", "status == FAILED")
     check(not bool(result.get("success")), "success == False")
     check(str(result.get("status")) != "SUCCESS", "must not masquerade as SUCCESS")
@@ -403,7 +471,12 @@ def run_failed(library: Path, game_mods: Path, db: DatabaseManager) -> dict[str,
         elapsed_ms=elapsed_ms,
         passed=ok,
         assertions=assertions,
-        extra={"source_removed": str(source), "target": str(target)},
+        extra={
+            "source_removed": str(source),
+            "target": str(target),
+            "workspace_id": FAILED_WORKSPACE_ID,
+            "internal_id": internal_id,
+        },
     )
 
 
@@ -412,21 +485,15 @@ def run_redeploy(library: Path, game_mods: Path, db: DatabaseManager) -> dict[st
     source = library / GAME_NAME / "SmokeMod"
     target = game_mods / "SmokeMod"
     if not source.is_dir():
-        source = _seed_folder_mod(library, mod_id=SUCCESS_MOD_ID, title="SmokeMod")
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=SUCCESS_MOD_ID,
-                title="SmokeMod",
-                app_id=APP_ID,
-                managed_path=str(source),
-                game_name=GAME_NAME,
-            )
+        source, _pk, _frozen = _seed_folder_mod(
+            db, library, workspace_id=SUCCESS_WORKSPACE_ID, title="SmokeMod"
         )
+    internal_id = _internal_id_for_workspace(db, SUCCESS_WORKSPACE_ID)
 
     deployer = ModDeployer(library_root=library, db=db)
     # Ensure first deploy exists (SUCCESS case may have already done this).
     if not (target / "payload.bin").is_file():
-        _run_worker(mod_id=SUCCESS_MOD_ID, library=library, deployer=deployer)
+        _run_worker(internal_id=internal_id, library=library, deployer=deployer)
 
     man1 = load_manifest(source)
     files1 = len(man1.files) if man1 else 0
@@ -434,7 +501,9 @@ def run_redeploy(library: Path, game_mods: Path, db: DatabaseManager) -> dict[st
     nested_bad = target / "SmokeMod"
 
     t0 = time.perf_counter()
-    result, logs = _run_worker(mod_id=SUCCESS_MOD_ID, library=library, deployer=deployer)
+    result, logs = _run_worker(
+        internal_id=internal_id, library=library, deployer=deployer
+    )
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     files_after, bytes_after = _tree_stats(target)
     man2 = load_manifest(source)
@@ -449,6 +518,8 @@ def run_redeploy(library: Path, game_mods: Path, db: DatabaseManager) -> dict[st
         if not cond:
             ok = False
 
+    check(is_frozen_internal_uuid(internal_id), "resolved Frozen internal_id")
+    check(str(result.get("internal_id") or "") == internal_id, "result.internal_id == Frozen UUID")
     check(str(result.get("status")) == "SUCCESS", "redeploy status == SUCCESS")
     check(bool(result.get("success")), "redeploy success == True")
     check((target / "payload.bin").is_file(), "payload still present")
@@ -480,6 +551,8 @@ def run_redeploy(library: Path, game_mods: Path, db: DatabaseManager) -> dict[st
             "manifest_files_before": files1,
             "manifest_files_after": files2,
             "nested_duplicate_present": nested_bad.exists(),
+            "workspace_id": SUCCESS_WORKSPACE_ID,
+            "internal_id": internal_id,
         },
     )
 
@@ -507,7 +580,13 @@ def run_smoke(workspace: Path) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Deploy System real-pipeline smoke runner")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Deploy System real-pipeline smoke runner. "
+            "Deploy identity is Frozen internal_id; workspace_id is platform "
+            "identity; mod_pk is a DB handle only."
+        )
+    )
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -573,6 +652,7 @@ def main(argv: list[str] | None = None) -> int:
         mark = "PASS" if case["passed"] else "FAIL"
         print(
             f"  [{mark}] {case['case']}: status={case['status']} "
+            f"internal_id={case.get('internal_id') or (case.get('extra') or {}).get('internal_id') or ''} "
             f"elapsed_ms={case['elapsed_ms']} files={case['files_before']}→{case['files_after']}",
             file=sys.stderr,
         )

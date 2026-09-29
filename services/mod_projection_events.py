@@ -114,31 +114,35 @@ def notify_mod_changed(internal_id: str | int) -> None:
     mid = str(internal_id or "").strip()
     if not mid:
         return
-    frozen = mid
-    try:
-        from services.mod_library_cache import get_library_cache
+    from services.deploy_e2e import e2e_count, e2e_span
 
-        updated = get_library_cache().refresh_projection(mid)
-        if updated is not None:
-            key = str(getattr(updated, "id", "") or "").strip()
-            if key:
-                frozen = key
-    except Exception:  # noqa: BLE001
-        from services.crash_trace import log_exception
+    with e2e_span("notify_mod_changed", internal_id=mid):
+        e2e_count("notify_mod_changed_count")
+        frozen = mid
+        try:
+            from services.mod_library_cache import get_library_cache
 
-        log_exception("notify_mod_changed.refresh_projection", internal_id=mid)
-        logger.debug("refresh_projection failed internal_id=%s", mid, exc_info=True)
-    if _should_marshal_to_gui():
-        bridge = _gui_bridge()
-        if bridge is None:
-            logger.warning(
-                "notify_mod_changed skipped UI listeners (no GUI bridge) internal_id=%s",
-                frozen,
-            )
+            updated = get_library_cache().refresh_projection(mid)
+            if updated is not None:
+                key = str(getattr(updated, "id", "") or "").strip()
+                if key:
+                    frozen = key
+        except Exception:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("notify_mod_changed.refresh_projection", internal_id=mid)
+            logger.debug("refresh_projection failed internal_id=%s", mid, exc_info=True)
+        if _should_marshal_to_gui():
+            bridge = _gui_bridge()
+            if bridge is None:
+                logger.warning(
+                    "notify_mod_changed skipped UI listeners (no GUI bridge) internal_id=%s",
+                    frozen,
+                )
+                return
+            bridge.changed.emit(frozen)
             return
-        bridge.changed.emit(frozen)
-        return
-    _invoke_listeners(frozen)
+        _invoke_listeners(frozen)
 
 
 def _invoke_listeners(mid: str) -> None:

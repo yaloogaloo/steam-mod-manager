@@ -20,7 +20,7 @@ from services.deploy_rules.game_capabilities import (
 from services.file_ops import INFO_DIR_NAME
 from services.deploy_rules.generic import deploy_folder_name
 from services.mod_path_normalizer import contains_chinese
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 
 DD_APP = 262060
 CIV6 = 289070
@@ -74,6 +74,8 @@ def test_production_json_lists_darkest_dungeon_and_civ6() -> None:
     games = _production_capabilities()
     assert games["262060"][CAP] is True
     assert games["289070"][CAP] is True
+    assert games["262060"]["sync_project_xml_title"] is True
+    assert games["289070"].get("sync_project_xml_title") is not True
 
 
 def test_unconfigured_game_returns_false() -> None:
@@ -225,9 +227,7 @@ def _seed_and_register(
 
 
 def _frozen(db: DatabaseManager, pk: str) -> str:
-    meta = db.get_mod(pk)
-    assert meta is not None
-    return str(meta.internal_id)
+    return frozen_from_pk(db, pk)
 
 
 def test_darkest_dungeon_deploy_uses_workspace_folder(

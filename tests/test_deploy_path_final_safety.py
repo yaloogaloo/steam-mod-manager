@@ -23,7 +23,7 @@ from services.deploy_security import ManifestSecurityError, collect_allowed_targ
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
 from services.importers.archive import extract_archive
-from tests.helpers.identity import create_steam_test_mod
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, frozen_from_pk
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
@@ -178,12 +178,12 @@ def test_audit2_ambiguous_or_failed_remap_does_not_delete(db: DatabaseManager, t
     folder = library / 'Game' / 'FailRemap'
     folder.mkdir(parents=True)
     (folder / 'a.xml').write_text('A', encoding='utf-8')
-    _write_meta(folder, {'published_file_id': '92001', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(new_mods), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='92001', title='FailRemap', app_id=4242)
-    db.update_mod_identity_fields('92001', last_known_path=str(folder), folder_present=True)
-    save_manifest(folder, DeployManifest(mod_id='92001', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(secret.resolve()))]))
-    out = ModDeployer(library_root=library, db=db).undeploy_mod('92001')
+    created = create_steam_test_mod(db, external_id='92001', title='FailRemap', app_id=4242)
+    pk = str(created.mod_id)
+    _prove_folder(db, pk, folder, extra={'app_id': 4242, 'game_name': 'Game'})
+    save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(secret.resolve()))]))
+    out = ModDeployer(library_root=library, db=db).undeploy_mod(frozen_deploy_id(created))
     assert out.get('success') is False, out
     assert secret.read_text(encoding='utf-8') == 'KEEP'
     assert (folder / INFO_DIR_NAME / 'deploy_manifest.json').is_file()
@@ -227,13 +227,13 @@ def test_audit3_validation_failure_preserves_manifest_and_files(db: DatabaseMana
     folder = library / 'Game' / 'Trav'
     folder.mkdir(parents=True)
     (folder / 'a.xml').write_text('A', encoding='utf-8')
-    _write_meta(folder, {'published_file_id': '92002', 'app_id': 4242, 'game_name': 'Game'})
     db.update_game_deploy_config(4242, name='Game', install_path=str(tmp_path / 'new' / 'game'), mod_path=str(mods), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='92002', title='Trav', app_id=4242)
-    db.update_mod_identity_fields('92002', last_known_path=str(folder), folder_present=True)
-    save_manifest(folder, DeployManifest(mod_id='92002', deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(live), root_kind=ROOT_KIND_GAME_MODS, relative='../outside.txt')]))
+    created = create_steam_test_mod(db, external_id='92002', title='Trav', app_id=4242)
+    pk = str(created.mod_id)
+    _prove_folder(db, pk, folder, extra={'app_id': 4242, 'game_name': 'Game'})
+    save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='folder_copy', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(live), root_kind=ROOT_KIND_GAME_MODS, relative='../outside.txt')]))
     cfg = db.get_game_deploy_config(4242)
-    ctx = DeployContext(internal_id='92002', source=folder, app_id=4242, config=cfg, deploy_type='folder_copy', managed_path=folder)
+    ctx = DeployContext(internal_id=frozen_deploy_id(created), source=folder, app_id=4242, config=cfg, deploy_type='folder_copy', managed_path=folder)
     man = load_manifest(folder)
     assert man is not None
     with pytest.raises((DeployPathError, ManifestSecurityError)):
@@ -291,7 +291,7 @@ def test_audit5_normal_lifecycle_deploy_undeploy_redeploy(db: DatabaseManager, t
         extra={'app_id': ANNO_1800_APP_ID, 'game_name': 'Anno 1800'},
     )
     deployer = ModDeployer(library_root=library, db=db)
-    d1 = deployer.deploy_mod(pk)
+    d1 = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert d1.get('success') is True, d1
     man = load_manifest(folder)
     assert man is not None
@@ -299,10 +299,10 @@ def test_audit5_normal_lifecycle_deploy_undeploy_redeploy(db: DatabaseManager, t
     targets = {Path(e.target).resolve() for e in man.files}
     assert all((t.exists() for t in targets))
     rels = {e.relative.replace('\\', '/') for e in man.files}
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen_from_pk(db, pk))
     assert und.get('success') is True, und
     assert all((not t.exists() for t in targets))
-    d2 = deployer.deploy_mod(pk)
+    d2 = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert d2.get('success') is True, d2
     man2 = load_manifest(folder)
     assert man2 is not None
@@ -334,16 +334,16 @@ def test_audit5_drive_migration_style_remap_and_redeploy(db: DatabaseManager, tm
     )
     save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='anno_1800', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(old_target))]))
     cfg = db.get_game_deploy_config(ANNO_1800_APP_ID)
-    allowed_before = {str(p.resolve()) for p in collect_allowed_target_roots(DeployContext(internal_id=pk, source=folder, app_id=ANNO_1800_APP_ID, config=cfg, deploy_type='anno_1800', managed_path=folder))}
+    allowed_before = {str(p.resolve()) for p in collect_allowed_target_roots(DeployContext(internal_id=frozen_from_pk(db, pk), source=folder, app_id=ANNO_1800_APP_ID, config=cfg, deploy_type='anno_1800', managed_path=folder))}
     assert not any(('D_sim' in p for p in allowed_before))
     deployer = ModDeployer(library_root=library, db=db)
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen_from_pk(db, pk))
     assert und.get('success') is True, und
     assert not live.exists()
     assert old_target.read_text(encoding='utf-8') == 'OLD_D'
     (folder / 'data').mkdir(exist_ok=True)
     (folder / 'data' / 'b.xml').write_text('<B/>', encoding='utf-8')
-    dep = deployer.deploy_mod(pk)
+    dep = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert dep.get('success') is True, dep
     man = load_manifest(folder)
     assert man is not None
@@ -351,7 +351,7 @@ def test_audit5_drive_migration_style_remap_and_redeploy(db: DatabaseManager, tm
         assert 'F_sim' in entry.target.replace('\\', '/')
         assert 'D_sim' not in entry.target.replace('\\', '/')
     cfg2 = db.get_game_deploy_config(ANNO_1800_APP_ID)
-    allowed_after = {str(p.resolve()) for p in collect_allowed_target_roots(DeployContext(internal_id=pk, source=folder, app_id=ANNO_1800_APP_ID, config=cfg2, deploy_type='anno_1800', managed_path=folder))}
+    allowed_after = {str(p.resolve()) for p in collect_allowed_target_roots(DeployContext(internal_id=frozen_from_pk(db, pk), source=folder, app_id=ANNO_1800_APP_ID, config=cfg2, deploy_type='anno_1800', managed_path=folder))}
     assert not any(('D_sim' in p for p in allowed_after))
 
 def test_audit5_failed_remap_blocks_redeploy_without_deletion(db: DatabaseManager, tmp_path: Path) -> None:
@@ -374,7 +374,7 @@ def test_audit5_failed_remap_blocks_redeploy_without_deletion(db: DatabaseManage
         extra={'app_id': ANNO_1800_APP_ID, 'game_name': 'Anno 1800'},
     )
     save_manifest(folder, DeployManifest(mod_id=pk, deploy_time='t', deploy_type='anno_1800', files=[ManifestFileEntry(source=str(folder / 'a.xml'), target=str(secret.resolve()))]))
-    out = ModDeployer(library_root=library, db=db).redeploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).redeploy_mod(frozen_from_pk(db, pk))
     assert out.get('success') is False, out
     assert secret.read_text(encoding='utf-8') == 'KEEP'
     assert (folder / INFO_DIR_NAME / 'deploy_manifest.json').is_file()
@@ -398,7 +398,7 @@ def test_audit6_archive_uses_zip_root_not_library_folder_name(db: DatabaseManage
         folder,
         extra={'app_id': ANNO_1800_APP_ID, 'game_name': 'Anno 1800'},
     )
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out.get('success') is True, out
     man = load_manifest(folder)
     assert man is not None

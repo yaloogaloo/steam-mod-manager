@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import zipfile
 from pathlib import Path
 
@@ -28,8 +27,9 @@ from services.deploy_rules import (
     resolve_strategy,
 )
 from services.deploy_rules.base import DeployContext
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
 from services.identity_service import create_mod_identity, identity_create_scope
+from tests.helpers.identity import write_info_sidecar
 
 WH3 = WARHAMMER3_APP_ID
 assert WH3 == 1142710
@@ -71,7 +71,11 @@ def _seed_mod(
     app_id: int = WH3,
     game_name: str = "Total War: WARHAMMER III",
     game_folder: str = "Warhammer3",
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
+    """Return ``(folder, mod_pk, internal_id)``.
+
+    ``internal_id`` is the public Deploy token. ``mod_pk`` is the DAL handle.
+    """
     with identity_create_scope():
         created = create_mod_identity(
             db,
@@ -84,23 +88,17 @@ def _seed_mod(
             operation="import",
         )
     pk = str(created.mod_id)
+    frozen = str(created.internal_id)
     mod_dir = library / game_folder / folder
     mod_dir.mkdir(parents=True)
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "internal_id": pk,
-                "published_file_id": str(external_id),
-                "title": folder,
-                "app_id": app_id,
-                "game_name": game_name,
-                "platform": PLATFORM_STEAM,
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    write_info_sidecar(
+        mod_dir,
+        internal_id=frozen,
+        title=folder,
+        external_id=str(external_id),
+        workspace_id=str(created.workspace_id or external_id),
+        app_id=app_id,
+        game_name=game_name,
     )
     for rel, data in files.items():
         path = mod_dir / rel
@@ -128,7 +126,7 @@ def _seed_mod(
                     dest.write_bytes(data)
                 else:
                     dest.write_bytes(str(data).encode("utf-8"))
-    return mod_dir, pk
+    return mod_dir, pk, frozen
 
 
 def _make_zip(path: Path, mapping: dict[str, bytes]) -> Path:
@@ -212,7 +210,7 @@ def test_single_pack_deploys_without_copying_to_data(
 ) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="OnePack",
@@ -225,8 +223,11 @@ def test_single_pack_deploys_without_copying_to_data(
         },
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
+    assert result.get("internal_id") == iid
+    assert str(result.get("internal_id")) != str(pk)
+    assert str(db.find_mod_by_internal_id(iid) or "") == str(pk)
     assert result["deploy_type"] == DEPLOY_TYPE_WARHAMMER3
     assert int(result.get("copied_files") or 0) == 0
     assert (folder / "xxx.pack").read_bytes() == b"PACK"
@@ -250,7 +251,7 @@ def test_multiple_packs_stay_in_library(
 ) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="Multi",
@@ -258,7 +259,7 @@ def test_multiple_packs_stay_in_library(
         files={"a.pack": b"A", "b.pack": b"B", "readme.txt": "no"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (folder / "a.pack").read_bytes() == b"A"
     assert (folder / "b.pack").read_bytes() == b"B"
@@ -278,7 +279,7 @@ def test_nested_folder_packs_activate_from_library(
 ) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="NestedDir",
@@ -292,7 +293,7 @@ def test_nested_folder_packs_activate_from_library(
         },
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (folder / "foo.pack").read_bytes() == b"FOO"
     assert (folder / "sub" / "baz.pack").read_bytes() == b"BAZ"
@@ -313,7 +314,7 @@ def test_non_pack_and_info_sidecar_not_activated(
 ) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="Sidecar",
@@ -327,7 +328,7 @@ def test_non_pack_and_info_sidecar_not_activated(
     hist.mkdir()
     (hist / "old.pack").write_bytes(b"NO")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     text = (tmp_path / "WH3Install" / "used_mods.txt").read_text(encoding="utf-8")
     assert 'mod "real.pack";' in text
@@ -341,7 +342,7 @@ def test_non_pack_and_info_sidecar_not_activated(
 def test_chinese_folder_name_pack_only(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="中文模组包",
@@ -349,7 +350,7 @@ def test_chinese_folder_name_pack_only(tmp_path: Path, db: DatabaseManager) -> N
         files={"单位.pack": b"CN", "说明.txt": "txt"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (folder / "单位.pack").read_bytes() == b"CN"
     assert _data_pack_names(mod_path) == set()
@@ -363,7 +364,7 @@ def test_chinese_folder_name_pack_only(tmp_path: Path, db: DatabaseManager) -> N
 def test_pack_extension_case_insensitive(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="Case",
@@ -371,7 +372,7 @@ def test_pack_extension_case_insensitive(tmp_path: Path, db: DatabaseManager) ->
         files={"Upper.PACK": b"U", "Mixed.Pack": b"M"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (folder / "Upper.PACK").read_bytes() == b"U"
     assert (folder / "Mixed.Pack").read_bytes() == b"M"
@@ -387,7 +388,7 @@ def test_archive_deploys_to_workshop_unzip(
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
     folder = "ZipNested"
-    source, pk = _seed_mod(library, db, folder=folder, external_id="11406", files={})
+    source, pk, iid = _seed_mod(library, db, folder=folder, external_id="11406", files={})
     _make_zip(
         source / "mod.zip",
         {
@@ -397,7 +398,7 @@ def test_archive_deploys_to_workshop_unzip(
         },
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert _data_pack_names(mod_path) == set()
     assert (source / "mod.zip").is_file()
@@ -422,8 +423,8 @@ _WH3_112_MORATHI_PACK = "morathi_animation.pack"
 
 def _seed_wh3_112_multi_archive(
     library: Path, db: DatabaseManager
-) -> tuple[Path, str]:
-    source, pk = _seed_mod(
+) -> tuple[Path, str, str]:
+    source, pk, iid = _seed_mod(
         library,
         db,
         folder="Khalida the Queen Uncensored",
@@ -432,7 +433,7 @@ def _seed_wh3_112_multi_archive(
     )
     _make_zip(source / _WH3_112_QUEEN, {_WH3_112_QUEEN_PACK: b"QUEEN"})
     _make_zip(source / _WH3_112_MORATHI, {_WH3_112_MORATHI_PACK: b"MORATHI"})
-    return source, pk
+    return source, pk, iid
 
 
 def _set_wh3_112_selection(db: DatabaseManager, pk: str, selected_name: str) -> None:
@@ -495,11 +496,11 @@ def test_wh3_mod112_select_queen_deploys_queen_not_morathi(
 ) -> None:
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    _source, pk = _seed_wh3_112_multi_archive(library, db)
+    _source, pk, iid = _seed_wh3_112_multi_archive(library, db)
     _set_wh3_112_selection(db, pk, _WH3_112_QUEEN)
     extracted = _spy_wh3_extracts(monkeypatch)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert extracted == [_WH3_112_QUEEN]
     assert _WH3_112_MORATHI not in extracted
@@ -516,11 +517,11 @@ def test_wh3_mod112_select_morathi_deploys_morathi_not_queen(
 ) -> None:
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    _source, pk = _seed_wh3_112_multi_archive(library, db)
+    _source, pk, iid = _seed_wh3_112_multi_archive(library, db)
     _set_wh3_112_selection(db, pk, _WH3_112_MORATHI)
     extracted = _spy_wh3_extracts(monkeypatch)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert extracted == [_WH3_112_MORATHI]
     assert _WH3_112_QUEEN not in extracted
@@ -537,12 +538,12 @@ def test_wh3_mod112_redeploy_follows_current_checkbox(
 ) -> None:
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    _source, pk = _seed_wh3_112_multi_archive(library, db)
+    _source, pk, iid = _seed_wh3_112_multi_archive(library, db)
     extracted = _spy_wh3_extracts(monkeypatch)
     deployer = ModDeployer(library_root=library, db=db)
 
     _set_wh3_112_selection(db, pk, _WH3_112_QUEEN)
-    first = deployer.deploy_mod(pk)
+    first = deployer.deploy_mod(iid)
     assert first["success"] is True, first
     assert extracted == [_WH3_112_QUEEN]
     text = _wh3_112_used_text(tmp_path)
@@ -551,7 +552,7 @@ def test_wh3_mod112_redeploy_follows_current_checkbox(
 
     extracted.clear()
     _set_wh3_112_selection(db, pk, _WH3_112_MORATHI)
-    second = deployer.deploy_mod(pk)
+    second = deployer.deploy_mod(iid)
     assert second["success"] is True, second
     assert extracted == [_WH3_112_MORATHI]
     assert _WH3_112_QUEEN not in extracted
@@ -564,7 +565,7 @@ def test_wh3_mod112_redeploy_follows_current_checkbox(
 
     extracted.clear()
     _set_wh3_112_selection(db, pk, _WH3_112_QUEEN)
-    third = deployer.deploy_mod(pk)
+    third = deployer.deploy_mod(iid)
     assert third["success"] is True, third
     assert extracted == [_WH3_112_QUEEN]
     text = _wh3_112_used_text(tmp_path)
@@ -577,7 +578,7 @@ def test_wh3_single_archive_selection_unchanged(
 ) -> None:
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    source, pk = _seed_mod(
+    source, pk, iid = _seed_mod(
         library, db, folder="OneZip", external_id="11430", files={}
     )
     zip_name = "only-mod.zip"
@@ -596,7 +597,7 @@ def test_wh3_single_archive_selection_unchanged(
         ),
     )
     extracted = _spy_wh3_extracts(monkeypatch)
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert extracted == [zip_name]
     unzip = tmp_path / "workshop" / "content" / str(WH3) / "OneZip_unzip"
@@ -614,14 +615,14 @@ def test_workshop_path_missing_fails_deploy(
 
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    _folder, pk = _seed_mod(
+    _folder, pk, iid = _seed_mod(
         library, db, folder="Gone", external_id="11420", files={"a.pack": b"A"}
     )
     db.update_game_deploy_config(
         WH3,
         workshop_path=str(tmp_path / "missing_workshop"),
     )
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is False
     assert WH3_WORKSHOP_MISSING in str(result.get("error") or "")
     assert _data_pack_names(mod_path) == set()
@@ -634,7 +635,7 @@ def test_missing_pack_fails_without_half_deploy(
     mod_path = _configure_wh3(db, tmp_path)
     sentinel = mod_path / "keep.pack"
     sentinel.write_bytes(b"KEEP")
-    source, pk = _seed_mod(
+    source, pk, iid = _seed_mod(
         library,
         db,
         folder="NoPack",
@@ -642,7 +643,7 @@ def test_missing_pack_fails_without_half_deploy(
         files={"readme.txt": "only docs", "preview.png": b"PNG"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is False
     assert "未找到 .pack 文件" in str(result.get("error") or "")
     assert sentinel.read_bytes() == b"KEEP"
@@ -657,7 +658,7 @@ def test_missing_pack_fails_without_half_deploy(
 def test_archive_without_pack_fails(tmp_path: Path, db: DatabaseManager) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    source, pk = _seed_mod(
+    source, pk, iid = _seed_mod(
         library,
         db,
         folder="ZipEmpty",
@@ -669,7 +670,7 @@ def test_archive_without_pack_fails(tmp_path: Path, db: DatabaseManager) -> None
         {"readme.txt": b"hi", "preview.jpg": b"img"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is False
     assert "未找到 .pack 文件" in str(result.get("error") or "")
     assert list(mod_path.iterdir()) == []
@@ -682,7 +683,7 @@ def test_activation_does_not_write_copy_manifest(
 ) -> None:
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    source, pk = _seed_mod(
+    source, pk, iid = _seed_mod(
         library,
         db,
         folder="Mani",
@@ -690,7 +691,7 @@ def test_activation_does_not_write_copy_manifest(
         files={"a.pack": b"A", "b.pack": b"B", "readme.txt": "no"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert load_manifest(source) is None
     assert int(result.get("copied_files") or 0) == 0
@@ -701,20 +702,20 @@ def test_same_name_packs_do_not_copy_into_data(
 ) -> None:
     library = tmp_path / "library"
     mod_path = _configure_wh3(db, tmp_path)
-    folder_a, pk_a = _seed_mod(
+    folder_a, pk_a, iid_a = _seed_mod(
         library, db, folder="First", external_id="11410", files={"shared.pack": b"ONE"}
     )
-    folder_b, pk_b = _seed_mod(
+    folder_b, pk_b, iid_b = _seed_mod(
         library, db, folder="Second", external_id="11411", files={"shared.pack": b"TWO"}
     )
     deployer = ModDeployer(library_root=library, db=db)
 
-    first = deployer.deploy_mod(pk_a)
+    first = deployer.deploy_mod(iid_a)
     assert first["success"] is True, first
     assert (folder_a / "shared.pack").read_bytes() == b"ONE"
     assert _data_pack_names(mod_path) == set()
 
-    second = deployer.deploy_mod(pk_b)
+    second = deployer.deploy_mod(iid_b)
     assert second["success"] is True, second
     assert (folder_b / "shared.pack").read_bytes() == b"TWO"
     assert (folder_a / "shared.pack").read_bytes() == b"ONE"
@@ -734,7 +735,7 @@ def test_folder_copy_game_still_deploys_pack_and_readme(
         mod_path=str(mods_root),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    _folder, pk = _seed_mod(
+    _folder, pk, iid = _seed_mod(
         library,
         db,
         folder="PlainMod",
@@ -745,7 +746,7 @@ def test_folder_copy_game_still_deploys_pack_and_readme(
         game_folder="SomeGame",
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_FOLDER_COPY
     dest = mods_root / "PlainMod"
@@ -761,7 +762,7 @@ def test_wh3_deploy_does_not_copy_or_hash_pack(
 
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="Timed",
@@ -786,7 +787,7 @@ def test_wh3_deploy_does_not_copy_or_hash_pack(
         ),
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert int(result.get("copied_files") or 0) == 0
     timing = result.get("deploy_timing") or {}
@@ -803,7 +804,7 @@ def test_undeploy_does_not_delete_library_pack(
 ) -> None:
     library = tmp_path / "library"
     _configure_wh3(db, tmp_path)
-    folder, pk = _seed_mod(
+    folder, pk, iid = _seed_mod(
         library,
         db,
         folder="Keep",
@@ -811,8 +812,8 @@ def test_undeploy_does_not_delete_library_pack(
         files={"stay.pack": b"KEEP"},
     )
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"] is True
-    und = deployer.undeploy_mod(pk)
+    assert deployer.deploy_mod(iid)["success"] is True
+    und = deployer.undeploy_mod(iid)
     assert und["success"] is True, und
     assert (folder / "stay.pack").read_bytes() == b"KEEP"
     info = db.get_mod_deploy_info(pk)
@@ -821,3 +822,38 @@ def test_undeploy_does_not_delete_library_pack(
     used = tmp_path / "WH3Install" / "used_mods.txt"
     text = used.read_text(encoding="utf-8") if used.is_file() else ""
     assert "stay.pack" not in text
+
+
+def test_wh3_deploy_mod_rejects_digit_pk(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    library = tmp_path / "library"
+    _configure_wh3(db, tmp_path)
+    _folder, pk, iid = _seed_mod(
+        library,
+        db,
+        folder="PkReject",
+        external_id="11499",
+        files={"only.pack": b"PACK"},
+    )
+    assert pk.isdigit()
+    assert is_frozen_internal_uuid(iid)
+    assert iid != pk
+
+    deployer = ModDeployer(library_root=library, db=db)
+    rejected = deployer.deploy_mod(pk)
+    assert rejected.get("success") is False
+    assert rejected.get("error_code") == "invalid_internal_uuid"
+    info = db.get_mod_deploy_info(pk)
+    status = str(getattr(info, "deploy_status", "") or "") if info is not None else ""
+    assert status != "deployed"
+
+    ok = deployer.deploy_mod(iid)
+    assert ok.get("success") is True, ok
+    assert ok.get("internal_id") == iid
+    assert str(db.find_mod_by_internal_id(iid) or "") == str(pk)
+    deployed = db.get_mod_deploy_info(pk)
+    assert deployed is not None
+    assert deployed.deploy_status == "deployed"

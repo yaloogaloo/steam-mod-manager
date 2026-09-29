@@ -530,6 +530,7 @@ class ModSearchFields:
     conflict_status: str = CONFLICT_STATUS_NONE
     enabled: bool = True
     category_tags: str = ""
+    category: str = ""
     type_id: int | None = None
     # Library sort authority (ISO → epoch via updated_at_to_mtime).
     updated_at: str = ""
@@ -3196,6 +3197,7 @@ class DatabaseManager:
                     m.local_size_bytes,
                     m.local_size_status,
                     m.type_id,
+                    m.category,
                     COALESCE(g.name, '') AS game_name
                 FROM mods AS m
                 LEFT JOIN games AS g ON g.app_id = m.app_id
@@ -3309,6 +3311,9 @@ class DatabaseManager:
                         else "unknown"
                     ),
                     "category_tags": "",
+                    "category": str(row["category"] or "").strip()
+                    if "category" in row.keys()
+                    else "",
                     "type_id": _row_type_id(row),
                     "external_id": str(row["external_id"] or "").strip(),
                     "source_url": str(row["source_url"] or "").strip(),
@@ -3995,6 +4000,7 @@ class DatabaseManager:
                     m.enabled,
                     m.updated_at,
                     m.type_id,
+                    m.category,
                     COALESCE(g.name, '') AS game_name
                 FROM mods AS m
                 LEFT JOIN games AS g ON g.app_id = m.app_id
@@ -4071,6 +4077,9 @@ class DatabaseManager:
                 ),
                 enabled=enabled,
                 category_tags=" ".join(cat_map.get(mid) or []),
+                category=str(row["category"] or "").strip()
+                if "category" in keys
+                else "",
                 type_id=_row_type_id(row),
                 updated_at=(
                     str(row["updated_at"] or "") if "updated_at" in keys else ""

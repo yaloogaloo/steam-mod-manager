@@ -1,0 +1,11 @@
+# Files allowed to mention production paths because they only hash or read them.
+# They must not pass those paths to a mutation API.
+tests/test_test_data_isolation.py
+tests/test_nexus_offline_scraper.py
+tests/test_backup_retention_contract.py
+tests/test_backup_content_contract.py
+tests/test_backup_storage_contract.py
+tests/bg3_sort_stage2_real_ui_gate.py
+tests/bg3_undeploy_order_real_gate.py
+tests/ck3_sort_mode_real_ui_gate.py
+tests/wh3_sort_identity_real_ui_gate.py

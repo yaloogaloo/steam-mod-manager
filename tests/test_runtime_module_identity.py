@@ -14,7 +14,7 @@ from core.db_manager import (
     DatabaseManager,
 )
 from services.deploy import ModDeployer
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 from services.runtime_identity import (
     get_archive_module_identity,
     log_archive_runtime_identity,
@@ -52,7 +52,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _make_managed_mod(
     db: DatabaseManager, library: Path, *, mod_id: str, app_id: int
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     mod_dir = library / "Game" / "RuntimeMod"
     mod_dir.mkdir(parents=True)
     (mod_dir / "mod.txt").write_text("payload", encoding="utf-8")
@@ -67,7 +67,7 @@ def _make_managed_mod(
         app_id=app_id,
         game_name="Game",
     )
-    return mod_dir, pk
+    return mod_dir, pk, frozen_deploy_id(created)
 
 
 def test_deploy_success_clears_deploy_error(
@@ -86,7 +86,7 @@ def test_deploy_success_clears_deploy_error(
         install_path=str(tmp_path / "GameInstall"),
         mod_path=str(game_mods),
     )
-    _mod_dir, pk = _make_managed_mod(db, library, mod_id=workshop, app_id=app_id)
+    _mod_dir, pk, iid = _make_managed_mod(db, library, mod_id=workshop, app_id=app_id)
     db.update_mod_deploy_status(
         pk,
         deploy_status=DEPLOY_STATUS_FAILED,
@@ -96,7 +96,7 @@ def test_deploy_success_clears_deploy_error(
     )
 
     caplog.set_level(logging.INFO)
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
 
     assert result["success"] is True
     info = db.get_mod_deploy_info(pk)

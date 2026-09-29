@@ -21,10 +21,11 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from core.db_manager import DEPLOY_STATUS_DEPLOYED, DatabaseManager, get_db
 from core.mod_platform import WARHAMMER3_APP_IDS, is_warhammer3_game
+from services.deploy_identity import frozen_internal_id_for_pk, is_frozen_internal_uuid
 from services.deploy_rules.pak_mod_path import iter_suffix_payload_files
 
 logger = logging.getLogger(__name__)
@@ -50,13 +51,109 @@ def is_wh3_activation_app(app_id: int | str = 0, game_name: str = "") -> bool:
     return bool(game_name) and is_warhammer3_game(game_name, aid)
 
 
+class Wh3OrderError(Exception):
+    """Structured WH3 load-order failure. Digit PK is never a canonical token."""
+
+    def __init__(self, code: str, message: str, **fields: Any) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.fields = dict(fields)
+
+    def __str__(self) -> str:
+        extra = " ".join(f"{k}={v}" for k, v in self.fields.items())
+        if extra:
+            return f"{self.code}: {self.args[0]} ({extra})"
+        return f"{self.code}: {self.args[0]}"
+
+
 def canon_internal_id(raw: object) -> str:
+    """Normalize a token string. Digit PK is not a WH3 sort identity.
+
+    Shared with Paradox/BG3 as a strip helper. WH3 canonical order uses
+    :func:`canonicalize_wh3_order_tokens` so ``\"1234\"`` cannot persist.
+    """
     text = str(raw or "").strip()
     if not text:
         return ""
     if text.isdigit():
         return str(int(text))
     return text
+
+
+def _dal_pk(internal_id: str, db: DatabaseManager | None = None) -> str:
+    """Implementation handle only. Never a sort / persistence token."""
+    text = str(internal_id or "").strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return str(int(text))
+    database = db if db is not None else get_db()
+    try:
+        found = database.find_mod_by_internal_id(text)
+    except Exception:  # noqa: BLE001
+        found = None
+    pk = str(found or "").strip()
+    return pk if pk.isdigit() else ""
+
+
+def _internal_id_for_legacy_pk(pk: str, db: DatabaseManager) -> str:
+    frozen = frozen_internal_id_for_pk(pk, db=db)
+    if frozen:
+        return frozen
+    try:
+        meta = db.get_mod(pk) if str(pk).strip().isdigit() else None
+    except Exception:  # noqa: BLE001
+        meta = None
+    if meta is None:
+        return ""
+    frozen = str(getattr(meta, "internal_id", "") or "").strip()
+    return frozen if is_frozen_internal_uuid(frozen) else ""
+
+
+def canonicalize_wh3_order_tokens(
+    tokens: Sequence[object],
+    db: DatabaseManager | None = None,
+    *,
+    fail_closed: bool = True,
+) -> tuple[list[str], bool]:
+    """Return Frozen ``internal_id[]``. Legacy digit PK migrates once via DAL.
+
+    Unknown PK / invalid tokens raise :class:`Wh3OrderError` when *fail_closed*.
+    """
+    database = db if db is not None else get_db()
+    out: list[str] = []
+    seen: set[str] = set()
+    changed = False
+    for raw in tokens:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if is_frozen_internal_uuid(text):
+            iid = text
+        elif text.isdigit():
+            iid = _internal_id_for_legacy_pk(str(int(text)), database)
+            if not iid:
+                if fail_closed:
+                    raise Wh3OrderError(
+                        "UnknownLegacyPk",
+                        "legacy WH3 order token is not a known mod_pk",
+                        token=str(int(text)),
+                    )
+                continue
+            changed = True
+        else:
+            if fail_closed:
+                raise Wh3OrderError(
+                    "InvalidOrderToken",
+                    "WH3 order token is not a Frozen internal_id",
+                    token=text,
+                )
+            continue
+        if iid in seen:
+            continue
+        seen.add(iid)
+        out.append(iid)
+    return out, changed
 
 
 def _order_path() -> Path:
@@ -113,22 +210,29 @@ def _read_order_file(path: Path) -> list[str] | None:
     return _parse_order_payload(raw)
 
 
-def load_saved_order() -> list[str]:
-    """Persisted load-order of ``internal_id`` values (may include stale ids)."""
+def load_saved_order(db: DatabaseManager | None = None) -> list[str]:
+    """Persisted Frozen ``internal_id`` order. Legacy PK tokens migrate once."""
     path = _order_path()
+    parsed: list[str] | None = None
+    from_legacy = False
     if path.is_file():
         parsed = _read_order_file(path)
         _remove_legacy_order_files()
-        return parsed if parsed is not None else []
-    for legacy in _legacy_order_paths():
-        if not legacy.is_file():
-            continue
-        parsed = _read_order_file(legacy)
-        if parsed is None:
-            continue
-        save_saved_order(parsed)
-        return parsed
-    return []
+    else:
+        for legacy in _legacy_order_paths():
+            if not legacy.is_file():
+                continue
+            parsed = _read_order_file(legacy)
+            if parsed is None:
+                continue
+            from_legacy = True
+            break
+    if parsed is None:
+        return []
+    migrated, changed = canonicalize_wh3_order_tokens(parsed, db)
+    if changed or from_legacy:
+        save_saved_order(migrated)
+    return migrated
 
 
 def save_saved_order(internal_ids: list[str]) -> None:
@@ -137,8 +241,8 @@ def save_saved_order(internal_ids: list[str]) -> None:
     ordered: list[str] = []
     seen: set[str] = set()
     for raw in internal_ids:
-        mid = canon_internal_id(raw)
-        if not mid or mid in seen:
+        mid = str(raw or "").strip()
+        if not is_frozen_internal_uuid(mid) or mid in seen:
             continue
         seen.add(mid)
         ordered.append(mid)
@@ -237,9 +341,15 @@ class Wh3GamePaths:
     workshop_path: str
 
 
-def _row_to_ref(row: dict[str, Any]) -> Wh3ModRef | None:
-    mid = canon_internal_id(row.get("internal_id") or row.get("mod_id"))
-    if not mid:
+def _row_to_ref(
+    row: dict[str, Any],
+    db: DatabaseManager | None = None,
+) -> Wh3ModRef | None:
+    mid = str(row.get("internal_id") or "").strip()
+    if not is_frozen_internal_uuid(mid):
+        database = db if db is not None else get_db()
+        mid = _internal_id_for_legacy_pk(str(row.get("mod_id") or ""), database)
+    if not is_frozen_internal_uuid(mid):
         return None
     enabled = True
     raw_enabled = row.get("enabled", True)
@@ -269,31 +379,43 @@ def list_deployed_wh3_mods(
     database = db if db is not None else get_db()
     deployed_ids: list[str] = []
     seen: set[str] = set()
+    pk_by_iid: dict[str, str] = {}
     for raw in list(database.list_deployed_mod_ids_for_app(WH3_APP_ID)) + list(
         database.list_deployed_mod_ids_for_library_game(
             WH3_APP_ID, library_root=library_root
         )
     ):
-        mid = canon_internal_id(raw)
-        if not mid or mid in seen:
+        handle = str(raw or "").strip()
+        if not handle:
             continue
-        seen.add(mid)
-        deployed_ids.append(mid)
+        if is_frozen_internal_uuid(handle):
+            iid = handle
+        elif handle.isdigit():
+            iid = _internal_id_for_legacy_pk(str(int(handle)), database)
+            if iid:
+                pk_by_iid[iid] = str(int(handle))
+        else:
+            continue
+        if not iid or iid in seen:
+            continue
+        seen.add(iid)
+        deployed_ids.append(iid)
     if not deployed_ids:
         return []
     by_id: dict[str, Wh3ModRef] = {}
     for row in database.list_mod_list_items(app_id=WH3_APP_ID):
-        ref = _row_to_ref(row)
+        ref = _row_to_ref(row, database)
         if ref is not None:
             by_id[ref.internal_id] = ref
     missing = [mid for mid in deployed_ids if mid not in by_id]
     for mid in missing:
-        rows = database.list_mod_list_items(mod_id=mid)
+        handle = pk_by_iid.get(mid) or mid
+        rows = database.list_mod_list_items(mod_id=handle)
         if not rows:
             continue
-        ref = _row_to_ref(rows[0])
+        ref = _row_to_ref(rows[0], database)
         if ref is not None:
-            by_id[mid] = ref
+            by_id[ref.internal_id] = ref
     out: list[Wh3ModRef] = []
     for mid in deployed_ids:
         ref = by_id.get(mid)
@@ -314,7 +436,7 @@ def resolved_load_order(
         m.internal_id
         for m in list_deployed_wh3_mods(db, library_root=library_root)
     ]
-    return merge_deployed_order(load_saved_order(), deployed)
+    return merge_deployed_order(load_saved_order(db), deployed)
 
 
 def persist_load_order(
@@ -323,11 +445,12 @@ def persist_load_order(
     *,
     library_root: str | Path | None = None,
 ) -> list[str]:
+    tokens, _changed = canonicalize_wh3_order_tokens(internal_ids, db)
     deployed = [
         m.internal_id
         for m in list_deployed_wh3_mods(db, library_root=library_root)
     ]
-    merged = merge_deployed_order(internal_ids, deployed)
+    merged = merge_deployed_order(tokens, deployed)
     save_saved_order(merged)
     return merged
 
@@ -340,7 +463,30 @@ def apply_card_drop(
     library_root: str | Path | None = None,
 ) -> list[str]:
     current = resolved_load_order(db, library_root=library_root)
-    next_order = move_in_order(current, source_id, target_id)
+    source_ids, _ = canonicalize_wh3_order_tokens([source_id], db)
+    target_ids, _ = canonicalize_wh3_order_tokens([target_id], db)
+    if not source_ids or not target_ids:
+        return current
+    next_order = move_in_order(current, source_ids[0], target_ids[0])
+    save_saved_order(next_order)
+    return next_order
+
+
+def apply_order_move(
+    token: str,
+    action: str,
+    db: DatabaseManager | None = None,
+    *,
+    library_root: str | Path | None = None,
+) -> list[str]:
+    """Top / Up / Down / Bottom. Token is Frozen ``internal_id``."""
+    from services.paradox_activation import _move_order_token
+
+    current = resolved_load_order(db, library_root=library_root)
+    tokens, _ = canonicalize_wh3_order_tokens([token], db)
+    if not tokens:
+        return current
+    next_order = _move_order_token(current, tokens[0], action)
     save_saved_order(next_order)
     return next_order
 
@@ -352,14 +498,14 @@ def set_wh3_enabled(
 ) -> bool:
     """Toggle ``mods.enabled`` only — never deploys or copies files."""
     database = db if db is not None else get_db()
-    mid = canon_internal_id(internal_id)
-    if not mid or not mid.isdigit():
+    pk = _dal_pk(internal_id, database)
+    if not pk:
         return False
     if enabled:
-        database.enable_mod(mid)
+        database.enable_mod(pk)
     else:
-        database.disable_mod(mid)
-    return bool(database.is_mod_enabled(mid)) is bool(enabled)
+        database.disable_mod(pk)
+    return bool(database.is_mod_enabled(pk)) is bool(enabled)
 
 
 def load_wh3_game_paths(db: DatabaseManager | None = None) -> Wh3GamePaths:
@@ -519,10 +665,14 @@ def _filter_wh3_selected_archives(
         return list(discovered)
     database = db if db is not None else get_db()
     try:
-        from services.mod_library_cache import dal_mod_pk
+        from services.deploy_identity import is_frozen_internal_uuid
 
-        pk = dal_mod_pk(ref.internal_id)
-        if not pk:
+        token = str(ref.internal_id or "").strip()
+        pk = ""
+        if is_frozen_internal_uuid(token):
+            found = database.find_mod_by_internal_id(token)
+            pk = str(found or "").strip()
+        if not str(pk).isdigit():
             return list(discovered)
         bundle = database.get_mod_files(pk)
     except Exception:  # noqa: BLE001
@@ -761,7 +911,7 @@ def collect_enabled_pack_lines(
         ref.internal_id: ref
         for ref in list_deployed_wh3_mods(database, library_root=library_root)
     }
-    order = merge_deployed_order(load_saved_order(), list(by_id.keys()))
+    order = merge_deployed_order(load_saved_order(database), list(by_id.keys()))
     lines: list[Wh3PackLine] = []
     for mid in order:
         ref = by_id.get(mid)
@@ -786,10 +936,10 @@ def complete_wh3_deploy_activation(
 ) -> None:
     """After deploy_status=deployed: enable, append load order, rewrite used_mods.txt."""
     database = db if db is not None else get_db()
-    mid = canon_internal_id(internal_id)
-    if mid.isdigit():
-        database.enable_mod(mid)
-    persist_load_order(load_saved_order(), db=database, library_root=library_root)
+    pk = _dal_pk(internal_id, database)
+    if pk:
+        database.enable_mod(pk)
+    persist_load_order(load_saved_order(database), db=database, library_root=library_root)
     sync_used_mods_txt(database, library_root=library_root)
 
 
@@ -802,7 +952,7 @@ def complete_wh3_undeploy_activation(
     """After deploy_status is cleared: drop load-order id and rewrite used_mods.txt."""
     del internal_id
     database = db if db is not None else get_db()
-    persist_load_order(load_saved_order(), db=database, library_root=library_root)
+    persist_load_order(load_saved_order(database), db=database, library_root=library_root)
     sync_used_mods_txt(database, library_root=library_root)
 
 

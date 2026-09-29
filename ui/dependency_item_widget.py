@@ -27,6 +27,7 @@ from core.db_manager import (
     DEPLOY_STATUS_NOT_DEPLOYED,
 )
 from ui.styles import ACCENT_ERROR, ACCENT_SUCCESS, TEXT_MUTED
+from ui.window_lifecycle import detach_owned_widget
 
 DEPENDENCY_ITEM_HEIGHT_PX = 52
 _DEPLOY_DOT_SIZE_PX = 8
@@ -242,8 +243,7 @@ class DependencyListHost(QWidget):
             taken = self._layout.takeAt(0)
             widget = taken.widget() if taken is not None else None
             if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+                detach_owned_widget(widget)
         self._rows = list(items)
         for row in self._rows:
             item = DependencyItem(row, parent=self)

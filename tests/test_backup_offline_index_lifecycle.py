@@ -19,6 +19,7 @@ from services.metadata_backup import (
     BACKUP_OFFLINE_INDEX,
     backup_root,
     mark_missing,
+    readable_backup_root,
     snapshot_from_mod_folder,
 )
 from services.metadata_backup_sync import (
@@ -123,7 +124,9 @@ def _write_steam_legacy_offline(folder: Path, html: str = "<html>steam-legacy</h
 
 
 def _backup_index(pk: str) -> Path:
-    return backup_root(pk) / BACKUP_OFFLINE_DIR / BACKUP_OFFLINE_INDEX
+    dest = readable_backup_root(pk)
+    assert dest is not None
+    return dest / BACKUP_OFFLINE_DIR / BACKUP_OFFLINE_INDEX
 
 
 def test_canonical_offline_first_backup_writes_index(
@@ -239,13 +242,29 @@ def test_no_live_offline_does_not_invent_backup_page(
     folder, pk = _seed(db, tmp_path, workshop_id="981008", title="NoPage")
     sync_after_metadata_change(pk, folder, "import", wait=True)
     assert not _backup_index(pk).exists()
-    leftover = backup_root(pk) / BACKUP_OFFLINE_DIR
-    leftover.mkdir(parents=True, exist_ok=True)
-    (leftover / BACKUP_OFFLINE_INDEX).write_text("<html>stale</html>", encoding="utf-8")
     snap = snapshot_from_mod_folder(folder, owner_mod_id=pk)
     assert snap is not None
     assert snap.offline_path == ""
     assert not _backup_index(pk).exists()
+
+
+def test_live_offline_missing_preserves_existing_backup_page(
+    db: DatabaseManager, data_root: Path, tmp_path: Path
+) -> None:
+    folder, pk = _seed(db, tmp_path, workshop_id="981018", title="KeepStale")
+    sync_after_metadata_change(pk, folder, "import", wait=True)
+    dest = readable_backup_root(pk)
+    assert dest is not None
+    leftover = dest / BACKUP_OFFLINE_DIR
+    leftover.mkdir(parents=True, exist_ok=True)
+    (leftover / BACKUP_OFFLINE_INDEX).write_text("<html>stale</html>", encoding="utf-8")
+    snap = snapshot_from_mod_folder(folder, owner_mod_id=pk)
+    assert snap is not None
+    assert _backup_index(pk).is_file()
+    assert "stale" in _backup_index(pk).read_text(encoding="utf-8")
+    live = folder / INFO_DIR_NAME / "offline" / BACKUP_OFFLINE_INDEX
+    assert live.is_file()
+    assert "stale" in live.read_text(encoding="utf-8")
 
 
 def test_steam_legacy_info_index_is_copied_to_backup_offline(

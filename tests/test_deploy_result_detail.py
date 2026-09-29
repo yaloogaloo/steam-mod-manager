@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 from tests.helpers.deploy import patch_apply_then_unlink_targets
 
 from core.db_manager import (
@@ -84,7 +84,7 @@ def test_case1_single_file_deploy_records_detail(
     _install, mods = _setup_game(db, tmp_path)
     _mod_dir, pk = _make_mod(library, db, mod_id="93001", files={"only.txt": "hello"})
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True
     assert out["validated"] == 1
     files = out.get("files") or []
@@ -111,7 +111,7 @@ def test_case2_multi_file_deploy_records_all(
         files={"a.txt": "A", "sub/b.txt": "BB"},
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True
     assert out["validated"] == 2
     files = out.get("files") or []
@@ -133,7 +133,7 @@ def test_case3_validation_failure_has_no_result_files(
     mod_dir, pk = _make_mod(library, db, mod_id="93003")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
@@ -162,7 +162,7 @@ def test_case4_backup_restore_unaffected_by_result_detail(
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    out = deployer.deploy_mod(pk)
+    out = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True
     assert len(out.get("files") or []) == 1
     assert prior.read_text(encoding="utf-8") == "NEW"
@@ -170,7 +170,7 @@ def test_case4_backup_restore_unaffected_by_result_detail(
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
 
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen_from_pk(db, pk))
     assert und["success"] is True
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"
     info2 = db.get_mod_deploy_info(pk)

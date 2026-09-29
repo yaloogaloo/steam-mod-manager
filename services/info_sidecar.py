@@ -692,11 +692,41 @@ def apply_sidecar_to_db(
     except Exception as exc:  # noqa: BLE001
         logger.warning("apply sidecar identity persist failed: %s", exc)
 
+    cover_override = False
+    try:
+        from services.metadata_ownership import FIELD_COVER, user_has_override
+
+        cover_override = user_has_override(
+            database.get_user_override_fields(mid), FIELD_COVER
+        )
+    except Exception:  # noqa: BLE001
+        cover_override = False
+
+    foreign_cover = False
     if sidecar.cover_path:
         try:
-            database.update_mod_cover_path(mid, sidecar.cover_path)
+            from services.metadata_ownership import cover_reference_is_foreign
+
+            foreign_cover = cover_reference_is_foreign(root, sidecar.cover_path)
         except Exception:  # noqa: BLE001
-            pass
+            foreign_cover = False
+    if sidecar.cover_path:
+        if cover_override:
+            logger.info(
+                "apply sidecar skipped cover_path: user cover override mod_id=%s",
+                mid,
+            )
+        elif foreign_cover:
+            logger.info(
+                "apply sidecar rejected foreign cover_path mod_id=%s ref=%s",
+                mid,
+                sidecar.cover_path,
+            )
+        else:
+            try:
+                database.update_mod_cover_path(mid, sidecar.cover_path)
+            except Exception:  # noqa: BLE001
+                pass
 
     # File roles: rescan archives and/or remap existing bundle.
     bundle = database.get_mod_files(mid)
@@ -747,7 +777,7 @@ def apply_sidecar_to_db(
                     meta.title = sidecar.display_name
                 if sidecar.description:
                     meta.description = sidecar.description
-                if sidecar.cover_path:
+                if sidecar.cover_path and not cover_override and not foreign_cover:
                     meta.cover_path = sidecar.cover_path
                 mgr.save_metadata(meta, root)
         except Exception:  # noqa: BLE001

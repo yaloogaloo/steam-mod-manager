@@ -8,7 +8,11 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from services.deploy import ModDeployer
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 from services.deploy_rules import (
     DEPLOY_TYPE_DUCKOV,
     DEPLOY_TYPE_PALWORLD_PAK,
@@ -33,11 +37,11 @@ def _register(
     title: str,
     app_id: int,
     game: str,
-) -> None:
+) -> tuple[str, str]:
     created = create_steam_test_mod(
         db, external_id=mid, title=title, app_id=app_id, game_name=game
     )
-    prove_managed_folder(
+    pk = prove_managed_folder(
         db,
         mod_dir,
         handle=created.mod_id,
@@ -45,6 +49,7 @@ def _register(
         app_id=app_id,
         game_name=game,
     )
+    return pk, frozen_deploy_id(created)
 
 
 def test_palworld_18mb_fixture_pipeline(tmp_path: Path, db: DatabaseManager) -> None:
@@ -66,11 +71,11 @@ def test_palworld_18mb_fixture_pipeline(tmp_path: Path, db: DatabaseManager) -> 
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_PALWORLD_PAK,
     )
-    _register(
+    _pk, iid = _register(
         db, mod, mid="3780000001", title="Big", app_id=1623730, game="Palworld"
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("3780000001")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert out.get("success") is True
     assert out.get("status") == "SUCCESS"
     assert out.get("copied_files", 0) >= 1
@@ -96,11 +101,11 @@ def test_duckov_info_ini_regression(tmp_path: Path, db: DatabaseManager) -> None
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_DUCKOV,
     )
-    _register(
+    _pk, iid = _register(
         db, mod, mid="3167000001", title="Good", app_id=3167020, game="Duckov"
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("3167000001")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert out.get("success") is True
     dest = mods / "GoodMod"
     assert (dest / "info.ini").is_file()
@@ -123,10 +128,10 @@ def test_stardew_nested_manifest(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_STARDEW_VALLEY,
     )
-    _register(
+    _pk, iid = _register(
         db, mod, mid="4131500001", title="Nested", app_id=413150, game="StardewValley"
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod("4131500001")
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert out.get("success") is True
     assert (mods / "CoolMod" / "manifest.json").is_file()

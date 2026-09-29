@@ -98,6 +98,9 @@ def install_cover_file(candidate: Path | str, managed_path: str | Path) -> Path 
         return None
 
     dest_root = Path(managed_path)
+    from services.mutation_context import assert_mutation_allowed
+
+    assert_mutation_allowed(dest_root)
     info = dest_root / INFO_DIR_NAME
     info.mkdir(parents=True, exist_ok=True)
     ext = src.suffix.lower() or ".png"
@@ -167,12 +170,14 @@ def apply_cover_to_mod(
             except Exception:  # noqa: BLE001
                 pass
     if sync_backup:
-        try:
-            from services.metadata_backup_sync import sync_after_metadata_change
+        from services.metadata_backup_sync import (
+            BackupSyncError,
+            sync_after_metadata_change,
+        )
 
-            sync_after_metadata_change(mod_id, dest, "cover_change")
-        except Exception:  # noqa: BLE001
-            pass
+        ok = sync_after_metadata_change(mod_id, dest, "cover_change")
+        if not ok:
+            raise BackupSyncError("Backup 封面同步失败")
     return rel
 
 

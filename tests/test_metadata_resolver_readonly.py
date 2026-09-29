@@ -11,7 +11,7 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, persist_unified_metadata_dict
-from services.metadata_backup import backup_root, load_backup
+from services.metadata_backup import backup_root, load_backup, readable_backup_root
 from services.metadata_backup_sync import drain_backup_queue, sync_after_metadata_change
 from services.mod_metadata_resolver import resolve_mod_metadata
 from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
@@ -201,7 +201,7 @@ def test_case4_repeated_sync_is_idempotent(
     assert not list(root.glob("cover_*.jpg"))
 
 
-def test_case5_deleting_info_cover_removes_backup_cover(
+def test_case5_deleting_info_cover_preserves_and_restores_backup_cover(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
@@ -209,7 +209,11 @@ def test_case5_deleting_info_cover_removes_backup_cover(
         db, library, game="G", title="M5", workshop="940005", meta_title="Cover", with_cover=True
     )
 
-    assert list(backup_root(pk).glob("cover.*"))
+    dest = readable_backup_root(pk)
+    assert dest is not None
+    backup_covers = list(dest.glob("cover.*"))
+    assert backup_covers
+    original = backup_covers[0].read_bytes()
     cover = folder / INFO_DIR_NAME / "cover.jpg"
     cover.unlink()
     data = json.loads(
@@ -218,7 +222,14 @@ def test_case5_deleting_info_cover_removes_backup_cover(
     data.pop("cover_path", None)
     persist_unified_metadata_dict(folder, data, sync_backup=False)
     sync_after_metadata_change(pk, folder, "cover_change", wait=True)
-    assert list(backup_root(pk).glob("cover.*")) == []
+    dest = readable_backup_root(pk)
+    assert dest is not None
+    kept = list(dest.glob("cover.*"))
+    assert kept
+    assert kept[0].read_bytes() == original
+    restored = folder / INFO_DIR_NAME / "cover.jpg"
+    assert restored.is_file()
+    assert restored.read_bytes() == original
 
 
 def test_case6_deleting_mod_folder_keeps_backup(

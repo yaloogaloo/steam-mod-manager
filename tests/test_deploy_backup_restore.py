@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 from tests.helpers.deploy import patch_apply_then_unlink_targets
@@ -23,7 +24,12 @@ from services.deploy_rules.manifest import (
     ManifestFileEntry,
 )
 from services.file_ops import INFO_DIR_NAME
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_from_pk,
+    prove_managed_folder,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -75,7 +81,7 @@ def test_case1_no_prior_file_undeploy_deletes(tmp_path: Path, db: DatabaseManage
     source, pk = _add_mod(library, db, mid="92001", title="FreshMod")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
 
     target = mods_root / "FreshMod" / "a.txt"
     assert target.read_text(encoding="utf-8") == "MOD-A"
@@ -83,7 +89,7 @@ def test_case1_no_prior_file_undeploy_deletes(tmp_path: Path, db: DatabaseManage
     assert manifest is not None
     assert all(f.backup is None for f in manifest.files)
 
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen_from_pk(db, pk))
     assert und["success"] is True
     assert not target.exists()
     assert not (source / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
@@ -100,25 +106,25 @@ def test_case2_restore_game_original(tmp_path: Path, db: DatabaseManager) -> Non
     prior.write_text("GAME-ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     assert prior.read_text(encoding="utf-8") == "MOD-A"
 
     manifest = load_manifest(source)
     assert manifest is not None
     backed = [f for f in manifest.files if f.backup is not None]
     assert len(backed) == 1
-    bak = BackupManager(source, internal_id=pk).resolve_backup_file(
+    bak = BackupManager(source, internal_id=frozen_from_pk(db, pk)).resolve_backup_file(
         backed[0].backup  # type: ignore[union-attr]
     )
     assert bak.is_file()
     assert not (source / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
     assert "deploy_backup" in bak.as_posix()
 
-    und = deployer.undeploy_mod(pk)
+    und = deployer.undeploy_mod(frozen_from_pk(db, pk))
     assert und["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME-ORIGINAL"
     assert not (source / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
-    assert not BackupManager(source, internal_id=pk).listed_backup_files()
+    assert not BackupManager(source, internal_id=frozen_from_pk(db, pk)).listed_backup_files()
 
 
 def test_case3_multi_file_restore(tmp_path: Path, db: DatabaseManager) -> None:
@@ -138,7 +144,7 @@ def test_case3_multi_file_restore(tmp_path: Path, db: DatabaseManager) -> None:
     (mods_root / "Multi" / "sub" / "b.txt").write_text("GB", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod(pk)["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     assert (mods_root / "Multi" / "a.txt").read_text(encoding="utf-8") == "MA"
     assert (mods_root / "Multi" / "sub" / "b.txt").read_text(encoding="utf-8") == "MB"
 
@@ -146,7 +152,7 @@ def test_case3_multi_file_restore(tmp_path: Path, db: DatabaseManager) -> None:
     assert manifest is not None
     assert sum(1 for f in manifest.files if f.backup is not None) == 2
 
-    assert deployer.undeploy_mod(pk)["success"] is True
+    assert deployer.undeploy_mod(frozen_from_pk(db, pk))["success"] is True
     assert (mods_root / "Multi" / "a.txt").read_text(encoding="utf-8") == "GA"
     assert (mods_root / "Multi" / "sub" / "b.txt").read_text(encoding="utf-8") == "GB"
 
@@ -167,7 +173,7 @@ def test_case4_deploy_failure_auto_restore(tmp_path: Path, db: DatabaseManager) 
         raise_after=RuntimeError("simulated deploy failure"),
     ):
         with pytest.raises(RuntimeError, match="simulated deploy failure"):
-            deployer.deploy_mod(pk)
+            deployer.deploy_mod(frozen_from_pk(db, pk))
 
     assert prior.read_text(encoding="utf-8") == "KEEP-ME"
 
@@ -221,7 +227,7 @@ def test_case5_legacy_manifest_without_backup(tmp_path: Path, db: DatabaseManage
     assert loaded is not None
     assert loaded.files[0].backup is None
 
-    und = ModDeployer(library_root=library, db=db).undeploy_mod(pk)
+    und = ModDeployer(library_root=library, db=db).undeploy_mod(frozen_from_pk(db, pk))
     assert und["success"] is True
     assert not target.exists()
 
@@ -298,7 +304,9 @@ def test_backup_manager_unique_names(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True)
     target.write_text("v1", encoding="utf-8")
 
-    mgr = BackupManager(managed)
+    frozen = str(uuid.uuid4())
+    write_info_sidecar(managed, internal_id=frozen, title="modfolder")
+    mgr = BackupManager(managed, internal_id=frozen)
     prep1 = mgr.prepare_overwrite([target])
     info1 = prep1.by_target[str(target.resolve())]
     assert info1 is not None

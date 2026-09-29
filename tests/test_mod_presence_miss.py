@@ -130,11 +130,11 @@ def test_missing_dir_with_backup_is_miss(
         app_id=4242,
         title="KeepMe",
     )
-    assert (backup_root(pk) / "metadata.json").is_file()
+    assert (backup_root(frozen) / "metadata.json").is_file()
     _make_miss(folder, pk)
     assert entity_state(pk, db=db) == ENTITY_MISS
     rows = db.list_mod_list_items()
-    assert any(str(r.get("internal_id")) == pk for r in rows)
+    assert any(str(r.get("internal_id")) == frozen for r in rows)
     resolved = resolve_mod_metadata(pk, managed_path=str(folder))
     assert resolved is not None
     assert resolved.folder_present is False
@@ -148,7 +148,7 @@ def test_missing_dir_without_backup_is_not_backup_managed_miss(
     db: DatabaseManager, data_root: Path, tmp_path: Path
 ) -> None:
     library = tmp_path / "mod"
-    folder, pk, _frozen = _create(
+    folder, pk, frozen = _create(
         db,
         library=library,
         game="GameA",
@@ -157,11 +157,11 @@ def test_missing_dir_without_backup_is_not_backup_managed_miss(
         app_id=4242,
         title="Ghost",
     )
-    shutil.rmtree(backup_root(pk), ignore_errors=True)
+    shutil.rmtree(backup_root(frozen), ignore_errors=True)
     _make_miss(folder, pk)
     assert entity_state(pk, db=db) == ENTITY_ABSENT
     assert entity_state(pk, db=db) != ENTITY_MISS
-    assert any(str(r.get("internal_id")) == pk for r in db.list_mod_list_items())
+    assert any(str(r.get("internal_id")) == frozen for r in db.list_mod_list_items())
 
 
 def test_miss_cover_and_offline_from_backup(
@@ -237,7 +237,7 @@ def test_miss_edit_persists_backup_without_creating_folder(
     assert persist_entity_metadata_to_backup(pk, db=db) is True
     assert not folder.exists()
     assert not (folder / INFO_DIR_NAME).exists()
-    meta = json.loads((backup_root(pk) / "metadata.json").read_text(encoding="utf-8"))
+    meta = json.loads((backup_root(frozen) / "metadata.json").read_text(encoding="utf-8"))
     assert meta.get("display_name") == "AfterMISS"
     from services.mod_identity import read_entity_key
 
@@ -337,7 +337,7 @@ def test_action_gating_local_source_miss_disables_deploy(
     assert proj.open_directory is False
     assert proj.edit_metadata is True
     assert proj.filesystem_actions is False
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(_frozen)
     assert out.get("success") is False
 
 
@@ -380,7 +380,7 @@ def test_action_gating_workshop_available_allows_deploy(
     proj = presence_projection(pk, db=db)
     assert proj.open_directory is False
     assert proj.edit_metadata is True
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(_frozen)
     assert out.get("success") is True, out
     assert not folder.exists()
 
@@ -418,7 +418,7 @@ def test_action_gating_workshop_missing_blocks_deploy(
     assert cap.source_kind == SOURCE_WORKSHOP
     assert cap.source_available is False
     assert cap.allowed is False
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(_frozen)
     assert out.get("success") is False
 
 
@@ -457,7 +457,7 @@ def test_wh3_miss_workshop_available_allows_deploy(
     _make_miss(folder, pk)
     cap = deployment_capability(pk, db=db)
     assert cap.allowed is True
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(_frozen)
     assert out.get("success") is True, out
 
 
@@ -555,7 +555,7 @@ def test_recovery_workspace_mismatch_remains_miss(
     assert result.success is False
     assert result.reason == "workspace_mismatch"
     assert entity_state(pk, db=db) == ENTITY_MISS
-    bak = json.loads((backup_root(pk) / "metadata.json").read_text(encoding="utf-8"))
+    bak = json.loads((backup_root(frozen) / "metadata.json").read_text(encoding="utf-8"))
     assert bak.get("workspace_id") != "99999" or bak.get("internal_id") == frozen
     assert str(db.get_mod_backup_row(pk).get("internal_id") or "") == frozen
 
@@ -596,7 +596,7 @@ def test_latest_information_wins_miss_edit_over_stale_info(
     display = db.get_mod_display_info(pk)
     assert display is not None
     assert "MissEdit" in (display.user_display_name or display.display_name)
-    bak = json.loads((backup_root(pk) / "metadata.json").read_text(encoding="utf-8"))
+    bak = json.loads((backup_root(frozen) / "metadata.json").read_text(encoding="utf-8"))
     assert bak.get("display_name") == "MissEdit"
     assert str(db.get_mod_backup_row(pk).get("internal_id") or "") == frozen
     assert entity_state(pk, db=db) == ENTITY_LIVE
@@ -639,7 +639,7 @@ def test_latest_wins_current_entity_newer_than_backup(
     assert result.success is True
     display = db.get_mod_display_info(pk)
     assert "EntityNewest" in (display.user_display_name or display.display_name)
-    bak = json.loads((backup_root(pk) / "metadata.json").read_text(encoding="utf-8"))
+    bak = json.loads((backup_root(frozen) / "metadata.json").read_text(encoding="utf-8"))
     assert bak.get("display_name") == "EntityNewest"
 
 

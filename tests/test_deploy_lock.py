@@ -13,6 +13,7 @@ from services.deploy_lock import deploy_operation_lock
 from tests.helpers.identity import (
     bind_managed_path,
     create_steam_test_mod,
+    frozen_deploy_id,
     write_info_sidecar,
 )
 
@@ -26,16 +27,17 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed_mod(db: DatabaseManager, library: Path, mod_id: str = "9001") -> Path:
+def _seed_mod(db: DatabaseManager, library: Path, mod_id: str = "9001") -> tuple[Path, str]:
     folder = library / "Game" / mod_id
     folder.mkdir(parents=True)
     (folder / "data.txt").write_text("x", encoding="utf-8")
     created = create_steam_test_mod(
         db, external_id=mod_id, title="LockTest", app_id=1, game_name="Game"
     )
+    iid = frozen_deploy_id(created)
     write_info_sidecar(
         folder,
-        internal_id=str(created.mod_id),
+        internal_id=iid,
         title="LockTest",
         external_id=mod_id,
         workspace_id=str(created.workspace_id or mod_id),
@@ -43,7 +45,7 @@ def _seed_mod(db: DatabaseManager, library: Path, mod_id: str = "9001") -> Path:
         game_name="Game",
     )
     bind_managed_path(db, created.mod_id, folder, title="LockTest", game_name="Game")
-    return folder
+    return folder, iid
 
 
 def test_deploy_operation_lock_rejects_concurrent() -> None:
@@ -79,7 +81,7 @@ def test_deploy_mod_rejects_second_inflight(
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
     (tmp_path / "mods").mkdir(parents=True)
-    _seed_mod(db, library)
+    _folder, iid = _seed_mod(db, library)
 
     gate = threading.Event()
     proceed = threading.Event()
@@ -110,13 +112,13 @@ def test_deploy_mod_rejects_second_inflight(
     results: list[dict] = []
 
     def _first() -> None:
-        results.append(deployer.deploy_mod("9001"))
+        results.append(deployer.deploy_mod(iid))
 
     t = threading.Thread(target=_first)
     t.start()
     assert gate.wait(timeout=3)
 
-    second = deployer.deploy_mod("9001")
+    second = deployer.deploy_mod(iid)
     proceed.set()
     t.join(timeout=3)
 

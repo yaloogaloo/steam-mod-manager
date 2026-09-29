@@ -17,7 +17,13 @@ from services.deploy_rules import DEPLOY_TYPE_FOLDER_COPY, DEPLOY_TYPE_PAK_MOD_P
 from services.importers.archive import ArchiveImporter
 from services.importers.importer_base import ImportContext
 from ui.edit_mod_dialog import EditModDialog
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    frozen_deploy_id,
+    frozen_from_pk,
+    write_info_sidecar,
+)
 
 BG3_APP_ID = 1086940
 
@@ -78,8 +84,13 @@ def test_bg3_zip_pak_deploys_flat_to_mod_path(
         context=ImportContext(game_id=BG3_APP_ID, game_name="Baldur's Gate 3"),
     )
     assert result.success, result.error
+    from services.deploy_identity import is_frozen_internal_uuid
 
-    deploy = ModDeployer(library_root=library, db=db).deploy_mod(result.mod_id)
+    token = str(result.mod_id or "").strip()
+    iid = token if is_frozen_internal_uuid(token) else frozen_from_pk(db, token)
+    assert is_frozen_internal_uuid(iid)
+
+    deploy = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert deploy["success"] is True, deploy
     assert deploy["deploy_type"] == DEPLOY_TYPE_PAK_MOD_PATH
     assert (mod_path / "MyCoolMod.pak").read_bytes() == b"PAKDATA"
@@ -104,9 +115,10 @@ def test_generic_game_without_pak_keeps_folder_copy(
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
     created = create_steam_test_mod(db, external_id="81001", title="PlainMod", app_id=100)
+    iid = frozen_deploy_id(created)
     write_info_sidecar(
         mod,
-        internal_id=str(created.mod_id),
+        internal_id=iid,
         title="PlainMod",
         external_id="81001",
         workspace_id=str(created.workspace_id or "81001"),
@@ -115,7 +127,7 @@ def test_generic_game_without_pak_keeps_folder_copy(
     )
     bind_managed_path(db, created.mod_id, mod, title="PlainMod", game_name="SomeGame")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("81001")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True
     assert result["deploy_type"] == DEPLOY_TYPE_FOLDER_COPY
     assert (mods_root / "PlainMod" / "a.txt").read_text(encoding="utf-8") == "A"
@@ -135,19 +147,21 @@ def test_custom_deploy_path_overrides_pak_mod_path(
     created = create_steam_test_mod(
         db, external_id="82001", title="CustomPak", app_id=BG3_APP_ID
     )
+    iid = frozen_deploy_id(created)
+    pk = str(created.mod_id)
     write_info_sidecar(
         managed,
-        internal_id=str(created.mod_id),
+        internal_id=iid,
         title="CustomPak",
         external_id="82001",
         workspace_id=str(created.workspace_id or "82001"),
         app_id=BG3_APP_ID,
         game_name="Baldur's Gate 3",
     )
-    bind_managed_path(db, created.mod_id, managed, title="CustomPak")
+    bind_managed_path(db, pk, managed, title="CustomPak")
 
     db.update_mod_user_metadata(
-        82001,
+        pk,
         {
             "display_name": "CustomPak",
             "custom_description": "",
@@ -162,7 +176,7 @@ def test_custom_deploy_path_overrides_pak_mod_path(
         mod_path=str(tmp_path / "unused_mod_path"),
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("82001")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (custom / "Override.pak").is_file()
     assert not (tmp_path / "unused_mod_path" / "Override.pak").exists()

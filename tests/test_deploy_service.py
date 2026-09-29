@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
@@ -67,10 +67,10 @@ def test_deploy_copies_files_and_updates_status(tmp_path: Path, db: DatabaseMana
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen_from_pk(db, pk))
 
     assert result["success"] is True
-    assert result["mod_id"] == pk
+    assert result["mod_id"] == frozen_from_pk(db, pk)
     assert result["copied_files"] == 2
     target = Path(result["target"])
     assert target == game_mods / "ModTest"
@@ -98,7 +98,7 @@ def test_deploy_ignores_info_dirs(tmp_path: Path, db: DatabaseManager) -> None:
     (legacy / "legacy.txt").write_text("nope", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen_from_pk(db, pk))
 
     assert result["success"] is True
     target = Path(result["target"])
@@ -116,7 +116,7 @@ def test_deploy_fails_without_mod_path_config(tmp_path: Path, db: DatabaseManage
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is False
     assert "部署目录" in result["error"] or "配置" in result["error"]
 
@@ -131,7 +131,7 @@ def test_deploy_fails_when_source_missing(tmp_path: Path, db: DatabaseManager) -
     pk = str(created.mod_id)
 
     deployer = ModDeployer(library_root=library, db=db)
-    result = deployer.deploy_mod(pk)
+    result = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is False
     assert "不存在" in result["error"]
 
@@ -149,13 +149,13 @@ def test_redeploy_preserves_unrelated_target_files(
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    first = deployer.deploy_mod(pk)
+    first = deployer.deploy_mod(frozen_from_pk(db, pk))
     assert first["success"] is True
 
     target = Path(first["target"])
     (target / "user_keep.txt").write_text("keep-me", encoding="utf-8")
 
-    result = deployer.redeploy_mod(pk)
+    result = deployer.redeploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is True
 
     assert (target / "user_keep.txt").read_text(encoding="utf-8") == "keep-me"

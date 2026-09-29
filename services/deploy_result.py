@@ -72,9 +72,8 @@ class DeployResult:
         if self.stage:
             out["stage"] = self.stage
         # Prefer applied_files when present; keep copied_files for legacy callers.
-        copied = self.copied_files or self.applied_files
-        if copied:
-            out["copied_files"] = copied
+        # Always emit the field so zero-copy activation (Paradox / WH3) is visible.
+        out["copied_files"] = int(self.copied_files or self.applied_files or 0)
         if self.copied_bytes:
             out["copied_bytes"] = self.copied_bytes
         if self.elapsed_ms:

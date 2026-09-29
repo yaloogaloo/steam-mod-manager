@@ -166,7 +166,17 @@ def _find_info_cover(info_dir: Path) -> Path | None:
     return None
 
 
+def _find_backup_cover(dest_dir: Path) -> Path | None:
+    if not dest_dir.is_dir():
+        return None
+    for candidate in sorted(dest_dir.glob(f"{BACKUP_COVER_BASENAME}.*")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _clear_backup_covers(dest_dir: Path) -> None:
+    """Explicit Backup cover delete only. Never call from snapshot/sync."""
     try:
         for old in dest_dir.glob(f"{BACKUP_COVER_BASENAME}.*"):
             if old.is_file():
@@ -177,14 +187,17 @@ def _clear_backup_covers(dest_dir: Path) -> None:
 
 def _copy_cover(src: Path | None, dest_dir: Path) -> str:
     """
-    Mirror cover into backup dir; return absolute path or ``""``.
+    Copy a Live cover into the backup dir; return absolute path or ``""``.
 
-    When *src* is missing, remove any existing backup cover (snapshot semantics).
-    Idempotent: skips copy when sha256 matches the canonical target.
+    Live missing does **not** delete Backup. Callers that need restore must
+    use :func:`_restore_live_cover_from_backup`. Idempotent when sha256 matches.
     """
     if src is None or not src.is_file():
-        _clear_backup_covers(dest_dir)
-        return ""
+        found = _find_backup_cover(dest_dir)
+        return str(found.resolve()) if found is not None else ""
+    from services.mutation_context import assert_mutation_allowed
+
+    assert_mutation_allowed(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     ext = src.suffix.lower() or ".jpg"
     dest = dest_dir / f"{BACKUP_COVER_BASENAME}{ext}"
@@ -216,11 +229,22 @@ def _copy_cover(src: Path | None, dest_dir: Path) -> str:
 
 
 def _clear_backup_offline(dest_offline: Path) -> None:
+    """Explicit Backup offline delete only. Never call from snapshot/sync."""
     try:
         if dest_offline.is_dir():
             shutil.rmtree(dest_offline)
     except OSError as exc:
         logger.warning("Failed to clear backup offline %s: %s", dest_offline, exc)
+
+
+def _existing_backup_offline_index(dest_offline: Path) -> str:
+    index = dest_offline / BACKUP_OFFLINE_INDEX
+    try:
+        if index.is_file():
+            return str(index.resolve())
+    except OSError:
+        return ""
+    return ""
 
 
 def _copy_offline_index(src_index: Path | None, dest_offline: Path) -> str:
@@ -229,13 +253,11 @@ def _copy_offline_index(src_index: Path | None, dest_offline: Path) -> str:
 
     Source is whatever OPEN already accepts: ``.info/offline/index.html`` first,
     then legacy Steam ``.info/index.html``. Never copytree ``.info`` or unused
-    ``assets/``. Missing live index clears backup offline so a later snapshot
-    cannot invent a page.
+    ``assets/``. Missing live index keeps Backup offline (protection copy).
     """
     index = src_index if src_index is not None and src_index.is_file() else None
     if index is None:
-        _clear_backup_offline(dest_offline)
-        return ""
+        return _existing_backup_offline_index(dest_offline)
     from services.offline.backup_closure import snapshot_offline_closure
 
     t_copy = time.perf_counter()
@@ -259,20 +281,120 @@ def _copy_offline_index(src_index: Path | None, dest_offline: Path) -> str:
     return copied
 
 
+def _restore_live_cover_from_backup(live_root: Path, backup_dir: Path) -> str:
+    """Copy Backup cover into Live ``.info/`` only when Live cover is missing."""
+    existing = _find_info_cover(live_root / INFO_DIR_NAME)
+    if existing is not None:
+        return str(existing.resolve())
+    bak = _find_backup_cover(backup_dir)
+    if bak is None:
+        return ""
+    info = live_root / INFO_DIR_NAME
+    try:
+        info.mkdir(parents=True, exist_ok=True)
+        target = info / bak.name
+        shutil.copy2(bak, target)
+    except OSError as exc:
+        logger.warning(
+            "Failed to restore live cover from backup %s: %s", bak, exc
+        )
+        return str(bak.resolve())
+    return str(bak.resolve())
+
+
+def _restore_live_offline_from_backup(live_root: Path, backup_dir: Path) -> str:
+    """Copy Backup offline index into Live ``.info/offline/`` only when Live is missing."""
+    live_page = resolve_offline_page(live_root)
+    if live_page is not None:
+        return str(live_page.resolve())
+    bak = backup_dir / BACKUP_OFFLINE_DIR / BACKUP_OFFLINE_INDEX
+    if not bak.is_file():
+        return ""
+    dest_live = live_root / INFO_DIR_NAME / "offline"
+    try:
+        dest_live.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(bak, dest_live / BACKUP_OFFLINE_INDEX)
+        manifest = bak.parent / "manifest.json"
+        if manifest.is_file():
+            shutil.copy2(manifest, dest_live / "manifest.json")
+    except OSError as exc:
+        logger.warning(
+            "Failed to restore live offline from backup %s: %s", bak, exc
+        )
+        return str(bak.resolve())
+    return str(bak.resolve())
+
+
+def restore_cover_from_backup(
+    managed_path: str | Path,
+    *,
+    owner_mod_id: str | int | None = None,
+) -> str:
+    """Restore Live cover from Backup when Live cover is missing. Never overwrite Live."""
+    root = Path(managed_path)
+    if not root.is_dir():
+        return ""
+    data = read_info_metadata_dict(root) or {}
+    frozen = prove_backup_storage_key(owner_mod_id, managed_path=root, info=data)
+    dest = readable_backup_root(
+        frozen if is_frozen_backup_uuid(frozen) else None,
+        mod_pk=str(owner_mod_id or "").strip() or None,
+    )
+    if dest is None:
+        return ""
+    return _restore_live_cover_from_backup(root, dest)
+
+
+def restore_offline_from_backup(
+    managed_path: str | Path,
+    *,
+    owner_mod_id: str | int | None = None,
+) -> str:
+    """Restore Live offline page from Backup when Live page is missing. Never overwrite Live."""
+    root = Path(managed_path)
+    if not root.is_dir():
+        return ""
+    data = read_info_metadata_dict(root) or {}
+    frozen = prove_backup_storage_key(owner_mod_id, managed_path=root, info=data)
+    dest = readable_backup_root(
+        frozen if is_frozen_backup_uuid(frozen) else None,
+        mod_pk=str(owner_mod_id or "").strip() or None,
+    )
+    if dest is None:
+        return ""
+    return _restore_live_offline_from_backup(root, dest)
+
+
+def delete_backup_cover(mod_id: int | str) -> bool:
+    """Explicit Backup cover delete. Snapshot/reconcile must never call this."""
+    dest = readable_backup_root(mod_id)
+    if dest is None or not dest.is_dir():
+        return False
+    _clear_backup_covers(dest)
+    return True
+
+
+def delete_backup_offline(mod_id: int | str) -> bool:
+    """Explicit Backup offline delete. Snapshot/reconcile must never call this."""
+    dest = readable_backup_root(mod_id)
+    if dest is None or not dest.is_dir():
+        return False
+    _clear_backup_offline(dest / BACKUP_OFFLINE_DIR)
+    return True
+
+
 def snapshot_from_mod_folder(
     mod_path: str | Path,
     *,
     owner_mod_id: str | int | None = None,
 ) -> BackupSnapshot | None:
     """
-    Read ``.info/metadata.json`` and mirror cover / a usable offline snapshot
-    into ``data/mod_backup/``. Discovers the same files OPEN uses
-    (``.info/offline/index.html``, then legacy ``.info/index.html``) and stores
-    ``offline/index.html`` plus the local dependency closure. Never copytree
-    ``.info`` or unused ``assets/``.
+    Protective ``.info`` → Backup sync for metadata / cover / offline.
 
-    Never writes back to the Mod folder. Missing ``.info`` assets delete matching
-    backup assets (folder-absent is handled by callers — not this function).
+    Live asset present → Backup follows Live (replace with the current file).
+    Live asset missing → Backup is kept and copied back to Live when possible.
+    Never deletes Backup cover/offline because Live is missing.
+    Entire Live folder missing is handled by callers (Backup remains).
 
     ``owner_mod_id`` is the Internal Database ID (caller-proven). When omitted,
     ownership is resolved from ``.info/internal_id`` only — never from
@@ -355,8 +477,31 @@ def snapshot_from_mod_folder(
         add_scan_ms((time.perf_counter() - t_assets) * 1000.0)
     except Exception:  # noqa: BLE001
         pass
-    cover_abs = _copy_cover(cover_src, dest)
-    offline_abs = _copy_offline_index(offline_src, dest / BACKUP_OFFLINE_DIR)
+    if cover_src is not None:
+        cover_abs = _copy_cover(cover_src, dest)
+        if not cover_abs:
+            logger.warning(
+                "backup cover sync failed (live cover present) path=%s", root
+            )
+            return None
+    else:
+        cover_abs = _restore_live_cover_from_backup(root, dest)
+        if not cover_abs:
+            found = _find_backup_cover(dest)
+            cover_abs = str(found.resolve()) if found is not None else ""
+
+    dest_offline = dest / BACKUP_OFFLINE_DIR
+    if offline_src is not None:
+        offline_abs = _copy_offline_index(offline_src, dest_offline)
+        if not offline_abs:
+            logger.warning(
+                "backup offline sync failed (live page present) path=%s", root
+            )
+            return None
+    else:
+        offline_abs = _restore_live_offline_from_backup(root, dest)
+        if not offline_abs:
+            offline_abs = _existing_backup_offline_index(dest_offline)
 
     return BackupSnapshot(
         mod_id=owner_pk or frozen,
@@ -562,7 +707,7 @@ def sync_metadata_backup(
     mod_path: str | Path,
     *,
     mod_id: str | int | None = None,
-) -> None:
+) -> bool:
     """
     Low-level ``.info`` → ``data/mod_backup`` snapshot.
 
@@ -574,7 +719,10 @@ def sync_metadata_backup(
     ``backup.internal_id == mods.internal_id``.
 
     When the Mod folder exists: snapshot ``.info`` → backup, mark folder present.
-    When absent: mark missing only (does not create backup).
+    When absent: mark missing only (does not delete backup). Returns True.
+
+    Returns False when the folder exists but the protective snapshot failed
+    (identity unresolved, or Live cover/offline present but Backup copy failed).
     """
     root = Path(mod_path)
     if not root.is_dir():
@@ -616,13 +764,13 @@ def sync_metadata_backup(
                 rebound = False
             if not rebound:
                 mark_missing(mid)
-                return
+                return True
         else:
-            return
+            return True
 
     snapshot = snapshot_from_mod_folder(root, owner_mod_id=mod_id)
     if snapshot is None:
-        return
+        return False
 
     meta_json = json.dumps(snapshot.metadata, ensure_ascii=False)
     try:
@@ -633,7 +781,7 @@ def sync_metadata_backup(
         if not sql_pk.isdigit():
             sql_pk = resolve_backup_mod_pk(internal_id=sql_pk)
         if not sql_pk.isdigit():
-            return
+            return True
         get_db().update_mod_backup_snapshot(
             sql_pk,
             last_known_path=snapshot.last_known_path,
@@ -652,6 +800,7 @@ def sync_metadata_backup(
         logger.warning(
             "DB backup snapshot update failed for %s: %s", snapshot.mod_id, exc
         )
+    return True
 
 
 def reconcile_folder_presence(library_root: str | Path | None = None) -> None:

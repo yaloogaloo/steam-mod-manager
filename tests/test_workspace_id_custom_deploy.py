@@ -18,7 +18,7 @@ from core.mod_platform import (
 from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.file_ops import INFO_DIR_NAME
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 
 
 @pytest.fixture()
@@ -212,6 +212,7 @@ def test_custom_deploy_path_copies_contents_not_shell(
         app_id=100,
         game_name="SomeGame",
     )
+    iid = frozen_deploy_id(created)
     custom = tmp_path / "game_root" / "custom_target"
     custom.mkdir(parents=True)
     db.update_mod_user_metadata(
@@ -228,7 +229,7 @@ def test_custom_deploy_path_copies_contents_not_shell(
     # Intentionally leave game mod_path empty — custom path must still deploy.
     db.update_game_deploy_config(100, name="SomeGame", mod_path="")
 
-    result = ModDeployer(library, db=db).deploy_mod(pk)
+    result = ModDeployer(library, db=db).deploy_mod(iid)
     assert result.get("success") is True, result
     assert (custom / "payload.txt").is_file()
     assert (custom / "sub" / "inner.bin").is_file()

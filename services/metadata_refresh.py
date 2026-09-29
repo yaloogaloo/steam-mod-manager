@@ -7,7 +7,6 @@ Reuses ``SteamWorkshopClient.refresh_details`` and folder sanitize helpers.
 from __future__ import annotations
 
 import gc
-import json
 import logging
 import os
 import time
@@ -165,12 +164,8 @@ def _persist_cleared_fetch_error(managed_path: Path) -> None:
     if not data or "fetch_error" not in data:
         return
     data.pop("fetch_error", None)
-    info = Path(managed_path) / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    meta_file = info / "metadata.json"
-    meta_file.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    persist_unified_metadata_dict(
+        managed_path, data, sync_backup=False, sync_reason="refresh"
     )
 
 
@@ -208,11 +203,8 @@ def _clear_placeholder_display_name(mod_id: str, managed_path: Path) -> None:
         dn = str(data.get("display_name") or "").strip()
         if is_unknown_mod_title(dn, published_file_id=mid):
             data.pop("display_name", None)
-            info = folder / INFO_DIR_NAME
-            info.mkdir(parents=True, exist_ok=True)
-            (info / "metadata.json").write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            persist_unified_metadata_dict(
+                folder, data, sync_backup=False, sync_reason="refresh"
             )
 
     # SQLite user override column
@@ -873,8 +865,15 @@ def refresh_steam_mod_metadata(
         local_cover = (
             str(display_info.cover_path or "").strip()
             if display_info
-            else str(meta.cover_path or "")
-        )
+            else ""
+        ) or str(meta.cover_path or "")
+        if not local_cover:
+            try:
+                disk = mgr.find_local_cover(folder)
+            except Exception:  # noqa: BLE001
+                disk = None
+            if disk is not None:
+                local_cover = str(disk)
 
         # Cover under .info/
         cover_path = ""

@@ -21,9 +21,11 @@ from services.deploy_rules import (
 from services.deploy_rules import anno as anno_mod
 from services.deploy_rules import custom as custom_mod
 from services.deploy_rules import duckov as duckov_mod
+from services.deploy_rules import kcd2 as kcd2_mod
 from services.deploy_rules import generic as generic_mod
 from services.deploy_rules import pak_mod_path as pak_mod
 from services.deploy_rules import palworld as palworld_mod
+from services.deploy_rules import paradox as paradox_mod
 from services.deploy_rules import slay_the_spire as sts_mod
 from services.deploy_rules import stardew_valley as stardew_mod
 from services.deploy_rules import warhammer3 as warhammer3_mod
@@ -32,9 +34,11 @@ _STRATEGY_MODULES = (
     anno_mod,
     custom_mod,
     duckov_mod,
+    kcd2_mod,
     generic_mod,
     pak_mod,
     palworld_mod,
+    paradox_mod,
     sts_mod,
     stardew_mod,
     warhammer3_mod,

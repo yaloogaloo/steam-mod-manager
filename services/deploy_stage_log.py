@@ -84,6 +84,7 @@ class DeployTimingSession:
             "hash_ms": round(self.stage_ms("hash"), 3),
             "persist_ms": round(self.stage_ms("persist"), 3),
             "cleanup_ms": round(self.stage_ms("cleanup"), 3),
+            "project_title_sync_ms": round(self.stage_ms("project_title_sync"), 3),
             "total_ms": round(self.total_elapsed_ms(), 3),
         }
 

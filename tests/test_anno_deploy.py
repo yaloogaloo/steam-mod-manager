@@ -8,7 +8,7 @@ import pytest
 from core.db_manager import DatabaseManager
 from services.deploy import ModDeployer
 from services.deploy_rules import DEPLOY_TYPE_ANNO_1800, resolve_deploy_type
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 
 ANNO_APP = 916440
 
@@ -67,7 +67,7 @@ def test_anno_deploy_creates_mods_and_copies(tmp_path: Path, db: DatabaseManager
     )
     pk = _register(db, mod, external_id="91601", title="BiggerHarbour")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_ANNO_1800
     target = Path(result["target"])
@@ -121,7 +121,7 @@ def test_anno_deploy_directory_mod_with_stale_unselected_files(
 
     from services.deploy_rules import load_manifest
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is True, result
     target = Path(result["target"])
     assert (target / "data" / "mod.json").is_file()
@@ -160,7 +160,7 @@ def test_anno_deploy_extracts_zip_preserves_inner_folder(
     )
     pk = _register(db, mod, external_id="91603", title=managed_name)
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is True, result
     mods_root = (install / "mods").resolve()
     assert Path(result["target"]).resolve() == mods_root
@@ -219,7 +219,7 @@ def test_anno_stamps_zip_merges_into_documents(
         extra={"category": "蓝图"},
     )
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is True, result
 
     stamps = resolve_anno_stamps_dir()
@@ -261,7 +261,7 @@ def test_anno_stamps_loose_folder_by_structure(
     )
     pk = _register(db, mod, external_id="91611", title="LooseStamp")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert result["success"] is True, result
     stamps = resolve_anno_stamps_dir()
     assert (stamps / "pack_a" / "a.a7s").is_file()

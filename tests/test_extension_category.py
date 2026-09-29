@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION, visible_extension_category
+from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION, MOD_TYPE_SKIN, visible_extension_category
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_type_catalog import get_mod_type_catalog
 from tests.helpers.identity import create_steam_test_mod
@@ -896,3 +896,91 @@ def test_no_category_has_no_extra_blank_after_resize(
     assert "<b>分类：</b>" not in (panel.meta_rich_label.text() or "")
     assert panel.meta_rich_label.height() < 80
     panel.close()
+
+
+def _ensure_type(app_id: int, name: str):
+    catalog = get_mod_type_catalog()
+    found = catalog.find_type_by_name(app_id, name)
+    if found is not None:
+        return found
+    return catalog.add_type(app_id, name)
+
+
+def test_skin_type_unlocks_subcategory() -> None:
+    aid = 100
+    skin = _ensure_type(aid, MOD_TYPE_SKIN)
+    ext = _ensure_type(aid, MOD_TYPE_EXTENSION)
+    beautify = _ensure_type(aid, MOD_TYPE_BEAUTIFY)
+    plain = _ensure_type(aid, "普通")
+    catalog = get_mod_type_catalog()
+    assert catalog.unlocks_subcategory(aid, skin.type_id)
+    assert catalog.unlocks_subcategory(aid, ext.type_id)
+    assert catalog.unlocks_subcategory(aid, beautify.type_id)
+    assert not catalog.unlocks_subcategory(aid, plain.type_id)
+    assert catalog.is_extension_type(aid, ext.type_id)
+    assert not catalog.is_extension_type(aid, skin.type_id)
+    assert visible_extension_category("修女", app_id=aid, type_id=skin.type_id) == "修女"
+    assert visible_extension_category("修女", app_id=aid, type_id=plain.type_id) == ""
+    dd_skin = catalog.find_type_by_name(262060, MOD_TYPE_SKIN)
+    if dd_skin is not None:
+        assert catalog.unlocks_subcategory(262060, dd_skin.type_id)
+        assert not catalog.is_extension_type(262060, dd_skin.type_id)
+
+
+def test_edit_dialog_category_visible_for_skin(qapp: QApplication) -> None:
+    ext_type = _ensure_type(100, MOD_TYPE_EXTENSION)
+    beautify_type = _ensure_type(100, MOD_TYPE_BEAUTIFY)
+    skin_type = _ensure_type(100, MOD_TYPE_SKIN)
+    other_type = _ensure_type(100, "普通")
+    options = [
+        (ext_type.type_id, get_mod_type_catalog().resolve_name(100, ext_type.type_id)),
+        (beautify_type.type_id, get_mod_type_catalog().resolve_name(100, beautify_type.type_id)),
+        (skin_type.type_id, get_mod_type_catalog().resolve_name(100, skin_type.type_id)),
+        (other_type.type_id, get_mod_type_catalog().resolve_name(100, other_type.type_id)),
+    ]
+    skin = EditModDialog(
+        mod_id="4",
+        game_id=100,
+        mod_type_id=skin_type.type_id,
+        type_options=options,
+        category="修女",
+    )
+    assert not skin.category_edit.isHidden()
+    assert skin.category_edit.text() == "修女"
+    assert skin.values()["category"] == "修女"
+
+    skin.type_combo.setCurrentIndex(skin.type_combo.findData(other_type.type_id))
+    QApplication.processEvents()
+    assert skin.category_edit.isHidden()
+    assert skin.values()["category"] == "修女"
+
+    skin.type_combo.setCurrentIndex(skin.type_combo.findData(skin_type.type_id))
+    QApplication.processEvents()
+    assert not skin.category_edit.isHidden()
+    assert skin.values()["category"] == "修女"
+
+    ext = EditModDialog(
+        mod_id="5",
+        game_id=100,
+        mod_type_id=ext_type.type_id,
+        type_options=options,
+        category="动画",
+    )
+    assert not ext.category_edit.isHidden()
+    beautify = EditModDialog(
+        mod_id="6",
+        game_id=100,
+        mod_type_id=beautify_type.type_id,
+        type_options=options,
+        category="角色美化",
+    )
+    assert not beautify.category_edit.isHidden()
+    other = EditModDialog(
+        mod_id="7",
+        game_id=100,
+        mod_type_id=other_type.type_id,
+        type_options=options,
+        category="修女",
+    )
+    assert other.category_edit.isHidden()
+    assert other.values()["category"] == "修女"

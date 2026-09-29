@@ -24,7 +24,7 @@ from services.deploy_rules.manifest import DeployManifest, ManifestFileEntry, lo
 from services.deploy_rules.stardew_valley import STARDEW_VALLEY_APP_ID
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_status import CONTENT_HEALTHY
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import create_steam_test_mod, frozen_from_pk, prove_managed_folder
 
 
 BG3_APP_ID = 1086940
@@ -124,7 +124,7 @@ def test_case1_zip_mod_extracts_and_deploys(
     pk = _register(db, mid="94001", path=str(managed), title="ZipMod")
     _set_archive_entry(db, pk, "pack.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True, out
     dest = mods / "ZipMod"
     assert (dest / "mod.dll").is_file()
@@ -155,7 +155,7 @@ def test_case2_missing_archive_but_loose_content_allowed(
     # DB still lists a zip that is no longer on disk (already extracted).
     _set_archive_entry(db, pk, "WASD-781-1-9-8-1758653752.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True, out
     assert (mods / "LooseMod" / "logic.dll").is_file()
     assert (mods / "LooseMod" / "readme.txt").is_file()
@@ -183,7 +183,7 @@ def test_case3_missing_archive_archives_only_rejected(
     pk = _register(db, mid="94003", path=str(managed), title="ZipOnly")
     _set_archive_entry(db, pk, "WASD-781-1-9-8-1758653752.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is False, out
     assert "files" not in out or not out.get("files")
     assert load_manifest(managed) is None
@@ -217,7 +217,7 @@ def test_case4_copy_failure_not_success(
         "services.deploy_apply.shutil.copy2",
         side_effect=OSError("simulated copy failure"),
     ):
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False, out
     assert load_manifest(managed) is None
@@ -245,7 +245,7 @@ def test_case5_missing_manifest_target_not_success(
     pk = _register(db, mid="94005", path=str(managed), title="Ghost")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert out.get("reason") == "missing_targets"
@@ -296,7 +296,7 @@ def test_case6_bg3_custom_path_preserves_bin(
         },
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True, out
     assert (game_root / "bin" / "bink2w64.dll").read_bytes() == b"DLL1"
     assert (game_root / "bin" / "bink2w64_original.dll").read_bytes() == b"DLL2"
@@ -343,7 +343,7 @@ def test_case7_stardew_zip_mod_not_regressed(
     )
     _set_archive_entry(db, pk, "CoolMod.zip")
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
     assert out["success"] is True, out
     assert (mods_dir / "CoolMod" / "manifest.json").is_file()
     assert (mods_dir / "CoolMod" / "CoolMod.dll").is_file()
@@ -372,7 +372,7 @@ def test_case8_failure_rolls_back_backup(
     prior.write_text("ORIGINAL", encoding="utf-8")
 
     with patch_apply_then_unlink_targets():
-        out = ModDeployer(library_root=library, db=db).deploy_mod(pk)
+        out = ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert out["success"] is False
     assert prior.read_text(encoding="utf-8") == "ORIGINAL"

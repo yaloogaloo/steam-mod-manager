@@ -1,6 +1,5 @@
 """Phase 4 Deploy contract tests — permanent FilePlan / Apply / Verify lock."""
 from __future__ import annotations
-import json
 import zipfile
 from pathlib import Path
 import pytest
@@ -12,9 +11,9 @@ from services.deploy_file_plan import OP_COPY, OP_EXTRACT_MEMBER, DeployFilePlan
 from services.deploy_rules.base import DeployContext
 from services.deploy_rules.generic import FolderCopyStrategy
 from services.deploy_verifier import verify_file_plan
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
 from services.library_status import CONTENT_HEALTHY
+from tests.helpers.identity import bind_managed_path, frozen_deploy_id, write_info_sidecar
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
@@ -144,8 +143,6 @@ def _anno_shape_deploy(tmp_path: Path, db: DatabaseManager, *, folder_name: str,
     mods.mkdir(parents=True)
     folder = library / 'Anno 1800' / folder_name
     folder.mkdir(parents=True)
-    info = folder / INFO_DIR_NAME
-    info.mkdir()
     zpath = folder / 'mod.zip'
     with zipfile.ZipFile(zpath, 'w') as zf:
         for rel in members:
@@ -154,12 +151,24 @@ def _anno_shape_deploy(tmp_path: Path, db: DatabaseManager, *, folder_name: str,
         with zipfile.ZipFile(zpath, 'r') as zf:
             zf.extractall(mods)
     created = create_mod_identity(db, platform=PLATFORM_MODIO, external_id=external_id, source_url=f'https://mod.io/g/anno-1800/m/{url_slug}', title=title, app_id=916440, game_name='Anno 1800', operation='import')
-    mid = str(created.mod_id)
-    (info / METADATA_FILENAME).write_text(json.dumps({'internal_id': mid, 'published_file_id': mid, 'workspace_id': created.workspace_id, 'title': title, 'app_id': 916440, 'game_name': 'Anno 1800', 'platform': 'modio', 'source_type': 'modio'}), encoding='utf-8')
+    pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
+    write_info_sidecar(
+        folder,
+        internal_id=iid,
+        title=title,
+        external_id=external_id,
+        workspace_id=str(created.workspace_id or ''),
+        app_id=916440,
+        game_name='Anno 1800',
+        platform=PLATFORM_MODIO,
+        extra={'source_type': 'modio'},
+    )
+    bind_managed_path(db, pk, folder, title=title, game_name='Anno 1800')
     db.update_game_deploy_config(916440, name='Anno 1800', install_path=str(install), mod_path='', deploy_type='folder_copy')
-    db.update_mod_identity_fields(mid, internal_id=mid, folder_present=True, last_known_path=str(folder), platform=PLATFORM_MODIO, app_id=916440)
-    db.update_mod_content_status(mid, content_status=CONTENT_HEALTHY)
-    return ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    db.update_mod_identity_fields(pk, platform=PLATFORM_MODIO, app_id=916440)
+    db.update_mod_content_status(pk, content_status=CONTENT_HEALTHY)
+    return ModDeployer(library_root=library, db=db).deploy_mod(iid)
 
 def test_anno_ocean_liner_overwrite_contract(tmp_path: Path, db: DatabaseManager) -> None:
     members = ['data/config/export/main/asset/assets.xml', 'data/graphics/icon.png', 'modinfo.json']

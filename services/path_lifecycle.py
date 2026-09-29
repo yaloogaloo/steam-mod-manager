@@ -10,14 +10,13 @@ successful.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from services.file_ops import INFO_DIR_NAME, read_info_metadata_dict
+from services.file_ops import persist_unified_metadata_dict, read_info_metadata_dict
 
 logger = logging.getLogger(__name__)
 
@@ -495,7 +494,6 @@ def commit_path_change(
     resolved = str(new_p)
 
     # --- sidecar ---
-    info = new_p / INFO_DIR_NAME / "metadata.json"
     try:
         data = read_info_metadata_dict(new_p) or {}
         old_prefix = str(old_p.resolve()) if old_p is not None else ""
@@ -506,10 +504,8 @@ def commit_path_change(
             old_prefix=old_prefix,
             new_prefix=resolved,
         )
-        info.parent.mkdir(parents=True, exist_ok=True)
-        info.write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        persist_unified_metadata_dict(
+            new_p, merged, sync_backup=False, sync_reason=reason
         )
     except OSError as exc:
         return PathChangeResult(

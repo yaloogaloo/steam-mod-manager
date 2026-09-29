@@ -77,6 +77,8 @@ class ModCardData:
     external_id: str = ""
     workspace_id: str = ""
     category_tags: str = ""
+    # Secondary classification from mods.category (search / filter index).
+    category: str = ""
     tag_values: str = ""
     folder_absent: bool = False
     missing_content: bool = False
@@ -244,6 +246,7 @@ def mod_list_item_from_row(row: dict[str, Any]) -> ModListItem:
         has_offline=bool(row.get("has_offline")),
         mtime=float(row.get("mtime") or 0.0),
         category_tags=str(row.get("category_tags") or ""),
+        category=str(row.get("category") or ""),
         external_id=str(row.get("external_id") or ""),
         source_url=str(row.get("source_url") or ""),
         source_type=str(row.get("source_type") or ""),
@@ -297,6 +300,7 @@ def list_item_to_card_data(item: ModListItem) -> ModCardData:
         external_id=item.external_id,
         workspace_id=item.workspace_id,
         category_tags=item.category_tags,
+        category=str(getattr(item, "category", "") or ""),
         tag_values="",
         folder_absent=item.folder_absent,
         missing_content=missing,
@@ -379,6 +383,8 @@ def fetch_mod_list_item(internal_id: str | int) -> ModListItem | None:
         if fields is not None:
             if str(fields.category_tags or "").strip():
                 item = replace(item, category_tags=str(fields.category_tags or ""))
+            if str(getattr(fields, "category", "") or "").strip():
+                item = replace(item, category=str(fields.category or ""))
             if getattr(fields, "type_id", None) is not None:
                 item = replace(item, type_id=fields.type_id)
     except Exception:  # noqa: BLE001

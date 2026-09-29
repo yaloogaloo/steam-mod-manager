@@ -194,13 +194,13 @@ def entity_state(
 
 def _workshop_deploy_type(app_id: int, deploy_type: str | None) -> bool:
     from services.deploy_rules import (
-        DEPLOY_TYPE_STELLARIS,
         DEPLOY_TYPE_WARHAMMER3,
+        is_paradox_launcher_deploy_type,
         resolve_deploy_type,
     )
 
     key = resolve_deploy_type(app_id, deploy_type)
-    return key in {DEPLOY_TYPE_STELLARIS, DEPLOY_TYPE_WARHAMMER3}
+    return is_paradox_launcher_deploy_type(key) or key == DEPLOY_TYPE_WARHAMMER3
 
 
 def workshop_source_available(
@@ -215,14 +215,13 @@ def workshop_source_available(
         return False
     root: Path | None = None
     try:
-        from services.stellaris_activation import (
-            STELLARIS_APP_ID,
-            is_stellaris_activation_app,
-            workshop_content_root as stellaris_workshop_root,
+        from services.paradox_activation import (
+            is_paradox_activation_app,
+            workshop_content_root as paradox_workshop_root,
         )
 
-        if is_stellaris_activation_app(app_id) or int(app_id) == int(STELLARIS_APP_ID):
-            root = stellaris_workshop_root(workshop_path)
+        if is_paradox_activation_app(app_id):
+            root = paradox_workshop_root(workshop_path, app_id=app_id)
     except Exception:  # noqa: BLE001
         root = None
     if root is None:
@@ -494,6 +493,12 @@ def persist_miss_cover(
         dest = write_backup_root_for(mid)
     except BackupIdentityError:
         return ""
+    from services.mutation_context import MutationBoundaryError, assert_mutation_allowed
+
+    try:
+        assert_mutation_allowed(dest)
+    except MutationBoundaryError:
+        return ""
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -545,7 +550,7 @@ def _independent_descriptor_workspace(folder: Path) -> str:
     try:
         if not desc.is_file():
             return ""
-        from services.stellaris_activation import parse_mod_descriptor
+        from services.paradox_activation import parse_mod_descriptor
 
         parsed = parse_mod_descriptor(desc.read_text(encoding="utf-8", errors="replace"))
         return str(parsed.get("remote_file_id") or "").strip()

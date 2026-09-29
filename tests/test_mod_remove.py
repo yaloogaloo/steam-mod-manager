@@ -49,8 +49,10 @@ def test_remove_mod_deletes_library_and_db(tmp_path: Path, db: DatabaseManager) 
 
     db.add_category_tag(pk, "Fix")
 
-    out = ModRemover(library, db=db).remove_mod(pk)
+    out = ModRemover(library, db=db).remove_mod(str(created.internal_id))
     assert out["success"] is True
+    assert out.get("internal_id") == str(created.internal_id)
+    assert str(out.get("internal_id")) != pk
     assert out.get("deleted_path"), out
     assert not folder.exists()
     assert other.exists()

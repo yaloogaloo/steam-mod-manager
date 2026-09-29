@@ -1,11 +1,25 @@
 {
-  "_comment": "Per Steam App ID deploy capabilities. Enable a capability for a new game here; do not add Python App ID whitelists. normalize_mod_folder_name maps the library folder name through services.mod_path_normalizer (ASCII pinyin). There is no game-specific folder rename in Python.",
+  "_comment": "Per Steam App ID deploy capabilities. Enable a capability for a new game here; do not add Python App ID whitelists. normalize_mod_folder_name maps the library folder name through services.mod_path_normalizer (ASCII pinyin). There is no game-specific folder rename in Python. sync_project_xml_title rewrites target project.xml <Title> after Apply using .info/metadata.json display_name. paradox_launcher_activation documents Paradox Launcher Workshop enable/order sync (Stellaris, CK3); runtime config lives in services.paradox_activation.PARADOX_LAUNCHER_GAMES. native_modsettings_order documents BG3 Patch 8 modsettings.lsx order (AppID 1086940); runtime is services.bg3_activation via services.order_backend. flat_pak_layout copies *.pak to game.mod_path by basename (BG3). folder_copy games without this flag keep the Mod folder, even when the payload is a .pak. kcd2_mod_manifest_root deploys the directory that contains mod.manifest directly under game.mod_path (Kingdom Come: Deliverance II).",
   "games": {
     "262060": {
-      "normalize_mod_folder_name": true
+      "normalize_mod_folder_name": true,
+      "sync_project_xml_title": true
     },
     "289070": {
       "normalize_mod_folder_name": true
+    },
+    "281990": {
+      "paradox_launcher_activation": true
+    },
+    "1158310": {
+      "paradox_launcher_activation": true
+    },
+    "1086940": {
+      "native_modsettings_order": true,
+      "flat_pak_layout": true
+    },
+    "1771300": {
+      "kcd2_mod_manifest_root": true
     }
   }
 }

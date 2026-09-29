@@ -1146,6 +1146,9 @@ class ModSyncService:
             opts.overwrite_files
             or meta.published_file_id in self._force_overwrite_ids
         )
+        outcome_hint = "success"
+        backup_wins = True
+        managed: Path
 
         with self._alloc_lock:
             # Detection A — numeric ID folder → real Mod title
@@ -1169,25 +1172,68 @@ class ModSyncService:
                 if junction.skip_physical_copy:
                     meta.managed_path = str(existing)
                     existing_index[meta.published_file_id] = existing
-                    return "success", existing
-                managed = self.files.copy_mod(
-                    meta,
-                    overwrite_existing=True,
-                    destination=existing,
-                )
+                    managed = existing
+                    backup_wins = False
+                else:
+                    from services.sidecar_hydration import (
+                        protect_live_sidecar_before_overwrite,
+                    )
+
+                    if not protect_live_sidecar_before_overwrite(
+                        existing,
+                        workspace_id=str(meta.published_file_id or ""),
+                        app_id=int(meta.app_id or 0),
+                    ):
+                        raise RuntimeError(
+                            "sidecar backup protect failed; refusing overwrite "
+                            f"workspace_id={meta.published_file_id}"
+                        )
+                    managed = self.files.copy_mod(
+                        meta,
+                        overwrite_existing=True,
+                        destination=existing,
+                    )
+                    managed = self._rename_numeric_if_needed(Path(managed), meta)
+                    existing_index[meta.published_file_id] = managed
+                    backup_wins = True
+            elif existing and existing.exists() and opts.skip_existing:
+                # Detection B — folder exists: skip large copytree
+                meta.managed_path = str(existing)
+                managed = existing
+                outcome_hint = "skipped_incomplete"
+                backup_wins = False
+            else:
+                managed = self.files.copy_mod(meta, overwrite_existing=False)
                 managed = self._rename_numeric_if_needed(Path(managed), meta)
                 existing_index[meta.published_file_id] = managed
-                return "success", managed
+                backup_wins = True
 
-            # Detection B — folder exists: skip large copytree
-            if existing and existing.exists() and opts.skip_existing:
-                meta.managed_path = str(existing)
-                return "skipped_incomplete", existing
+        self._hydrate_managed_sidecar(meta, managed, backup_wins=backup_wins)
+        return outcome_hint, managed
 
-            managed = self.files.copy_mod(meta, overwrite_existing=False)
-            managed = self._rename_numeric_if_needed(Path(managed), meta)
-            existing_index[meta.published_file_id] = managed
-            return "success", managed
+    def _hydrate_managed_sidecar(
+        self,
+        meta: ModMetadata,
+        managed: Path,
+        *,
+        backup_wins: bool,
+    ) -> None:
+        """Workshop ``.info`` is a candidate only. Backup user assets win."""
+        from services.sidecar_hydration import hydrate_managed_sidecar
+
+        result = hydrate_managed_sidecar(
+            managed,
+            workspace_id=str(meta.published_file_id or ""),
+            app_id=int(meta.app_id or 0),
+            source="workshop",
+            backup_wins=backup_wins,
+            commit_backup=True,
+        )
+        if not result.ok:
+            raise RuntimeError(
+                "sidecar hydration failed "
+                f"workspace_id={meta.published_file_id} path={managed}"
+            )
 
     def _rename_numeric_if_needed(self, folder: Path, meta: ModMetadata) -> Path:
         """If *folder* is named with digits only, rename it to the Mod title."""

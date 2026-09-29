@@ -8,8 +8,12 @@ import pytest
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    frozen_deploy_id,
+    write_info_sidecar,
+)
 from services.custom_deploy_path_stale import (
     ACTION_CLEAR_TO_INHERIT,
     STALE_DRIVE_MIGRATE,
@@ -20,7 +24,6 @@ from services.custom_deploy_path_stale import (
 )
 from services.deploy import ModDeployer
 from services.deploy_path_lifecycle import CUSTOM_DEPLOY_PATH_MISSING
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 
 ANNO = 916440
 
@@ -42,7 +45,7 @@ def _seed(
     mods: Path,
     custom: str = "",
     title: str = "Loader",
-) -> Path:
+) -> tuple[Path, str, str]:
     install.mkdir(parents=True, exist_ok=True)
     mods.mkdir(parents=True, exist_ok=True)
     db.upsert_game(GameInfo(app_id=ANNO, name="Anno 1800", folder_name="Anno 1800"))
@@ -56,25 +59,31 @@ def _seed(
     folder = library / "Anno 1800" / title
     folder.mkdir(parents=True)
     (folder / "payload.bin").write_bytes(b"x")
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        f'{{"internal_id":"{mid}","app_id":{ANNO},"title":"{title}"}}',
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=ANNO, game_name="Anno 1800"
     )
-    create_steam_test_mod(db, external_id=mid, title=title, app_id=ANNO, game_name="Anno 1800")
-    bind_managed_path(db, mid, folder, title=title)
+    pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
+    write_info_sidecar(
+        folder,
+        internal_id=iid,
+        title=title,
+        external_id=mid,
+        workspace_id=str(created.workspace_id or mid),
+        app_id=ANNO,
+        game_name="Anno 1800",
+    )
+    bind_managed_path(db, pk, folder, title=title)
 
     db.update_mod_identity_fields(
-        mid,
-        internal_id=mid,
+        pk,
         workspace_id="17864251756563492",
         last_known_path=str(folder.resolve()),
         folder_present=True,
     )
     if custom:
-        db.update_mod_user_metadata(mid, {"custom_deploy_path": custom})
-    return folder
+        db.update_mod_user_metadata(pk, {"custom_deploy_path": custom})
+    return folder, pk, iid
 
 
 def test_case1_live_custom_deploy_path_deploys(
@@ -85,7 +94,9 @@ def test_case1_live_custom_deploy_path_deploys(
     mods = install / "mods"
     custom = tmp_path / "custom_out"
     custom.mkdir(parents=True)
-    _seed(db, library, mid="1238", install=install, mods=mods, custom=str(custom))
+    _folder, _pk, iid = _seed(
+        db, library, mid="1238", install=install, mods=mods, custom=str(custom)
+    )
 
     finding = classify_custom_deploy_path(
         mod_id="1238",
@@ -96,7 +107,7 @@ def test_case1_live_custom_deploy_path_deploys(
     )
     assert finding is None
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("1238")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result.get("success") is True, result
     assert (custom / "payload.bin").is_file()
 
@@ -108,10 +119,12 @@ def test_case2_missing_custom_returns_custom_deploy_path_missing(
     install = tmp_path / "F_Steam" / "steamapps" / "common" / "Anno 1800"
     mods = install / "mods"
     missing = tmp_path / "nope" / "Bin" / "Win64"
-    _seed(db, library, mid="1238", install=install, mods=mods, custom=str(missing))
+    _folder, _pk, iid = _seed(
+        db, library, mid="1238", install=install, mods=mods, custom=str(missing)
+    )
 
     ctx, err, _ = ModDeployer(library_root=library, db=db)._resolve_context(
-        "1238", require_target_exists=True, prepare_archives=False
+        iid, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -172,7 +185,7 @@ def test_case4_repair_clear_then_deploy_uses_game_mod_path(
         / "Bin"
         / "Win64"
     )
-    _seed(
+    _folder, pk, iid = _seed(
         db,
         library,
         mid="1238",
@@ -184,7 +197,7 @@ def test_case4_repair_clear_then_deploy_uses_game_mod_path(
 
     # Before repair: blocked
     ctx, err, _ = ModDeployer(library_root=library, db=db)._resolve_context(
-        "1238", require_target_exists=True, prepare_archives=False
+        iid, require_target_exists=True, prepare_archives=False
     )
     assert ctx is None
     assert err is not None
@@ -192,13 +205,13 @@ def test_case4_repair_clear_then_deploy_uses_game_mod_path(
         err.get("error_code") or err.get("error_kind") or err.get("error") or ""
     )
 
-    assert apply_clear_custom_deploy_path(db, "1238") is True
-    info = db.get_mod_display_info("1238")
+    assert apply_clear_custom_deploy_path(db, pk) is True
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert str(info.custom_deploy_path or "") == ""
 
     # After clear: inherits game roots (Anno → install/mods), no custom override
-    result = ModDeployer(library_root=library, db=db).deploy_mod("1238")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result.get("success") is True, result
     # Must land under game.mod_path, not under remapped Bin/Win64
     assert not (install / "Bin" / "Win64").exists() or not any(

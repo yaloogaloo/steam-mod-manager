@@ -1,0 +1,50 @@
+---
+description: Visible QWidget detach + user-owned cover — do not regress popup or cover overwrite
+alwaysApply: true
+---
+
+# Visible-child lifecycle and user-owned cover
+
+See `docs/architecture/UI_LIFECYCLE_AND_COVER_OWNERSHIP.md`.
+
+## Visible child detach
+
+Never `setParent(None)` on a **visible** `QWidget`. That maps a top-level HWND
+and steals `MainWindow` focus (seen as `DependencyItem` after cover/refresh/offline
+success). Sequence is `hide()` → `setParent(None)` → `deleteLater()` via
+`ui.window_lifecycle.detach_owned_widget`.
+
+Do not globally ban `setParent`, `show()`, or dialogs. Do not hide the flash
+with sleep/timers. The Import-Mod `show`/`setVisible` guard does **not** cover
+detach.
+
+## User-owned cover
+
+User-set cover (`apply_cover_to_mod` + `user_override_fields.cover`) is not
+refresh-fetched cover. Generic refresh / sidecar rescan must not point
+`mods.cover_path` at a stale absolute path, official preview, backup blob, or
+placeholder. Do not clobber in-memory `cover_path` in `_build_unified_payload`
+with a pre-update sidecar snapshot.
+
+## UI refresh
+
+Do not sync Detail by adding extra `show_mod()` rebuilds. One logical mutation
+uses `_canonical_detail_sync` and one `_reload_current_detail_from_projection`.
+Success paths must not create unrequested top-level UI or launch Explorer.
+
+## Production mutation boundary
+
+Cover, metadata, backup, and deploy writes require
+`services.mutation_context`. Test and forensic code must pass an explicit
+temporary root. Production context is activated only from `main._run_gui`.
+No context refuses the write. Do not fall back to the current library or
+the first visible Mod. Do not treat a path prefix such as a drive letter
+as the boundary.
+
+## Regression gate
+
+Not Cursor-specific. See `AGENTS.md`. After touching `show_mod`,
+`notify_mod_changed`, `setParent`, `cover_path`, `apply_sidecar_to_db`, or
+`_build_unified_payload`, run:
+
+`python -m pytest tests/test_success_path_ui_invariants.py tests/test_cover_ownership_invariants.py tests/test_widget_detach_lifecycle.py tests/test_ui_lifecycle_static_guard.py`

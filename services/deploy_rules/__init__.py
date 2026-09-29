@@ -40,7 +40,16 @@ from services.deploy_rules.duckov import (
     DuckovStrategy,
     find_duckov_mod_root,
 )
+from services.deploy_rules.kcd2 import (
+    KCD2_APP_ID,
+    KingdomCome2Strategy,
+)
+from services.deploy_rules.paradox import (
+    DEPLOY_TYPE_PARADOX_LAUNCHER,
+    ParadoxLauncherStrategy,
+)
 from services.deploy_rules.stellaris import (
+    DEPLOY_TYPE_STELLARIS,
     STELLARIS_APP_ID,
     StellarisStrategy,
 )
@@ -58,12 +67,14 @@ DEPLOY_TYPE_ANNO_1800 = Anno1800Strategy.deploy_type
 DEPLOY_TYPE_SLAY_THE_SPIRE = SlayTheSpireStrategy.deploy_type
 DEPLOY_TYPE_STARDEW_VALLEY = StardewValleyStrategy.deploy_type
 DEPLOY_TYPE_DUCKOV = DuckovStrategy.deploy_type
+DEPLOY_TYPE_KCD2 = KingdomCome2Strategy.deploy_type
 DEPLOY_TYPE_PAK_MOD_PATH = PakModPathStrategy.deploy_type
 DEPLOY_TYPE_WARHAMMER3 = Warhammer3Strategy.deploy_type
-DEPLOY_TYPE_STELLARIS = StellarisStrategy.deploy_type
 
 # Steam AppID — always use enhanced PalworldStrategy (pak rules + folder_copy fallback).
 PALWORLD_APP_ID = 1623730
+
+_PARADOX_LAUNCHER_STRATEGY = ParadoxLauncherStrategy()
 
 _STRATEGIES: dict[str, DeployStrategy] = {
     DEPLOY_TYPE_FOLDER_COPY: FolderCopyStrategy(),
@@ -73,10 +84,18 @@ _STRATEGIES: dict[str, DeployStrategy] = {
     DEPLOY_TYPE_SLAY_THE_SPIRE: SlayTheSpireStrategy(),
     DEPLOY_TYPE_STARDEW_VALLEY: StardewValleyStrategy(),
     DEPLOY_TYPE_DUCKOV: DuckovStrategy(),
+    DEPLOY_TYPE_KCD2: KingdomCome2Strategy(),
     DEPLOY_TYPE_WARHAMMER3: Warhammer3Strategy(),
-    DEPLOY_TYPE_STELLARIS: StellarisStrategy(),
+    DEPLOY_TYPE_PARADOX_LAUNCHER: _PARADOX_LAUNCHER_STRATEGY,
+    DEPLOY_TYPE_STELLARIS: _PARADOX_LAUNCHER_STRATEGY,
     DEPLOY_TYPE_CUSTOM_PATH: CustomPathStrategy(),
 }
+
+
+def is_paradox_launcher_deploy_type(deploy_type: str | None) -> bool:
+    """True for ``paradox_launcher`` and the Stellaris compatibility alias."""
+    key = str(deploy_type or "").strip()
+    return key in {DEPLOY_TYPE_PARADOX_LAUNCHER, DEPLOY_TYPE_STELLARIS}
 
 
 def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
@@ -92,8 +111,9 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
     Total War: WARHAMMER III (1142710) always uses library activation
     (``warhammer3_pack``): confirm local ``.pack`` files, never flatten-copy
     into ``game.mod_path``.
-    Stellaris (281990) always uses launcher enable/order sync
-    (``stellaris_launcher``): never copy Workshop content.
+    Paradox Launcher games (Stellaris, CK3) always use enable/order sync
+    (``paradox_launcher``; ``stellaris_launcher`` remains a compatibility
+    alias): never copy Workshop content.
     Other games keep configured type.
     """
     try:
@@ -110,13 +130,24 @@ def resolve_deploy_type(app_id: int | str, deploy_type: str | None) -> str:
         return DEPLOY_TYPE_STARDEW_VALLEY
     if aid == DUCKOV_APP_ID:
         return DEPLOY_TYPE_DUCKOV
+    from services.deploy_rules.game_capabilities import (
+        CAPABILITY_KCD2_MOD_MANIFEST_ROOT,
+        supports_game_capability,
+    )
+
+    if supports_game_capability(aid, CAPABILITY_KCD2_MOD_MANIFEST_ROOT):
+        return DEPLOY_TYPE_KCD2
     if aid == CIVILIZATION_VI_APP_ID:
         return DEPLOY_TYPE_FOLDER_COPY
     if aid == WARHAMMER3_APP_ID:
         return DEPLOY_TYPE_WARHAMMER3
-    if aid == STELLARIS_APP_ID:
-        return DEPLOY_TYPE_STELLARIS
+    from services.paradox_activation import is_paradox_activation_app
+
+    if is_paradox_activation_app(aid):
+        return DEPLOY_TYPE_PARADOX_LAUNCHER
     key = (deploy_type or DEPLOY_TYPE_FOLDER_COPY).strip() or DEPLOY_TYPE_FOLDER_COPY
+    if is_paradox_launcher_deploy_type(key):
+        return DEPLOY_TYPE_PARADOX_LAUNCHER
     return key
 
 
@@ -135,15 +166,32 @@ def resolve_strategy(ctx: DeployContext) -> DeployStrategy | None:
 
     Priority:
     1. ``custom_deploy_path`` → CustomPathStrategy
-    2. Content includes ``*.pak`` on a ``folder_copy`` game → PakModPathStrategy
+    2. ``folder_copy`` with ``flat_pak_layout`` and a ``*.pak`` payload
+       → PakModPathStrategy
     3. Game / configured deploy type
+
+    A ``*.pak`` file alone does not flatten a ``folder_copy`` game.
+    ``deploy_type=pak_mod_path`` still selects PakModPathStrategy directly.
     """
     if str(ctx.custom_deploy_path or "").strip():
         return CustomPathStrategy()
     effective = resolve_deploy_type(ctx.app_id, ctx.deploy_type)
-    if effective == DEPLOY_TYPE_FOLDER_COPY and content_has_pak_files(ctx):
+    if (
+        effective == DEPLOY_TYPE_FOLDER_COPY
+        and content_has_pak_files(ctx)
+        and _folder_copy_uses_flat_pak(ctx.app_id)
+    ):
         return PakModPathStrategy()
     return get_strategy(effective, app_id=ctx.app_id)
+
+
+def _folder_copy_uses_flat_pak(app_id: int | str) -> bool:
+    from services.deploy_rules.game_capabilities import (
+        CAPABILITY_FLAT_PAK_LAYOUT,
+        supports_game_capability,
+    )
+
+    return supports_game_capability(app_id, CAPABILITY_FLAT_PAK_LAYOUT)
 
 
 def supported_deploy_types() -> tuple[str, ...]:
@@ -160,12 +208,18 @@ __all__ = [
     "DEPLOY_TYPE_PALWORLD_PAK",
     "DEPLOY_TYPE_SLAY_THE_SPIRE",
     "DEPLOY_TYPE_DUCKOV",
+    "DEPLOY_TYPE_KCD2",
+    "KCD2_APP_ID",
+    "KingdomCome2Strategy",
     "DEPLOY_TYPE_STARDEW_VALLEY",
+    "DEPLOY_TYPE_PARADOX_LAUNCHER",
     "DEPLOY_TYPE_STELLARIS",
     "DEPLOY_TYPE_WARHAMMER3",
     "DUCKOV_APP_ID",
     "STELLARIS_APP_ID",
+    "ParadoxLauncherStrategy",
     "StellarisStrategy",
+    "is_paradox_launcher_deploy_type",
     "DuckovStrategy",
     "PALWORLD_APP_ID",
     "PakModPathStrategy",

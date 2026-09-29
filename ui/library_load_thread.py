@@ -36,9 +36,12 @@ class LibraryLoadWorker(QThread):
         except Exception:  # noqa: BLE001
             pass
         try:
-            snapshot = get_library_cache().load_snapshot(
-                self.library_root, force=self.force
-            )
+            from services.deploy_e2e import e2e_span
+
+            with e2e_span("LibraryLoadWorker.run"):
+                snapshot = get_library_cache().load_snapshot(
+                    self.library_root, force=self.force
+                )
             if self.isInterruptionRequested():
                 return
             self.loaded.emit(snapshot)

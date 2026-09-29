@@ -160,6 +160,8 @@ class ModFilterIndex:
     conflict_status: str = "none"
     enabled: bool = True
     category_tags: str = ""
+    # Secondary classification from mods.category (e.g. 修女). Not type name.
+    category: str = ""
     type_id: int | None = None
     content_status: str = ""
     identity_status: str = "ok"
@@ -312,6 +314,7 @@ def matches_search(index: ModFilterIndex, query: str) -> bool:
         index.game_name,
         index.tag_values,
         index.category_tags,
+        index.category,
         index.source_url,
         index.external_id,
         index.platform,

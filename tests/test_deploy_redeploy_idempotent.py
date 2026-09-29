@@ -13,6 +13,7 @@ from services.deploy_rules.manifest import load_manifest
 from tests.helpers.identity import (
     bind_managed_path,
     create_steam_test_mod,
+    frozen_deploy_id,
     write_info_sidecar,
 )
 
@@ -28,7 +29,7 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 def _seed(
     db: DatabaseManager, library: Path, mods: Path, *, mid: str = "88001"
-) -> Path:
+) -> tuple[Path, str]:
     folder = library / "Game" / "IdemMod"
     folder.mkdir(parents=True)
     (folder / "a.txt").write_text("payload", encoding="utf-8")
@@ -36,9 +37,10 @@ def _seed(
     created = create_steam_test_mod(
         db, external_id=mid, title="IdemMod", app_id=1, game_name="Game"
     )
+    iid = frozen_deploy_id(created)
     write_info_sidecar(
         folder,
-        internal_id=str(created.mod_id),
+        internal_id=iid,
         title="IdemMod",
         external_id=mid,
         workspace_id=str(created.workspace_id or mid),
@@ -46,7 +48,7 @@ def _seed(
         game_name="Game",
     )
     bind_managed_path(db, created.mod_id, folder, title="IdemMod", game_name="Game")
-    return folder
+    return folder, iid
 
 
 def test_redeploy_twice_idempotent(tmp_path: Path, db: DatabaseManager) -> None:
@@ -59,10 +61,10 @@ def test_redeploy_twice_idempotent(tmp_path: Path, db: DatabaseManager) -> None:
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    _seed(db, library, mods)
+    _folder, iid = _seed(db, library, mods)
 
     deployer = ModDeployer(library_root=library, db=db)
-    first = deployer.deploy_mod("88001")
+    first = deployer.deploy_mod(iid)
     assert first.get("success") is True
     target = Path(first["target"])
     assert (target / "a.txt").read_text(encoding="utf-8") == "payload"
@@ -70,7 +72,7 @@ def test_redeploy_twice_idempotent(tmp_path: Path, db: DatabaseManager) -> None:
     assert man1 is not None
     files1 = len(man1.files)
 
-    second = deployer.deploy_mod("88001")
+    second = deployer.deploy_mod(iid)
     assert second.get("success") is True
     assert (target / "a.txt").read_text(encoding="utf-8") == "payload"
     man2 = load_manifest(library / "Game" / "IdemMod")
@@ -90,7 +92,7 @@ def test_concurrent_second_deploy_rejected(
         mod_path=str(mods),
         deploy_type=DEPLOY_TYPE_FOLDER_COPY,
     )
-    _seed(db, library, mods, mid="88002")
+    _folder, iid = _seed(db, library, mods, mid="88002")
 
     gate = threading.Event()
     proceed = threading.Event()
@@ -121,12 +123,12 @@ def test_concurrent_second_deploy_rejected(
     results: list[dict] = []
 
     def _first() -> None:
-        results.append(deployer.deploy_mod("88002"))
+        results.append(deployer.deploy_mod(iid))
 
     t = threading.Thread(target=_first)
     t.start()
     assert gate.wait(timeout=3)
-    blocked = deployer.deploy_mod("88002")
+    blocked = deployer.deploy_mod(iid)
     proceed.set()
     t.join(timeout=10)
 

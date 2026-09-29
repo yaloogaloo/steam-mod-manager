@@ -6,7 +6,11 @@ import threading
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 pytest.importorskip("PySide6")
 
@@ -41,7 +45,7 @@ def _ensure_game(db: DatabaseManager, app_id: int = 99, *, mod_path: str = "") -
 
 def _make_mod(
     db: DatabaseManager, library: Path, *, mod_id: str = "8001", app_id: int = 99
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     mod_dir = library / "TestGame" / "DeployMe"
     mod_dir.mkdir(parents=True)
     (mod_dir / "pak.txt").write_text("data", encoding="utf-8")
@@ -56,7 +60,7 @@ def _make_mod(
         app_id=app_id,
         game_name="TestGame",
     )
-    return mod_dir, pk
+    return mod_dir, pk, frozen_deploy_id(created)
 
 
 def _pump(ms: int = 50) -> None:
@@ -93,7 +97,7 @@ def test_click_deploy_starts_worker(
 ) -> None:
     library = tmp_path / "mod"
     _ensure_game(db, mod_path=str(tmp_path / "GameMods"))
-    mod_dir, pk = _make_mod(db, library)
+    mod_dir, _pk, iid = _make_mod(db, library)
 
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
@@ -109,19 +113,19 @@ def test_click_deploy_starts_worker(
             constructed.append(self)
 
         def start(self, *args, **kwargs):  # noqa: ANN002
-            started.append(self.mod_id)
+            started.append(self.internal_id)
             # Simulate deploy_started without running a real OS thread.
             self.deploy_started.emit()
 
         def isRunning(self) -> bool:  # noqa: N802
-            return self.mod_id in started and self.mod_id not in ("done",)
+            return self.internal_id in started and self.internal_id not in ("done",)
 
     monkeypatch.setattr("ui.library_view.DeployWorker", FakeWorker)
 
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
-    view.detail_panel.show_mod(mod_dir, mod_id=pk)
+    view.detail_panel.show_mod(mod_dir, mod_id=iid)
 
     assert view.detail_panel.btn_deploy.isEnabled()
     assert view.detail_panel.btn_deploy.text() == "部署"
@@ -130,8 +134,8 @@ def test_click_deploy_starts_worker(
     # Panel → signal → library starts worker (no UI-thread deploy_mod)
     view.detail_panel._request_deploy()
 
-    assert started == [pk]
-    assert constructed and constructed[0].mod_id == pk
+    assert started == [iid]
+    assert constructed and constructed[0].internal_id == iid
     assert view._deploy_worker is constructed[0]
     assert view.detail_panel._deploy_busy is True
     assert "正在部署" in view.detail_panel.view_deploy.text()
@@ -141,9 +145,10 @@ def test_success_result_refreshes_panel_status(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
+    monkeypatch.setattr("services.mod_library_cache.get_db", lambda: db)
     library = tmp_path / "mod"
-    _ensure_game(db)
-    mod_dir, pk = _make_mod(db, library)
+    _ensure_game(db, mod_path=str(tmp_path / "GameMods"))
+    mod_dir, pk, iid = _make_mod(db, library)
 
     db.update_mod_deploy_status(
         pk,
@@ -153,12 +158,14 @@ def test_success_result_refreshes_panel_status(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir, mod_id=pk)
+    panel.show_mod(mod_dir, mod_id=iid)
     panel.set_deploy_busy(True)
     panel.apply_deploy_result(
         {
             "success": True,
-            "mod_id": pk,
+            "mod_id": iid,
+            "internal_id": iid,
+            "mod_pk": pk,
             "target": str(tmp_path / "Mods" / "DeployMe"),
             "copied_files": 1,
             "deploy_time": "2026-01-01T00:00:00+00:00",
@@ -179,12 +186,13 @@ def test_failure_shows_error(
     qapp: QApplication, db: DatabaseManager, tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
+    monkeypatch.setattr("services.mod_library_cache.get_db", lambda: db)
     library = tmp_path / "mod"
-    _ensure_game(db)
-    mod_dir, pk = _make_mod(db, library)
+    _ensure_game(db, mod_path=str(tmp_path / "GameMods"))
+    mod_dir, _pk, iid = _make_mod(db, library)
 
     panel = ModDetailPanel()
-    panel.show_mod(mod_dir, mod_id=pk)
+    panel.show_mod(mod_dir, mod_id=iid)
     panel.set_deploy_busy(True)
     panel.apply_deploy_result(
         {"success": False, "error": "请先配置游戏部署目录"}
@@ -203,7 +211,7 @@ def test_deploy_mod_runs_off_ui_thread(
     game_mods = tmp_path / "GameMods"
     game_mods.mkdir()
     db.update_game_deploy_config(99, name="TestGame", mod_path=str(game_mods))
-    _mod_dir, pk = _make_mod(db, library)
+    _mod_dir, pk, iid = _make_mod(db, library)
 
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
     monkeypatch.setattr("services.mod_library_cache.get_db", lambda: db)
@@ -219,6 +227,8 @@ def test_deploy_mod_runs_off_ui_thread(
         return {
             "success": True,
             "mod_id": str(mod_id),
+            "internal_id": str(mod_id),
+            "mod_pk": pk,
             "target": str(game_mods / "DeployMe"),
             "copied_files": 1,
         }
@@ -228,7 +238,7 @@ def test_deploy_mod_runs_off_ui_thread(
         tracking_deploy,
     )
 
-    worker = DeployWorker(pk, library_root=library)
+    worker = DeployWorker(iid, library_root=library)
     worker.deploy_finished.connect(lambda r: results.append(r))
     worker.deploy_failed.connect(
         lambda r: results.append(r if isinstance(r, dict) else {"success": False, "error": r})
@@ -249,7 +259,7 @@ def test_library_deploy_finished_does_not_call_refresh(
     game_mods = tmp_path / "Mods"
     game_mods.mkdir()
     db.update_game_deploy_config(99, name="TestGame", mod_path=str(game_mods))
-    mod_dir, pk = _make_mod(db, library)
+    mod_dir, pk, iid = _make_mod(db, library)
 
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
@@ -269,7 +279,7 @@ def test_library_deploy_finished_does_not_call_refresh(
     view = ModLibraryView()
     view.set_target_root(str(library))
     view.refresh()
-    view.detail_panel.show_mod(mod_dir, mod_id=pk)
+    view.detail_panel.show_mod(mod_dir, mod_id=iid)
 
     refresh_calls: list[int] = []
     original = view.refresh
@@ -280,11 +290,13 @@ def test_library_deploy_finished_does_not_call_refresh(
 
     monkeypatch.setattr(view, "refresh", counting_refresh)
 
-    view._deploy_mod_id = pk
+    view._deploy_mod_id = iid
     view._on_deploy_finished(
         {
             "success": True,
-            "mod_id": pk,
+            "mod_id": iid,
+            "internal_id": iid,
+            "mod_pk": pk,
             "target": str(game_mods / "DeployMe"),
             "copied_files": 1,
         }

@@ -18,6 +18,8 @@ from services.importers.importer_base import ImportContext
 from tests.helpers.identity import (
     bind_managed_path,
     create_steam_test_mod,
+    frozen_deploy_id,
+    frozen_from_pk,
     write_info_sidecar,
 )
 
@@ -74,7 +76,9 @@ def test_archive_deploy_extracts_content(tmp_path: Path, db: DatabaseManager) ->
 
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(install_mods))
 
-    deploy = ModDeployer(library_root=library, db=db).deploy_mod(result.mod_id)
+    deploy = ModDeployer(library_root=library, db=db).deploy_mod(
+        frozen_from_pk(db, result.mod_id)
+    )
     assert deploy["success"] is True, deploy
 
     dest = install_mods / "ArchiveMod"
@@ -100,9 +104,10 @@ def test_steam_empty_bundle_deploy_unchanged(tmp_path: Path, db: DatabaseManager
         encoding="utf-8",
     )
     created = create_steam_test_mod(db, external_id="8802", title="SteamMod", app_id=100)
+    iid = frozen_deploy_id(created)
     write_info_sidecar(
         mod,
-        internal_id=str(created.mod_id),
+        internal_id=iid,
         title="SteamMod",
         external_id="8802",
         workspace_id=str(created.workspace_id or "8802"),
@@ -113,6 +118,6 @@ def test_steam_empty_bundle_deploy_unchanged(tmp_path: Path, db: DatabaseManager
 
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(install_mods))
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("8802")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (install_mods / "SteamMod" / "content.dll").is_file()

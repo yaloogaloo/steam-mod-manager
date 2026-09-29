@@ -1,22 +1,24 @@
 """Phase 2 Deploy Core — FilePlan / Apply / Verify / overwrite accounting."""
 from __future__ import annotations
 import inspect
-import json
 import zipfile
 from pathlib import Path
 import pytest
 from core.db_manager import DatabaseManager
 from core.mod_platform import PLATFORM_MODIO
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_apply import apply_file_plan
 from services.deploy_file_plan import OP_COPY, OP_EXTRACT_MEMBER, DeployFilePlan, DeployFilePlanEntry, file_plan_core_applicable, file_plan_from_strategy_result, manifest_from_file_plan
 from services.deploy_rules.base import DeployContext, StrategyResult
 from services.deploy_rules.manifest import ManifestFileEntry
 from services.deploy_verifier import verify_file_plan
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.identity_service import create_mod_identity
-from tests.helpers.identity import bind_managed_path, create_steam_test_mod
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 from services.library_status import CONTENT_HEALTHY
 
 @pytest.fixture()
@@ -34,25 +36,17 @@ def _prove_managed_folder(
     *,
     extra: dict | None = None,
 ) -> None:
-    """Stamp ``.info/entity_key`` so Deploy path resolve accepts the folder."""
-    from services.mod_identity import set_entity_key
-
-    proof = str(mid)
-    payload = set_entity_key({'published_file_id': mid}, proof)
-    if extra:
-        payload.update(extra)
-        payload = set_entity_key(payload, proof)
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(payload, ensure_ascii=False),
-        encoding='utf-8',
-    )
-    db.update_mod_identity_fields(
-        mid,
-        internal_id=proof,
-        last_known_path=str(folder),
-        folder_present=True,
+    """Stamp Frozen ``.info/internal_id`` and bind the managed folder."""
+    extra = extra or {}
+    prove_managed_folder(
+        db,
+        folder,
+        handle=mid,
+        title=str(extra.get('title') or folder.name),
+        app_id=int(extra.get('app_id') or 0),
+        game_name=str(extra.get('game_name') or ''),
+        platform=str(extra.get('platform') or 'steam'),
+        extra=extra,
     )
 
 def test_file_plan_folder_apply_verify_manifest(tmp_path: Path) -> None:
@@ -133,6 +127,7 @@ def test_anno_accident_regression_target_already_full(tmp_path: Path, db: Databa
     assert len(preexisting_files) == n
     created = create_mod_identity(db, platform=PLATFORM_MODIO, external_id='1786890582763999', source_url='https://mod.io/g/anno-1800/m/ocean-liner-test', title='Ocean Liner', app_id=916440, game_name='Anno 1800', operation='import')
     mod_id = str(created.mod_id)
+    iid = frozen_deploy_id(created)
     _prove_managed_folder(
         db,
         mod_id,
@@ -149,7 +144,7 @@ def test_anno_accident_regression_target_already_full(tmp_path: Path, db: Databa
     db.update_game_deploy_config(916440, name='Anno 1800', install_path=str(install), mod_path='', deploy_type='folder_copy')
     db.update_mod_identity_fields(mod_id, platform=PLATFORM_MODIO, app_id=916440)
     db.update_mod_content_status(mod_id, content_status=CONTENT_HEALTHY)
-    out = ModDeployer(library_root=library, db=db).deploy_mod(mod_id)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert out.get('success') is True, out
     assert int(out.get('planned_files') or 0) == n, out
     assert int(out.get('applied_files') or 0) == n, out
@@ -168,16 +163,18 @@ def test_folder_deploy_via_moddeployer_uses_fileplan_counts(tmp_path: Path, db: 
     (folder / 'data').mkdir()
     (folder / 'data' / 'c.bin').write_bytes(b'\x00\x01')
     db.update_game_deploy_config(1, name='Game', install_path='', mod_path=str(mods), deploy_type='folder_copy')
-    create_steam_test_mod(db, external_id='88011', title='ModA', app_id=1, game_name='Game')
-    bind_managed_path(db, '88011', folder, title='ModA', game_name='Game')
+    created = create_steam_test_mod(db, external_id='88011', title='ModA', app_id=1, game_name='Game')
+    pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
+    bind_managed_path(db, pk, folder, title='ModA', game_name='Game')
     _prove_managed_folder(
         db,
-        '88011',
+        pk,
         folder,
         extra={'title': 'ModA', 'app_id': 1, 'game_name': 'Game'},
     )
-    db.update_mod_content_status('88011', content_status=CONTENT_HEALTHY)
-    out = ModDeployer(library_root=library, db=db).deploy_mod('88011')
+    db.update_mod_content_status(pk, content_status=CONTENT_HEALTHY)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert out.get('success') is True, out
     assert int(out.get('planned_files') or 0) == 2
     assert int(out.get('applied_files') or 0) == 2
@@ -294,6 +291,7 @@ def _anno_zip_moddeployer(tmp_path: Path, db: DatabaseManager, *, folder_name: s
         assert len([p for p in (mods / zip_root).rglob('*') if p.is_file()]) == len(members)
     created = create_mod_identity(db, platform=PLATFORM_MODIO, external_id=external_id, source_url=f'https://mod.io/g/anno-1800/m/{url_slug}', title=title, app_id=916440, game_name='Anno 1800', operation='import')
     mod_id = str(created.mod_id)
+    iid = frozen_deploy_id(created)
     _prove_managed_folder(
         db,
         mod_id,
@@ -310,7 +308,7 @@ def _anno_zip_moddeployer(tmp_path: Path, db: DatabaseManager, *, folder_name: s
     db.update_game_deploy_config(916440, name='Anno 1800', install_path=str(install), mod_path='', deploy_type='folder_copy')
     db.update_mod_identity_fields(mod_id, platform=PLATFORM_MODIO, app_id=916440)
     db.update_mod_content_status(mod_id, content_status=CONTENT_HEALTHY)
-    out = ModDeployer(library_root=library, db=db).deploy_mod(mod_id)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     return out
 
 def test_anno_fixture_ocean_liner_overwrite_succeeds(tmp_path: Path, db: DatabaseManager) -> None:

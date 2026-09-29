@@ -36,7 +36,7 @@ class DeployWorker(QThread):
 
     def __init__(
         self,
-        internal_id: int | str,
+        internal_id: str,
         library_root: str | Path | None = None,
         parent=None,
         *,
@@ -77,16 +77,26 @@ class DeployWorker(QThread):
         self.deploy_failed.emit(normalized)
 
     def run(self) -> None:
+        from services.deploy_e2e import bind_job, e2e_count, e2e_event, e2e_mark, e2e_span
+
+        bind_job(str(getattr(self, "_e2e_job_id", "") or ""))
+        e2e_event("worker started")
+        e2e_mark("worker_started")
         self.deploy_started.emit()
         result: dict[str, Any] | None = None
         try:
             deployer = self._deployer or ModDeployer(library_root=self.library_root)
-            if self.action == "undeploy":
-                result = deployer.undeploy_mod(self.internal_id)
-            elif self.action == "redeploy":
-                result = deployer.redeploy_mod(self.internal_id)
-            else:
-                result = deployer.deploy_mod(self.internal_id)
+            e2e_event("worker deploy entered")
+            e2e_mark("worker_deploy_entered")
+            with e2e_span("worker_deploy"):
+                if self.action == "undeploy":
+                    result = deployer.undeploy_mod(self.internal_id)
+                elif self.action == "redeploy":
+                    result = deployer.redeploy_mod(self.internal_id)
+                else:
+                    result = deployer.deploy_mod(self.internal_id)
+            e2e_event("worker deploy returned")
+            e2e_mark("worker_deploy_returned")
             if self.isInterruptionRequested():
                 result = DeployResult(
                     status=DeployStatus.CANCELLED,
@@ -119,4 +129,7 @@ class DeployWorker(QThread):
                     error="部署失败：未知错误（无结果）",
                     error_code="empty_result",
                 ).to_dict()
+            e2e_count("finish_signal_count")
+            e2e_event("worker finished emitted")
+            e2e_mark("worker_finished_emitted")
             self._emit_terminal(result)

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION
+from core.models import MOD_TYPE_BEAUTIFY, MOD_TYPE_EXTENSION, MOD_TYPE_SKIN
 from core.paths import mod_types_path
 
 logger = logging.getLogger(__name__)
@@ -226,11 +226,12 @@ class ModTypeCatalog:
         """True when this Type shows the optional「分类」field.
 
         拓展 uses the durable per-game stamp (survives display rename).
-        美化 uses the current Type display name and the same ``mods.category`` column.
+        美化 / 皮肤 use the current Type display name and the same
+        ``mods.category`` column. Not a Mod title check.
         """
         if self.is_extension_type(app_id, type_id):
             return True
-        return self.resolve_name(app_id, type_id) == MOD_TYPE_BEAUTIFY
+        return self.resolve_name(app_id, type_id) in {MOD_TYPE_BEAUTIFY, MOD_TYPE_SKIN}
 
     def _stamp_extension_type(self, app_id: int, type_id: int, name: str) -> bool:
         """First Type created/found as the canonical extension label wins. Name may later change."""

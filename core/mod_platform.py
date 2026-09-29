@@ -345,6 +345,20 @@ STELLARIS_NAME_ALIASES = frozenset(
     }
 )
 
+# Crusader Kings III / 十字军之王Ⅲ — Paradox Launcher activation (AppID 1158310).
+CK3_APP_IDS = frozenset({1158310})
+CK3_NAME_ALIASES = frozenset(
+    {
+        "crusader kings iii",
+        "crusader kings 3",
+        "ck3",
+        "十字军之王iii",
+        "十字军之王ⅲ",
+        "十字军之王3",
+        "十字军之王Ⅲ",
+    }
+)
+
 # Total War: WARHAMMER III / 全面战争：战锤 III — pack-only deploy into mod_path.
 WARHAMMER3_APP_IDS = frozenset({1142710})
 WARHAMMER3_NAME_ALIASES = frozenset(
@@ -456,6 +470,28 @@ def is_stellaris_game(game_name: str = "", game_id: int | str = 0) -> bool:
     key = _normalize_game_key(game_name)
     aliases = {_normalize_game_key(a) for a in STELLARIS_NAME_ALIASES}
     return key in aliases
+
+
+def is_ck3_game(game_name: str = "", game_id: int | str = 0) -> bool:
+    """True when the library game is Crusader Kings III / 十字军之王Ⅲ."""
+    gid = _coerce_game_id(game_id)
+    if gid in CK3_APP_IDS:
+        return True
+    raw = str(game_name or "").strip()
+    if not raw:
+        return False
+    key = _normalize_game_key(game_name)
+    aliases = {_normalize_game_key(a) for a in CK3_NAME_ALIASES}
+    if key in aliases:
+        return True
+    if "十字军之王" in raw and (
+        "3" in raw or "Ⅲ" in raw or "ⅲ" in raw or "iii" in raw.casefold()
+    ):
+        return True
+    compact = key.replace("crusaderkings", "")
+    if "crusaderkings" in key and ("3" in compact or "iii" in compact):
+        return True
+    return False
 
 
 def is_warhammer3_game(game_name: str = "", game_id: int | str = 0) -> bool:

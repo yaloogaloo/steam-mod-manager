@@ -9,7 +9,11 @@ import pytest
 from core.db_manager import DatabaseManager
 from services.deploy import ModDeployer
 from services.deploy_rules import load_manifest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 
 PALWORLD_APP = 1623730
@@ -30,7 +34,7 @@ def _seed(
     *,
     external_id: str,
     title: str,
-) -> str:
+) -> tuple[str, str]:
     created = create_steam_test_mod(
         db,
         external_id=external_id,
@@ -38,7 +42,7 @@ def _seed(
         app_id=PALWORLD_APP,
         game_name="Palworld",
     )
-    return prove_managed_folder(
+    pk = prove_managed_folder(
         db,
         mod,
         handle=created.mod_id,
@@ -46,6 +50,7 @@ def _seed(
         app_id=PALWORLD_APP,
         game_name="Palworld",
     )
+    return pk, frozen_deploy_id(created)
 
 
 def test_root_pak_goes_to_tilde_mods_under_install(
@@ -72,9 +77,9 @@ def test_root_pak_goes_to_tilde_mods_under_install(
     nested = mod / "sub"
     nested.mkdir()
     (nested / "nested.pak").write_bytes(b"nope")
-    _seed(db, mod, external_id="99101", title="Loose")
+    _pk, iid = _seed(db, mod, external_id="99101", title="Loose")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("99101")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True
 
     target = install / "Pal" / "Content" / "Paks" / "~mods" / "test.pak"
@@ -110,9 +115,9 @@ def test_logicmods_go_under_paks_logicmods(
     logic = mod / "LogicMods"
     logic.mkdir(parents=True)
     (logic / "a.pak").write_bytes(b"logic")
-    _seed(db, mod, external_id="99102", title="LogicPack")
+    _pk, iid = _seed(db, mod, external_id="99102", title="LogicPack")
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("99102")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True
 
     target = install / "Pal" / "Content" / "Paks" / "LogicMods" / "a.pak"
@@ -145,9 +150,9 @@ def test_never_copies_into_mod_path(tmp_path: Path, db: DatabaseManager) -> None
     logic = mod / "LogicMods"
     logic.mkdir()
     (logic / "L.pak").write_bytes(b"L")
-    _seed(db, mod, external_id="99103", title="Both")
+    _pk, iid = _seed(db, mod, external_id="99103", title="Both")
 
-    assert ModDeployer(library_root=library, db=db).deploy_mod("99103")["success"]
+    assert ModDeployer(library_root=library, db=db).deploy_mod(iid)["success"]
     assert list(mod_path.rglob("*")) == []  # untouched
     assert (install / "Pal" / "Content" / "Paks" / "~mods" / "root.pak").is_file()
     assert (install / "Pal" / "Content" / "Paks" / "LogicMods" / "L.pak").is_file()
@@ -173,10 +178,10 @@ def test_undeploy_removes_correct_install_targets(
     logic = mod / "LogicMods"
     logic.mkdir()
     (logic / "a.pak").write_bytes(b"y")
-    _seed(db, mod, external_id="99104", title="CleanMe")
+    _pk, iid = _seed(db, mod, external_id="99104", title="CleanMe")
 
     dep = ModDeployer(library_root=library, db=db)
-    assert dep.deploy_mod("99104")["success"]
+    assert dep.deploy_mod(iid)["success"]
     root_pak = install / "Pal" / "Content" / "Paks" / "~mods" / "test.pak"
     logic_pak = install / "Pal" / "Content" / "Paks" / "LogicMods" / "a.pak"
     assert root_pak.is_file() and logic_pak.is_file()
@@ -185,7 +190,7 @@ def test_undeploy_removes_correct_install_targets(
     foreign = install / "Pal" / "Content" / "Paks" / "~mods" / "Other.pak"
     foreign.write_bytes(b"keep")
 
-    und = dep.undeploy_mod("99104")
+    und = dep.undeploy_mod(iid)
     assert und["success"] is True
     assert not root_pak.exists()
     assert not logic_pak.exists()

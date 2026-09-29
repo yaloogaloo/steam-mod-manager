@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
@@ -34,7 +38,7 @@ def _seed(
     files: dict[str, str],
     game: str = "G",
     app_id: int = 42,
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     mod = library / game / title
     mod.mkdir(parents=True)
     for name, text in files.items():
@@ -50,7 +54,7 @@ def _seed(
         app_id=app_id,
         game_name=game,
     )
-    return mod, pk
+    return mod, pk, frozen_deploy_id(created)
 
 
 def test_redeploy_removes_stale_files_and_rewrites_manifest(
@@ -63,7 +67,7 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     db.update_game_deploy_config(
         42, name="G", mod_path=str(mods_root), deploy_type=DEPLOY_TYPE_FOLDER_COPY
     )
-    mod, pk = _seed(
+    mod, pk, iid = _seed(
         db,
         library,
         mid="96001",
@@ -72,7 +76,7 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     )
 
     deployer = ModDeployer(library_root=library, db=db)
-    first = deployer.deploy_mod("96001")
+    first = deployer.deploy_mod(iid)
     assert first["success"] is True
 
     target = mods_root / "ShrinkMod"
@@ -85,7 +89,7 @@ def test_redeploy_removes_stale_files_and_rewrites_manifest(
     # New version drops B.txt
     (mod / "B.txt").unlink()
 
-    red = deployer.redeploy_mod("96001")
+    red = deployer.redeploy_mod(iid)
     assert red["success"] is True
     assert (target / "A.txt").is_file()
     assert not (target / "B.txt").exists()
@@ -107,16 +111,16 @@ def test_redeploy_aborts_when_undeploy_fails(
     mods_root = tmp_path / "GameMods"
     mods_root.mkdir()
     db.update_game_deploy_config(42, name="G", mod_path=str(mods_root))
-    _seed(db, library, mid="96002", title="M", files={"x.txt": "x"})
+    _mod, _pk, iid = _seed(db, library, mid="96002", title="M", files={"x.txt": "x"})
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("96002")["success"]
+    assert deployer.deploy_mod(iid)["success"]
 
     monkeypatch.setattr(
         deployer,
         "undeploy_mod",
         lambda *_a, **_k: {"success": False, "error": "simulated undeploy fail"},
     )
-    red = deployer.redeploy_mod("96002")
+    red = deployer.redeploy_mod(iid)
     assert red["success"] is False
     assert "重新部署中止" in red["error"]
