@@ -917,6 +917,8 @@ def collect_enabled_pack_lines(
         ref = by_id.get(mid)
         if ref is None or not ref.enabled:
             continue
+        # Empty pack lines are an unresolved external projection. The Mod
+        # stays in canonical order and Sorting Mode.
         lines.extend(
             resolve_pack_lines(
                 ref,

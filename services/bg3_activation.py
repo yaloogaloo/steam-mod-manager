@@ -150,8 +150,11 @@ def _attr(obj: object, *names: str) -> str:
 
 
 def sort_token(obj: object) -> str:
-    """Load-order token: Frozen ``internal_id`` only."""
-    return canon_internal_id(_attr(obj, "internal_id", "id"))
+    """Load-order token: Frozen ``internal_id`` only. Never a SQLite PK."""
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    token = str(_attr(obj, "internal_id") or "").strip()
+    return token if is_frozen_internal_uuid(token) else ""
 
 
 def load_saved_order() -> list[str]:
@@ -219,12 +222,14 @@ def _list_deployed_rows(
         handles.append(key)
     by_pk: dict[str, dict[str, Any]] = {}
     by_iid: dict[str, dict[str, Any]] = {}
+    from services.deploy_identity import is_frozen_internal_uuid
+
     for row in database.list_mod_list_items(app_id=BG3_APP_ID):
         pk = str(row.get("mod_id") or "").strip()
-        iid = canon_internal_id(row.get("internal_id") or "")
+        iid = str(row.get("internal_id") or "").strip()
         if pk:
             by_pk[pk] = row
-        if iid:
+        if is_frozen_internal_uuid(iid):
             by_iid[iid] = row
     out: list[dict[str, Any]] = []
     used: set[str] = set()
@@ -235,8 +240,8 @@ def _list_deployed_rows(
             row = extra[0] if extra else None
         if row is None or not _is_deployed_row(row):
             continue
-        iid = canon_internal_id(row.get("internal_id") or "")
-        if not iid or iid in used:
+        iid = str(row.get("internal_id") or "").strip()
+        if not is_frozen_internal_uuid(iid) or iid in used:
             continue
         used.add(iid)
         out.append(row)
@@ -391,6 +396,29 @@ def inspect_bg3_membership(
     )
 
 
+def deployed_order_ids(
+    db: DatabaseManager | None = None,
+    *,
+    library_root: str | Path | None = None,
+) -> list[str]:
+    """Canonical BG3 order tokens: deployed ``internal_id`` values.
+
+    Pak UUID resolution is projection (:func:`inspect_bg3_membership`) and
+    does not remove a deployed Mod from this list.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    for row in _list_deployed_rows(db, library_root=library_root):
+        iid = str(row.get("internal_id") or "").strip()
+        if not is_frozen_internal_uuid(iid) or iid in seen:
+            continue
+        seen.add(iid)
+        out.append(iid)
+    return out
+
+
 def list_sortable_bg3_mods(
     db: DatabaseManager | None = None,
     *,
@@ -423,6 +451,7 @@ def initialize_order_from_modsettings(
     *,
     library_root: str | Path | None = None,
 ) -> list[str]:
+    deployed = deployed_order_ids(db, library_root=library_root)
     members = list_sortable_bg3_mods(db, library_root=library_root)
     uuid_to_iids: dict[str, list[str]] = {}
     for member in members:
@@ -430,13 +459,13 @@ def initialize_order_from_modsettings(
             uuid_to_iids.setdefault(uuid, []).append(member.internal_id)
     path = bg3_modsettings_path()
     if not path.is_file():
-        return [m.internal_id for m in members]
+        return list(deployed)
     try:
         text = path.read_text(encoding="utf-8")
         _version, nodes = parse_bg3_modsettings(text)
     except (OSError, UnicodeDecodeError, Bg3ModsettingsError):
         logger.debug("BG3 initial order: cannot parse modsettings.lsx", exc_info=True)
-        return [m.internal_id for m in members]
+        return list(deployed)
     order: list[str] = []
     seen: set[str] = set()
     ambiguous: set[str] = set()
@@ -451,9 +480,10 @@ def initialize_order_from_modsettings(
             continue
         seen.add(iid)
         order.append(iid)
-    for member in members:
-        if member.internal_id not in seen and member.internal_id not in ambiguous:
-            order.append(member.internal_id)
+    for iid in deployed:
+        if iid not in seen:
+            seen.add(iid)
+            order.append(iid)
     return order
 
 
@@ -462,11 +492,11 @@ def resolved_load_order(
     *,
     library_root: str | Path | None = None,
 ) -> list[str]:
-    sortable = get_sortable_mods(db, library_root=library_root)
+    deployed = deployed_order_ids(db, library_root=library_root)
     saved = load_saved_order()
     if not bg3_order_path().is_file():
         saved = initialize_order_from_modsettings(db, library_root=library_root)
-    return merge_deployed_order(saved, sortable)
+    return merge_deployed_order(saved, deployed)
 
 
 def persist_load_order(
@@ -475,13 +505,13 @@ def persist_load_order(
     *,
     library_root: str | Path | None = None,
 ) -> list[str]:
-    sortable = get_sortable_mods(db, library_root=library_root)
+    deployed = deployed_order_ids(db, library_root=library_root)
     if not bg3_order_path().is_file():
         seeded = initialize_order_from_modsettings(db, library_root=library_root)
         base = seeded if not internal_ids else merge_deployed_order(internal_ids, seeded)
     else:
         base = list(internal_ids) if internal_ids is not None else load_saved_order()
-    merged = merge_deployed_order(base, sortable)
+    merged = merge_deployed_order(base, deployed)
     save_saved_order(merged)
     return merged
 
@@ -620,9 +650,9 @@ def _commit_order(
         for item in exclude_internal_ids
         if canon_internal_id(item)
     }
-    sortable = [
+    deployed = [
         iid
-        for iid in get_sortable_mods(db, library_root=library_root)
+        for iid in deployed_order_ids(db, library_root=library_root)
         if iid not in exclude
     ]
     requested = [
@@ -630,13 +660,21 @@ def _commit_order(
         for item in internal_ids
         if canon_internal_id(item) and canon_internal_id(item) not in exclude
     ]
-    merged = merge_deployed_order(requested, sortable)
+    merged = merge_deployed_order(requested, deployed)
     if not project:
         save_saved_order(merged)
         return merged
 
+    # Pak-resolvable ids are the external projection. Unresolved deployed
+    # ids stay in the canonical order and in Sorting Mode.
+    projectable = {
+        member.internal_id
+        for member in list_sortable_bg3_mods(db, library_root=library_root)
+        if member.internal_id not in exclude
+    }
+    project_ids = [iid for iid in merged if iid in projectable]
     uuid_order, missing_nodes = resolve_uuid_sequence(
-        merged, db, library_root=library_root
+        project_ids, db, library_root=library_root
     )
     remove = [_norm_uuid(uuid) for uuid in remove_uuids if _norm_uuid(uuid)]
     if any(uuid == _norm_uuid(GUSTAVX_UUID) for uuid in remove):
@@ -822,7 +860,8 @@ def is_sortable_member(
     *,
     library_root: str | Path | None = None,
 ) -> bool:
-    token = sort_token(index)
-    if not token:
-        return False
-    return token in set(get_sortable_mods(db, library_root=library_root))
+    """Canonical membership. Pak metadata does not hide a deployed Mod."""
+    del db, library_root
+    from services.canonical_membership import entry_is_deployed
+
+    return entry_is_deployed(index)

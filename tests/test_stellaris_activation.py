@@ -280,7 +280,7 @@ def test_enable_disable_does_not_drive_launcher_membership(
     assert "mod/ugc_1002.mod" not in payload["enabled_mods"]
     assert payload["disabled_dlcs"] == ["fake_dlc"]
     saved = json.loads((load_order_dir() / STELLARIS_ORDER_FILENAME).read_text(encoding="utf-8"))
-    assert saved["order"] == _toks(db, [a, b])
+    assert saved["order"] == [_tok(db, a)]
     assert deployed_load_order_tokens(db) == [_tok(db, a)]
 
 
@@ -292,9 +292,9 @@ def test_drag_reorder_save_and_reload(tmp_path: Path, db: DatabaseManager) -> No
     c = _seed_stellaris_mod(library, db, folder="C", workshop_id="2003")
     for wid in ("2001", "2002", "2003"):
         _write_ugc_descriptor(user_dir, wid)
-    persist_load_order(_toks(db, [a, b, c]), db)
     for pk in (a, b, c):
         _mark_deployed(db, pk)
+    persist_load_order(_toks(db, [a, b, c]), db)
     apply_card_drop(_tok(db, c), _tok(db, a), db)
     assert load_saved_order() == _toks(db, [c, a, b])
     assert resolved_load_order(db) == _toks(db, [c, a, b])
@@ -313,8 +313,8 @@ def test_missing_mod_stays_in_file_until_persist(
 ) -> None:
     _configure_stellaris(db, tmp_path)
     library = tmp_path / "mod"
-    a = _seed_stellaris_mod(library, db, folder="A", workshop_id="3001")
-    b = _seed_stellaris_mod(library, db, folder="B", workshop_id="3002")
+    a = _seed_stellaris_mod(library, db, folder="A", workshop_id="3001", deployed=True)
+    b = _seed_stellaris_mod(library, db, folder="B", workshop_id="3002", deployed=True)
     from services.stellaris_activation import save_saved_order
 
     save_saved_order([_tok(db, a), "999999", _tok(db, b)])
@@ -328,10 +328,10 @@ def test_new_mod_appends_without_disturbing_order(
 ) -> None:
     _configure_stellaris(db, tmp_path)
     library = tmp_path / "mod"
-    a = _seed_stellaris_mod(library, db, folder="A", workshop_id="4001")
-    b = _seed_stellaris_mod(library, db, folder="B", workshop_id="4002")
+    a = _seed_stellaris_mod(library, db, folder="A", workshop_id="4001", deployed=True)
+    b = _seed_stellaris_mod(library, db, folder="B", workshop_id="4002", deployed=True)
     persist_load_order(_toks(db, [b, a]), db)
-    c = _seed_stellaris_mod(library, db, folder="C", workshop_id="4003")
+    c = _seed_stellaris_mod(library, db, folder="C", workshop_id="4003", deployed=True)
     assert resolved_load_order(db) == _toks(db, [b, a, c])
 
 
@@ -365,8 +365,8 @@ def test_identity_mapping_not_polluted(tmp_path: Path, db: DatabaseManager) -> N
     library = tmp_path / "mod"
     a = _seed_stellaris_mod(library, db, folder="A", workshop_id="1623423360")
     _write_ugc_descriptor(user_dir, "1623423360", name="UI Overhaul Dynamic")
-    persist_load_order(_toks(db, [a]), db)
     _mark_deployed(db, a)
+    persist_load_order(_toks(db, [a]), db)
     entity = _entity_internal_id(db, a)
     workspace = _workspace_id(db, a)
     assert entity
@@ -785,7 +785,7 @@ def test_stellaris_sort_mode_click_shows_deployed_not_launcher(
         (load_order_dir() / STELLARIS_ORDER_FILENAME).read_text(encoding='utf-8')
     )
     assert set(saved.keys()) == {'order'}
-    assert set(saved['order']) == set(_toks(db, all_ids))
+    assert set(saved['order']) == set(_toks(db, deployed_ids))
     after_sync = json.loads((user_dir / 'dlc_load.json').read_text(encoding='utf-8'))
     assert after_sync['enabled_mods'] == [
         workshop_launcher_id(str(8400 + i)) for i in (2, 0, 1)
@@ -902,8 +902,6 @@ def test_stellaris_sort_mode_deployed_with_empty_launcher(
         for i in range(6)
     ]
     _write_enabled_mods(user_dir, [])
-    for i in range(3):
-        _write_ugc_descriptor(user_dir, str(8600 + i), name=f'Lib{i}')
     persist_load_order(_toks(db, ids), db)
     view = ModLibraryView()
     view.set_target_root(str(library))
@@ -916,6 +914,61 @@ def test_stellaris_sort_mode_deployed_with_empty_launcher(
     assert set(_filtered_mod_ids(view)) == set(expected)
     assert _same_mod_ids(_host_visible_card_ids(view), expected, db)
     assert view.count_label.text().startswith('3 Mods')
+    view.deleteLater()
+    QApplication.processEvents()
+
+
+def test_stellaris_fresh_deploy_without_descriptor_is_in_both_views(
+    qapp, tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Deployed + missing ugc descriptor stays in the deployed filter and Sorting Mode."""
+    from PySide6.QtWidgets import QApplication
+
+    from ui.library_query import FILTER_DEPLOYED
+    from ui.library_view import ModLibraryView
+
+    user_dir, _workshop = _configure_stellaris(db, tmp_path)
+    library = tmp_path / 'mod'
+    pk = _seed_stellaris_mod(
+        library, db, folder='Fresh', workshop_id='8699', deployed=False
+    )
+    view = ModLibraryView()
+    view.set_target_root(str(library))
+    view.set_preferred_filter('Stellaris')
+    view.refresh()
+    QApplication.processEvents()
+    view._set_library_status_filter(FILTER_DEPLOYED)
+    QApplication.processEvents()
+    assert pk not in _filtered_mod_ids(view)
+
+    result = ModDeployer(library_root=library, db=db).deploy_mod(_tok(db, pk))
+    assert result.get('success') is True, result
+    assert not (user_dir / 'mod' / 'ugc_8699.mod').exists()
+
+    view.refresh()
+    QApplication.processEvents()
+    view._set_library_status_filter(FILTER_DEPLOYED)
+    QApplication.processEvents()
+    deployed = _filtered_mod_ids(view)
+    assert deployed == [pk]
+
+    view.btn_wh3_sort_mode.click()
+    QApplication.processEvents()
+    assert view._wh3_sort_mode is True
+    sorting_ids = _filtered_mod_ids(view)
+    missing = [item for item in deployed if item not in sorting_ids]
+    extra = [item for item in sorting_ids if item not in deployed]
+    print(f"DEPLOYED_IDS={deployed}")
+    print(f"SORTING_IDS={sorting_ids}")
+    print(f"MISSING_FROM_SORTING={missing}")
+    print(f"EXTRA_IN_SORTING={extra}")
+    assert missing == []
+    assert extra == []
+    assert sorting_ids == deployed
+    assert _tok(db, pk) in load_saved_order()
+    report = sync_stellaris_launcher(db, user_dir=user_dir)
+    assert _tok(db, pk) in report.unresolved
+    assert not (user_dir / 'mod' / 'ugc_8699.mod').exists()
     view.deleteLater()
     QApplication.processEvents()
 
@@ -939,6 +992,8 @@ def test_stellaris_deploy_writes_b_then_syncs_a(
         _write_ugc_descriptor(user_dir, str(8700 + i))
     _write_ugc_descriptor(user_dir, '8799')
     _write_enabled_mods(user_dir, ['8799', '8700', '8701', '8702'])
+    for pk in ids:
+        _mark_deployed(db, pk)
     persist_load_order(_toks(db, [ids[2], ids[0], ids[1], extra]), db)
 
     deployer = ModDeployer(library_root=library, db=db)
@@ -956,7 +1011,8 @@ def test_stellaris_deploy_writes_b_then_syncs_a(
         workshop_launcher_id('8701'),
     ]
     saved = json.loads((load_order_dir() / STELLARIS_ORDER_FILENAME).read_text(encoding='utf-8'))
-    assert saved['order'] == _toks(db, [ids[2], ids[0], ids[1], extra])
+    assert saved['order'] == _toks(db, [ids[2], ids[0], ids[1]])
+    assert _tok(db, extra) not in saved['order']
 
 
 def test_stellaris_undeploy_removes_from_launcher(
@@ -989,7 +1045,7 @@ def test_stellaris_undeploy_removes_from_launcher(
         workshop_launcher_id('8802'),
     ]
     saved = json.loads((load_order_dir() / STELLARIS_ORDER_FILENAME).read_text(encoding='utf-8'))
-    assert saved['order'] == _toks(db, ids)
+    assert saved['order'] == _toks(db, [ids[0], ids[2]])
 
 
 def test_sync_corrects_launcher_without_adopting_into_smm(

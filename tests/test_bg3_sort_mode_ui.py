@@ -269,3 +269,78 @@ def test_bg3_token_is_internal_id_not_pk() -> None:
     assert "application/x-smm-bg3" not in card_src
     start = card_src.split("def _start_wh3_sort_drag", 1)[1]
     assert "mod_pk" not in start.split("def dragEnterEvent", 1)[0]
+
+
+def test_bg3_unresolved_pak_stays_in_sort_membership(
+    qapp, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deployed Mod whose pak UUID cannot be resolved stays in Sorting Mode."""
+    from PySide6.QtWidgets import QApplication
+
+    from services.bg3_activation import inspect_bg3_membership
+    from ui.library_view import ModLibraryView
+
+    patch_library_get_db(monkeypatch, db)
+    library, _order_path, _lsx_path = _configure_bg3(db, tmp_path, monkeypatch)
+    iid_ok = _seed(library, db, tmp_path, folder="ModA", uuid=UUID_A, name="A")
+    created = create_other_test_mod(
+        db,
+        title="Unresolved",
+        external_id="nexus-missing",
+        app_id=BG3_APP_ID,
+        game_name="Baldur's Gate 3",
+    )
+    iid_missing = str(created.internal_id or "")
+    pk = str(created.mod_id)
+    mod_dir = library / "博德之门Ⅲ" / "MissingPak"
+    mod_dir.mkdir(parents=True)
+    write_info_sidecar(
+        mod_dir,
+        internal_id=iid_missing,
+        title="Unresolved",
+        external_id="nexus-missing",
+        workspace_id=str(created.workspace_id or ""),
+        app_id=BG3_APP_ID,
+        game_name="Baldur's Gate 3",
+    )
+    missing_pak = tmp_path / "game_mods" / "missing.pak"
+    info = mod_dir / INFO_DIR_NAME
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "deploy_manifest.json").write_text(
+        json.dumps(
+            {
+                "mod_id": pk,
+                "internal_id": iid_missing,
+                "deploy_time": "2026-01-01T00:00:00",
+                "deploy_type": "pak_mod_path",
+                "files": [
+                    {
+                        "source": str(missing_pak),
+                        "target": str(missing_pak),
+                        "type": "pak",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    db.update_mod_identity_fields(pk, last_known_path=str(mod_dir), folder_present=True)
+    db.update_mod_deploy_status(
+        pk, deploy_status=DEPLOY_STATUS_DEPLOYED, deploy_path=str(missing_pak)
+    )
+
+    view = ModLibraryView()
+    view.set_target_root(str(library))
+    view.set_preferred_filter("博德之门Ⅲ")
+    view.refresh()
+    QApplication.processEvents()
+    view.btn_wh3_sort_mode.click()
+    QApplication.processEvents()
+    shown = _filtered_internal_ids(view)
+    assert iid_ok in shown
+    assert iid_missing in shown
+    assert iid_missing in load_saved_order()
+    report = inspect_bg3_membership(db, library_root=library)
+    assert iid_missing not in [member.internal_id for member in report.sortable]
+    assert any(item.internal_id == iid_missing for item in report.unresolved)
+    view.deleteLater()

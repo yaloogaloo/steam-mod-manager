@@ -22,6 +22,35 @@ python -m pytest tests/test_success_path_ui_invariants.py tests/test_cover_owner
 
 Do not treat the task as done if that gate fails.
 
+## CANONICAL MEMBERSHIP REGRESSION GATE
+
+Deployed Filter and Sorting Mode both call ``entry_is_deployed`` on the
+library snapshot (``mods.deploy_status = deployed``). Order files only
+sequence that set.
+Launcher descriptors, playsets, ``dlc_load.json``, ``used_mods.txt``, pak
+UUIDs, and ``modsettings.lsx`` are external projection: unresolved must not
+hide a deployed Mod.
+
+If you touch any of:
+
+- `services/deploy.py`
+- `services/order_backend.py`
+- `services/canonical_membership.py`
+- `services/paradox_activation.py`
+- `services/bg3_activation.py`
+- `services/wh3_activation.py`
+- `ui/library_view.py`
+- `ui/library_query.py`
+
+run:
+
+```
+python -m pytest tests/test_canonical_membership_contract.py tests/test_canonical_membership_static_guard.py tests/test_canonical_identity_contract.py tests/test_canonical_identity_static_guard.py tests/test_ck3_sort_mode_ui.py tests/test_stellaris_activation.py tests/test_bg3_sort_mode_ui.py tests/test_wh3_activation.py
+```
+
+Do not treat the task as done if that gate fails. A non-empty sort list, a
+changed order file, or a successful drag is not this contract.
+
 ## Invariants
 
 VISIBLE CHILD LIFECYCLE: a visible child is `hide` → detach → `deleteLater`

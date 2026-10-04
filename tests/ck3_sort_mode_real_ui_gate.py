@@ -125,6 +125,16 @@ def main() -> int:
             return _fail("could not enter CK3 Sort Mode")
         tokens = _filtered_internal_ids(view)
         print("CK3_SORT_TOKENS", len(tokens), tokens[:8])
+        deployed_ids = [
+            str(getattr(index, "internal_id", "") or "")
+            for index, _payload in view._game_row_entries
+            if bool(getattr(index, "deployed", False))
+        ]
+        if set(tokens) != set(deployed_ids):
+            return _fail(
+                "CK3 Sorting Mode "
+                f"({len(tokens)}) != canonical deployed membership ({len(deployed_ids)})"
+            )
         if not tokens:
             return _fail("CK3 Sort Mode has no sortable Mods")
         if not all(is_frozen_internal_uuid(tok) for tok in tokens):

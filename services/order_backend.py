@@ -20,7 +20,6 @@ from services.paradox_activation import (
     paradox_game_for_name,
 )
 from services.wh3_activation import (
-    canon_internal_id,
     display_numbers,
     is_wh3_activation_app,
 )
@@ -52,7 +51,13 @@ class OrderBackend(Protocol):
 
     def bind_token(self, obj: object) -> str: ...
 
-    def is_sortable_member(self, index: object, **kwargs: Any) -> bool: ...
+    def is_sortable_member(self, index: object, **kwargs: Any) -> bool:
+        """True when *index* is in canonical deployed membership.
+
+        Implementations must not consult launcher descriptors, pak UUIDs,
+        ``used_mods.txt``, or order files. Those are external projection.
+        """
+        ...
 
     def get_sortable_mods(self, **kwargs: Any) -> list[str]: ...
 
@@ -86,47 +91,29 @@ class ParadoxOrderBackend:
         return True
 
     def sort_token(self, obj: object) -> str:
-        return canon_internal_id(_attr(obj, "internal_id", "mod_id", "id"))
+        """CK3/Stellaris order token is the Frozen ``internal_id``."""
+        from services.deploy_identity import is_frozen_internal_uuid
+
+        token = str(getattr(obj, "internal_id", "") or "").strip()
+        return token if is_frozen_internal_uuid(token) else ""
 
     def bind_token(self, obj: object) -> str:
         return self.sort_token(obj)
 
     def is_sortable_member(self, index: object, **kwargs: Any) -> bool:
-        if not bool(getattr(index, "deployed", False)):
-            return False
-        token = self.sort_token(index)
-        if not token or self.app_id <= 0:
-            return False
-        from core.db_manager import get_db
-        from services.paradox_activation import (
-            ParadoxModRef,
-            map_to_launcher_id,
-            resolve_paradox_user_dir,
-        )
+        """Canonical membership only. Launcher descriptor availability is projection."""
+        del kwargs
+        from services.canonical_membership import entry_is_deployed
 
-        db = kwargs.get("db") or get_db()
-        try:
-            user_dir = resolve_paradox_user_dir(db, app_id=self.app_id)
-            ref = ParadoxModRef(
-                token=token,
-                workspace_id=_attr(index, "workspace_id"),
-                enabled=True,
-                deployed=True,
-                last_known_path="",
-                platform=_attr(index, "platform"),
-                external_id=_attr(index, "external_id"),
-            )
-            return bool(map_to_launcher_id(ref, user_dir=user_dir).available)
-        except Exception:
-            return False
+        return entry_is_deployed(index)
 
     def get_sortable_mods(self, **kwargs: Any) -> list[str]:
+        from services.canonical_membership import canonical_deployed_internal_ids
         from services.paradox_activation import list_installed_paradox_mods
 
-        return [
-            m.token
-            for m in list_installed_paradox_mods(kwargs.get("db"), app_id=self.app_id)
-        ]
+        return canonical_deployed_internal_ids(
+            list_installed_paradox_mods(kwargs.get("db"), app_id=self.app_id)
+        )
 
     def get_current_order(self, **kwargs: Any) -> list[str]:
         from services.paradox_activation import resolved_load_order
@@ -182,9 +169,11 @@ class Wh3OrderBackend:
         return self.sort_token(obj)
 
     def is_sortable_member(self, index: object, **kwargs: Any) -> bool:
-        if not bool(getattr(index, "deployed", False)):
-            return False
-        return bool(self.sort_token(index))
+        """Canonical membership only. Pack lines are WH3 projection, not membership."""
+        del kwargs
+        from services.canonical_membership import entry_is_deployed
+
+        return entry_is_deployed(index)
 
     def get_sortable_mods(self, **kwargs: Any) -> list[str]:
         from services.wh3_activation import list_deployed_wh3_mods
@@ -248,9 +237,6 @@ class Wh3OrderBackend:
 
 
 class Bg3OrderBackend:
-    def __init__(self) -> None:
-        self._sortable_cache: list[str] | None = None
-
     def sort_mode_tooltip(self) -> str:
         return "进入已部署 Mod 的 Load Order 排序工作区"
 
@@ -266,19 +252,18 @@ class Bg3OrderBackend:
         return self.sort_token(obj)
 
     def get_sortable_mods(self, **kwargs: Any) -> list[str]:
-        if self._sortable_cache is None:
-            from services.bg3_activation import get_sortable_mods
+        from services.bg3_activation import deployed_order_ids
 
-            self._sortable_cache = get_sortable_mods(
-                kwargs.get("db"), library_root=kwargs.get("library_root")
-            )
-        return list(self._sortable_cache)
+        return deployed_order_ids(
+            kwargs.get("db"), library_root=kwargs.get("library_root")
+        )
 
     def is_sortable_member(self, index: object, **kwargs: Any) -> bool:
-        token = self.sort_token(index)
-        if not token:
-            return False
-        return token in set(self.get_sortable_mods(**kwargs))
+        """Canonical membership only. Pak UUID resolution is BG3 projection."""
+        del kwargs
+        from services.canonical_membership import entry_is_deployed
+
+        return entry_is_deployed(index)
 
     def get_current_order(self, **kwargs: Any) -> list[str]:
         from services.bg3_activation import resolved_load_order

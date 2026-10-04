@@ -413,6 +413,12 @@ def test_t10_shared_runtime_separate_order_files(
         game_name="Stellaris",
     )
     db.update_mod_identity_fields(st_pk, last_known_path=str(st_dir), folder_present=True)
+    db.update_mod_deploy_status(
+        st_pk,
+        deploy_status=DEPLOY_STATUS_DEPLOYED,
+        deploy_path=str(st_dir),
+        app_id=STELLARIS,
+    )
     persist_load_order([ck3_entity], db, app_id=CK3)
     persist_load_order([st_entity], db, app_id=STELLARIS)
     ck3_path = load_order_dir() / CK3_ORDER_FILENAME

@@ -259,12 +259,14 @@ def matches_record_visibility(
     recorded_mod_ids: frozenset[str] | None,
 ) -> bool:
     """Visible under deployment-record filter: recorded ∪ deployed."""
+    from services.canonical_membership import entry_is_deployed
+
     if recorded_mod_ids is None:
         return False
     mid = normalize_record_mod_id(index.mod_id)
     if mid and mid in recorded_mod_ids:
         return True
-    return bool(index.deployed)
+    return entry_is_deployed(index)
 
 
 def compute_record_relative_status(
@@ -274,10 +276,12 @@ def compute_record_relative_status(
     """Overlay flags only when a record filter set is active; never load/store in DB."""
     if recorded_mod_ids is None:
         return None
+    from services.canonical_membership import entry_is_deployed
+
     mid = normalize_record_mod_id(index.mod_id)
     return RecordRelativeStatus(
         recorded=bool(mid) and mid in recorded_mod_ids,
-        deployed=bool(index.deployed),
+        deployed=entry_is_deployed(index),
     )
 
 
@@ -329,7 +333,9 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
     if key == FILTER_FAVORITE:
         return bool(index.favorite)
     if key == FILTER_DEPLOYED:
-        return bool(index.deployed)
+        from services.canonical_membership import entry_is_deployed
+
+        return entry_is_deployed(index)
     if key == FILTER_OFFLINE_PRESENT:
         return bool(index.has_offline)
     if key == FILTER_OFFLINE_MISSING:
@@ -620,7 +626,9 @@ def index_matches_current_view(
     deployed_only: bool = False,
 ) -> bool:
     """True when *index* would appear in the current Library view (no sort)."""
-    if deployed_only and not bool(index.deployed):
+    from services.canonical_membership import entry_is_deployed
+
+    if deployed_only and not entry_is_deployed(index):
         return False
     if filter_key == FILTER_DEPLOYMENT_RECORD:
         if not matches_record_visibility(index, record_mod_ids):

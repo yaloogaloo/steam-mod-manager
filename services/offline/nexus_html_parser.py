@@ -8,7 +8,8 @@ Trigger boundary (enforced by architecture):
 Public API
 ----------
 parse_nexus_offline_html(index_html_path) -> NexusOfflineCandidates
-    Pure parser. Returns candidates; never writes files or touches the DB.
+    Reads the HTML and resolves captured ``./assets/`` refs through the
+    current resource authority. Never writes Mod covers or the DB.
 
 apply_nexus_offline_candidates(mod_id, managed_path, candidates, ...)
     Merge helper. Fills only missing fields. Never overwrites existing values.
@@ -21,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlsplit, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,8 @@ class NexusOfflineCandidates:
     title: str = ""
     source_url: str = ""
     external_id: str = ""          # Nexus numeric Mod ID as string
-    cover_asset_path: Path | None = None  # absolute path inside offline/assets/
+    cover_asset_path: Path | None = None  # resolved captured resource, if any
+    cover_resolution: str = ""     # NO_LOCAL / UNRESOLVED / REMOTE / RESOLVED
     description: str = ""
     confidence: dict[str, str] = field(default_factory=dict)
 
@@ -65,6 +67,13 @@ _NEXUS_MOD_URL_NO_GAME_RE = re.compile(
 )
 _LOGIN_TITLE_RE = re.compile(r"^\s*please\s+log\s+in\s*$", re.IGNORECASE)
 _EMPTY_MOD_FOLDER_RE = re.compile(r"^Empty Mod [0-9a-f]{8}$", re.IGNORECASE)
+
+# Cover-field outcomes. A missing gallery and a local ref the authority
+# cannot resolve are different events.
+NO_LOCAL_COVER_REFERENCE = "NO_LOCAL_COVER_REFERENCE"
+UNRESOLVED_LOCAL_RESOURCE = "UNRESOLVED_LOCAL_RESOURCE"
+REMOTE_RESOURCE_SKIPPED = "REMOTE_RESOURCE_SKIPPED"
+RESOLVED_LOCAL_COVER = "RESOLVED_LOCAL_COVER"
 
 
 def is_valid_nexus_mod_id(value: str = "") -> bool:
@@ -298,62 +307,71 @@ def _extract_mod_id(soup, nexus_url: str) -> tuple[str, str]:
     return "", "none"
 
 
-def _is_local_asset(src: str) -> bool:
-    return src.startswith("./assets/") or src.startswith("assets/")
-
-
-def _resolve_asset(src: str, index_html_path: Path) -> Path | None:
-    try:
-        resolved = (index_html_path.parent / src).resolve()
-        if resolved.is_file():
-            return resolved
-    except Exception:
-        pass
-    return None
-
-
-def _extract_gallery_image(soup, index_html_path: Path) -> tuple[Path | None, str]:
-    """Find first true Mod Gallery image (local ./assets/ only; no remote URLs)."""
-
-    def _first_local(container) -> Path | None:
-        if container is None:
-            return None
-        for img in container.find_all("img"):
-            src = str(img.get("src") or "").strip()
-            if _is_local_asset(src):
-                resolved = _resolve_asset(src, index_html_path)
-                if resolved is not None:
-                    return resolved
-        return None
-
-    # Primary: #sidebargallery > ul.thumbgallery
+def _gallery_regions(soup) -> list[tuple[object, str]]:
+    """Gallery containers in the existing priority order, with confidence."""
+    regions: list[tuple[object, str]] = []
     gallery = soup.find("div", id="sidebargallery")
     if gallery:
         thumbs = gallery.find("ul", class_=re.compile(r"\bgallery\b|\bthumbgallery\b"))
         if thumbs:
-            found = _first_local(thumbs)
-            if found:
-                return found, "high"
-        found = _first_local(gallery)
-        if found:
-            return found, "high"
-
-    # Fallback 1: ul.thumbgallery anywhere
+            regions.append((thumbs, "high"))
+        regions.append((gallery, "high"))
     thumbs = soup.find("ul", class_=re.compile(r"\bgallery\b|\bthumbgallery\b"))
-    if thumbs:
-        found = _first_local(thumbs)
-        if found:
-            return found, "medium"
-
-    # Fallback 2: new Tailwind UI containers
+    if thumbs is not None:
+        regions.append((thumbs, "medium"))
     for div in soup.find_all("div", class_=True):
         cls = " ".join(div.get("class") or [])
         if "group/image" in cls or "aspect-video" in cls:
-            found = _first_local(div)
-            if found:
-                return found, "medium"
+            regions.append((div, "medium"))
+    return regions
 
-    return None, "none"
+
+def _extract_gallery_image(
+    soup, index_html_path: Path
+) -> tuple[Path | None, str, str]:
+    """Find the first captured gallery image via the resource authority.
+
+    Remote ``https`` / ``og:image`` URLs are not local covers. A ``./assets/``
+    reference that the authority cannot resolve is ``UNRESOLVED_LOCAL_RESOURCE``,
+    which is not the same as a page with no cover reference.
+    """
+    from services.offline.captured_resource import (
+        CaptureResolveStatus,
+        CapturedResourceResolver,
+    )
+
+    resolver = CapturedResourceResolver(index_html_path)
+    saw_unresolved = False
+    saw_remote = False
+    for container, confidence in _gallery_regions(soup):
+        for img in container.find_all("img"):
+            src = str(img.get("src") or "").strip()
+            if not src:
+                continue
+            found = resolver.resolve(src)
+            if (
+                found.status is CaptureResolveStatus.RESOLVED
+                and found.path is not None
+            ):
+                logger.info(
+                    "[NEXUS_SCRAPER] %s ref=%s",
+                    RESOLVED_LOCAL_COVER,
+                    found.reference,
+                )
+                return found.path, confidence, RESOLVED_LOCAL_COVER
+            if found.status is CaptureResolveStatus.UNRESOLVED_REFERENCE:
+                saw_unresolved = True
+            elif found.status is CaptureResolveStatus.REMOTE_OR_UNSUPPORTED:
+                if urlsplit(src).scheme:
+                    saw_remote = True
+    if saw_unresolved:
+        logger.info("[NEXUS_SCRAPER] %s", UNRESOLVED_LOCAL_RESOURCE)
+        return None, "none", UNRESOLVED_LOCAL_RESOURCE
+    if saw_remote:
+        logger.info("[NEXUS_SCRAPER] %s", REMOTE_RESOURCE_SKIPPED)
+        return None, "none", REMOTE_RESOURCE_SKIPPED
+    logger.info("[NEXUS_SCRAPER] %s", NO_LOCAL_COVER_REFERENCE)
+    return None, "none", NO_LOCAL_COVER_REFERENCE
 
 
 def _extract_description(soup) -> str:
@@ -373,8 +391,8 @@ def _extract_description(soup) -> str:
 def parse_nexus_offline_html(index_html_path: Path) -> NexusOfflineCandidates:
     """Parse a Nexus offline ``index.html`` and return metadata candidates.
 
-    PURE function: reads the HTML file only, writes nothing, touches no DB,
-    makes no network requests.
+    Reads the HTML file and resolves captured local resources. Writes no Mod
+    cover, touches no DB, makes no network requests.
 
     This function MUST only be invoked from the offline-HTML-import path
     (``attach_nexus_offline_page`` → ``_apply_nexus_offline_metadata``).
@@ -425,7 +443,11 @@ def parse_nexus_offline_html(index_html_path: Path) -> NexusOfflineCandidates:
 
     # gallery cover
     try:
-        c.cover_asset_path, c.confidence["cover"] = _extract_gallery_image(soup, index_html_path)
+        (
+            c.cover_asset_path,
+            c.confidence["cover"],
+            c.cover_resolution,
+        ) = _extract_gallery_image(soup, index_html_path)
     except Exception as exc:
         logger.warning("[NEXUS_SCRAPER] failed to parse gallery image: %s", exc)
         c.confidence["cover"] = "error"
@@ -734,11 +756,13 @@ def apply_nexus_offline_candidates(
             local_value=str(getattr(info, "cover_path", "") or "").strip(),
         )
     ):
+        logger.info("[NEXUS_SCRAPER] %s", RESOLVED_LOCAL_COVER)
         _install_offline_cover(mid, dest, candidates.cover_asset_path)
     elif candidates.cover_asset_path:
         logger.info("[NEXUS_SCRAPER] cover already exists or overridden, skipped")
     else:
-        logger.info("[NEXUS_SCRAPER] no gallery cover found, skipped")
+        token = candidates.cover_resolution or NO_LOCAL_COVER_REFERENCE
+        logger.info("[NEXUS_SCRAPER] %s", token)
 
 
 def _install_offline_cover(

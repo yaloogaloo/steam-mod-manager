@@ -2,8 +2,12 @@
 
 Source of truth:
 
-- B: ``mods.deploy_status = deployed`` — Sort Mode membership
-- Order: ``config/load_order/<order_filename>`` — full user sequence (internal_id)
+- Membership: ``mods.deploy_status = deployed`` — the only Sort Mode membership
+- Order: ``config/load_order/<order_filename>`` — sequence of that membership
+  (internal_id). A deployed Mod missing from the file is appended. An
+  undeployed Mod is not a member, even if an older file still names it.
+- Launcher files (``ugc_*.mod``, playsets, ``dlc_load.json``) are external
+  projection. ``unresolved`` does not remove Sort Mode membership.
 - Direct EXE: ``dlc_load.json`` ``enabled_mods`` — mixed list; SMM rewrites
   only its managed Mod subset (B + order) whether or not a playset is active.
   DLC / unknown / non-SMM entries are kept. Order matters.
@@ -355,6 +359,9 @@ class ParadoxModRef:
     external_id: str = ""
     title: str = ""
     entity_internal_id: str = ""
+    # Frozen business identity. Empty when the row has no Frozen UUID.
+    # Never a SQLite PK, workspace id, or launcher id.
+    internal_id: str = ""
 
 
 StellarisModRef = ParadoxModRef
@@ -416,9 +423,15 @@ StellarisSyncReport = ParadoxSyncReport
 
 
 def _row_to_ref(row: dict[str, Any]) -> ParadoxModRef | None:
-    token = canon_internal_id(row.get("internal_id") or row.get("mod_id"))
-    if not token:
-        return None
+    """Build a ref. Order token is the Frozen UUID, never a SQLite PK."""
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    raw_iid = str(row.get("internal_id") or "").strip()
+    internal_id = raw_iid if is_frozen_internal_uuid(raw_iid) else ""
+    if not internal_id:
+        logger.warning(
+            "Paradox ref has no Frozen internal_id; order token left empty"
+        )
     enabled = True
     raw_enabled = row.get("enabled", True)
     try:
@@ -431,7 +444,8 @@ def _row_to_ref(row: dict[str, Any]) -> ParadoxModRef | None:
     else:
         deployed = bool(raw_deployed)
     return ParadoxModRef(
-        token=token,
+        token=internal_id,
+        internal_id=internal_id,
         workspace_id=str(row.get("workspace_id") or "").strip(),
         enabled=enabled,
         deployed=deployed,
@@ -459,9 +473,13 @@ def list_installed_paradox_mods(
     seen: set[str] = set()
     for row in database.list_mod_list_items(app_id=game.app_id):
         ref = _row_to_ref(row)
-        if ref is None or ref.token in seen:
+        if ref is None:
             continue
-        seen.add(ref.token)
+        # Dedup valid entities by Frozen UUID. A missing UUID is not a PK key.
+        key = ref.internal_id or f"missing:{row.get('mod_id')}"
+        if key in seen:
+            continue
+        seen.add(key)
         out.append(ref)
     return out
 
@@ -472,13 +490,28 @@ def list_installed_stellaris_mods(
     return list_installed_paradox_mods(db, app_id=STELLARIS_APP_ID)
 
 
+def _deployed_order_tokens(
+    db: DatabaseManager | None = None,
+    *,
+    app_id: int | str,
+) -> list[str]:
+    """Deployed Frozen UUIDs for this Paradox game. Not all installed mods."""
+    from services.canonical_membership import canonical_deployed_internal_ids
+
+    return canonical_deployed_internal_ids(
+        list_installed_paradox_mods(db, app_id=app_id)
+    )
+
+
 def resolved_load_order(
     db: DatabaseManager | None = None,
     *,
     app_id: int | str,
 ) -> list[str]:
-    installed = [m.token for m in list_installed_paradox_mods(db, app_id=app_id)]
-    return merge_deployed_order(load_saved_order(app_id=app_id), installed)
+    return merge_deployed_order(
+        load_saved_order(app_id=app_id),
+        _deployed_order_tokens(db, app_id=app_id),
+    )
 
 
 def _order_handle_map(
@@ -486,27 +519,47 @@ def _order_handle_map(
     *,
     app_id: int | str,
 ) -> dict[str, str]:
-    """Map Frozen UUID and SQLite PK handles onto the order token (internal_id)."""
+    """Map a Frozen UUID or a SQLite PK handle onto the Frozen UUID.
+
+    The stored value is always the Frozen UUID. A PK with no UUID is not
+    written back as an order token.
+    """
+    from services.deploy_identity import is_frozen_internal_uuid
+
     game = paradox_game_for_app_id(app_id)
     if game is None:
         return {}
     database = db if db is not None else get_db()
     mapping: dict[str, str] = {}
     for row in database.list_mod_list_items(app_id=game.app_id):
-        iid = canon_internal_id(row.get("internal_id") or "")
-        pk = canon_internal_id(row.get("mod_id") or "")
-        if iid:
-            mapping[iid] = iid
+        raw_iid = str(row.get("internal_id") or "").strip()
+        iid = raw_iid if is_frozen_internal_uuid(raw_iid) else ""
+        pk = str(row.get("mod_id") or "").strip()
+        if pk.isdigit():
+            pk = str(int(pk))
+        else:
+            pk = ""
+        if not iid:
+            continue
+        mapping[iid] = iid
         if pk:
-            mapping[pk] = iid or pk
+            mapping[pk] = iid
     return mapping
 
 
 def _order_token_from_handle(raw: object, mapping: dict[str, str]) -> str:
-    text = canon_internal_id(raw)
-    if not text:
-        return ""
-    return mapping.get(text, text)
+    """Inbound handle → Frozen UUID. Unknown digits and other tokens are dropped."""
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    text = str(raw or "").strip()
+    if text.isdigit():
+        text = str(int(text))
+    mapped = mapping.get(text, "")
+    if is_frozen_internal_uuid(mapped):
+        return mapped
+    if is_frozen_internal_uuid(text):
+        return text
+    return ""
 
 
 def persist_load_order(
@@ -517,8 +570,8 @@ def persist_load_order(
 ) -> list[str]:
     mapping = _order_handle_map(db, app_id=app_id)
     canon = [_order_token_from_handle(item, mapping) for item in tokens]
-    installed = [m.token for m in list_installed_paradox_mods(db, app_id=app_id)]
-    merged = merge_deployed_order([item for item in canon if item], installed)
+    deployed = _deployed_order_tokens(db, app_id=app_id)
+    merged = merge_deployed_order([item for item in canon if item], deployed)
     save_saved_order(merged, app_id=app_id)
     return merged
 
@@ -725,14 +778,12 @@ def deployed_load_order_tokens(
     *,
     app_id: int | str,
 ) -> list[str]:
-    """SMM tokens with ``deploy_status=deployed``, in saved load-order sequence.
+    """SMM tokens with ``deploy_status=deployed``, in canonical load-order sequence.
 
-    This is Sort Mode membership (B). Never reads ``dlc_load.json``.
-    Undeployed ids stay in the order file but are omitted here.
+    This is Sort Mode membership. Never reads ``dlc_load.json`` or ``ugc_*.mod``.
+    Undeployed ids are not members of the canonical order.
     """
-    refs = {ref.token: ref for ref in list_installed_paradox_mods(db, app_id=app_id)}
-    order = merge_deployed_order(load_saved_order(app_id=app_id), list(refs))
-    return [tok for tok in order if refs.get(tok) is not None and refs[tok].deployed]
+    return resolved_load_order(db, app_id=app_id)
 
 
 def enabled_load_order_tokens(
@@ -764,9 +815,11 @@ def enabled_load_order_tokens(
         return []
     by_launcher: dict[str, str] = {}
     for ref in list_installed_paradox_mods(database, app_id=app_id):
+        if not ref.internal_id:
+            continue
         lid = normalize_launcher_id(_launcher_id_for_ref(ref, user_dir=docs))
         if lid and lid not in by_launcher:
-            by_launcher[lid] = ref.token
+            by_launcher[lid] = ref.internal_id
     out: list[str] = []
     seen_tok: set[str] = set()
     for lid in wanted:
@@ -1178,30 +1231,34 @@ def sync_paradox_launcher(
         return report
     database = db if db is not None else get_db()
     docs = resolve_paradox_user_dir(database, app_id=game.app_id, user_dir=user_dir)
-    refs = {ref.token: ref for ref in list_installed_paradox_mods(database, app_id=game.app_id)}
-    order = merge_deployed_order(load_saved_order(app_id=game.app_id), list(refs))
+    installed = list_installed_paradox_mods(database, app_id=game.app_id)
+    refs = {ref.internal_id: ref for ref in installed if ref.internal_id}
+    order = merge_deployed_order(
+        load_saved_order(app_id=game.app_id),
+        _deployed_order_tokens(database, app_id=game.app_id),
+    )
     managed_ids: set[str] = set()
+    # Every SMM launcher id, deployed or not, so an undeploy strips enabled_mods
+    # without putting that Mod back into canonical membership.
+    for ref in installed:
+        owned_id = normalize_launcher_id(_launcher_id_for_ref(ref, user_dir=docs))
+        if owned_id:
+            managed_ids.add(owned_id)
     enabled_ordered: list[str] = []
     deployed_count = 0
     deployed_unresolved: list[str] = []
     for token in order:
         ref = refs.get(token)
-        if ref is None:
+        if ref is None or not ref.deployed:
             continue
-        if ref.deployed:
-            deployed_count += 1
-        owned_id = normalize_launcher_id(_launcher_id_for_ref(ref, user_dir=docs))
-        if owned_id:
-            managed_ids.add(owned_id)
+        deployed_count += 1
         mapping = map_to_launcher_id(ref, user_dir=docs)
         if not mapping.available:
             report.unresolved.append(token)
-            if ref.deployed:
-                deployed_unresolved.append(token)
+            deployed_unresolved.append(token)
             continue
         managed_ids.add(mapping.launcher_id)
-        if ref.deployed:
-            enabled_ordered.append(mapping.launcher_id)
+        enabled_ordered.append(mapping.launcher_id)
 
     def _finish(state: ParadoxEffectiveState) -> ParadoxSyncReport:
         report.active_playset_id = state.active_playset_id

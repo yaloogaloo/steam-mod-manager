@@ -3367,12 +3367,15 @@ class ModLibraryView(QWidget):
                     self._sync_viewport_cards(scroll_y=restore_scroll)
                     assert id(self.detail_panel) == detail_id
             elif getattr(self, "_wh3_sort_mode", False) and self._order_backend() is not None:
+                from services.canonical_membership import entry_is_deployed
+
                 backend = self._order_backend()
-                kwargs = self._order_kwargs()
+                # Membership is the deployed projection. Order is applied
+                # afterwards and must not drop a deployed row that has no token.
                 self._filtered_row_entries = [
                     (index, payload)
                     for index, payload in self._game_row_entries
-                    if backend.is_sortable_member(index, **kwargs)
+                    if entry_is_deployed(index)
                 ]
                 if str(query or "").strip() and backend.search_in_sort_mode():
                     self._filtered_row_entries = [

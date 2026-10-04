@@ -32,6 +32,10 @@ from services.importers.importer_base import ImportContext
 from services.importers.nexus import NexusImporter
 from services.offline.manager import attach_nexus_offline_page
 from services.offline.nexus_html_parser import (
+    NO_LOCAL_COVER_REFERENCE,
+    REMOTE_RESOURCE_SKIPPED,
+    RESOLVED_LOCAL_COVER,
+    UNRESOLVED_LOCAL_RESOURCE,
     NexusOfflineCandidates,
     apply_nexus_offline_candidates,
     parse_nexus_offline_html,
@@ -212,12 +216,14 @@ class TestParseNexusOfflineHtml:
         assert result.cover_asset_path is not None
         assert result.cover_asset_path.is_file()
         assert result.confidence["cover"] in ("high", "medium")
+        assert result.cover_resolution == RESOLVED_LOCAL_COVER
 
     def test_gallery_remote_url_skipped(self, tmp_path: Path) -> None:
         items = '<li><img src="https://cdn.nexusmods.com/images/10455.jpg"/></li>'
         index = _write_offline_html(tmp_path, gallery_items=items, create_asset=False)
         result = parse_nexus_offline_html(index)
         assert result.cover_asset_path is None
+        assert result.cover_resolution == REMOTE_RESOURCE_SKIPPED
 
     def test_extracts_description(self, tmp_path: Path) -> None:
         index = _write_offline_html(tmp_path, description="A cool mod.")
@@ -264,6 +270,7 @@ class TestParseNexusOfflineHtml:
         result = parse_nexus_offline_html(index)
         assert result.title == "Bare Mod"
         assert result.cover_asset_path is None
+        assert result.cover_resolution == NO_LOCAL_COVER_REFERENCE
 
     def test_metadata_json_fallback_for_url(self, tmp_path: Path) -> None:
         offline_dir = tmp_path / INFO_DIR_NAME / "offline"
@@ -343,6 +350,7 @@ class TestGalleryImageSelection:
         index.write_text(html, encoding="utf-8")
         result = parse_nexus_offline_html(index)
         assert result.cover_asset_path is None
+        assert result.cover_resolution == UNRESOLVED_LOCAL_RESOURCE
 
 
 # ===========================================================================

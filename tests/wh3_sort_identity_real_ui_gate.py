@@ -168,6 +168,16 @@ def main() -> int:
         pks = _filtered_pks(view)
         print("WH3_SORT_TOKENS", len(tokens), tokens[:4])
         print("WH3_SORT_PKS", pks[:4])
+        deployed_ids = [
+            str(getattr(index, "internal_id", "") or "")
+            for index, _payload in view._game_row_entries
+            if bool(getattr(index, "deployed", False))
+        ]
+        if set(tokens) != set(deployed_ids):
+            return _fail(
+                "WH3 Sorting Mode "
+                f"({len(tokens)}) != canonical deployed membership ({len(deployed_ids)})"
+            )
         if len(tokens) < 2:
             return _fail("WH3 Sort Mode has fewer than 2 sortable Mods")
         if not all(is_frozen_internal_uuid(tok) for tok in tokens):

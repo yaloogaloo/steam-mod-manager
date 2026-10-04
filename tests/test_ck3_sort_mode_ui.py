@@ -397,14 +397,85 @@ def test_ck3_sort_writes_ck3_json_and_launcher_order(
     view2.deleteLater()
 
 
-def test_ck3_unresolved_ugc_excluded_from_sort_sequence(
+def test_ck3_unresolved_ugc_stays_in_sort_membership(
     qapp, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Missing ``ugc_*.mod`` is an unresolved launcher projection, not exclusion."""
+    from services.paradox_activation import sync_paradox_launcher
+
     view, _user_dir, pks, entities, _wids = _open_ck3_sort_view(
         qapp, tmp_path, db, monkeypatch, count=3, ugc={0, 1}
     )
     shown = _filtered_internal_ids(view)
-    assert shown == entities[:2]
-    assert entities[2] not in shown
+    assert shown == entities
+    assert entities[2] in shown
     assert pks[2] not in shown
+    assert load_saved_order(app_id=CK3)[:3] == entities
+    report = sync_paradox_launcher(db, app_id=CK3)
+    assert entities[2] in report.unresolved
+    assert entities[0] not in report.unresolved
+    assert entities[1] not in report.unresolved
+    view.deleteLater()
+
+
+def test_ck3_fresh_deploy_without_ugc_appears_in_both_views(
+    qapp, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """New Deploy with no launcher descriptor is in both deployed filter and Sorting Mode."""
+    from PySide6.QtWidgets import QApplication
+
+    from services.deploy import ModDeployer
+    from services.paradox_activation import sync_paradox_launcher
+    from ui.library_query import FILTER_DEPLOYED
+    from ui.library_view import ModLibraryView
+
+    patch_library_get_db(monkeypatch, db)
+    user_dir, _workshop, library = _configure_ck3(db, tmp_path)
+    _pk, entity = _seed_ck3_mod(
+        library,
+        db,
+        workshop_id="99001",
+        folder="FreshCK3",
+        deployed=False,
+    )
+    view = ModLibraryView()
+    view.set_target_root(str(library))
+    view.set_preferred_filter("十字军之王Ⅲ")
+    view.refresh()
+    QApplication.processEvents()
+    view._set_library_status_filter(FILTER_DEPLOYED)
+    QApplication.processEvents()
+    assert entity not in _filtered_internal_ids(view)
+
+    result = ModDeployer(library_root=library, db=db).deploy_mod(entity)
+    assert result.get("success") is True, result
+    assert not (user_dir / "mod" / "ugc_99001.mod").exists()
+
+    view.refresh()
+    QApplication.processEvents()
+    view._set_library_status_filter(FILTER_DEPLOYED)
+    QApplication.processEvents()
+    deployed_ids = _filtered_internal_ids(view)
+    assert deployed_ids == [entity]
+
+    view.btn_wh3_sort_mode.click()
+    QApplication.processEvents()
+    assert view._wh3_sort_mode is True
+    sorting_ids = _filtered_internal_ids(view)
+    from services.deploy_identity import is_frozen_internal_uuid
+
+    assert sorting_ids and all(is_frozen_internal_uuid(item) for item in sorting_ids)
+    missing = [item for item in deployed_ids if item not in sorting_ids]
+    extra = [item for item in sorting_ids if item not in deployed_ids]
+    print(f"DEPLOYED_IDS={deployed_ids}")
+    print(f"SORTING_IDS={sorting_ids}")
+    print(f"MISSING_FROM_SORTING={missing}")
+    print(f"EXTRA_IN_SORTING={extra}")
+    assert missing == []
+    assert extra == []
+    assert sorting_ids == deployed_ids
+    assert entity in load_saved_order(app_id=CK3)
+    report = sync_paradox_launcher(db, app_id=CK3)
+    assert entity in report.unresolved
+    assert not (user_dir / "mod" / "ugc_99001.mod").exists()
     view.deleteLater()
