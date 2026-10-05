@@ -729,6 +729,63 @@ def _unzip_dir(root: Path, ref: Wh3ModRef, archives: list[Path]) -> Path | None:
     return root / f"{name}_unzip"
 
 
+def _native_dir(path: str) -> str:
+    return os.path.normpath(str(path or "").strip())
+
+
+def _project_pack_onto_link(link_root: Path, pack: Path) -> Path | None:
+    """Address *pack* from the Workshop link, not from its junction target.
+
+    ``link_root`` is ``workshop/content/1142710/<workspace_id>`` and may be a
+    junction into the SMM library. Listing packs resolves that junction, so
+    the discovered path is the managed folder. ``used_mods.txt`` must keep
+    the Workshop path. Relative segments are joined back onto *link_root*
+    without ``Path.resolve`` on the result.
+    """
+    try:
+        anchor = link_root.resolve()
+        rel = pack.resolve().relative_to(anchor)
+    except (OSError, ValueError):
+        return None
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    return link_root.joinpath(*rel.parts)
+
+
+def _directory_in_content_root(directory: str, content_root: Path) -> bool:
+    """True when *directory* is under the Workshop content root.
+
+    Does not resolve junctions. A managed-library path fails this check.
+    """
+    try:
+        Path(directory).absolute().relative_to(content_root.absolute())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _publishable_pack_lines(
+    lines: list[Wh3PackLine],
+    content_root: Path,
+) -> list[Wh3PackLine]:
+    """Drop load directories that are not on the Workshop content tree.
+
+    ``in_data`` lines stay: they contribute a pack name and no working
+    directory. Every other directory must sit under *content_root*.
+    """
+    kept: list[Wh3PackLine] = []
+    for line in lines:
+        if line.in_data or _directory_in_content_root(line.directory, content_root):
+            kept.append(line)
+            continue
+        logger.warning(
+            "WH3 projection unresolved directory outside workshop content "
+            "workspace_ref=%s",
+            line.internal_id,
+        )
+    return kept
+
+
 def _packs_to_lines(
     ref: Wh3ModRef,
     packs: list[Path],
@@ -756,7 +813,7 @@ def _packs_to_lines(
         lines.append(
             Wh3PackLine(
                 pack_name=pack.name,
-                directory=str(pack.parent),
+                directory=_native_dir(str(pack.parent)),
                 in_data=in_data,
                 internal_id=ref.internal_id,
             )
@@ -817,8 +874,27 @@ def prepare_wh3_workshop_packs(
         except OSError:
             native = None
     native_packs = _list_packs(native) if native is not None else []
-    if native_packs:
-        return _packs_to_lines(ref, native_packs, data_folder), ""
+    if native_packs and native is not None:
+        projected: list[Path] = []
+        for pack in native_packs:
+            side = _project_pack_onto_link(native, pack)
+            if side is not None:
+                projected.append(side)
+        lines = _publishable_pack_lines(
+            _packs_to_lines(ref, projected, data_folder),
+            root,
+        )
+        if lines:
+            return lines, ""
+        # Packs were visible through the link, but their resolved paths are
+        # not the Workshop content tree. Never publish the managed folder.
+        logger.warning(
+            "WH3 projection unresolved workspace_id=%s",
+            wid,
+        )
+        if not extract:
+            return [], ""
+        return [], WH3_WORKSHOP_MOD_MISSING
 
     library = local_mod_directory(ref)
     discovered = _list_library_archives(library) if library is not None else []
@@ -831,7 +907,17 @@ def prepare_wh3_workshop_packs(
     # extract the current checkbox selection instead of leftover packs.
     reuse_unzip = (not extract) or len(discovered) <= 1
     if reuse_unzip and unzip_packs:
-        return _packs_to_lines(ref, unzip_packs, data_folder), ""
+        lines = _publishable_pack_lines(
+            _packs_to_lines(ref, unzip_packs, data_folder),
+            root,
+        )
+        if lines:
+            return lines, ""
+        logger.warning(
+            "WH3 projection unresolved workspace_id=%s",
+            wid,
+        )
+        return [], ""
 
     if extract and archives and unzip is not None:
         if len(discovered) > 1:
@@ -841,7 +927,17 @@ def prepare_wh3_workshop_packs(
             return [], err
         unzip_packs = _list_packs(unzip)
         if unzip_packs:
-            return _packs_to_lines(ref, unzip_packs, data_folder), ""
+            lines = _publishable_pack_lines(
+                _packs_to_lines(ref, unzip_packs, data_folder),
+                root,
+            )
+            if lines:
+                return lines, ""
+            logger.warning(
+                "WH3 projection unresolved workspace_id=%s",
+                wid,
+            )
+            return [], ""
         return [], WH3_MISSING_PACK
 
     if extract:
@@ -867,10 +963,6 @@ def resolve_pack_lines(
         db=db,
     )
     return lines
-
-
-def _native_dir(path: str) -> str:
-    return os.path.normpath(str(path or "").strip())
 
 
 def render_used_mods_text(lines: list[Wh3PackLine]) -> str:
@@ -918,15 +1010,21 @@ def collect_enabled_pack_lines(
         if ref is None or not ref.enabled:
             continue
         # Empty pack lines are an unresolved external projection. The Mod
-        # stays in canonical order and Sorting Mode.
-        lines.extend(
-            resolve_pack_lines(
-                ref,
-                workshop_path=game_paths.workshop_path,
-                data_folder=game_paths.data_folder,
-                db=database,
-            )
+        # stays in canonical order and Sorting Mode. Never fall back to the
+        # SMM managed folder.
+        pack_lines = resolve_pack_lines(
+            ref,
+            workshop_path=game_paths.workshop_path,
+            data_folder=game_paths.data_folder,
+            db=database,
         )
+        if not pack_lines:
+            logger.warning(
+                "WH3 projection unresolved internal_id=%s workspace_id=%s",
+                ref.internal_id,
+                ref.workspace_id,
+            )
+        lines.extend(pack_lines)
     return lines
 
 

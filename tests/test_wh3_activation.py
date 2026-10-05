@@ -1257,6 +1257,110 @@ def test_unknown_pk_and_invalid_token_fail_closed(
     assert changed is False
 
 
+def _make_junction(link: Path, target: Path) -> None:
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("Junctions require Windows mklink /J")
+    if link.exists():
+        link.rmdir()
+    completed = subprocess.run(
+        ["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.skip(
+            "mklink /J unavailable: "
+            + (completed.stderr or completed.stdout or "").strip()
+        )
+
+
+def test_junction_used_mods_keeps_workshop_path(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    """Workshop junction target is the library. used_mods must not follow it."""
+    install, _data, workshop = _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    wid = "3323554182"
+    iid = _seed_wh3_mod(
+        library, db, folder="JunctionMod", workshop_id=wid, pack_name="root.pack"
+    )
+    pk = _pk(db, iid)
+    managed = library / "Warhammer3" / "JunctionMod"
+    nested = managed / "nested"
+    nested.mkdir()
+    (nested / "nested.pack").write_bytes(b"NEST")
+    link = workshop / wid
+    shutil.rmtree(link)
+    _make_junction(link, managed)
+    persist_load_order([iid], db, library_root=library)
+    text = render_used_mods_text(
+        collect_enabled_pack_lines(db, library_root=library)
+    )
+    content = workshop
+    assert str(content) in text
+    assert str(link) in text
+    assert str(link / "nested") in text
+    assert 'mod "root.pack";' in text
+    assert 'mod "nested.pack";' in text
+    assert str(managed) not in text
+    assert str(library) not in text
+    assert iid not in text
+    assert f'mod "{pk}";' not in text
+    assert f'mod "{wid}";' not in text
+    moved = apply_order_move(iid, "bottom", db, library_root=library)
+    assert moved == [iid]
+    again = render_used_mods_text(
+        collect_enabled_pack_lines(db, library_root=library)
+    )
+    assert str(link) in again
+    assert str(managed) not in again
+    set_wh3_enabled(iid, False, db)
+    sync_used_mods_txt(db, library_root=library, install_path=install)
+    disabled = (install / "used_mods.txt").read_text(encoding="utf-8")
+    assert str(managed) not in disabled
+    assert 'mod "root.pack";' not in disabled
+    set_wh3_enabled(iid, True, db)
+    sync_used_mods_txt(db, library_root=library, install_path=install)
+    redeployed = (install / "used_mods.txt").read_text(encoding="utf-8")
+    assert str(link) in redeployed
+    assert str(managed) not in redeployed
+    assert iid not in redeployed
+    assert f'mod "{pk}";' not in redeployed
+
+
+def test_missing_workspace_id_does_not_fall_back_to_library(
+    tmp_path: Path, db: DatabaseManager
+) -> None:
+    install, _data, workshop = _configure_wh3(db, tmp_path)
+    library = tmp_path / "mod"
+    iid = _seed_wh3_mod(
+        library, db, folder="NoWorkshop", workshop_id="88001", pack_name="local.pack"
+    )
+    pk = _pk(db, iid)
+    managed = library / "Warhammer3" / "NoWorkshop"
+    db.update_mod_identity_fields(pk, workspace_id="")
+    shutil.rmtree(workshop / "88001")
+    persist_load_order([iid], db, library_root=library)
+    lines = collect_enabled_pack_lines(db, library_root=library)
+    text = render_used_mods_text(lines)
+    assert lines == []
+    assert "add_working_directory" not in text
+    assert str(managed) not in text
+    assert "local.pack" not in text
+    assert iid not in text
+    assert pk not in text
+    sync_used_mods_txt(db, library_root=library, install_path=install)
+    written = (install / "used_mods.txt").read_text(encoding="utf-8")
+    assert str(managed) not in written
+    assert "projection" not in written
+
+
 def test_save_saved_order_drops_digit_pk(tmp_path: Path, db: DatabaseManager) -> None:
     import json
 
