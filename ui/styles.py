@@ -454,6 +454,79 @@ QPushButton#libraryHeaderButton:disabled {{
     border-color: {BORDER_SUBTLE};
 }}
 
+/* D1 Library presentation scope: preserve global controls and card geometry. */
+QFrame#libraryPageHeader {{
+    background-color: {BACKGROUND_PANEL};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 8px;
+}}
+
+QFrame#libraryPageHeader QLabel#pageTitle {{
+    color: {TEXT_PRIMARY};
+    font-size: 20px;
+    font-weight: 600;
+}}
+
+QFrame#libraryPageHeader QLabel#subtitleLabel {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+}}
+
+QWidget#libraryFilterColumn,
+QWidget#libraryRecordActions {{
+    background-color: {BACKGROUND_PANEL};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 6px;
+}}
+
+QLabel#librarySectionCaption {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton[libraryPrimaryAction="true"] {{
+    background-color: {BACKGROUND_BUTTON};
+    border-color: {ACCENT_PRIMARY};
+    color: {TEXT_PRIMARY};
+    font-weight: 600;
+}}
+
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton[libraryPrimaryAction="true"]:hover {{
+    background-color: {BACKGROUND_BUTTON_HOVER};
+}}
+
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton[libraryPrimaryAction="true"]:disabled {{
+    background-color: {BACKGROUND_BUTTON_DISABLED};
+    border-color: {BORDER_SUBTLE};
+    color: {TEXT_MUTED};
+}}
+
+QWidget#libraryFilterColumn QLineEdit#librarySearchBox:focus,
+QWidget#libraryFilterColumn QComboBox#librarySortCombo:focus {{
+    border-color: {BORDER_FOCUS};
+}}
+
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:checked {{
+    background-color: {BACKGROUND_CARD_SELECTED};
+    color: {ACCENT_PRIMARY};
+    border-color: {ACCENT_SELECTION};
+}}
+
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:hover,
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:focus,
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton:focus {{
+    border-color: {BORDER_FOCUS};
+}}
+
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:disabled {{
+    background-color: {BACKGROUND_BUTTON_DISABLED};
+    color: {TEXT_MUTED};
+    border-color: {BORDER_SUBTLE};
+}}
+
 QPushButton#libraryIconButton,
 QPushButton#panelIconButton {{
     background-color: {BACKGROUND_BUTTON_PRESSED};

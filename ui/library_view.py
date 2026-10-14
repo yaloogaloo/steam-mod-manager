@@ -457,8 +457,11 @@ class ModLibraryView(QWidget):
         self._page_title.setObjectName("pageTitle")
         self.count_label = QLabel("0 Mods")
         self.count_label.setObjectName("subtitleLabel")
+        self.count_label.setWordWrap(True)
+        self._page_title.setWordWrap(True)
         self.import_btn = QPushButton("导入 Mod")
         self.import_btn.setObjectName("libraryHeaderButton")
+        self.import_btn.setProperty("libraryPrimaryAction", True)
         self.import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.import_btn.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed
@@ -524,7 +527,7 @@ class ModLibraryView(QWidget):
         game_layout.addWidget(self.game_list)
         self.splitter.addWidget(game_panel)
 
-        # --- D-4 Center: filter zone ≤ 2 rows + dense card grid ---
+        # Center: context header, full-width query group, then task controls.
         center = QWidget()
         center.setObjectName("libraryCenter")
         center.setSizePolicy(
@@ -535,9 +538,11 @@ class ModLibraryView(QWidget):
         center_layout.setContentsMargins(4, 0, 4, 0)
         center_layout.setSpacing(6)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(10)
+        header_panel = QFrame(center)
+        header_panel.setObjectName("libraryPageHeader")
+        header = QHBoxLayout(header_panel)
+        header.setContentsMargins(12, 10, 12, 10)
+        header.setSpacing(12)
         self.btn_collection_back = QPushButton("← 合集")
         self.btn_collection_back.setObjectName("libraryHeaderButton")
         self.btn_collection_back.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -546,14 +551,16 @@ class ModLibraryView(QWidget):
         self.btn_collection_back.hide()
         title_col = QVBoxLayout()
         title_col.setContentsMargins(0, 0, 0, 0)
-        title_col.setSpacing(0)
+        title_col.setSpacing(4)
         title_col.addWidget(self._page_title)
         title_col.addWidget(self.count_label)
+        # Preserve the existing hidden path hint and tooltip update contract.
+        title_col.addWidget(self.path_hint)
         header.addWidget(self.btn_collection_back, alignment=Qt.AlignmentFlag.AlignTop)
         header.addLayout(title_col, stretch=1)
         header.addWidget(self.import_btn, alignment=Qt.AlignmentFlag.AlignTop)
         header.addWidget(self.refresh_btn, alignment=Qt.AlignmentFlag.AlignTop)
-        center_layout.addLayout(header)
+        center_layout.addWidget(header_panel)
 
         self.search_box = QLineEdit()
         self.search_box.setObjectName("librarySearchBox")
@@ -563,10 +570,9 @@ class ModLibraryView(QWidget):
         self.search_box.setClearButtonEnabled(True)
         self.search_box.setMinimumHeight(32)
         self.search_box.textChanged.connect(self._on_search_text_changed)
-        center_layout.addWidget(self.search_box)
 
-        # Filter column (chips + category/sort) is independent of Mode column.
-        # Mode stack height must never move chips or _meta_bar.
+        # Query controls and workspace actions have separate visual regions.
+        # Preserve the existing chips/meta height and filtering contracts.
         self._filter_group = QButtonGroup(self)
         self._filter_group.setExclusive(True)
         self._filter_buttons: dict[str, QPushButton] = {}
@@ -576,9 +582,9 @@ class ModLibraryView(QWidget):
         self._library_toolbar.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
-        toolbar_row = QHBoxLayout(self._library_toolbar)
+        toolbar_row = QVBoxLayout(self._library_toolbar)
         toolbar_row.setContentsMargins(0, 0, 0, 0)
-        toolbar_row.setSpacing(8)
+        toolbar_row.setSpacing(6)
         toolbar_row.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self._filter_column = QWidget(self._library_toolbar)
@@ -587,9 +593,18 @@ class ModLibraryView(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         left_col = QVBoxLayout(self._filter_column)
-        left_col.setContentsMargins(0, 0, 0, 0)
-        left_col.setSpacing(6)
+        left_col.setContentsMargins(10, 8, 10, 8)
+        left_col.setSpacing(8)
         left_col.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        search_caption = QLabel("搜索", self._filter_column)
+        search_caption.setObjectName("librarySectionCaption")
+        search_caption.setBuddy(self.search_box)
+        search_row.addWidget(search_caption)
+        search_row.addWidget(self.search_box, 1)
+        left_col.addLayout(search_row)
 
         self._status_chips = QWidget(self._filter_column)
         self._status_chips.setObjectName("libraryFilterBar")
@@ -612,7 +627,13 @@ class ModLibraryView(QWidget):
                 lambda checked, k=key: self._on_status_filter_toggled(k, checked)
             )
             status_flow.addWidget(btn)
-        left_col.addWidget(self._status_chips, 0)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+        status_caption = QLabel("筛选", self._filter_column)
+        status_caption.setObjectName("librarySectionCaption")
+        status_row.addWidget(status_caption, 0, Qt.AlignmentFlag.AlignTop)
+        status_row.addWidget(self._status_chips, 1)
+        left_col.addLayout(status_row)
 
         # Tag / sort — own flow row so they wrap as whole groups, never overlap chips
         self._meta_bar = QWidget(self._filter_column)
@@ -677,12 +698,18 @@ class ModLibraryView(QWidget):
         self._record_actions = QWidget(self._library_toolbar)
         self._record_actions.setObjectName("libraryRecordActions")
         self._record_actions.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
         )
         record_col = QVBoxLayout(self._record_actions)
-        record_col.setContentsMargins(0, 0, 0, 0)
-        record_col.setSpacing(4)
-        record_col.setAlignment(Qt.AlignmentFlag.AlignTop)
+        record_col.setContentsMargins(10, 8, 10, 8)
+        record_col.setSpacing(6)
+        task_caption = QLabel("工作区与记录", self._record_actions)
+        task_caption.setObjectName("librarySectionCaption")
+        record_col.addWidget(task_caption)
+        task_buttons = QWidget(self._record_actions)
+        task_buttons.setObjectName("libraryTaskButtons")
+        task_flow = FlowLayout(task_buttons, margin=0, h_spacing=8, v_spacing=6)
+        record_col.addWidget(task_buttons)
 
         self.btn_deployment_record = self._make_library_action_button(
             "💾 部署记录 ▼", parent=self._record_actions
@@ -696,7 +723,6 @@ class ModLibraryView(QWidget):
         self._deployment_record_menu.aboutToShow.connect(
             self._rebuild_deployment_record_menu
         )
-        record_col.addWidget(self.btn_deployment_record, 0)
 
         self.btn_wh3_sort_mode = self._make_library_action_button(
             "排序模式", parent=self._record_actions
@@ -707,7 +733,7 @@ class ModLibraryView(QWidget):
         )
         self.btn_wh3_sort_mode.toggled.connect(self._on_wh3_sort_mode_toggled)
         self.btn_wh3_sort_mode.hide()
-        record_col.addWidget(self.btn_wh3_sort_mode, 0)
+        task_flow.addWidget(self.btn_wh3_sort_mode)
 
         self.btn_collection_mode = self._make_library_action_button(
             "合集模式", parent=self._record_actions
@@ -715,9 +741,10 @@ class ModLibraryView(QWidget):
         self.btn_collection_mode.setCheckable(True)
         self.btn_collection_mode.setToolTip("进入合集列表工作区")
         self.btn_collection_mode.toggled.connect(self._on_collection_mode_toggled)
-        record_col.addWidget(self.btn_collection_mode, 0)
+        task_flow.addWidget(self.btn_collection_mode)
+        task_flow.addWidget(self.btn_deployment_record)
 
-        toolbar_row.addWidget(self._filter_column, 1, Qt.AlignmentFlag.AlignTop)
+        toolbar_row.addWidget(self._filter_column, 0, Qt.AlignmentFlag.AlignTop)
         toolbar_row.addWidget(
             self._record_actions, 0, Qt.AlignmentFlag.AlignTop
         )

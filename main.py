@@ -192,16 +192,37 @@ def _notify_already_running() -> None:
         pass
 
 
-def launch_gui() -> int:
+def launch_gui(*, next_frontend: bool = False, read_only: bool = False) -> int:
+    if next_frontend:
+        from frontend.admission import require_production_admission
+        require_production_admission(read_only=read_only)
     from services.app_instance import acquire_instance_lock
 
     if not acquire_instance_lock():
         _notify_already_running()
         return 1
+    if next_frontend:
+        from services.app_instance import release_instance_lock
+        try:
+            return _run_gui(next_frontend=True, read_only=read_only)
+        finally:
+            release_instance_lock()
     return _run_gui()
 
 
-def _run_gui() -> int:
+def _run_gui(*, next_frontend: bool = False, read_only: bool = False) -> int:
+    if next_frontend:
+        # Production opt-in stays at the canonical application entry boundary.
+        from frontend.admission import require_production_admission
+        require_production_admission(read_only=read_only)
+        from services.mutation_context import activate_production_context, reset_mutation_context
+        from frontend.web_application import run
+        token = None if read_only else activate_production_context()
+        try:
+            return run(read_only=read_only)
+        finally:
+            if token is not None:
+                reset_mutation_context(token)
     from PySide6.QtWidgets import QApplication
 
     from core.db_manager import get_db

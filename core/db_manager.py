@@ -716,6 +716,51 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     @classmethod
+    def open_existing(cls, db_path: str | Path, *, read_only: bool = True) -> DatabaseManager:
+        """Open a current-schema database without creating, migrating or backfilling.
+
+        Opt-in frontend seam. The legacy constructor and singleton are unchanged.
+        Callers own this connection; SQL errors propagate rather than repairing data.
+        """
+        path = Path(db_path).resolve(strict=True)
+        if not path.is_file():
+            raise ValueError("Existing database must be a file")
+        obj = cls.__new__(cls)
+        obj.db_path = path
+        obj._lock = threading.RLock()
+        obj._closed = False
+        obj._read_only = read_only
+        mode = "ro" if read_only else "rw"
+        obj._conn = sqlite3.connect(path.as_uri() + "?mode=" + mode, uri=True,
+                                    check_same_thread=False, timeout=5)
+        obj._conn.row_factory = sqlite3.Row
+        try:
+            obj._conn.execute("PRAGMA foreign_keys = ON")
+            if read_only:
+                obj._conn.execute("PRAGMA query_only = ON")
+                def authorize(action, arg1, arg2, database, source):
+                    # Fail closed even if a caller tries query_only=OFF or ATTACH.
+                    if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ,
+                                  sqlite3.SQLITE_RECURSIVE):
+                        return sqlite3.SQLITE_OK
+                    if action == sqlite3.SQLITE_FUNCTION and str(arg2).lower() != 'load_extension':
+                        return sqlite3.SQLITE_OK
+                    if action == sqlite3.SQLITE_PRAGMA and arg2 is None and str(arg1).lower() in {
+                        'query_only', 'journal_mode', 'foreign_keys', 'quick_check',
+                        'foreign_key_check', 'integrity_check', 'data_version'}:
+                        return sqlite3.SQLITE_OK
+                    return sqlite3.SQLITE_DENY
+                obj._conn.set_authorizer(authorize)
+            # Validate the existing contract without running schema initialization.
+            obj._conn.execute(f"SELECT {_MOD_SELECT_COLS} FROM mods LIMIT 0")
+            obj._conn.execute("SELECT internal_id, last_known_path FROM mods LIMIT 0")
+            obj._conn.execute("SELECT app_id, name FROM games LIMIT 0")
+        except Exception:
+            obj.close()
+            raise
+        return obj
+
+    @classmethod
     def instance(cls, db_path: str | Path | None = None) -> DatabaseManager:
         """Return the process-wide singleton.
 
