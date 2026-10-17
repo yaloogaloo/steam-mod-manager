@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--hold', action='store_true')
     parser.add_argument('--game', help='Explicit real game AppID; default is largest real library')
+    parser.add_argument('--inspector-actions', action='store_true', help='Capture only Inspector actions and game picker')
     args = parser.parse_args()
     output = Path(args.output).resolve()
     database = project_root() / DATA_DIR_NAME / DATABASE_FILENAME
@@ -108,6 +109,11 @@ def main():
             pass
     short = min(descriptions)[1] if descriptions else None
     long = max(descriptions)[1] if descriptions else None
+    undeployed = next((a.internal_id for a in assets if not a.deployed and not a.status
+                      and db._conn.execute('SELECT deploy_status FROM mods WHERE mod_id=?', (a.mod_pk,)).fetchone()[0] == 'not_deployed'), None)
+    deployed = next((a.internal_id for a in assets if a.deployed and not a.status), None)
+    if args.inspector_actions and (not undeployed or not deployed):
+        raise RuntimeError('This real game needs both healthy deployed and undeployed assets for action evidence')
     print(json.dumps({'games': counts, 'selected': game, 'description_lengths': [min(descriptions)[0], max(descriptions)[0]] if descriptions else [], 'fingerprinted_files': len(before), 'database_before': before[str(database)]}, ensure_ascii=False), flush=True)
     window = WebLibraryWindow(adapter)
     # Physical 1600x900 content at both 100% and 125%, native Windows rendering.
@@ -120,6 +126,9 @@ def main():
     phase = {'value': 0, 'busy': False, 'since': time.perf_counter()}
 
     def capture(name):
+        # Measure the reclaimed row in the same live window, without loading
+        # another frontend or changing any data. Restore before the screenshot.
+        js("(()=>{const now=$('viewport').clientHeight;const row=document.createElement('div');row.style.cssText='height:28px;flex:none';document.querySelector('.workspace').before(row);const previous=$('viewport').clientHeight;row.remove();return JSON.stringify({previousViewport:previous,currentViewport:now,twoCompleteRows:now>=2*S.cell-12,cell:S.cell,gained:now-previous,toolbarGap:$('viewport').getBoundingClientRect().top-document.querySelector('.querybar').getBoundingClientRect().bottom,inspectorTop:$('inspector').getBoundingClientRect().top,viewportTop:$('viewport').getBoundingClientRect().top,residualRows:document.querySelectorAll('.resultbar').length,properties:[...document.querySelectorAll('.inspector-properties .badge')].map(e=>({text:e.textContent,height:e.getBoundingClientRect().height,width:e.getBoundingClientRect().width})),propertyGroupHeight:document.querySelector('.inspector-properties')?.getBoundingClientRect().height});})()", lambda raw: report['metrics'].setdefault('ui_optimization', {}).update({name: json.loads(raw)}))
         path = output / (name + '.png')
         ok = window.grab().save(str(path))
         report['captures'].append({'name': name, 'path': str(path), 'saved': ok})
@@ -131,7 +140,7 @@ def main():
         if phase['busy']:
             return
         phase['busy'] = True
-        js("JSON.stringify({connected:typeof bridge!=='undefined'&&!!bridge,count:typeof S!=='undefined'?S.assets.length:0,game:document.getElementById('game').value,pending:typeof S!=='undefined'?S.coverActive:0,details:typeof S!=='undefined'&&!!S.details,dialog:document.getElementById('detail').open})", advance)
+        js("JSON.stringify({connected:typeof bridge!=='undefined'&&!!bridge,count:typeof S!=='undefined'?S.assets.length:0,game:document.getElementById('game').value,pending:typeof S!=='undefined'?S.coverActive:0,details:typeof S!=='undefined'&&!!S.details,action:typeof S!=='undefined'?S.details?.actions?.primary?.id:null,more:document.getElementById('more-menu').matches(':popover-open'),picker:document.getElementById('game-menu').matches(':popover-open'),dialog:document.getElementById('detail').open})", advance)
 
     def advance(raw):
         phase['busy'] = False
@@ -144,6 +153,39 @@ def main():
             return
         state = json.loads(raw)
         p = phase['value']
+        if args.inspector_actions and 1 <= p <= 6:
+            if p == 1 and state['game'] == game[0] and state['count'] == game[2] and state['pending'] == 0:
+                js("inspect(S.assets.find(a=>a.internal_id==="+json.dumps(undeployed)+"));")
+                phase['value'] = 2
+            elif p == 2 and state['action'] == 'deploy' and state['pending'] == 0:
+                capture('01-undeployed-actions')
+                # Recreate only the previous header/footer to compare reading space.
+                js("(()=>{const current=document.querySelector('.inspector-scroll').clientHeight;$('open-detail').remove();document.querySelector('.inspector-footer').innerHTML='<button class=primary>阅读完整详情</button>';const previous=document.querySelector('.inspector-scroll').clientHeight;drawInspector(S.current,S.details);return JSON.stringify({previous,current,delta:current-previous});})()", lambda raw: report['metrics'].update({'reading_height': json.loads(raw)}))
+                js("inspect(S.assets.find(a=>a.internal_id==="+json.dumps(deployed)+"));$('viewport').scrollTop=Math.floor(S.rows.findIndex(a=>a.internal_id==="+json.dumps(deployed)+")/S.columns)*S.cell;renderGrid();")
+                phase['value'] = 3
+            elif p == 3 and state['action'] == 'redeploy' and state['pending'] == 0:
+                capture('02-deployed-actions')
+                js("JSON.stringify({commands:[...document.querySelectorAll('[data-command]')].map(e=>({id:e.dataset.command,disabled:e.disabled,width:e.getBoundingClientRect().width,top:e.getBoundingClientRect().top,height:e.getBoundingClientRect().height})),footerWidth:document.querySelector('.inspector-footer').clientWidth,overflow:document.querySelector('.inspector-command-row').scrollWidth>document.querySelector('.inspector-command-row').clientWidth,bodyHeight:document.querySelector('.inspector-scroll').clientHeight})", lambda raw: report['metrics'].update({'deployed_layout': json.loads(raw)}))
+                js('openMoreMenu();')
+                phase['value'] = 4
+            elif p == 4 and state['more']:
+                capture('03-more-menu')
+                js("JSON.stringify({bodyHeight:document.querySelector('.inspector-scroll').clientHeight,items:[...document.querySelectorAll('#more-menu [role=menuitem]')].map(e=>({id:e.dataset.action,disabled:e.getAttribute('aria-disabled'),icons:e.querySelectorAll('svg').length,height:e.getBoundingClientRect().height}))})", lambda raw: report['metrics'].update({'menu_layout': json.loads(raw)}))
+                js('closeMoreMenu();openGameMenu();')
+                phase['value'] = 5
+            elif p == 5 and state['picker']:
+                capture('04-dark-game-picker')
+                js("JSON.stringify({background:getComputedStyle($('game-menu')).backgroundColor,color:getComputedStyle($('game-menu')).color,gameCount:$('game').options.length})", lambda raw: report['metrics'].update({'picker': json.loads(raw)}))
+                other = next(g for g in counts if g[0] != game[0] and g[2] > 0)
+                phase['switch_game'] = other
+                js("$('game-menu').querySelector('[data-game=\""+other[0]+"\"]').click();")
+                phase['value'] = 6
+            elif p == 6 and state['game'] == phase['switch_game'][0] and state['count'] == phase['switch_game'][2] and state['pending'] == 0:
+                capture('05-game-switched')
+                report['metrics']['game_switch'] = phase['switch_game']
+                phase['value'] = 7
+                phase['since'] = time.perf_counter()
+            return
         if p == 0 and state['connected']:
             js("$('game').value="+json.dumps(game[0])+";load();")
             phase['value'] = 1

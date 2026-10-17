@@ -46,13 +46,12 @@ def _member_pks(
     """Frozen ``internal_id`` UUID (or digit PK handle) → ``mods.mod_id`` FKs."""
     from services.mod_library_cache import dal_mod_pk
 
-    _ = db
     pks: list[int] = []
     seen: set[int] = set()
     for raw in internal_ids or ():
         if not str(raw).strip():
             continue
-        pk = dal_mod_pk(raw)
+        pk = dal_mod_pk(raw, db=db)
         if not pk:
             raise ValueError(f"invalid mod_id: {raw!r}")
         value = int(pk)
@@ -96,28 +95,35 @@ def delete_collection(
 ) -> bool:
     """Delete Collection + memberships only. Never deletes Mod rows.
 
-    After a successful DB delete, removes only this Collection's Cover files.
+    Clean owned covers before DB deletion; restore them if either step fails.
     """
     from services.collection_cover import delete_collection_cover_files
     from services.cover_cache import invalidate_cover
 
     database = _db(db)
     rec = database.get_collection(collection_id)
-    old_rel = str(rec.cover_path or "").strip() if rec is not None else ""
-    old_files = []
-    try:
-        from services.collection_cover import own_cover_files, stored_cover_file
-
-        old_files = list(own_cover_files(collection_id))
-        stored = stored_cover_file(old_rel) if old_rel else None
-        if stored is not None and stored not in old_files:
-            old_files.append(stored)
-    except Exception:  # noqa: BLE001
-        old_files = []
-    ok = database.delete_collection(collection_id)
-    if not ok:
+    if rec is None:
         return False
-    removed = delete_collection_cover_files(collection_id)
+    old_rel = str(rec.cover_path or "").strip()
+    from services.collection_cover import own_cover_files, owned_stored_cover_file
+    from services.mutation_context import assert_mutation_allowed
+    old_files = list(own_cover_files(collection_id))
+    if old_rel:
+        owned_stored_cover_file(collection_id, old_rel)
+    # Cover files are small image resources, independent of original Mod covers.
+    # Retain their bytes until the database commit succeeds.
+    saved = {path: path.read_bytes() for path in old_files}
+    try:
+        removed = delete_collection_cover_files(collection_id)
+        ok = database.delete_collection(collection_id)
+        if not ok:
+            raise LookupError('合集已经变化，请刷新后重试')
+    except Exception:
+        for path, content in saved.items():
+            if not path.exists():
+                assert_mutation_allowed(path)
+                path.write_bytes(content)
+        raise
     for path in list(old_files) + list(removed):
         try:
             invalidate_cover(path)
@@ -141,7 +147,7 @@ def set_collection_cover(
         commit_staged_cover,
         rollback_staged_cover,
         stage_collection_cover,
-        stored_cover_file,
+        owned_stored_cover_file,
     )
     from services.cover_cache import invalidate_cover
 
@@ -150,7 +156,7 @@ def set_collection_cover(
     if rec is None:
         raise LookupError(f"collection not found: {collection_id}")
     old_rel = str(rec.cover_path or "").strip()
-    old_abs = stored_cover_file(old_rel) if old_rel else None
+    old_abs = owned_stored_cover_file(rec.collection_id, old_rel) if old_rel else None
     staged = stage_collection_cover(
         rec.collection_id, source, current_relative=old_rel
     )
@@ -183,7 +189,7 @@ def set_collection_cover_from_member(
 
     database = _db(db)
     members = list_collection_member_ids(collection_id, db=database)
-    pk = dal_mod_pk(internal_id)
+    pk = dal_mod_pk(internal_id, db=database)
     if not pk or pk not in {str(x).strip() for x in members}:
         raise ValueError("mod is not a member of this collection")
     src = member_cover_file(pk, db=database)

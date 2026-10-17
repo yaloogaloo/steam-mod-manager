@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DEPLOY_TYPE_FOLDER_COPY, DatabaseManager
 from ui.game_deploy_view import GameDeployView, validate_deploy_paths
-from ui.main_window import PAGE_DEPLOY, PAGE_LIBRARY, PAGE_SYNC, MainWindow
 
 
 @pytest.fixture(scope="module")
@@ -83,22 +82,3 @@ def test_save_config_via_view(
     assert view.install_edit.text() == str(install)
 
 
-def test_main_window_has_deploy_page(qapp: QApplication, monkeypatch, tmp_path: Path) -> None:
-    DatabaseManager.reset_instance()
-    db = DatabaseManager(tmp_path / "main_deploy.db")
-    monkeypatch.setattr("core.db_manager.DatabaseManager.instance", classmethod(lambda cls, db_path=None: db))
-    monkeypatch.setattr("ui.game_deploy_view.get_db", lambda: db)
-
-    win = MainWindow()
-    assert win.nav_list.count() == 3
-    assert win.nav_list.item(PAGE_DEPLOY).text() == "游戏部署"
-    assert win.stack.count() == 3
-    assert win.stack.widget(PAGE_SYNC) is win.sync_view
-    assert win.stack.widget(PAGE_LIBRARY) is win.library_view
-    assert win.stack.widget(PAGE_DEPLOY) is win.deploy_view
-
-    win.nav_list.setCurrentRow(PAGE_DEPLOY)
-    assert win.stack.currentIndex() == PAGE_DEPLOY
-    win.close()
-    db.close()
-    DatabaseManager.reset_instance()

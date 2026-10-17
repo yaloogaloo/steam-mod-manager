@@ -201,7 +201,7 @@ def _row_mod_pk(row: dict[str, Any]) -> int | None:
     return pk if pk > 0 else None
 
 
-def dal_mod_pk(internal_id: str | int | None) -> str:
+def dal_mod_pk(internal_id: str | int | None, *, db=None) -> str:
     """Map Frozen UUID to SQLite PK. Digit tokens are already SQL PK."""
     from services.deploy_identity import is_frozen_internal_uuid
     from services.identity_service import resolve_mod_pk_from_internal_id
@@ -211,7 +211,7 @@ def dal_mod_pk(internal_id: str | int | None) -> str:
         return ""
     if is_frozen_internal_uuid(token):
         try:
-            pk = resolve_mod_pk_from_internal_id(token, db=get_db())
+            pk = resolve_mod_pk_from_internal_id(token, db=db if db is not None else get_db())
         except Exception:  # noqa: BLE001
             pk = ""
     elif token.isdigit():
@@ -314,15 +314,6 @@ def list_item_to_card_data(item: ModListItem) -> ModCardData:
         type_id=item.type_id,
         mod_pk=item.mod_pk,
     )
-    if item.type_id:
-        try:
-            from services.mod_type_catalog import get_mod_type_catalog
-
-            type_name = get_mod_type_catalog().resolve_name(item.game_id, item.type_id)
-        except Exception:  # noqa: BLE001
-            type_name = ""
-        if type_name:
-            data = replace(data, category_tags=type_name, tags=type_name)
     return data
 
 

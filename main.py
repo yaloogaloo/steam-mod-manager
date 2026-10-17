@@ -12,13 +12,17 @@ import logging
 import sys
 
 
-def _configure_logging(verbose: bool = False) -> None:
+def _configure_logging(verbose: bool = False, *, crash_hooks: bool = True) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    if not crash_hooks:
+        import faulthandler
+        faulthandler.enable(all_threads=True)
+        return
     from services.crash_trace import install_crash_hooks
 
     install_crash_hooks()
@@ -39,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable debug logging",
     )
 
+    parser.add_argument('--read-only', action='store_true', help='Open the WebEngine UI with native read-only data access')
+    parser.add_argument('--validation-root', help='Run the WebEngine release candidate against an existing isolated resource root')
     sub = parser.add_subparsers(dest="command")
 
     scan_cmd = sub.add_parser("scan", help="Scan a Steam workshop directory for Mod IDs")
@@ -192,10 +198,10 @@ def _notify_already_running() -> None:
         pass
 
 
-def launch_gui(*, next_frontend: bool = False, read_only: bool = False) -> int:
-    if next_frontend:
-        from frontend.admission import require_production_admission
-        require_production_admission(read_only=read_only)
+def launch_gui(*, next_frontend: bool = True, read_only: bool = False, validation_root: str | None = None) -> int:
+    if validation_root:
+        from frontend.web_application import run_validation
+        return run_validation(validation_root)
     from services.app_instance import acquire_instance_lock
 
     if not acquire_instance_lock():
@@ -210,7 +216,7 @@ def launch_gui(*, next_frontend: bool = False, read_only: bool = False) -> int:
     return _run_gui()
 
 
-def _run_gui(*, next_frontend: bool = False, read_only: bool = False) -> int:
+def _run_gui(*, next_frontend: bool = True, read_only: bool = False) -> int:
     if next_frontend:
         # Production opt-in stays at the canonical application entry boundary.
         from frontend.admission import require_production_admission
@@ -223,168 +229,6 @@ def _run_gui(*, next_frontend: bool = False, read_only: bool = False) -> int:
         finally:
             if token is not None:
                 reset_mutation_context(token)
-    from PySide6.QtWidgets import QApplication
-
-    from core.db_manager import get_db
-    from ui.main_window import MainWindow
-    from ui.styles import APP_STYLE, apply_dark_palette
-    from PySide6.QtCore import QTimer
-
-    from ui.startup_lifecycle import (
-        dump_startup_surface_audit,
-        log_startup,
-        mark_qapplication_created,
-        reset_startup_timeline,
-    )
-    from ui.window_chrome import (
-        DarkTitleBarFilter,
-        TITLE_BAR_STYLE,
-        apply_application_icon,
-        diagnose_and_bind_win32_taskbar_icon,
-        install_syscommand_probe,
-    )
-
-    # Ensure SQLite schema exists before any sync / UI lookup.
-    # Production mutations are refused until this process opts in.
-    get_db()
-    from services.mutation_context import activate_production_context
-
-    activate_production_context()
-
-    reset_startup_timeline()
-    app = QApplication(sys.argv)
-
-    def _on_about_to_quit() -> None:
-        from services.app_shutdown import shutdown_runtime
-        from services.app_instance import release_instance_lock
-
-        shutdown_runtime()
-        release_instance_lock()
-
-    app.aboutToQuit.connect(_on_about_to_quit)
-    mark_qapplication_created()
-
-    from services.runtime.dependency_check import (
-        ensure_runtime_dependencies_or_raise,
-        log_runtime_dependencies,
-    )
-
-    try:
-        log_runtime_dependencies(logging.getLogger(__name__))
-        ensure_runtime_dependencies_or_raise()
-    except RuntimeError as exc:
-        logging.getLogger(__name__).error("%s", exc)
-        from PySide6.QtWidgets import QMessageBox
-
-        QMessageBox.critical(
-            None,
-            "缺少 Python 依赖",
-            str(exc),
-        )
-        return 1
-
-    from core.debug_config import ui_trace_enabled, performance_log_enabled
-
-    def _boot(msg: str) -> None:
-        if ui_trace_enabled() or performance_log_enabled():
-            print(f"[BOOT] {msg}", flush=True)
-
-    _boot("QApplication ready")
-    app.setOrganizationName("SteamModManager")
-    app.setApplicationName("WorkshopLibrary")
-    app.setStyle("Fusion")
-    apply_dark_palette(app)
-    log_startup("apply_dark_palette done")
-    apply_application_icon(app)
-    log_startup("apply_application_icon done")
-
-    if ui_trace_enabled():
-        from ui.widget_show_trace import install_widget_show_trace
-
-        install_widget_show_trace(app)
-    # Always enforce window ownership — refuse parentless control show
-    # (Import Mod orphan float accident class). See ui.window_lifecycle.
-    from ui.window_lifecycle import install_window_ownership_guard
-
-    install_window_ownership_guard(app)
-    # App-level sheet so top-level popups (QMenu / QToolTip / combo lists) inherit dark tokens.
-    app.setStyleSheet(APP_STYLE + "\n" + TITLE_BAR_STYLE)
-    log_startup("app.setStyleSheet done")
-
-    # Dark native titlebars + icon for dialogs / message boxes.
-    chrome_filter = DarkTitleBarFilter(app)
-    app.installEventFilter(chrome_filter)
-    # Keep filter alive for the app lifetime.
-    app.setProperty("_dark_titlebar_filter", chrome_filter)
-    log_startup("DarkTitleBarFilter installed")
-
-    log_startup("MainWindow construct begin")
-    _boot("before MainWindow")
-    window = MainWindow()
-    from services.app_shutdown import register_main_window
-
-    register_main_window(window)
-    _boot("MainWindow created")
-    log_startup("MainWindow construct end")
-    if ui_trace_enabled():
-        install_syscommand_probe(app, window)
-    log_startup("about to show()")
-    _boot("before show")
-    try:
-        from services.perf_stage import reset_perf_stage, log_perf_stage
-
-        reset_perf_stage()
-        log_perf_stage("startup", 0.0, event="before_show")
-    except Exception:
-        pass
-    window.show()
-    _boot("after show")
-    app.processEvents()
-    try:
-        from services.perf_stage import log_perf_stage, since_ms
-
-        log_perf_stage("startup", since_ms(), event="after_show_processEvents")
-    except Exception:
-        pass
-    log_startup(
-        f"show() returned visible={window.isVisible()} "
-        f"size={window.width()}x{window.height()} state={window.windowState()!r}"
-    )
-    dump_startup_surface_audit(window)
-    # Icon diagnose only — must not resize / change flags after show.
-    QTimer.singleShot(0, lambda: diagnose_and_bind_win32_taskbar_icon(window))
-    QTimer.singleShot(800, _probe_modio_playwright_runtime)
-    return app.exec()
-
-
-def _probe_modio_playwright_runtime() -> None:
-    """Non-blocking Chromium probe for mod.io offline archive."""
-    try:
-        from services.startup_io_trace import begin as _io_begin
-
-        _io_begin("modio_probe")
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from services.offline.modio_browser_snapshot import probe_modio_playwright_runtime
-
-        ready, message = probe_modio_playwright_runtime()
-        if not ready:
-            logging.getLogger(__name__).warning(
-                "[MODIO_OFFLINE] startup runtime check: %s", message
-            )
-    except Exception as exc:  # noqa: BLE001
-        logging.getLogger(__name__).debug(
-            "mod.io playwright startup probe skipped: %s", exc
-        )
-    finally:
-        try:
-            from services.startup_io_trace import end as _io_end
-
-            _io_end("modio_probe")
-        except Exception:  # noqa: BLE001
-            pass
-
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -410,8 +254,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     verbose = "-v" in argv or "--verbose" in argv
-    _configure_logging(verbose=verbose)
-    return launch_gui()
+    gui, _qt_arguments = parser.parse_known_args(argv)
+    if gui.read_only or gui.validation_root:sys.dont_write_bytecode = True
+    _configure_logging(verbose=verbose, crash_hooks=not (gui.read_only or gui.validation_root))
+    if gui.read_only and gui.validation_root:
+        parser.error('--read-only and --validation-root cannot be combined')
+    return launch_gui(next_frontend=True, read_only=gui.read_only,
+                      validation_root=gui.validation_root)
 
 
 if __name__ == "__main__":

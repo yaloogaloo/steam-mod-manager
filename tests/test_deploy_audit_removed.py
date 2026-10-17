@@ -17,10 +17,10 @@ from ui.library_query import (
 
 
 def test_case1_library_open_does_not_start_deploy_audit() -> None:
-    import ui.main_window as mw
+    import frontend.web_window as mw
     import ui.library_view as lv
 
-    main_src = inspect.getsource(mw.MainWindow)
+    main_src = inspect.getsource(mw.WebLibraryWindow)
     view_src = inspect.getsource(lv.ModLibraryView)
     assert "run_deploy_audit" not in main_src
     assert "_run_startup_deploy_audit" not in main_src

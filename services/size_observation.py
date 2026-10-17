@@ -532,6 +532,19 @@ def enqueue_mod_size(
     mid = str(internal_id or "").strip()
     if not mid.isdigit():
         return False
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        # Import/Sync already runs in its owned business thread. The legacy
+        # daemon queue loses this DB context and may outlive the application.
+        try:
+            _assert_not_ui_thread()
+        except RuntimeError:
+            return False
+        if managed_path is not None:resources.validate(managed_path)
+        observation = observe_mod_size(mid, managed_path, force=force, db=resources.db)
+        if on_done is not None:_dispatch_done([on_done], observation)
+        return True
     path = Path(managed_path) if managed_path is not None else None
     callbacks = [on_done] if on_done is not None else []
     start: tuple[int, Path | None, bool, list[OnSizeDone]] | None = None

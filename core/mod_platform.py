@@ -528,7 +528,7 @@ def omits_steam_workshop_source(game_name: str = "", game_id: int | str = 0) -> 
 
 
 def supports_modio_source(game_name: str = "", game_id: int | str = 0) -> bool:
-    """True when Import / Edit should offer mod.io for this game."""
+    """Known official mod.io game mapping; not a manual registration gate."""
     return is_anno_1800_game(game_name, game_id) or is_baldurs_gate_3_game(
         game_name, game_id
     )
@@ -575,17 +575,11 @@ def get_available_sources(
     game_id: int = 0,
 ) -> list[tuple[str, str]]:
     """
-    Dynamic source platforms for Import / Edit UI.
-
-    Always includes Nexus / GitHub / 其它. Steam Workshop is omitted for
-    Stardew Valley, Baldur's Gate 3, and Cyberpunk 2077. For Anno 1800 and
-    Baldur's Gate 3, ``mod.io`` is prepended.
+    Manual registration sources, independent of deployment/API game support.
+    Workshop discovery and automatic API mapping retain their own contracts.
     """
     sources = list(BASE_SOURCE_OPTIONS)
-    if omits_steam_workshop_source(game_name, game_id):
-        sources = [(p, label) for p, label in sources if p != PLATFORM_STEAM]
-    if supports_modio_source(game_name, game_id):
-        sources.insert(0, (PLATFORM_MODIO, "mod.io"))
+    sources.insert(0, (PLATFORM_MODIO, "mod.io"))
     return sources
 
 

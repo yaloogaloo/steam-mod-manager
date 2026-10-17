@@ -329,7 +329,13 @@ def _download_cover(
 
     prepare_managed_folder_for_rename(managed_path)
     suffix = _logo_suffix(logo_url)
-    with tempfile.TemporaryDirectory(prefix="modio_cover_") as tmp:
+    from services.business_resources import current_resources
+    resources = current_resources()
+    temporary_root = resources.path('cache/modio_cover') if resources else None
+    if temporary_root is not None:
+        resources.validate_write(temporary_root)
+        temporary_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="modio_cover_", dir=temporary_root) as tmp:
         tmp_file = Path(tmp) / f"logo{suffix}"
         client.download_file(logo_url, tmp_file)
         rel = apply_cover_to_mod(

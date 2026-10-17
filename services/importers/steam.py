@@ -24,6 +24,15 @@ from services.importers.materialize import materialize_imported_mod
 from services.importers.source_files import apply_steam_file_semantics
 
 
+def parse_workshop_id(value):
+    """The existing Steam importer input contract, shared with preview."""
+    mid=str(value or '').strip()
+    if not mid:raise ValueError('缺少 Workshop ID')
+    if not mid.isdigit() and 'id=' in mid:mid=mid.split('id=',1)[-1].split('&',1)[0].strip()
+    if not mid.isdigit():raise ValueError(f'无效的 Workshop ID：{value}')
+    return mid
+
+
 class SteamImporter(ModImporter):
     platform = PLATFORM_STEAM
 
@@ -46,20 +55,8 @@ class SteamImporter(ModImporter):
         context: ImportContext | dict[str, Any] | None = None,
         **_kwargs: Any,
     ) -> ImportResult:
-        mid = str(workshop_id or "").strip()
-        if not mid:
-            return ImportResult(
-                success=False, error="缺少 Workshop ID", platform=self.platform
-            )
-        if not mid.isdigit():
-            if "id=" in mid:
-                mid = mid.split("id=", 1)[-1].split("&", 1)[0].strip()
-            if not mid.isdigit():
-                return ImportResult(
-                    success=False,
-                    error=f"无效的 Workshop ID：{workshop_id}",
-                    platform=self.platform,
-                )
+        try:mid=parse_workshop_id(workshop_id)
+        except ValueError as exc:return ImportResult(success=False,error=str(exc),platform=self.platform)
 
         ctx = coerce_import_context(context, game_id=app_id, game_name=game_name, app_id=app_id)
         resolved = resolve_game_for_import(

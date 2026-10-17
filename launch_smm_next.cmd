@@ -6,5 +6,5 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-".venv\Scripts\python.exe" -B "launch_smm_next.py" %*
+".venv\Scripts\python.exe" -B "main.py" %*
 if errorlevel 1 pause

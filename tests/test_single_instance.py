@@ -78,9 +78,9 @@ def test_c_launch_gui_source_lock_before_get_db() -> None:
     assert "MainWindow" not in launch_src
     assert "reconcile_library" not in launch_src
     assert launch_src.find("acquire_instance_lock") < launch_src.find("_run_gui")
-    assert "get_db" in run_src
-    get_db_at = run_src.find("get_db()")
-    assert get_db_at >= 0
+    assert "activate_production_context" in run_src
+    from frontend.web_application import run
+    assert "DatabaseManager.open_existing" in inspect.getsource(run)
     assert "acquire_instance_lock" not in run_src
 
 

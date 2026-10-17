@@ -1063,6 +1063,10 @@ def paradox_playset_notice_path() -> Path:
     override = os.environ.get("SMM_PARADOX_PLAYSET_NOTICE", "").strip()
     if override:
         return Path(override)
+    from services.business_resources import current_resources
+    resources=current_resources()
+    if resources is not None:
+        return resources.path('config') / PARADOX_PLAYSET_NOTICE_FILENAME
     if os.environ.get("PYTEST_CURRENT_TEST"):
         token = re.sub(
             r"[^A-Za-z0-9_.-]+",

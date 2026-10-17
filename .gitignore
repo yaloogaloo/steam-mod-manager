@@ -85,3 +85,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Machine-local production recovery receipt
+/config/production_recovery.json

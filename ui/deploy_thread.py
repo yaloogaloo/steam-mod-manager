@@ -42,12 +42,16 @@ class DeployWorker(QThread):
         *,
         action: DeployAction = "deploy",
         deployer: ModDeployer | None = None,
+        resources=None,
+        preflight=None,
     ) -> None:
         super().__init__(parent)
         self.internal_id = str(internal_id).strip()
         self.library_root = Path(library_root) if library_root else default_mod_library()
         self.action: DeployAction = action
         self._deployer = deployer
+        self.resources = resources
+        self.preflight = preflight
         self._terminal_emitted = False
 
     def _emit_terminal(self, payload: dict[str, Any]) -> None:
@@ -77,6 +81,21 @@ class DeployWorker(QThread):
         self.deploy_failed.emit(normalized)
 
     def run(self) -> None:
+        try:
+            if self.resources is not None:
+                with self.resources.bind():
+                    if self.preflight is not None:
+                        self.preflight()
+                    payload = self._run_operation()
+            else:
+                payload = self._run_operation()
+        except Exception as exc:
+            payload = DeployResult(status=DeployStatus.FAILED,
+                internal_id=self.internal_id, error=str(exc),
+                error_code='resource_boundary_refused').to_dict()
+        self._emit_terminal(payload)
+
+    def _run_operation(self):
         from services.deploy_e2e import bind_job, e2e_count, e2e_event, e2e_mark, e2e_span
 
         bind_job(str(getattr(self, "_e2e_job_id", "") or ""))
@@ -96,6 +115,13 @@ class DeployWorker(QThread):
                 else:
                     result = deployer.deploy_mod(self.internal_id)
             e2e_event("worker deploy returned")
+            if result and result.get('projection_errors'):
+                # The original service records canonical membership before its
+                # external projection. Report the partial outcome; do not invent
+                # an atomic rollback or overwrite that authoritative DB state.
+                result={**result,'success':False,'status':DeployStatus.FAILED.value,
+                    'partial_state_saved':True,'error_code':'projection_failed',
+                    'error':'部署成员状态已保存，但游戏投影失败：'+'；'.join(result['projection_errors'])}
             e2e_mark("worker_deploy_returned")
             if self.isInterruptionRequested():
                 result = DeployResult(
@@ -132,4 +158,4 @@ class DeployWorker(QThread):
             e2e_count("finish_signal_count")
             e2e_event("worker finished emitted")
             e2e_mark("worker_finished_emitted")
-            self._emit_terminal(result)
+            return result

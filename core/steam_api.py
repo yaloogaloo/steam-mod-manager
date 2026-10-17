@@ -151,6 +151,9 @@ def _format_steam_network_error(
             name = "ConnectionError"
             break
     proxy_label = "proxy=enabled" if proxy_enabled else "proxy=direct"
+    status = getattr(getattr(exc, 'response', None), 'status_code', None)
+    if status is not None:
+        name = f'HTTP {status}' + (' 限流，请稍后重试' if status == 429 else ' 来源不存在' if status == 404 else '')
     return f"Steam API network failure: {name} {hostname} ({proxy_label})"
 
 
@@ -185,6 +188,10 @@ class SteamWorkshopClient:
         proxies: Mapping[str, str | None] | None = None,
         proxy_url: str | None = None,
     ) -> None:
+        from services.business_resources import current_resources
+        resources = current_resources()
+        self._details_url = resources.steam_api_url if resources and resources.steam_api_url else STEAM_PUBLISHED_FILE_DETAILS_URL
+        self._refresh_timeout = (1.0, 2.0) if resources and resources.steam_api_url else (REFRESH_CONNECT_TIMEOUT, REFRESH_READ_TIMEOUT)
         self.timeout = timeout
         self.batch_size = max(1, min(batch_size, 100))
         self.request_interval = max(0.0, request_interval)
@@ -701,6 +708,33 @@ class SteamWorkshopClient:
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         try:
+            from services.business_resources import current_resources, _scope
+            resources = current_resources()
+            if resources and resources.steam_public:
+                source_network = getattr(resources, 'steam_source_network_active', lambda: False)()
+                if method != 'POST' or url != STEAM_PUBLISHED_FILE_DETAILS_URL or (self._proxies and not source_network):
+                    raise PermissionError('仅允许无代理的固定 Steam 元数据接口')
+                from services.business_resources import resolve_steam_addresses
+                if not source_network:
+                    _scope.get().steam_addresses = resolve_steam_addresses()
+                kwargs['allow_redirects'] = False
+                kwargs['stream'] = True
+                response = session.request(method, url, **kwargs)
+                try:
+                    if 300 <= response.status_code < 400:
+                        raise PermissionError('Steam 来源重定向被拒绝')
+                    response.raise_for_status()
+                    blocks, total = [], 0
+                    for block in response.iter_content(65536):
+                        total += len(block)
+                        if total > 2 * 1024 * 1024:
+                            raise ValueError('Steam 元数据响应超过 2 MiB 限制')
+                        blocks.append(block)
+                    response._content = b''.join(blocks)
+                    _scope.get().network.append({'url':url,'status':response.status_code,'bytes':total})
+                    return response
+                finally:
+                    response.close()
             return session.request(method, url, **kwargs)
         finally:
             session.close()
@@ -719,7 +753,7 @@ class SteamWorkshopClient:
         if not ids:
             return []
 
-        timeout = (REFRESH_CONNECT_TIMEOUT, REFRESH_READ_TIMEOUT)
+        timeout = self._refresh_timeout
         last_batch: list[ModMetadata] | None = None
 
         for attempt in range(1, REFRESH_MAX_ATTEMPTS + 1):
@@ -794,14 +828,14 @@ class SteamWorkshopClient:
             if disable_adapter_retries:
                 response = self._request_without_adapter_retries(
                     "POST",
-                    STEAM_PUBLISHED_FILE_DETAILS_URL,
+                    self._details_url,
                     data=form,
                     timeout=req_timeout,
                 )
             else:
                 response = self._request(
                     "POST",
-                    STEAM_PUBLISHED_FILE_DETAILS_URL,
+                    self._details_url,
                     data=form,
                     timeout=req_timeout,
                 )
@@ -810,7 +844,7 @@ class SteamWorkshopClient:
         except requests.RequestException as exc:
             msg = _format_steam_network_error(
                 exc,
-                url=STEAM_PUBLISHED_FILE_DETAILS_URL,
+                url=self._details_url,
                 proxy_enabled=proxy_on,
             )
             logger.error("%s original=%s", msg, exc)

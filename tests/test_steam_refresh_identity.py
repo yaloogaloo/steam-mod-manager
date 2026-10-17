@@ -159,6 +159,17 @@ def test_refresh_updates_pk_row_not_workshop_row(
     ).fetchone()["n"] == 0
 
 
+    # Manual refresh remains available after the first official sync.
+    db.set_official_metadata_synced(mid, True)
+    before = SteamWorkshopClient.refresh_details.call_count
+    forced = refresh_steam_mod_metadata(
+        mid, folder, library_root=lib, db=db, force=True,
+        allow_official_sync=True, download_cover=False,
+    )
+    assert forced.success and not forced.skipped
+    assert SteamWorkshopClient.refresh_details.call_count == before + 1
+
+
 def test_workspace_id_as_mod_id_fails_with_structured_log(
     db: DatabaseManager, tmp_path: Path, caplog
 ) -> None:

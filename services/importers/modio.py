@@ -1,4 +1,4 @@
-"""mod.io manual folder importer (Anno 1800 / Baldur's Gate 3 in UI).
+"""mod.io manual importer, independent of official API game mappings.
 
 Workspace ID is system-generated unless a stable numeric platform id is bound
 as external_id. Internal PK must never become Workspace ID.

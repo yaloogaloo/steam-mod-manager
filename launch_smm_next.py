@@ -1,4 +1,4 @@
-"""Explicit new SMM entry; legacy main.py remains the default."""
+"""Compatibility launcher; main.py owns WebEngine startup and release admission."""
 import argparse
 import os
 import sys
@@ -8,8 +8,8 @@ sys.dont_write_bytecode = True
 
 
 def main():
-    parser = argparse.ArgumentParser(description='SMM 新版资产库（部署与导入待迁移）')
-    parser.add_argument('--read-only', action='store_true', help='禁止收藏和合集写入')
+    parser = argparse.ArgumentParser(description='SMM WebEngine（兼容启动器，实际入口为 main.py）')
+    parser.add_argument('--read-only', action='store_true', help='以原生只读数据库启动')
     args = parser.parse_args()
     if os.environ.get('SMM_TEST_DB') or os.environ.get('PYTEST_CURRENT_TEST'):
         parser.error('生产入口不接受测试数据库环境；请使用隔离验证入口')
@@ -19,8 +19,8 @@ def main():
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    from main import launch_gui
-    return launch_gui(next_frontend=True, read_only=args.read_only)
+    from main import main as canonical_main
+    return canonical_main(['--read-only'] if args.read_only else [])
 
 
 if __name__ == '__main__':

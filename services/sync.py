@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from pathlib import Path
 
 from core.models import ModMetadata
@@ -146,6 +147,11 @@ class SyncOptions:
     # Optional Steam browser Cookie string (steamLoginSecure / sessionid / …)
     steam_cookie: str = ""
 
+    # Explicit subset/game admission for the WebEngine isolated workflow.
+    full_sync: bool = False
+    selected_ids: list[str] | None = None
+    app_id: int = 0
+
     def proxies_dict(self) -> dict[str, str] | None:
         """Convert ``proxy_url`` into a ``requests``-compatible proxies dict."""
         url = (self.proxy_url or "").strip()
@@ -199,19 +205,30 @@ class ModSyncService:
         client: SteamWorkshopClient | None = None,
         file_manager: ModFileManager | None = None,
         archiver: OfflinePageArchiver | None = None,
+        resources=None,
     ) -> None:
+        self.resources = resources
+        self._active_app_id = 0
         self.workshop_dir = Path(workshop_dir)
         self.target_dir = Path(target_dir)
         self._owns_client = client is None
+        if resources and client is None:
+            with resources.bind():
+                client=SteamWorkshopClient(db=resources.db,proxy_url='',enable_scrape_fallback=False)
         self.client = client or SteamWorkshopClient()
         self.files = file_manager or ModFileManager(self.target_dir)
-        self._owns_archiver = archiver is None
-        self.archiver = archiver or OfflinePageArchiver()
+        self._owns_archiver = archiver is None and resources is None
+        self.archiver = archiver if resources else archiver or OfflinePageArchiver()
         self._archive_ctx: SteamArchiveSyncContext | None = None
         # Protect destination path allocation across IO workers
         self._alloc_lock = threading.Lock()
         # Mod IDs that need copytree overwrite due to Steam source update detection.
         self._force_overwrite_ids: set[str] = set()
+
+    def _run_scoped(self,function,*args):
+        with self.resources.source_network('sync') if getattr(self.resources,'production',False) else nullcontext():
+            with self.resources.bind() if self.resources else nullcontext():
+                return function(*args)
 
     def close(self) -> None:
         self._end_archive_batch()
@@ -228,6 +245,7 @@ class ModSyncService:
 
     def _begin_archive_batch(self, opts: SyncOptions) -> None:
         """One shared curl_cffi Session for all archive work in this sync run."""
+        if self.resources and not opts.archive_pages:return
         proxies = opts.proxies_dict()
         timeout = self.client.timeout
         cookie = (opts.steam_cookie or "").strip() or None
@@ -260,6 +278,21 @@ class ModSyncService:
         *,
         on_progress: ProgressCallback | None = None,
     ) -> SyncResult:
+        with self.resources.bind() if self.resources else nullcontext():
+            if self.resources:
+                if self.target_dir != self.resources.path('mod'):
+                    raise PermissionError('同步归档根不匹配')
+                self.resources.validate(self.workshop_dir)
+                if not options or options.app_id <= 0 or (not options.selected_ids and not (getattr(self.resources,'production',False) and options.full_sync)):
+                    raise PermissionError('隔离同步必须明确当前游戏及已确认成员')
+                if options.archive_pages or options.overwrite_files or (options.download_covers and not getattr(self.resources,'production',False)):
+                    raise PermissionError('未准入封面/离线下载或无条件覆盖')
+                if self.workshop_dir.name!=str(options.app_id) or self.workshop_dir.parent.name!='content':
+                    raise PermissionError('Workshop 目录与当前 AppID 不匹配')
+                self._active_app_id = options.app_id
+            return self._sync_scoped(options,on_progress=on_progress)
+
+    def _sync_scoped(self,options=None,*,on_progress=None):
         opts = options or SyncOptions()
         result = SyncResult()
         self.files.ensure_target_root()
@@ -285,7 +318,7 @@ class ModSyncService:
         # --- Phase 0: fix legacy numeric Mod folder names ---
         progress("scan", 0, 1, "Migrating numeric mod folders to real titles…")
         try:
-            renames = self.files.migrate_numeric_mod_folders()
+            renames = [] if self.resources else self.files.migrate_numeric_mod_folders()
             if renames:
                 progress(
                     "scan",
@@ -300,6 +333,12 @@ class ModSyncService:
         progress("scan", 0, 1, "Scanning workshop directory…")
         scanner = WorkshopScanner(self.workshop_dir)
         scanned = scanner.scan(recursive=opts.recursive_scan)
+        if opts.selected_ids is not None:
+            selected=set(opts.selected_ids)
+            scanned=[item for item in scanned if item.published_file_id in selected]
+            missing=selected-{item.published_file_id for item in scanned}
+            for wid in sorted(missing):
+                result.failed.append((ModMetadata(published_file_id=wid),'所选 Workshop 本体目录已缺失'))
         progress("scan", 1, 1, f"Found {len(scanned)} mod folder(s)")
 
         if not scanned:
@@ -309,6 +348,7 @@ class ModSyncService:
         progress("scan", 1, 1, "Indexing local library for delta sync…")
         existing_index = self._build_existing_index()
         self._force_overwrite_ids = set()
+        self._timestamp_failures = {}
 
         to_skip: list[tuple[str, Path]] = []
         to_fetch: list = []
@@ -320,6 +360,12 @@ class ModSyncService:
             if opts.overwrite_files:
                 to_fetch.append(item)
                 continue
+            if self.resources and existing:
+                from services.local_file_index import has_local_mod_payload
+                if not has_local_mod_payload(existing,db=self.resources.db):
+                    self._force_overwrite_ids.add(item.published_file_id)
+                    to_fetch.append(item)
+                    continue
             if not existing or not self._is_fully_synced_mod(existing):
                 to_fetch.append(item)
                 continue
@@ -332,6 +378,9 @@ class ModSyncService:
 
         for item, existing in skip_candidates:
             pub_id = item.published_file_id
+            if self.resources and pub_id in self._timestamp_failures:
+                result.failed.append((ModMetadata(published_file_id=pub_id),self._timestamp_failures[pub_id]))
+                continue
             local_meta = self.files.load_metadata(existing)
             local_ts = (
                 normalize_source_timestamp(local_meta.time_updated)
@@ -448,7 +497,15 @@ class ModSyncService:
         def meta_progress(done: int, total: int) -> None:
             progress("metadata", done, total, f"Batch fetching metadata {done}/{total}")
 
-        metas = self.client.get_details_batch(ids, on_progress=meta_progress)
+        fetch = self.client.refresh_details if self.resources else self.client.get_details_batch
+        metas = fetch(ids, on_progress=meta_progress)
+        if self.resources:
+            accepted=[]
+            for meta in metas:
+                if meta.fetch_error or int(meta.app_id or 0)!=opts.app_id or meta.published_file_id not in path_map:
+                    result.failed.append((meta,meta.fetch_error or 'Steam 来源 AppID / Workshop ID 不匹配'))
+                else:accepted.append(meta)
+            metas=accepted
         for meta in metas:
             meta.source_path = str(path_map.get(meta.published_file_id, ""))
             self.files.enrich_title_from_db(meta)
@@ -500,7 +557,7 @@ class ModSyncService:
             max_workers=net_workers
         ) as net_pool:
             copy_futures = {
-                io_pool.submit(self._copy_only, meta, opts, existing_index): meta
+                io_pool.submit(self._run_scoped, self._copy_only, meta, opts, existing_index): meta
                 for meta in metas
             }
 
@@ -557,6 +614,7 @@ class ModSyncService:
                     return _status
 
                 nf = net_pool.submit(
+                    self._run_scoped,
                     self._network_enrich_and_save,
                     meta,
                     managed,
@@ -642,6 +700,9 @@ class ModSyncService:
         from services.identity_service import LIFECYCLE_SYNC, lifecycle_scope
         from services.mod_identity import resolve_existing_mod_id
 
+        if self.resources:
+            failed={str(meta.published_file_id) for meta,error in result.failed if meta is not None}
+            scanned=[item for item in scanned if item.published_file_id not in failed]
         result.source_count = len(scanned)
         if not scanned:
             result.materialized_count = 0
@@ -856,7 +917,7 @@ class ModSyncService:
 
         app_id = int(meta.app_id or 0)
         game_name = str(meta.game_name or managed.parent.name or "").strip()
-        if app_id > 0 and game_name:
+        if app_id > 0 and game_name and not (self.resources and db.get_game(app_id)):
             try:
                 db.upsert_game(
                     GameInfo(app_id=app_id, name=game_name, folder_name=game_name)
@@ -964,8 +1025,19 @@ class ModSyncService:
 
         index: dict[str, Path] = {}
         for folder in self.files.list_managed_mods():
+            if self.resources:
+                from services.file_ops import read_info_metadata_dict
+                from core.mod_platform import normalize_platform
+                raw=read_info_metadata_dict(folder) or {}
+                # Skip unrelated game sidecars before runtime path hydration.
+                # Missing legacy AppID still takes the original metadata path.
+                raw_app=raw.get('app_id')
+                if raw_app and str(raw_app)!=str(self._active_app_id):continue
+                if normalize_platform(raw.get('platform') or raw.get('source_type') or 'steam')!='steam':continue
             meta = self.files.load_metadata(folder)
             if meta is None:
+                continue
+            if self.resources and int(meta.app_id or 0)!=self._active_app_id:
                 continue
             pub = str(meta.published_file_id or "").strip()
             if pub.isdigit():
@@ -1029,6 +1101,9 @@ class ModSyncService:
         refreshed = self.client.refresh_details(ids, on_progress=_on_progress)
         out: dict[str, int | None] = {}
         for meta in refreshed:
+            if self.resources and (meta.fetch_error or int(meta.app_id or 0)!=self._active_app_id):
+                self._timestamp_failures[meta.published_file_id]=meta.fetch_error or 'Steam 来源 AppID 不匹配'
+                continue
             ts = normalize_source_timestamp(meta.time_updated)
             # Explicit API response with missing/zero time_updated → no mtime fallback.
             out[meta.published_file_id] = ts
@@ -1141,6 +1216,26 @@ class ModSyncService:
           - skipped_incomplete: reuse folder, still may need net fill
           - success: freshly copied (or overwritten)
         """
+        if self.resources:
+            hit = self.resources.db.find_mod_for_registration('steam', self._active_app_id, meta.published_file_id)
+            if hit:
+                raw = self.resources.db._conn.execute('SELECT deploy_status FROM mods WHERE mod_id=?', (hit.mod_id,)).fetchone()
+                if not raw or raw[0] != 'not_deployed':
+                    raise PermissionError('已部署或未知状态的 Mod 禁止同步改写归档')
+            destination = existing_index.get(meta.published_file_id)
+            if destination:
+                destination = self.resources.validate(destination)
+                if hit and self.resources.db.get_user_override_fields(hit.mod_id).get('cover'):
+                    info=self.resources.db.get_mod_display_info(hit.mod_id)
+                    cover=Path(info.cover_path) if info and info.cover_path else None
+                    cover=(destination/cover).resolve() if cover is not None else None
+                    roots=[destination/'.info',destination/'smm_info']
+                    if cover is None or cover.stem.lower() not in ('cover','preview') or not any(cover.is_relative_to(p.resolve()) for p in roots):
+                        raise PermissionError('自定义封面路径未满足同步恢复合同，未改写归档；请先用更换封面保存为托管封面')
+                for resource in destination.rglob('*'):
+                    self.resources.validate(resource)
+                    if resource.name == 'deploy_manifest.json':
+                        raise PermissionError('已有部署 manifest，拒绝同步归档')
         existing = existing_index.get(meta.published_file_id)
         force_overwrite = (
             opts.overwrite_files
@@ -1208,6 +1303,13 @@ class ModSyncService:
                 existing_index[meta.published_file_id] = managed
                 backup_wins = True
 
+        if self.resources:
+            # Re-copy may remove the live sidecar. Restore proof only for an already
+            # registered Steam entity; never mint identity before new FS materialization.
+            hit=self.resources.db.find_mod_for_registration('steam',self._active_app_id,meta.published_file_id)
+            if hit is not None:
+                from services.info_sidecar import ensure_registration_info_proof
+                ensure_registration_info_proof(managed,hit.mod_id,db=self.resources.db)
         self._hydrate_managed_sidecar(meta, managed, backup_wins=backup_wins)
         return outcome_hint, managed
 

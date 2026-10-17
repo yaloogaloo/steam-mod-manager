@@ -1,92 +1,23 @@
-# Asset library — offline WebEngine read-only preview
+# SMM WebEngine 正式前端
 
-`launch_smm_next.cmd --read-only` now opens the complete HTML/CSS/JS library
-through Qt WebEngine and the existing Python `LibraryAdapter`. The Widgets
-implementation remains available for comparison; `main.py` remains the legacy
-default entry. Writable launch is still refused.
+在项目目录执行 `python main.py`，默认连接既有 SQLite 和 QSettings 指定的归档目录（当前为 `E:\mod`），启用已迁移的业务写入。`python main.py --read-only` 保留原生 SQLite 只读安全模式。兼容脚本最终也调用同一个 main.py。
 
-The new page includes virtualized cover cards, authoritative local size/type
-labels, search/status/type/category filters, favorites and collection browsing,
-independent checkboxes, an Inspector shown only on inspection, and full reading,
-identity and resource tabs. All selection, navigation and density state is
-in memory. There are no write or external-open commands in its bridge.
+资产库支持收藏、用户信息、标签和合集；获取与同步、WH3 加载顺序及部署快照使用既有 Worker、Service 和 DAL。游戏菜单中的“管理当前游戏”可读取、选择目录并保存原有游戏路径，不移动归档。输入文件和目录需由原生选择器明确授权；Workshop 源始终只读。
 
-WebEngine uses an off-record profile. Request interception and CSP refuse
-network and local-file resources; covers arrive as scaled image data through
-opaque snapshot tokens. Descriptions use the existing sanitizer. Game-load and
-detail generations reject stale responses. Cover jobs are limited to four and
-queued jobs outside the viewport are discarded. The image cache is bounded.
+部署按 Mod 检查原策略、配置和 manifest；生产路径不再误套隔离目录限制。folder_copy 已完成正式界面往返，其他策略不能据此视为全部验收。历史复制 manifest 继续明确拒绝。部署工作台复用 WH3、Stellaris、CK3、BG3 各自的 Backend，投影操作前为具体配置文件创建恢复点；后面三个游戏的正式界面写入往返仍待验收。手动 Steam 官方元数据刷新可更新已同步对象；未迁移下载、凭据功能不冒充可用。
 
-Production capture: `tools/web_library_validation.py --output <outside-data-dir>`.
-Comparison: `tools/web_library_comparison.py --mode widgets|p23 --game 916440
---output <outside-data-dir>`. Both use the shared instance lock, a native read-only
-database, the readonly runtime guard and a suspended mutation context. They
-never construct the legacy `MainWindow`. Screenshots use a shown Windows window,
-not an offscreen Qt platform. Validation output includes source/config/database
-hash comparisons and the legacy application's registry settings fingerprint.
+生产入口在持有实例锁后验证独立 SQLite/配置恢复点。恢复点仅含 SQLite、配置和设置，不复制 CAS 或 Mod 本体。业务原有备份和恢复逻辑继续使用；正式程序不依赖 tools/web_*_sandbox.py。Worker 完成后先销毁 View/Page，再销毁 Profile、关闭数据库和释放实例锁。
 
-Evidence: `D:/smm-product-redesign-web/README.md`. Technical checks do not grant
-visual ACCEPT; product visual approval belongs to the user.
+旧 Widgets MainWindow 已移除，ui 包仅保留仍需的 Worker 和共享/历史合同辅助模块，不再导出另一个正式前端。代码回退点：`smm-pre-release-retirement-20261015`。历史组合测试原生中止仍保留风险记录，不宣称根因彻底关闭；实际正式程序验证见 `D:/smm-production-entry-evidence/`。
 
-## Historical P4.1 Widgets preview
+游戏切换菜单的“添加游戏”使用既有正整数 AppID / 部署类型合同，可保存路径并立即切换。Inspector 已接通合法来源网页、已有离线页面安全阅读、Nexus HTML/MHTML 关联和用户封面覆盖；Nexus 联网刷新及未配置凭据的 mod.io 明确禁用并说明原因。
 
-Start from the project directory with `launch_smm_next.cmd --read-only` or
-`.venv\Scripts\python.exe -B launch_smm_next.py --read-only`.
-This loads real games and assets through the existing DAL, without migrations.
-The old `main.py` remains the legacy entry. Close either frontend before starting
-the other; both use the same instance lock.
+Windows 打包使用 `python -m PyInstaller SMM.spec`，生成带原版图标和应用身份的 SMM.exe。打包程序通过既有 QSettings 的 application_dir 指向现有数据目录，不复制数据库或归档。
 
-The admitted preview supports browsing, search/filter, grid density, Inspector
-and plain-text full detail. All persistence and external-open commands are
-blocked at the UI, Adapter and runtime/SQLite boundaries. Writable launch is
-still denied. No real QSettings are used, and no business worker is started.
+游戏菜单支持搜索，并固定显示“添加游戏”和“管理当前游戏”；齿轮打开独立应用设置，使用原 QSettings 保存代理与 Steam Cookie。归档根目录显示当前值，运行中不切换或移动既有归档。
 
-SQLite WAL-mode readonly access may create an empty WAL and a SHM coordination
-file or update SHM mtime. This is not a zero-filesystem-side-effect claim. P41
-observed unchanged main DB, metadata, manifest and production settings.
-See `D:/smm-product-redesign-p41/` for the exact test scope and remaining unknown
-P4 historical database writer. Do not remove locks, WAL/SHM, or change admission
-constants to bypass a failure.
+获取与同步的“扫描并同步全部 Mod”读取当前游戏 Workshop 配置，直接运行原 SyncWorker / ModSyncService，以 Steam time_updated 做新增、更新和跳过判断；不使用内容哈希决定更新。已部署与 manifest 保护继续生效。原生来源刷新仍在单 Mod Inspector 中。
 
-## Historical P3 composition notes (before P4 integration)
+收藏仅位于资产卡片封面星标。Mod 类型使用原 mods.type_id 与游戏类型目录；用户标签仍独立保存在 mod_tags。新版不展示或编辑历史 mods.category 字段，也不清空其历史数据。无类型 Mod 可从 Inspector 的“未分类”提示直接选择类型，完整编辑页保留类型设置。Steam / mod.io / GitHub 的“保存离线网页”调用原 OfflineManager，Nexus 使用“导入离线网页”；Playwright 来源保留原浏览器快照合同。
 
-This is product UI code, not a WebView or screenshot renderer. The existing
-`main.py` / `ui.MainWindow` path is unchanged. This package does not import `ui`.
-
-## Composition API
-
-After the separate process-exit, stable-data and isolated-runtime gates pass,
-an isolated Qt host may construct `WorkbenchWindow(games)` from
-`frontend.shell`, supplying explicit `GameContext` values from
-`frontend.models`. The host owns QApplication and its lifetime.
-
-There is deliberately no automatic startup, production fallback, QSettings,
-database loader, path discovery, worker or business action in this package.
-Do not add a production launch switch until business integration gates pass.
-
-`navigate(key)` selects a retained workspace instance. `workspace_changed`
-and `game_changed` communicate presentation intent only. Workspace tabs and
-density remain in memory; a game switch clears the unbound search input.
-`WorkspaceFrame.content_layout` is the mount point for a later admitted page.
-
-Business buttons are disabled. Search/density are presentation controls only,
-explicitly labelled as unbound. No Mod grid or Inspector is implemented in P3.
-
-## Design and migration
-
-The P2.3 colors are frozen in `theme.py`. The stylesheet is attached to the new
-window only, never QApplication, so the legacy window is not restyled.
-`components.py` owns PageHeader and StatusBadge. `shell.py` owns viewport,
-navigation, game context and routes. `models.py` holds presentation inputs.
-
-Keep the old front end while admitting one business page at a time. Preserve
-identity, mutation-context, canonical-membership and cover-ownership contracts.
-Reverting/removing only this new package leaves the current application path
-intact; do not reset unrelated working-tree changes.
-
-P3 initially blocked runtime validation while production SMM was running. After
-it exited, three stable samples admitted the closed pure-Qt runner in
-`tools/ui_validation_d0/shell_preview.py`. Real offscreen QWidget captures cover
-1920x1080 and 1520x900. Windows onscreen sizing was constrained by the available
-desktop; offscreen results do not validate Windows DPI or window-manager behavior.
-Evidence and the frozen design manifest are in `D:/smm-product-redesign-p3/`.
+“从 SMM 注销 Mod…”位于 Inspector 更多菜单底部，调用原注册删除服务，仅移除记录及关系并保留文件；已部署、失败及未知状态拒绝注销。打开离线网页复用原 prepare_offline_open，将 manifest/CAS 恢复到 cache/offline_view，再交给系统默认浏览器，不再使用内部简化阅读器。原存档未捕获的远端资源或已损坏内容不会由打开操作重新下载。

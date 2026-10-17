@@ -31,6 +31,10 @@ _CONFIG_PATH: Path | None = None
 
 
 def game_capabilities_config_path() -> Path:
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        return resources.path('config/game_capabilities.json')
     if _CONFIG_PATH is not None:
         return _CONFIG_PATH
     return project_root() / CONFIG_REL
@@ -90,7 +94,9 @@ def _games_from_payload(raw: object) -> dict[str, Mapping[str, Any]]:
 
 def _load_games_table() -> dict[str, Mapping[str, Any]]:
     global _CACHED
-    if _CACHED is not None:
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if _CACHED is not None and resources is None:
         return _CACHED
     table: dict[str, Mapping[str, Any]] = {}
     path = game_capabilities_config_path()
@@ -101,7 +107,8 @@ def _load_games_table() -> dict[str, Mapping[str, Any]]:
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
         logger.warning("game capabilities config unreadable (%s): %s", path, exc)
         table = {}
-    _CACHED = table
+    if resources is None:
+        _CACHED = table
     return table
 
 

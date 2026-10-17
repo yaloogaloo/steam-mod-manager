@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2514,15 +2515,15 @@ class OfflinePageArchiver:
         workers = max(1, int(GLOBAL_ASSET_WORKERS))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             css_futs = {
-                pool.submit(_tracked_download, href, page_url): (link, href)
+                pool.submit(copy_context().run, _tracked_download, href, page_url): (link, href)
                 for link, href in css_jobs
             }
             font_futs = {
-                pool.submit(_tracked_download, href, page_url): (link, href)
+                pool.submit(copy_context().run, _tracked_download, href, page_url): (link, href)
                 for link, href in font_jobs
             }
             img_futs = {
-                pool.submit(_download_first, candidates): (img, candidates)
+                pool.submit(copy_context().run, _download_first, candidates): (img, candidates)
                 for img, candidates in img_jobs
             }
 
@@ -2631,7 +2632,7 @@ class OfflinePageArchiver:
             return
         workers = max(1, int(GLOBAL_ASSET_WORKERS))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(nested_download, raw, base_url, nested=True) for raw in unique]
+            futs = [pool.submit(copy_context().run, nested_download, raw, base_url, nested=True) for raw in unique]
             for fut in as_completed(futs):
                 fut.result()
 
@@ -2678,7 +2679,7 @@ class OfflinePageArchiver:
                 workers = max(1, int(GLOBAL_ASSET_WORKERS))
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futs = [
-                        pool.submit(nested_download, raw, base, nested=True)
+                        pool.submit(copy_context().run, nested_download, raw, base, nested=True)
                         for raw, base in prefetch
                     ]
                     for fut in as_completed(futs):

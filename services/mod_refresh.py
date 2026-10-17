@@ -261,6 +261,8 @@ def refresh_mod(
     library_root: str | Path | None = None,
     source_url: str = "",
     db=None,
+    steam_client=None,
+    download_cover=True,
 ) -> ModRefreshResult:
     """
     Detail refresh entry: local reconcile always; official provider at most once
@@ -313,6 +315,8 @@ def refresh_mod(
                     mid,
                     folder,
                     library_root=library_root,
+                    client=steam_client,
+                    download_cover=download_cover,
                     force=True,
                     allow_official_sync=True,
                     db=database,

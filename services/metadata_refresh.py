@@ -627,7 +627,7 @@ def refresh_steam_mod_metadata(
     Re-fetch Steam Workshop metadata for one managed Mod and persist results.
 
     When *force* is False (default), healthy mods are skipped (Feature 3).
-    When *allow_official_sync* is False or ``official_metadata_synced`` is set,
+    When *allow_official_sync* is False, or an automatic refresh was already synced,
     no network I/O is performed.
     """
     from core.db_manager import get_db
@@ -723,7 +723,7 @@ def refresh_steam_mod_metadata(
     resolved = resolve_managed_folder(mid, hint_path=folder, db=database)
     folder = resolved.path or folder
 
-    if not allow_official_sync or database.is_official_metadata_synced(mid):
+    if not allow_official_sync or (database.is_official_metadata_synced(mid) and not force):
         existing = None
         try:
             root = Path(library_root) if library_root else (
@@ -840,6 +840,9 @@ def refresh_steam_mod_metadata(
             )
 
         # Merge into existing sidecar fields we want to keep.
+        if app_id_hint and fetched.app_id and int(fetched.app_id) != int(app_id_hint):
+            return MetadataRefreshResult(mod_id=mid, success=False, managed_path=folder,
+                old_path=folder, error='Steam 来源所属游戏与当前 Mod 不匹配，拒绝更新')
         meta = existing or ModMetadata(published_file_id=steam_external_id)
         meta.published_file_id = steam_external_id
         meta.title = fetched.title.strip()

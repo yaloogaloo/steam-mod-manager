@@ -96,14 +96,6 @@ def test_schedule_startup_delayed_when_enabled(
     assert pace.batch_size == 10
 
 
-def test_main_window_uses_startup_gate() -> None:
-    from ui.main_window import MainWindow
-
-    src = inspect.getsource(MainWindow._run_startup_library_reconcile)
-    assert "schedule_startup_library_reconcile" in src
-    assert "start_reconcile_library_async" not in src
-    restore = inspect.getsource(MainWindow._restore_settings)
-    assert "start_reconcile_library_async" not in restore
 
 
 def test_reconcile_max_mods_skips_missing_phase(

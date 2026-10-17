@@ -30,7 +30,12 @@ class LibraryAdapter:
         self.writable = writable
 
     def games(self):
-        return [GameContext(str(g.app_id), g.name or '未归属游戏', str(g.app_id)) for g in self.db.list_games()]
+        with self.db._lock:
+            games=self.db.list_games()
+            unassigned=self.db._conn.execute('SELECT 1 FROM mods WHERE app_id=0 LIMIT 1').fetchone()
+            empty=not any(int(g.app_id)!=0 for g in games)
+            return [GameContext(str(g.app_id), g.name or '未归属资产', str(g.app_id)) for g in games
+                    if int(g.app_id)!=0 or unassigned or empty]
 
     def assets(self, app_id: int):
         result = []
@@ -46,9 +51,11 @@ class LibraryAdapter:
             result.append(Asset(identity, row['workspace_id'], int(row['mod_pk']),
                 row['managed_path'], row['name'], row['platform'], row['deployed'],
                 row['favorite'], str(row.get('category') or ''), row['cover_path'],
-                '身份异常' if identity_error else '内容缺失' if row['content_status'] == 'content_missing' else
+                '身份异常' if identity_error else '待补齐内容' if row['content_status'] == 'content_missing' else
                 '身份异常' if row['identity_status'] not in ('', 'ok') else
-                '已标记异常' if row['invalid'] else '目录缺失' if row['folder_absent'] else ''))
+                '已标记异常' if row['invalid'] else '已标记冲突' if row['conflict'] else
+                '已禁用' if not row['enabled'] else '已标记停更' if row['abandoned'] else
+                '目录缺失' if row['folder_absent'] else ''))
         return result
 
     def verify(self, asset: Asset):

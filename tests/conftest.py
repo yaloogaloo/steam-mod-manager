@@ -181,31 +181,40 @@ def _isolate_production_data(
 
     monkeypatch.setenv("SMM_TEST_DB", str(db_file))
 
+    def _resource(name: str, fallback: Path) -> Path:
+        from services.business_resources import resource_path
+        return resource_path(name, fallback)
+
     def _data_dir() -> Path:
-        return data
+        return _resource('data', data)
 
     def _cache_dir() -> Path:
-        cache.mkdir(parents=True, exist_ok=True)
-        return cache
+        path = _resource('cache', cache)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _logs_dir() -> Path:
-        logs.mkdir(parents=True, exist_ok=True)
-        return logs
+        path = _resource('logs', logs)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _config_dir() -> Path:
-        return config
+        return _resource('config', config)
 
     def _load_order_dir() -> Path:
-        path = config / "load_order"
+        path = _config_dir() / "load_order"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     def _default_mod_library() -> Path:
-        library.mkdir(parents=True, exist_ok=True)
-        return library
+        path = _resource('mod', library)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def _database_path() -> Path:
-        return db_file
+        from services.business_resources import current_resources
+        resources = current_resources()
+        return Path(resources.db.db_path) if resources else db_file
 
     # Patch both the defining module and common re-import sites.
     monkeypatch.setattr("core.paths.data_dir", _data_dir)

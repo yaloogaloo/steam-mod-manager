@@ -1,4 +1,4 @@
-"""Registration-only entity removal — never deletes filesystem content.
+"""Registration removal; files are preserved unless explicit cleanup is requested.
 
 Steam Mod Manager principle: deleting a registration entity ≠ deleting files.
 
@@ -6,8 +6,8 @@ This service removes SQLite / in-memory registration bindings only:
 mods row, tags, relations, deployment items, games row, categories,
 library projection cache, cover RAM cache.
 
-It must never call ``shutil.rmtree``, ``os.remove``, ``ModRemover``,
-deploy-remove, reconcile cleanup, or any filesystem repair.
+The default path never deletes files. Optional exclusive-archive cleanup is
+delegated to the ownership-checked, recoverable quarantine coordinator.
 """
 
 from __future__ import annotations
@@ -74,8 +74,12 @@ class ModRegistrationRemovalService:
         mod_id: int | str,
         *,
         workspace_id: str | int | None = None,
+        cleanup_resources=None,
     ) -> RegistrationRemovalResult:
-        """Remove one Mod registration. Never deletes disk content."""
+        """Remove one registration; optional cleanup requires explicit resources."""
+        if cleanup_resources is not None:
+            from services.registration_archive_cleanup import remove_with_archive
+            return remove_with_archive(self, cleanup_resources, mod_id)
         mid = str(mod_id or "").strip()
         if not mid.isdigit() and workspace_id is not None:
             from services.path_lifecycle import resolve_mod_id
@@ -101,7 +105,8 @@ class ModRegistrationRemovalService:
                 was_app_root = False
 
         # Registration delete only — never ModRemover / rmtree / undeploy.
-        removed = db.delete_mod_record(mid)
+        with db._conn:
+            removed = db.delete_mod_record(mid)
         self._invalidate_projection(mid)
         if cover:
             self._invalidate_cover(cover)

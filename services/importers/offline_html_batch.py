@@ -36,10 +36,10 @@ def normalize_offline_html_paths(
     return out
 
 
-def make_empty_mod_stub(*, title: str = "", ident: str = "") -> Path:
+def make_empty_mod_stub(*, title: str = "", ident: str = "", temp_root: Path | None = None) -> Path:
     """Empty payload folder — same role as the single-import stub."""
     raw = str(title or ident or "").strip() or f"Empty_Mod_{uuid.uuid4().hex[:8]}"
     label = sanitize_folder_name(raw, fallback="Empty_Mod")
-    dest = Path(tempfile.mkdtemp(prefix="smm_empty_import_")) / label
+    dest = Path(tempfile.mkdtemp(prefix="smm_empty_import_", dir=temp_root)) / label
     dest.mkdir(parents=True, exist_ok=True)
     return dest

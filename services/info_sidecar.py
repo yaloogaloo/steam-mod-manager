@@ -635,9 +635,12 @@ def apply_sidecar_to_db(
                 existing_user = ""
         except Exception:  # noqa: BLE001
             pass
+    from services.metadata_ownership import FIELD_DISPLAY_NAME, FIELD_DESCRIPTION
+    overrides = database.get_user_override_fields(mid)
     patch: dict[str, Any] = {
-        "display_name": sidecar_display or existing_user or "",
+        "display_name": existing_user if overrides.get(FIELD_DISPLAY_NAME) else (sidecar_display or existing_user or ""),
         "custom_description": (
+            existing.custom_description if overrides.get(FIELD_DESCRIPTION) else
             sidecar.description
             if sidecar.description
             else (existing.custom_description if existing else "")

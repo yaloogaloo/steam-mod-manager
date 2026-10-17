@@ -769,6 +769,13 @@ class DatabaseManager:
         Omitting *db_path* keeps the existing instance (production GUI path).
         """
         with cls._instance_lock:
+            from services.mutation_context import current_mutation_context, assert_mutation_allowed
+            context = current_mutation_context()
+            if context is not None and context.mode == 'test':
+                candidate = db_path or (cls._instance.db_path if cls._instance else os.environ.get('SMM_TEST_DB'))
+                if not candidate:
+                    raise PermissionError('隔离运行缺少明确数据库，禁止默认生产回退')
+                assert_mutation_allowed(candidate)
             if cls._app_shutdown:
                 if cls._instance is None:
                     raise DatabaseShutdownError(
@@ -5395,7 +5402,7 @@ class DatabaseManager:
         Does not delete ``mods`` rows, metadata, files, or deploy / WH3 state.
         """
         cid = int(str(collection_id).strip())
-        with self._lock:
+        with self._lock, self._conn:
             self._conn.execute(
                 "DELETE FROM collection_mods WHERE collection_id = ?",
                 (cid,),
@@ -6000,6 +6007,7 @@ class DatabaseManager:
             return False
         mid = int(mod_id)
         with self._lock:
+            self._conn.execute("DELETE FROM collection_mods WHERE mod_id = ?", (mid,))
             self._conn.execute("DELETE FROM mod_tags WHERE mod_id = ?", (mid,))
             self._conn.execute(
                 """
@@ -6857,4 +6865,8 @@ def _display_info_from_row(row: sqlite3.Row) -> ModDisplayInfo:
 
 def get_db() -> DatabaseManager:
     """Convenience accessor for the process-wide database singleton."""
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        return resources.db
     return DatabaseManager.instance()

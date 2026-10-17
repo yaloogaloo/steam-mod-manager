@@ -183,10 +183,14 @@ def _consumer_path(authority_path: Path, manifest_key: str) -> Path:
             return view
         if view.exists():
             view.unlink()
-        try:
-            os.link(authority_path, view)
-        except OSError:
+        from services.business_resources import current_resources
+        if current_resources() is not None:
             shutil.copy2(authority_path, view)
+        else:
+            try:
+                os.link(authority_path, view)
+            except OSError:
+                shutil.copy2(authority_path, view)
     except OSError as exc:
         logger.warning("offline resource view failed for %s: %s", manifest_key, exc)
         return authority_path

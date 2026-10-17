@@ -209,7 +209,7 @@ def test_old_ports_not_hardcoded_in_resolver_or_archive() -> None:
     for rel in (
         "services/proxy_resolver.py",
         "services/archive.py",
-        "ui/main_window.py",
+        "frontend/web_application.py",
         "ui/sync_view.py",
     ):
         text = (root / rel).read_text(encoding="utf-8")

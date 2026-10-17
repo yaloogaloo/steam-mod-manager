@@ -32,7 +32,6 @@ from services.cover_loader import (
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.mod_library_cache import ModCardData, reset_library_cache
 from ui.library_view import ModLibraryView
-from ui.main_window import MainWindow
 from ui.mod_card import COVER_HEIGHT, COVER_WIDTH, ModCardWidget
 
 

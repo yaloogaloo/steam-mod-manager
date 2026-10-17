@@ -27,7 +27,6 @@ from services.library_reconcile import (
     start_reconcile_library_async,
 )
 from ui.library_view import ModLibraryView
-from ui.main_window import MainWindow, PAGE_DEPLOY, PAGE_LIBRARY
 
 
 @pytest.fixture(scope="module")
@@ -250,24 +249,7 @@ def test_f_duplicate_idle_does_not_start_two_workers(
     assert len(starts) == 1
 
 
-def test_restore_settings_scheduling_contract() -> None:
-    """Startup may hold library load; must not nest reconcile inside Library refresh."""
-    src = inspect.getsource(MainWindow._restore_settings)
-    assert "reconcile_library(" not in src
-    hold_at = src.find("hold_library_load_until_reconcile_idle")
-    row_at = src.find("setCurrentRow")
-    if hold_at >= 0 and row_at >= 0:
-        assert hold_at < row_at
 
 
-def test_nav_away_cancels_pending_library_load() -> None:
-    src = inspect.getsource(MainWindow._on_nav_changed)
-    assert "cancel_pending_library_load" in src
-    lib_at = src.find("PAGE_LIBRARY")
-    cancel_at = src.find("cancel_pending_library_load")
-    assert 0 <= lib_at < cancel_at
 
 
-def test_page_constants_match_cases() -> None:
-    assert PAGE_LIBRARY == 1
-    assert PAGE_DEPLOY == 2

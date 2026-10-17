@@ -273,6 +273,17 @@ def apply_file_plan(
     ``OP_EXTRACT_MEMBER`` writes directly to ``target_absolute``.
     """
     del staging_parent
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        # Native Windows copy APIs may bypass Python open audit events. Validate
+        # their actual FilePlan inputs before entering the existing copy engine.
+        for entry in plan.files:
+            if entry.required:
+                resources.validate(entry.source)
+                target = resources.validate_write(entry.target_absolute)
+                if not resources.game_target(target):
+                    raise PermissionError('FilePlan 写入目标不属于当前配置的游戏部署目录')
     if not plan.files:
         plan.diagnostics.stage = "apply"
         plan.diagnostics.failed_files = 0

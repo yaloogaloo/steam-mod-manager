@@ -82,6 +82,9 @@ def _sha256_file(path: Path, *, chunk: int = 1024 * 1024) -> str:
 def _path_forbidden(rel_parts: tuple[str, ...]) -> bool:
     if not rel_parts:
         return True
+    from services.importers.image_scanner import IMAGE_EXTENSIONS
+    if Path(rel_parts[-1]).suffix.lower() in set(IMAGE_EXTENSIONS) | {'.html','.htm','.mhtml','.mht'} or rel_parts[-1].casefold() in {'metadata.json','mod.json'}:
+        return True
     if rel_parts[0] in SKIP_INDEX_PARTS:
         return True
     return any(part in SKIP_INDEX_PARTS for part in rel_parts)

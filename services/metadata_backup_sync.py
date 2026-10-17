@@ -141,6 +141,13 @@ def mark_backup_dirty(
     reason_key = str(reason or "").strip() or "rescan"
     if reason_key not in VALID_REASONS:
         reason_key = "rescan"
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        # Use the existing wait/inline business function in an isolated job.
+        # The legacy global queue cannot outlive this job's DB/context safely.
+        resources.validate(path)
+        return _sync_backup_now(mid, path, reason_key)
     _ensure_backup_worker()
     _backup_queue.put((mid, path, reason_key))
     qsize = _backup_queue.qsize()

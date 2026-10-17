@@ -56,6 +56,14 @@ _LEGACY_CACHE_MIGRATED = False
 
 def project_root() -> Path:
     """Absolute path to the repository / application root."""
+    import sys
+    if getattr(sys,'frozen',False):
+        from PySide6.QtCore import QSettings
+        configured=QSettings('SteamModManager','WorkshopLibrary').value('paths/application_dir','',str)
+        if configured:
+            candidate=Path(configured)
+            if candidate.is_absolute() and (candidate/'data/mod_manager.db').is_file():return candidate.resolve()
+        return Path(sys.executable).resolve().parent
     return _PROJECT_ROOT
 
 
@@ -65,7 +73,8 @@ def default_mod_library() -> Path:
 
     Creates the directory if it does not exist.
     """
-    path = project_root() / MOD_DIR_NAME
+    from services.business_resources import resource_path
+    path = resource_path(MOD_DIR_NAME, project_root() / MOD_DIR_NAME)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -76,7 +85,8 @@ def data_dir() -> Path:
     Regenerable performance caches belong under :func:`get_cache_dir`, not here.
     Runtime logs belong under :func:`logs_dir`.
     """
-    path = project_root() / DATA_DIR_NAME
+    from services.business_resources import resource_path
+    path = resource_path(DATA_DIR_NAME, project_root() / DATA_DIR_NAME)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -86,7 +96,8 @@ def logs_dir() -> Path:
 
     Crash / exception traces belong here, not under ``data/``. Not Source of Truth.
     """
-    path = project_root() / LOGS_DIR_NAME
+    from services.business_resources import resource_path
+    path = resource_path(LOGS_DIR_NAME, project_root() / LOGS_DIR_NAME)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -100,9 +111,11 @@ def get_cache_dir() -> Path:
     Does **not** scan cache contents on startup. Legacy ``data/`` cache trees
     are relocated with a directory-level rename when still present.
     """
-    path = project_root() / CACHE_DIR_NAME
+    from services.business_resources import resource_path, current_resources
+    path = resource_path(CACHE_DIR_NAME, project_root() / CACHE_DIR_NAME)
     path.mkdir(parents=True, exist_ok=True)
-    _maybe_migrate_legacy_caches()
+    if current_resources() is None:
+        _maybe_migrate_legacy_caches()
     return path
 
 
@@ -188,7 +201,8 @@ def legacy_data_headers_dir() -> Path:
 
 def config_dir() -> Path:
     """``<project_root>/config`` — local configuration (not production DB)."""
-    path = project_root() / CONFIG_DIR_NAME
+    from services.business_resources import resource_path
+    path = resource_path(CONFIG_DIR_NAME, project_root() / CONFIG_DIR_NAME)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -219,6 +233,10 @@ def collection_covers_dir() -> Path:
 
 def database_path() -> Path:
     """SQLite snapshot DB: ``<project_root>/data/mod_manager.db``."""
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        return resources.validate(resources.db.db_path)
     return data_dir() / DATABASE_FILENAME
 
 

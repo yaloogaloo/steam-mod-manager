@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import nullcontext, ExitStack
 
 from PySide6.QtCore import QThread, Signal
 
@@ -33,8 +34,11 @@ class SyncWorker(QThread):
         target_dir: str | Path,
         options: SyncOptions | None = None,
         parent=None,
+        resources=None,
+        preflight=None,
     ) -> None:
         super().__init__(parent)
+        self.resources,self.preflight=resources,preflight
         self.workshop_dir = Path(workshop_dir)
         self.target_dir = Path(target_dir)
         self.options = options or SyncOptions()
@@ -42,20 +46,23 @@ class SyncWorker(QThread):
 
     def run(self) -> None:
         try:
-            self._service = ModSyncService(self.workshop_dir, self.target_dir)
-            result = self._service.sync(
-                self.options,
-                on_progress=self._on_progress,
-            )
-            if self.isInterruptionRequested():
-                return
-            self.sync_finished.emit(result)
-        except Exception as exc:  # noqa: BLE001 — surface to UI
+            with ExitStack() as stack:
+                if getattr(self.resources,'production',False):stack.enter_context(self.resources.source_network('sync'))
+                if self.resources:stack.enter_context(self.resources.bind())
+                if self.preflight:self.preflight()
+                client=None
+                if self.resources:
+                    from core.steam_api import SteamWorkshopClient
+                    client=SteamWorkshopClient(db=self.resources.db,proxy_url=self.options.proxy_url,enable_scrape_fallback=False)
+                try:
+                    self._service = ModSyncService(self.workshop_dir,self.target_dir,client=client,resources=self.resources)
+                    result=self._service.sync(self.options,on_progress=self._on_progress)
+                    if not self.isInterruptionRequested():self.sync_finished.emit(result)
+                finally:
+                    if self._service:self._service.close();self._service=None
+                    if client:client.close()
+        except Exception as exc:
             self.sync_failed.emit(str(exc))
-        finally:
-            if self._service is not None:
-                self._service.close()
-                self._service = None
 
     def _on_progress(
         self,

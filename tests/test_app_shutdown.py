@@ -119,22 +119,18 @@ def test_g_instance_lock_still_releases(tmp_path: Path) -> None:
     assert acquire_instance_lock(path=lock_path) is True
 
 
-def test_close_event_calls_shutdown_before_super() -> None:
-    from ui.main_window import MainWindow
-
-    src = inspect.getsource(MainWindow.closeEvent)
-    assert "shutdown_runtime" in src
-    assert src.find("shutdown_runtime") < src.find("super().closeEvent")
-    assert "sync_view.shutdown()" not in src or src.find("shutdown_runtime") < src.find(
-        "sync_view.shutdown()"
-    )
+def test_close_event_waits_for_web_workers_before_super():
+    from frontend.web_window import WebLibraryWindow
+    src=inspect.getsource(WebLibraryWindow.closeEvent)
+    assert src.index('bridge.shutdown') < src.index('super().closeEvent')
+    assert 'event.ignore()' in src
 
 
-def test_about_to_quit_closes_db_before_lock() -> None:
-    import main as main_mod
-
-    src = inspect.getsource(main_mod._run_gui)
-    assert "shutdown_runtime" in src
-    assert "release_instance_lock" in src
-    quit_fn = src[src.find("_on_about_to_quit") :]
-    assert quit_fn.find("shutdown_runtime") < quit_fn.find("release_instance_lock")
+def test_database_closes_before_instance_lock_released():
+    import main
+    from frontend.web_application import _execute
+    src=inspect.getsource(_execute)
+    assert src.index('bridge.shutdown') < src.index('db.close()')
+    assert src.index('delete(window)') < src.index('db.close()')
+    launch=inspect.getsource(main.launch_gui)
+    assert launch.index('_run_gui(next_frontend=True') < launch.index('release_instance_lock()')

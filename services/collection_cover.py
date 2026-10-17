@@ -56,6 +56,12 @@ def absolute_collection_cover_path(relative: str) -> Path:
     from core.paths import data_dir
 
     root = data_dir().resolve()
+    from services.business_resources import current_resources, checked_resource_path
+    resources = current_resources()
+    if resources is not None:
+        resources.validate(data_dir() / rel)
+    else:
+        checked_resource_path(root, data_dir() / rel)
     resolved = (root / rel).resolve()
     try:
         resolved.relative_to(root)
@@ -80,16 +86,40 @@ def stored_cover_file(relative: str) -> Path | None:
     return None
 
 
+def owned_stored_cover_file(collection_id: int | str, relative: str) -> Path | None:
+    if not relative:
+        return None
+    if str(relative).replace('\\', '/') not in {
+        relative_collection_cover_path(collection_id, ext) for ext in IMAGE_SUFFIXES
+    }:
+        raise ValueError('合集封面不属于当前合集，拒绝清理')
+    # Validate before following any link, even when the target is missing.
+    path = absolute_collection_cover_path(relative)
+    return path if path.is_file() else None
+
+
 def own_cover_files(collection_id: int | str) -> list[Path]:
     """Only ``<collection_id>.<ext>`` (and leftover incoming temps) in covers dir."""
     cid = int(str(collection_id).strip())
+    if cid <= 0:
+        raise ValueError('invalid collection identity')
     root = collection_covers_dir()
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        resources.validate(root)
     found: list[Path] = []
     for ext in sorted(IMAGE_SUFFIXES):
         candidate = root / f"{cid}{ext}"
+        absolute_collection_cover_path(f'{COLLECTION_COVERS_DIR_NAME}/{candidate.name}')
+        if resources is not None:
+            resources.validate(candidate)
         if candidate.is_file():
             found.append(candidate)
         incoming = root / f"{cid}{_INCOMING_MARK}{ext}"
+        absolute_collection_cover_path(f'{COLLECTION_COVERS_DIR_NAME}/{incoming.name}')
+        if resources is not None:
+            resources.validate(incoming)
         if incoming.is_file():
             found.append(incoming)
     return found
@@ -97,6 +127,10 @@ def own_cover_files(collection_id: int | str) -> list[Path]:
 
 def validate_and_decode_cover(source: str | Path) -> Path:
     """Suffix/existence check plus QImage decode. Does not copy."""
+    from services.business_resources import current_resources
+    resources = current_resources()
+    if resources is not None:
+        resources.validate(source)
     src = validate_cover_image(source)
     from PySide6.QtGui import QImage
 
@@ -129,7 +163,7 @@ def stage_collection_cover(
     relative = relative_collection_cover_path(cid, ext)
     final_abs = absolute_collection_cover_path(relative)
     old_rel = str(current_relative or "").strip().replace("\\", "/")
-    old_abs = stored_cover_file(old_rel) if old_rel else None
+    old_abs = owned_stored_cover_file(cid, old_rel) if old_rel else None
     same_extension = bool(
         old_abs is not None and old_abs.suffix.lower() == ext and old_abs.exists()
     )
@@ -184,7 +218,9 @@ def delete_collection_cover_files(collection_id: int | str) -> list[Path]:
     removed: list[Path] = []
     for path in own_cover_files(collection_id):
         abs_path = path.resolve() if path.exists() else path
-        _unlink_quiet(path)
+        from services.mutation_context import assert_mutation_allowed
+        assert_mutation_allowed(path)
+        path.unlink()
         removed.append(abs_path)
     return removed
 

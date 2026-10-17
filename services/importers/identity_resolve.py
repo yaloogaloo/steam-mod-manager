@@ -72,7 +72,7 @@ class ImportIdentity:
         return self.has_gate_fields()
 
 
-def parse_offline_page_identity(path: str | Path) -> ImportIdentity:
+def parse_offline_page_identity(path: str | Path, *, temp_root: Path | None = None) -> ImportIdentity:
     """Extract source_url / external_id / title from a saved offline HTML/MHTML page."""
     src = Path(path).expanduser()
     if not src.is_file():
@@ -93,7 +93,7 @@ def parse_offline_page_identity(path: str | Path) -> ImportIdentity:
             html_text, _assets, _cid = extract_mhtml(src)
             if not str(html_text or "").strip():
                 return ImportIdentity()
-            with tempfile.TemporaryDirectory(prefix="smm_id_gate_") as tmp:
+            with tempfile.TemporaryDirectory(prefix="smm_id_gate_", dir=temp_root) as tmp:
                 index = Path(tmp) / "index.html"
                 index.write_text(html_text, encoding="utf-8", errors="replace")
                 candidates = parse_nexus_offline_html(index)
@@ -166,6 +166,7 @@ def resolve_import_identity(
     source_url: str = "",
     offline_html: str = "",
     allow_local_fallback: bool = False,
+    temp_root: Path | None = None,
 ) -> ImportIdentity | ImportResult:
     """
     Resolve identity from caller fields, then offline page if still incomplete.
@@ -222,7 +223,8 @@ def resolve_import_identity(
         or not identity.external_id
         or (plat == PLATFORM_NEXUS and not str(identity.external_id).isdigit())
     ):
-        from_page = parse_offline_page_identity(offline)
+        from_page = (parse_offline_page_identity(offline, temp_root=temp_root) if temp_root is not None
+                     else parse_offline_page_identity(offline))
         if not identity.source_url and from_page.source_url:
             identity.source_url = from_page.source_url
         if (not identity.external_id or not str(identity.external_id).isdigit()) and (

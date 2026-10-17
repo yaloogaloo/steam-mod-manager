@@ -43,6 +43,11 @@ def cas_only_info_asset_runtime(*, force_reload: bool = False) -> bool:
     3. Default True
     """
     global _CACHED
+    from services.business_resources import current_resources
+    if current_resources() is not None and type(current_resources()).__name__ != 'ProductionResources':
+        # Isolated business resources admit the existing CAS-only contract;
+        # never inspect or inherit the production feature-gate cache.
+        return True
     if _CACHED is not None and not force_reload:
         return _CACHED
 

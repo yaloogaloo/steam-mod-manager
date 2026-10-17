@@ -116,6 +116,7 @@ from services.file_ops import (
 from services.metadata_backup import is_mod_folder_absent
 
 logger = logging.getLogger(__name__)
+from services.business_resources import isolated_deploy
 
 _conflict_scan_thread: threading.Thread | None = None
 _conflict_scan_shutdown = False
@@ -1065,10 +1066,12 @@ class ModDeployer:
         library_root: str | Path | None = None,
         *,
         db: DatabaseManager | None = None,
+        resources=None,
     ) -> None:
         root = Path(library_root) if library_root else default_mod_library()
         self.library_root = root.expanduser().resolve()
         self._db = db
+        self.resources = resources
         self.files = ModFileManager(self.library_root)
 
     def _database(self) -> DatabaseManager:
@@ -1762,6 +1765,7 @@ class ModDeployer:
             )
         return reports
 
+    @isolated_deploy
     def deploy_mod(
         self,
         internal_id: int | str,
@@ -3306,7 +3310,6 @@ class ModDeployer:
             )
 
         when = _utc_deploy_time()
-        db_warning: str | None = None
         try:
             self._database().update_mod_deploy_status(
                 ctx.mod_pk,
@@ -3340,24 +3343,29 @@ class ModDeployer:
                     exc_info=True,
                 )
         except Exception as exc:  # noqa: BLE001
-            db_warning = "database_update_failed"
             logger.warning(
                 "[DEPLOY] WH3 database status update failed internal_id=%s error=%s",
                 ctx.internal_id,
                 exc,
             )
+            return {"success": False, "mod_id": ctx.internal_id,
+                    "error": f"WH3 部署状态保存失败：{exc}",
+                    "error_code": "database_update_failed"}
         try:
             complete_wh3_deploy_activation(
                 str(ctx.mod_pk),
                 db=self._database(),
                 library_root=self.library_root,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "%s WH3 used_mods / load-order persist failed",
                 log_prefix,
                 exc_info=True,
             )
+            return {"success": False, "mod_id": ctx.internal_id,
+                    "error": f"WH3 加载顺序或投影保存失败，请重新部署重试：{exc}",
+                    "error_code": "projection_failed", "deployment_status": "deployed"}
 
         pack_names = [line.pack_name for line in pack_lines]
         logger.info(
@@ -3386,8 +3394,6 @@ class ModDeployer:
             "verified_files": 0,
             "failed_files": 0,
         }
-        if db_warning:
-            out["warning"] = db_warning
         if relationship_warnings:
             out["relationship_warnings"] = relationship_warnings
         return out
@@ -3443,12 +3449,15 @@ class ModDeployer:
                 db=self._database(),
                 library_root=self.library_root,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "%s WH3 used_mods persist after undeploy failed",
                 log_prefix,
                 exc_info=True,
             )
+            return {"success": False, "mod_id": ctx.internal_id,
+                    "error": f"WH3 已撤出，但投影保存失败：{exc}",
+                    "error_code": "projection_failed", "deployment_status": "not_deployed"}
         logger.info(
             "%s source=%s result=ok removed=%s",
             log_prefix,
@@ -3565,6 +3574,7 @@ class ModDeployer:
         report: object,
     ) -> None:
         """Attach projection vs effective fields. Does not change success."""
+        out['projection_errors']=list(getattr(report,'errors',[]) or []) if report is not None else ['游戏投影未完成；部署成员状态可能已经保存']
         if report is not None:
             direct_written = bool(getattr(report, "direct_dlc_load_written", False))
             out["direct_dlc_load_written"] = direct_written
@@ -3716,6 +3726,7 @@ class ModDeployer:
             "files": files,
         }
 
+    @isolated_deploy
     def undeploy_mod(self, internal_id: int | str) -> dict[str, Any]:
         """Undeploy one Mod by Frozen Internal UUID.
 
@@ -4014,6 +4025,7 @@ class ModDeployer:
             "deploy_type": result.deploy_type or ctx.deploy_type,
         }
 
+    @isolated_deploy
     def redeploy_mod(self, internal_id: int | str) -> dict[str, Any]:
         """
         Redeploy ≡ undeploy (old manifest) + deploy (new files + new manifest).

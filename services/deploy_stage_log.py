@@ -256,6 +256,8 @@ def write_deploy_timing(managed_folder: str | Path | None, sess: DeployTimingSes
         return
     path = root / ".info" / "deploy_timing.json"
     try:
+        from services.mutation_context import assert_mutation_allowed, current_mutation_context
+        assert_mutation_allowed(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(sess.to_dict(), ensure_ascii=False, indent=2),
@@ -263,7 +265,14 @@ def write_deploy_timing(managed_folder: str | Path | None, sess: DeployTimingSes
         )
         traces = list(getattr(sess.ops, "copy_files", None) or [])
         if traces:
-            plan_path = Path(__file__).resolve().parents[1] / "_tmp" / "copy_plan.json"
+            from services.business_resources import resource_path
+            fallback = Path(__file__).resolve().parents[1] / '_tmp'
+            context = current_mutation_context()
+            if context is not None and context.mode == 'test':
+                from core.paths import get_cache_dir
+                fallback = get_cache_dir() / 'deploy_traces'
+            plan_path = resource_path('cache/deploy_traces', fallback) / 'copy_plan.json'
+            assert_mutation_allowed(plan_path)
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             plan_path.write_text(
                 json.dumps(

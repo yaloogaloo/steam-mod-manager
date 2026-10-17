@@ -29,6 +29,8 @@ class ModRefreshWorker(QThread):
         platform: str = "",
         source_url: str = "",
         parent=None,
+        resources=None,
+        preflight=None,
     ) -> None:
         super().__init__(parent)
         self.managed_path = Path(managed_path)
@@ -39,9 +41,13 @@ class ModRefreshWorker(QThread):
         )
         self.platform = str(platform or "").strip()
         self.source_url = str(source_url or "").strip()
+        self.resources, self.preflight = resources, preflight
 
     @traced("ModRefreshWorker.run")
     def run(self) -> None:
+        if self.resources is not None:
+            self._run_isolated_source_sync()
+            return
         from services.mod_refresh import refresh_mod
         from services.path_lifecycle import resolve_refresh_folder
 
@@ -120,6 +126,33 @@ class ModRefreshWorker(QThread):
                 self.managed_path.name,
                 exc,
             )
+            self.refresh_failed.emit(str(exc))
+
+
+    def _run_isolated_source_sync(self):
+        from core.steam_api import SteamWorkshopClient
+        from services.mod_refresh import refresh_mod
+        from services.path_lifecycle import resolve_refresh_folder
+        self.refresh_started.emit()
+        try:
+            with self.resources.bind():
+                if self.preflight is not None:
+                    self.preflight()
+                if not (self.resources.steam_api_url or self.resources.steam_public) or self.platform.lower() != 'steam':
+                    raise PermissionError('当前仅准入受控 Steam 来源元数据首次同步')
+                folder = resolve_refresh_folder(self.mod_id, self.managed_path)
+                self.resources.validate(folder)
+                if self.resources.db.is_official_metadata_synced(self.mod_id):
+                    raise ValueError('该 Mod 已完成首次来源同步；重复来源更新尚未迁移')
+                with SteamWorkshopClient(db=self.resources.db, proxy_url='', enable_scrape_fallback=False) as client:
+                    result = refresh_mod(self.mod_id, folder, platform=self.platform,
+                        library_root=self.library_root, source_url=self.source_url,
+                        db=self.resources.db, steam_client=client, download_cover=False)
+                if not result.official_attempted or not result.official_success:
+                    raise RuntimeError(result.error or result.message or '来源同步未完成')
+                compat = result.to_metadata_refresh_result()
+            self.refresh_finished.emit(compat)
+        except Exception as exc:
             self.refresh_failed.emit(str(exc))
 
 
