@@ -11,6 +11,7 @@ from core.db_manager import DatabaseManager, PLATFORM_GITHUB
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
 from services.info_sidecar import InfoSidecar, save_info_sidecar, write_sidecar_for_mod
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -101,9 +102,11 @@ def test_write_sidecar_for_mod_does_not_clear_url(
         ),
         encoding="utf-8",
     )
-    db.upsert_mod(ModMetadata(published_file_id="9003", title="Mod"))
+    created = create_steam_test_mod(db, external_id="9003", title="Mod")
+    pk = str(created.mod_id)
+
     db.update_mod_user_metadata(
-        "9003",
+        pk,
         {
             "display_name": "Renamed",
             "custom_description": "Note",
@@ -113,7 +116,11 @@ def test_write_sidecar_for_mod_does_not_clear_url(
             "source_url": "",
         },
     )
-    write_sidecar_for_mod(folder, "9003", db=db)
+    write_sidecar_for_mod(folder, pk, db=db)
     loaded = json.loads((info / METADATA_FILENAME).read_text(encoding="utf-8"))
     assert loaded["url"] == "https://nexusmods.com/x/mods/1"
     assert loaded["display_name"] == "Renamed"
+    assert loaded.get("internal_id") == str(created.internal_id or "")
+    assert "entity_key" not in loaded
+    assert str(created.workspace_id or "9003")
+    assert pk.isdigit()

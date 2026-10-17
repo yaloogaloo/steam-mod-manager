@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -43,7 +44,8 @@ def _make_mod(library: Path, *, mod_id: str, title: str, app_id: int = 99) -> Pa
     (mod_dir / "pak.txt").write_text("data", encoding="utf-8")
     (info / METADATA_FILENAME).write_text(
         "{\n"
-        f'  "published_file_id": "{mod_id}",\n'
+        f'  \"internal_id\": \"{mod_id}\",\n'
+        f'  \"published_file_id\": \"{mod_id}\",\n'
         f'  "title": "{title}",\n'
         f'  "app_id": {app_id},\n'
         '  "game_name": "TestGame"\n'
@@ -68,10 +70,11 @@ def test_library_scroll_preserved_after_deploy(
         mid = str(9000 + i)
         title = f"Mod{i:02d}"
         _make_mod(library, mod_id=mid, title=title)
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=99))
+        create_steam_test_mod(db, external_id=mid, title=title, app_id=99)
+
 
     monkeypatch.setattr("ui.library_view.get_db", lambda: db)
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
+    monkeypatch.setattr("ui.mod_card.get_db", lambda: db, raising=False)
     monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
     monkeypatch.setattr("core.db_manager.get_db", lambda: db)
 

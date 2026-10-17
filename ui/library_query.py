@@ -25,9 +25,16 @@ FILTER_CONFLICT = "conflict"
 FILTER_DISABLED = "disabled"
 # Lifecycle content_status filters (Phase 7)
 FILTER_CONTENT_MISSING = "content_missing"
-FILTER_FOLDER_MISSING = "folder_missing"
-FILTER_BACKUP_INVALID = "backup_invalid"
-FILTER_IDENTITY_CONFLICT = "identity_conflict"
+# Deleted Mod-status filter keys (never match — kept only so mis-wired callers fail closed).
+_DELETED_STATUS_FILTERS = frozenset(
+    {
+        "folder_missing",
+        "backup_invalid",
+        "metadata_missing",
+        "identity_conflict",
+        "file_missing",
+    }
+)
 # User-facing aggregate (UI only — does not change content_status)
 FILTER_ANOMALY = "anomaly"
 # Same rank as 全部/收藏/… — not a separate “record mode”
@@ -43,6 +50,8 @@ FILTER_CATEGORY_ALL = "category_all"
 
 SORT_MTIME = "mtime"
 SORT_NAME = "name"
+SORT_NAME_DESC = "name_desc"
+SORT_SIZE = "size"
 
 
 def resolve_mod_library_title(
@@ -93,16 +102,9 @@ PLATFORM_FILTER_LABELS: tuple[tuple[str, str], ...] = (
     (FILTER_PLATFORM_LOCAL, "Local"),
 )
 
-# content_status values rolled into the user-facing 「异常」 chip.
-# content_missing stays a dedicated chip and is excluded here.
-ANOMALY_CONTENT_STATUSES: frozenset[str] = frozenset(
-    {
-        FILTER_IDENTITY_CONFLICT,
-        FILTER_BACKUP_INVALID,
-        FILTER_FOLDER_MISSING,
-        "metadata_missing",
-    }
-)
+# Reduced model: content_status only healthy|content_missing.
+# content_missing has its own chip; 「异常」 is user flags only.
+ANOMALY_CONTENT_STATUSES: frozenset[str] = frozenset()
 
 _SOURCE_TOKEN_TO_KEY: dict[str, str] = {
     "steam": FILTER_PLATFORM_STEAM,
@@ -125,12 +127,17 @@ FILTER_LABELS: tuple[tuple[str, str], ...] = (
 SORT_LABELS: tuple[tuple[str, str], ...] = (
     (SORT_MTIME, "最近修改"),
     (SORT_NAME, "名称"),
+    (SORT_SIZE, "大小"),
 )
 
 
 @dataclass(frozen=True)
 class ModFilterIndex:
-    """Cached fields used for library search / filter / sort."""
+    """Cached fields used for library search / filter / sort.
+
+    ``mod_id`` is SQLite PK (Deployment Record membership).
+    ``internal_id`` is Frozen UUID (Library selection / card identity).
+    """
 
     mod_id: str
     display_name: str
@@ -148,12 +155,22 @@ class ModFilterIndex:
     platform: str = PLATFORM_STEAM
     source_url: str = ""
     external_id: str = ""
+    workspace_id: str = ""
     is_invalid: bool = False
     conflict_status: str = "none"
     enabled: bool = True
     category_tags: str = ""
+    # Secondary classification from mods.category (e.g. 修女). Not type name.
+    category: str = ""
+    type_id: int | None = None
     content_status: str = ""
+    identity_status: str = "ok"
     source_type: str = ""
+    local_size_bytes: int | None = None
+    local_size_status: str = "unknown"
+    # Frozen UUID entity identity. ``mod_id`` remains SQLite PK for
+    # Deployment Record membership. Never compare Library selection to ``mod_id``.
+    internal_id: str = ""
 
 
 def normalize_record_mod_id(raw: object) -> str:
@@ -242,12 +259,14 @@ def matches_record_visibility(
     recorded_mod_ids: frozenset[str] | None,
 ) -> bool:
     """Visible under deployment-record filter: recorded ∪ deployed."""
+    from services.canonical_membership import entry_is_deployed
+
     if recorded_mod_ids is None:
         return False
     mid = normalize_record_mod_id(index.mod_id)
     if mid and mid in recorded_mod_ids:
         return True
-    return bool(index.deployed)
+    return entry_is_deployed(index)
 
 
 def compute_record_relative_status(
@@ -257,20 +276,27 @@ def compute_record_relative_status(
     """Overlay flags only when a record filter set is active; never load/store in DB."""
     if recorded_mod_ids is None:
         return None
+    from services.canonical_membership import entry_is_deployed
+
     mid = normalize_record_mod_id(index.mod_id)
     return RecordRelativeStatus(
         recorded=bool(mid) and mid in recorded_mod_ids,
-        deployed=bool(index.deployed),
+        deployed=entry_is_deployed(index),
     )
 
 
 def offline_page_exists(
     managed_path: Path, *, mod_id: str | int | None = None
 ) -> bool:
-    """True when resolver finds an offline page (``.info`` or backup)."""
-    from services.mod_metadata_resolver import resolve_offline_page
+    """True when a LIVE or Backup manifest exists (probe only — no materialize).
 
-    return resolve_offline_page(mod_id, managed_path) is not None
+    Deprecated alias for :func:`services.info_asset_runtime.probe_offline_open`
+    ``can_materialize``. Do not use as an OPEN / browser path.
+    """
+    from services.info_asset_runtime import probe_offline_open
+
+    probe = probe_offline_open(managed_path, mod_id=str(mod_id or "").strip())
+    return bool(probe.cache_hit or probe.can_materialize)
 
 
 def folder_mtime(managed_path: Path) -> float:
@@ -288,10 +314,11 @@ def matches_search(index: ModFilterIndex, query: str) -> bool:
         index.display_name,
         index.steam_name,
         index.notes,
-        index.mod_id,
+        index.workspace_id,
         index.game_name,
         index.tag_values,
         index.category_tags,
+        index.category,
         index.source_url,
         index.external_id,
         index.platform,
@@ -306,7 +333,9 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
     if key == FILTER_FAVORITE:
         return bool(index.favorite)
     if key == FILTER_DEPLOYED:
-        return bool(index.deployed)
+        from services.canonical_membership import entry_is_deployed
+
+        return entry_is_deployed(index)
     if key == FILTER_OFFLINE_PRESENT:
         return bool(index.has_offline)
     if key == FILTER_OFFLINE_MISSING:
@@ -314,20 +343,17 @@ def matches_status_filter(index: ModFilterIndex, filter_key: str) -> bool:
     if key == FILTER_INVALID:
         return bool(index.is_invalid or index.invalid)
     if key == FILTER_CONTENT_MISSING:
-        return str(index.content_status or "").strip() == FILTER_CONTENT_MISSING
-    if key == FILTER_FOLDER_MISSING:
-        return str(index.content_status or "").strip() == FILTER_FOLDER_MISSING
-    if key == FILTER_BACKUP_INVALID:
-        return str(index.content_status or "").strip() == FILTER_BACKUP_INVALID
-    if key == FILTER_IDENTITY_CONFLICT:
-        return str(index.content_status or "").strip() == FILTER_IDENTITY_CONFLICT
+        from services.status_authority import normalize_content_axis
+
+        return normalize_content_axis(index.content_status) == FILTER_CONTENT_MISSING
+    if key in _DELETED_STATUS_FILTERS:
+        return False
     if key == FILTER_ANOMALY:
         return index_is_anomaly(index)
     if key == FILTER_CONFLICT:
+        # User conflict annotation only — never identity_conflict / content_status.
         status = normalize_conflict_status(index.conflict_status)
-        return bool(index.conflict) or status == CONFLICT_STATUS_CONFLICT or str(
-            index.content_status or ""
-        ).strip() == FILTER_IDENTITY_CONFLICT
+        return status == CONFLICT_STATUS_CONFLICT
     if key == FILTER_DISABLED:
         return not bool(index.enabled)
     # Platform keys accidentally passed as status → defer to platform matcher
@@ -361,15 +387,11 @@ def effective_source_token(index: ModFilterIndex) -> str:
 
 
 def index_is_anomaly(index: ModFilterIndex) -> bool:
-    """User-facing 「异常」: conflicts, invalid, backup/folder/metadata issues."""
-    cs = str(index.content_status or "").strip()
-    if cs in ANOMALY_CONTENT_STATUSES:
-        return True
+    """User-facing 「异常」: user conflict / invalid / disabled only."""
     if bool(index.is_invalid or index.invalid):
         return True
     status = normalize_conflict_status(index.conflict_status)
-    # File conflict only — soft ``warning`` is not an anomaly badge
-    if bool(index.conflict) or status == CONFLICT_STATUS_CONFLICT:
+    if status == CONFLICT_STATUS_CONFLICT:
         return True
     if not bool(index.enabled):
         return True
@@ -462,16 +484,64 @@ def matches_category_filter(index: ModFilterIndex, category_key: str) -> bool:
     key = (category_key or FILTER_CATEGORY_ALL).strip()
     if key in ("", FILTER_ALL, FILTER_CATEGORY_ALL, "全部标签", "全部分类"):
         return True
-    tags = (index.category_tags or "").casefold().split()
-    needle = key.casefold()
-    return needle in tags or needle in (index.category_tags or "").casefold()
+    try:
+        want = int(key)
+    except (TypeError, ValueError):
+        return False
+    have = getattr(index, "type_id", None)
+    if have is None:
+        return False
+    try:
+        return int(have) == want
+    except (TypeError, ValueError):
+        return False
+
+
+def _valid_local_size_bytes(index: ModFilterIndex) -> int | None:
+    """Persisted observation bytes when status is ``ok``; else None (not 0)."""
+    status = str(getattr(index, "local_size_status", "") or "").strip()
+    if status != "ok":
+        return None
+    raw = getattr(index, "local_size_bytes", None)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def sort_key(index: ModFilterIndex, sort_mode: str):
+    """
+    Library Query sort keys.
+
+    ARCHITECTURE RULE: 「最近修改」 must not fall back to name as the secondary
+    key — equal ``mtime`` (common after system status recovery) would make
+    SORT_MTIME identical to SORT_NAME and sorting would appear broken.
+
+    「大小」 uses persisted ``local_size_bytes`` only. ``ok`` + 0 is valid.
+    unknown / missing / failed sort after every valid size (never coerced to 0).
+    """
     mode = sort_mode or SORT_MTIME
+    mid = str(index.mod_id or "")
+    name = index.sort_name.casefold()
     if mode == SORT_NAME:
-        return (index.sort_name.casefold(), index.mod_id)
-    return (-index.mtime, index.sort_name.casefold(), index.mod_id)
+        return (name, mid)
+    if mode == SORT_NAME_DESC:
+        # Ascending key; callers apply reverse=True for DESC.
+        return (name, mid)
+    if mode == SORT_SIZE:
+        size = _valid_local_size_bytes(index)
+        if size is None:
+            # Same residual tie-breaker as SORT_NAME (name, mid). Do not rank
+            # unknown/missing/failed against each other as a product rule.
+            return (1, 0, name, mid)
+        return (0, size, name, mid)
+    try:
+        mid_num = int(mid) if mid.isdigit() else 0
+    except ValueError:
+        mid_num = 0
+    return (-float(index.mtime or 0.0), -mid_num, mid)
 
 
 def filter_and_sort(
@@ -507,5 +577,106 @@ def filter_and_sort(
         if not matches_category_filter(index, category_key):
             continue
         matched.append((index, payload))
-    matched.sort(key=lambda pair: sort_key(pair[0], sort_mode))
+    reverse = (sort_mode or "") == SORT_NAME_DESC
+    mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
+    matched.sort(key=lambda pair: sort_key(pair[0], mode), reverse=reverse)
     return [payload for _, payload in matched]
+
+
+def filter_sort_entries(
+    entries: list[tuple[ModFilterIndex, object]],
+    *,
+    query: str = "",
+    filter_key: str = FILTER_ALL,
+    platform_key: str = FILTER_PLATFORM_ALL,
+    category_key: str = FILTER_CATEGORY_ALL,
+    sort_mode: str = SORT_MTIME,
+    record_mod_ids: frozenset[str] | None = None,
+) -> list[tuple[ModFilterIndex, object]]:
+    """Like ``filter_and_sort`` but keeps ``(index, payload)`` pairs."""
+    matched: list[tuple[ModFilterIndex, object]] = []
+    use_record = filter_key == FILTER_DEPLOYMENT_RECORD
+    for index, payload in entries:
+        if use_record:
+            if not matches_record_visibility(index, record_mod_ids):
+                continue
+        elif not matches_status_filter(index, filter_key):
+            continue
+        if not matches_search(index, query):
+            continue
+        if not matches_platform_filter(index, platform_key):
+            continue
+        if not matches_category_filter(index, category_key):
+            continue
+        matched.append((index, payload))
+    reverse = (sort_mode or "") == SORT_NAME_DESC
+    mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
+    matched.sort(key=lambda pair: sort_key(pair[0], mode), reverse=reverse)
+    return matched
+
+
+def index_matches_current_view(
+    index: ModFilterIndex,
+    *,
+    query: str = "",
+    filter_key: str = FILTER_ALL,
+    platform_key: str = FILTER_PLATFORM_ALL,
+    category_key: str = FILTER_CATEGORY_ALL,
+    record_mod_ids: frozenset[str] | None = None,
+    deployed_only: bool = False,
+) -> bool:
+    """True when *index* would appear in the current Library view (no sort)."""
+    from services.canonical_membership import entry_is_deployed
+
+    if deployed_only and not entry_is_deployed(index):
+        return False
+    if filter_key == FILTER_DEPLOYMENT_RECORD:
+        if not matches_record_visibility(index, record_mod_ids):
+            return False
+    elif not matches_status_filter(index, filter_key):
+        return False
+    if not matches_search(index, query):
+        return False
+    if not matches_platform_filter(index, platform_key):
+        return False
+    if not matches_category_filter(index, category_key):
+        return False
+    return True
+
+
+def projection_requires_view_recompute(
+    old: ModFilterIndex | None,
+    new: ModFilterIndex,
+    *,
+    query: str = "",
+    filter_key: str = FILTER_ALL,
+    platform_key: str = FILTER_PLATFORM_ALL,
+    category_key: str = FILTER_CATEGORY_ALL,
+    sort_mode: str = SORT_MTIME,
+    record_mod_ids: frozenset[str] | None = None,
+    deployed_only: bool = False,
+) -> bool:
+    """
+    Whether a patched projection must re-run filter/sort (not a card rebind).
+
+    Card-only fields (cover, notes unused by sort, size when sort is not Size)
+    must return False. Name / category / status / Size-sort keys that change
+    membership or sort order return True.
+    """
+    if old is None:
+        return True
+    kwargs = dict(
+        query=query,
+        filter_key=filter_key,
+        platform_key=platform_key,
+        category_key=category_key,
+        record_mod_ids=record_mod_ids,
+        deployed_only=deployed_only,
+    )
+    if index_matches_current_view(old, **kwargs) != index_matches_current_view(
+        new, **kwargs
+    ):
+        return True
+    reverse = (sort_mode or "") == SORT_NAME_DESC
+    mode = SORT_NAME if reverse else (sort_mode or SORT_MTIME)
+    return sort_key(old, mode) != sort_key(new, mode)

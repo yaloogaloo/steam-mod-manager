@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import json
+import uuid
 from pathlib import Path
 from unittest.mock import patch
+
+from tests.helpers.deploy import patch_apply_then_unlink_targets
 
 import pytest
 
@@ -28,32 +30,27 @@ from services.deploy_rules.manifest import (
     ManifestFileEntry,
     save_manifest,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_from_pk,
+    prove_managed_folder,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
-    manager = DatabaseManager(tmp_path / "backup_integrity.db")
+    manager = DatabaseManager.instance(tmp_path / "backup_integrity.db")
     yield manager
-    manager.close()
     DatabaseManager.reset_instance()
 
 
-def _meta(mod: Path, *, mid: str, title: str, app_id: int = 4242) -> None:
-    info = mod / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": title,
-                "app_id": app_id,
-                "game_name": "SomeGame",
-            }
-        ),
-        encoding="utf-8",
-    )
+def _standalone_backup(managed: Path) -> BackupManager:
+    frozen = str(uuid.uuid4())
+    write_info_sidecar(managed, internal_id=frozen, title=managed.name)
+    return BackupManager(managed, internal_id=frozen)
 
 
 def _setup_folder_copy(db: DatabaseManager, tmp_path: Path, *, app_id: int = 4242) -> Path:
@@ -83,14 +80,15 @@ def test_case1_backup_names_unique_across_targets_and_redeploy(tmp_path: Path) -
     a.write_text("A1", encoding="utf-8")
     b.write_text("B1", encoding="utf-8")
 
-    mgr = BackupManager(managed)
+    mgr = _standalone_backup(managed)
     prep = mgr.prepare_overwrite([a, b])
     ba = prep.by_target[str(a.resolve())]
     bb = prep.by_target[str(b.resolve())]
     assert ba is not None and bb is not None
     assert ba.path != bb.path
-    assert Path(managed / ba.path).is_file()
-    assert Path(managed / bb.path).is_file()
+    assert mgr.resolve_backup_file(ba).is_file()
+    assert mgr.resolve_backup_file(bb).is_file()
+    assert not (managed / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
 
     # Same target again — new unique file; old backup untouched
     a.write_text("A2", encoding="utf-8")
@@ -99,8 +97,8 @@ def test_case1_backup_names_unique_across_targets_and_redeploy(tmp_path: Path) -
     ba2 = prep2.by_target[str(a.resolve())]
     assert ba2 is not None
     assert ba2.path != ba.path
-    assert Path(managed / ba.path).read_text(encoding="utf-8") == "A1"
-    assert Path(managed / ba2.path).read_text(encoding="utf-8") == "A2"
+    assert mgr.resolve_backup_file(ba).read_text(encoding="utf-8") == "A1"
+    assert mgr.resolve_backup_file(ba2).read_text(encoding="utf-8") == "A2"
 
 
 # ---------------------------------------------------------------------------
@@ -115,13 +113,13 @@ def test_case2_hash_mismatch_refuses_restore(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True)
     target.write_text("ORIGINAL", encoding="utf-8")
 
-    mgr = BackupManager(managed)
+    mgr = _standalone_backup(managed)
     prep = mgr.prepare_overwrite([target])
     info = prep.by_target[str(target.resolve())]
     assert info is not None
 
     # Tamper with backup bytes after hashing
-    bak = Path(managed / info.path)
+    bak = mgr.resolve_backup_file(info)
     bak.write_text("TAMPERED", encoding="utf-8")
 
     with pytest.raises(BackupIntegrityError, match="hash mismatch"):
@@ -133,7 +131,7 @@ def test_case2_path_escape_refused(tmp_path: Path) -> None:
     managed.mkdir()
     outside = tmp_path / "evil.bin"
     outside.write_text("x", encoding="utf-8")
-    mgr = BackupManager(managed)
+    mgr = _standalone_backup(managed)
     evil = ManifestBackupInfo(path=str(outside.resolve()), hash="abc", created_at="t")
     with pytest.raises(BackupIntegrityError, match="escapes"):
         mgr.resolve_backup_file(evil)
@@ -151,7 +149,7 @@ def test_case3_restore_recreates_missing_target(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True)
     target.write_text("ORIGINAL", encoding="utf-8")
 
-    mgr = BackupManager(managed)
+    mgr = _standalone_backup(managed)
     prep = mgr.prepare_overwrite([target])
     info = prep.by_target[str(target.resolve())]
     assert info is not None
@@ -176,36 +174,39 @@ def test_case4_repeat_deploy_reuses_original_backup(
     mod = library / "SomeGame" / "Repeat"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("MOD-V1", encoding="utf-8")
-    _meta(mod, mid="93001", title="Repeat")
-    db.upsert_mod(ModMetadata(published_file_id="93001", title="Repeat", app_id=4242))
+    created = create_steam_test_mod(db, external_id="93001", title="Repeat", app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Repeat", app_id=4242, game_name="SomeGame")
 
     prior = mods_root / "Repeat" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME-ORIGINAL", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("93001")["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     man1 = load_manifest(mod)
     assert man1 is not None
     b1 = man1.files[0].backup
     assert b1 is not None
     first_path = b1.path
     first_hash = b1.hash
-    assert Path(mod / first_path).read_text(encoding="utf-8") == "GAME-ORIGINAL"
+    mgr = BackupManager(mod, internal_id=frozen_from_pk(db, pk))
+    assert mgr.resolve_backup_file(b1).read_text(encoding="utf-8") == "GAME-ORIGINAL"
+    assert not (mod / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
 
     # Second deploy without undeploy — payload changed, but backup must stay original
     (mod / "a.txt").write_text("MOD-V2", encoding="utf-8")
-    assert deployer.deploy_mod("93001")["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     man2 = load_manifest(mod)
     assert man2 is not None
     b2 = man2.files[0].backup
     assert b2 is not None
     assert b2.path == first_path
     assert b2.hash == first_hash
-    assert Path(mod / first_path).read_text(encoding="utf-8") == "GAME-ORIGINAL"
+    assert mgr.resolve_backup_file(b2).read_text(encoding="utf-8") == "GAME-ORIGINAL"
     assert prior.read_text(encoding="utf-8") == "MOD-V2"
 
-    assert deployer.undeploy_mod("93001")["success"] is True
+    assert deployer.undeploy_mod(frozen_from_pk(db, pk))["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME-ORIGINAL"
 
 
@@ -237,17 +238,19 @@ def test_case5_multi_mod_overwrite_chain(tmp_path: Path, db: DatabaseManager) ->
     )
 
     mods: dict[str, Path] = {}
-    for mid, title, body in (
+    pks: dict[str, str] = {}
+    for workshop, title, body in (
         ("93010", "ModA", "A"),
         ("93011", "ModB", "B"),
     ):
         folder = library / "SomeGame" / title
         folder.mkdir(parents=True)
         (folder / "config.ini").write_text(body, encoding="utf-8")
-        _meta(folder, mid=mid, title=title)
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title, app_id=4242))
+        created = create_steam_test_mod(db, external_id=workshop, title=title, app_id=4242)
+        pk = str(created.mod_id)
+        prove_managed_folder(db, folder, handle=pk, title=title, app_id=4242, game_name="SomeGame")
         db.update_mod_user_metadata(
-            mid,
+            pk,
             {
                 "display_name": title,
                 "custom_description": "",
@@ -256,26 +259,27 @@ def test_case5_multi_mod_overwrite_chain(tmp_path: Path, db: DatabaseManager) ->
                 "custom_deploy_path": str(game),
             },
         )
-        mods[mid] = folder
+        mods[workshop] = folder
+        pks[workshop] = pk
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("93010")["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pks["93010"]))["success"] is True
     assert shared.read_text(encoding="utf-8") == "A"
     man_a = load_manifest(mods["93010"])
     assert man_a is not None
     assert man_a.files[0].backup is not None
-    assert Path(mods["93010"] / man_a.files[0].backup.path).read_text(
-        encoding="utf-8"
-    ) == "GAME"
+    assert BackupManager(mods["93010"], internal_id=frozen_from_pk(db, pks["93010"])).resolve_backup_file(
+        man_a.files[0].backup
+    ).read_text(encoding="utf-8") == "GAME"
 
-    assert deployer.deploy_mod("93011")["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pks["93011"]))["success"] is True
     assert shared.read_text(encoding="utf-8") == "B"
     man_b = load_manifest(mods["93011"])
     assert man_b is not None
     assert man_b.files[0].backup is not None
-    assert Path(mods["93011"] / man_b.files[0].backup.path).read_text(
-        encoding="utf-8"
-    ) == "A"
+    assert BackupManager(mods["93011"], internal_id=frozen_from_pk(db, pks["93011"])).resolve_backup_file(
+        man_b.files[0].backup
+    ).read_text(encoding="utf-8") == "A"
 
     reports = ConflictDetector(library, db=db).check_all_mods(persist=False)
     overwrite = [
@@ -285,12 +289,12 @@ def test_case5_multi_mod_overwrite_chain(tmp_path: Path, db: DatabaseManager) ->
         if c.conflict_type == ConflictType.FILE_OVERWRITE.value
     ]
     assert overwrite
-    assert sorted(overwrite[0].mods) == ["93010", "93011"]
+    assert sorted(overwrite[0].mods) == sorted([pks["93010"], pks["93011"]])
 
-    assert deployer.undeploy_mod("93011")["success"] is True
+    assert deployer.undeploy_mod(frozen_from_pk(db, pks["93011"]))["success"] is True
     assert shared.read_text(encoding="utf-8") == "A"
 
-    assert deployer.undeploy_mod("93010")["success"] is True
+    assert deployer.undeploy_mod(frozen_from_pk(db, pks["93010"]))["success"] is True
     assert shared.read_text(encoding="utf-8") == "GAME"
 
 
@@ -315,7 +319,7 @@ def test_case6_partial_restore_leaves_failed_transaction(tmp_path: Path) -> None
         p.write_text(text, encoding="utf-8")
         targets.append(p)
 
-    mgr = BackupManager(managed)
+    mgr = _standalone_backup(managed)
     prep = mgr.prepare_overwrite(targets)
     assert all(prep.by_target[str(t.resolve())] is not None for t in targets)
 
@@ -347,7 +351,7 @@ def test_case6_partial_restore_leaves_failed_transaction(tmp_path: Path) -> None
     # Corrupt C's backup so restore fails after A/B succeed
     c_info = prep.by_target[str((game / "c.txt").resolve())]
     assert c_info is not None
-    Path(managed / c_info.path).write_text("CORRUPT", encoding="utf-8")
+    mgr.resolve_backup_file(c_info).write_text("CORRUPT", encoding="utf-8")
 
     with pytest.raises(BackupRestoreError) as caught:
         mgr.restore_from_manifest(manifest)
@@ -363,9 +367,9 @@ def test_case6_partial_restore_leaves_failed_transaction(tmp_path: Path) -> None
     txn = mgr.load_transaction()
     assert txn is not None
     assert txn.get("status") == TXN_FAILED
-    # Backups retained for diagnosis
-    assert (managed / INFO_DIR_NAME / BACKUPS_DIRNAME).is_dir()
-    assert list((managed / INFO_DIR_NAME / BACKUPS_DIRNAME).iterdir())
+    # Backups retained for diagnosis (never inside Library ``.info``)
+    assert mgr.listed_backup_files()
+    assert not (managed / INFO_DIR_NAME / BACKUPS_DIRNAME).exists()
 
 
 def test_case6_deploy_exception_clears_transaction_on_clean_rollback(
@@ -376,23 +380,20 @@ def test_case6_deploy_exception_clears_transaction_on_clean_rollback(
     mod = library / "SomeGame" / "Boom"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("MOD", encoding="utf-8")
-    _meta(mod, mid="93021", title="Boom")
-    db.upsert_mod(ModMetadata(published_file_id="93021", title="Boom", app_id=4242))
+    created = create_steam_test_mod(db, external_id="93021", title="Boom", app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Boom", app_id=4242, game_name="SomeGame")
 
     prior = mods_root / "Boom" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("KEEP", encoding="utf-8")
 
-    def boom(self, ctx):  # noqa: ANN001
-        prior.write_text("PARTIAL", encoding="utf-8")
-        raise RuntimeError("boom")
-
-    with patch(
-        "services.deploy_rules.generic.FolderCopyStrategy.deploy",
-        boom,
+    with patch_apply_then_unlink_targets(
+        partial_write=(prior, "PARTIAL"),
+        raise_after=RuntimeError("boom"),
     ):
         with pytest.raises(RuntimeError, match="boom"):
-            ModDeployer(library_root=library, db=db).deploy_mod("93021")
+            ModDeployer(library_root=library, db=db).deploy_mod(frozen_from_pk(db, pk))
 
     assert prior.read_text(encoding="utf-8") == "KEEP"
     assert not transaction_path_for(mod).is_file()
@@ -407,18 +408,19 @@ def test_undeploy_survives_missing_target(
     mod = library / "SomeGame" / "Gone"
     mod.mkdir(parents=True)
     (mod / "a.txt").write_text("MOD", encoding="utf-8")
-    _meta(mod, mid="93022", title="Gone")
-    db.upsert_mod(ModMetadata(published_file_id="93022", title="Gone", app_id=4242))
+    created = create_steam_test_mod(db, external_id="93022", title="Gone", app_id=4242)
+    pk = str(created.mod_id)
+    prove_managed_folder(db, mod, handle=pk, title="Gone", app_id=4242, game_name="SomeGame")
 
     prior = mods_root / "Gone" / "a.txt"
     prior.parent.mkdir(parents=True)
     prior.write_text("GAME", encoding="utf-8")
 
     deployer = ModDeployer(library_root=library, db=db)
-    assert deployer.deploy_mod("93022")["success"] is True
+    assert deployer.deploy_mod(frozen_from_pk(db, pk))["success"] is True
     # External deletion of deployed file
     prior.unlink()
     assert not prior.exists()
 
-    assert deployer.undeploy_mod("93022")["success"] is True
+    assert deployer.undeploy_mod(frozen_from_pk(db, pk))["success"] is True
     assert prior.read_text(encoding="utf-8") == "GAME"

@@ -12,8 +12,9 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services import deployment_record as dr
+from services.identity_service import create_mod_identity, identity_create_scope
 from ui.library_query import (
     FILTER_ALL,
     FILTER_DEPLOYED,
@@ -47,25 +48,32 @@ def _game(db: DatabaseManager, app_id: int, name: str) -> None:
 
 def _mod(
     db: DatabaseManager,
-    mod_id: int,
+    workshop_id: int,
     *,
     app_id: int,
     deployed: bool = False,
-) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=str(mod_id),
-            title=f"Mod {mod_id}",
+) -> int:
+    game = db.get_game(app_id)
+    game_name = game.name if game is not None else ""
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(workshop_id),
+            workshop_id=str(workshop_id),
+            title=f"Mod {workshop_id}",
             app_id=app_id,
+            game_name=game_name,
         )
-    )
+    entity_id = int(created.mod_id)
     db.update_mod_deploy_status(
-        mod_id,
+        entity_id,
         deploy_status=(
             DEPLOY_STATUS_DEPLOYED if deployed else DEPLOY_STATUS_NOT_DEPLOYED
         ),
-        deploy_path="" if not deployed else f"/fake/{mod_id}",
+        deploy_path="" if not deployed else f"/fake/{entity_id}",
     )
+    return entity_id
 
 
 def _index(mod_id: str, *, deployed: bool, favorite: bool = False) -> ModFilterIndex:
@@ -100,7 +108,7 @@ def test_case1_save_and_select_record_filter(db: DatabaseManager) -> None:
         entries,
         filter_key=FILTER_DEPLOYMENT_RECORD,
         record_mod_ids=recorded,
-    ) == ["A", "B", "C"]
+    ) == ["C", "B", "A"]
 
 
 def test_case2_extra_and_missing_under_record_filter(db: DatabaseManager) -> None:
@@ -121,7 +129,7 @@ def test_case2_extra_and_missing_under_record_filter(db: DatabaseManager) -> Non
         entries,
         filter_key=FILTER_DEPLOYMENT_RECORD,
         record_mod_ids=recorded,
-    ) == ["A", "B", "C", "D"]
+    ) == ["D", "C", "B", "A"]
     assert record_relative_badge_label(
         compute_record_relative_status(entries[2][0], recorded)
     ) == RECORD_STATUS_LABEL_MISSING
@@ -142,7 +150,7 @@ def test_case3_all_filter_clears_overlay() -> None:
     entries = [(index, "D"), (_index("9", deployed=False), "X")]
     assert filter_and_sort(
         entries, filter_key=FILTER_ALL, record_mod_ids=recorded
-    ) == ["D", "X"]
+    ) == ["X", "D"]
 
 
 def test_case4_update_record_items(db: DatabaseManager) -> None:
@@ -168,7 +176,7 @@ def test_case4_update_record_items(db: DatabaseManager) -> None:
         entries,
         filter_key=FILTER_DEPLOYMENT_RECORD,
         record_mod_ids=recorded,
-    ) == ["A", "B", "D"]
+    ) == ["D", "B", "A"]
 
 
 def test_case5_rename(db: DatabaseManager) -> None:
@@ -183,11 +191,11 @@ def test_case5_rename(db: DatabaseManager) -> None:
 
 def test_case6_delete_does_not_touch_mods(db: DatabaseManager) -> None:
     _game(db, STARDEW, "Stardew Valley")
-    _mod(db, 10, app_id=STARDEW, deployed=True)
+    pk = _mod(db, 10, app_id=STARDEW, deployed=True)
     record = dr.create_or_update_record(STARDEW, "del-me", db=db)
     assert dr.delete_record(record.id, db=db) is True
-    assert db.get_mod(10) is not None
-    assert db.get_mod_deploy_info(10).deploy_status == DEPLOY_STATUS_DEPLOYED
+    assert db.get_mod(pk) is not None
+    assert db.get_mod_deploy_info(pk).deploy_status == DEPLOY_STATUS_DEPLOYED
 
 
 def test_record_and_status_chips_are_mutex() -> None:
@@ -202,7 +210,7 @@ def test_record_and_status_chips_are_mutex() -> None:
         entries,
         filter_key=FILTER_DEPLOYMENT_RECORD,
         record_mod_ids=recorded,
-    ) == ["A", "B"]
+    ) == ["B", "A"]
     # Favorite alone ignores record_mod_ids.
     assert filter_and_sort(
         entries,
@@ -252,6 +260,7 @@ def test_ui_filter_mutex_and_clear_overlays(qapp, tmp_path: Path) -> None:
     view._set_library_status_filter(
         FILTER_DEPLOYMENT_RECORD, record_id=99, record_name="宝可梦一周目"
     )
+    view._card_entries = [(_index("2", deployed=False), card)]
     view._cached_record_mod_ids = frozenset({"2"})
     view._last_filter_sig = None
     view._sync_record_overlays()

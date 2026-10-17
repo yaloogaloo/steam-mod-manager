@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from services.metadata_refresh import (
-    MetadataRefreshResult,
-    refresh_selected_mods_metadata,
-)
+from services.crash_trace import log_exception, traced
+from services.metadata_refresh import refresh_selected_mods_metadata
+
+_log = logging.getLogger(__name__)
 
 
 class ModRefreshWorker(QThread):
@@ -28,39 +29,62 @@ class ModRefreshWorker(QThread):
         platform: str = "",
         source_url: str = "",
         parent=None,
+        resources=None,
+        preflight=None,
     ) -> None:
         super().__init__(parent)
         self.managed_path = Path(managed_path)
-        self.mod_id = str(mod_id or "").strip() or self.managed_path.name
+        # Identity: mods.mod_id only — never folder.name / workspace_id fallback.
+        self.mod_id = str(mod_id or "").strip()
         self.library_root = (
             Path(library_root) if library_root else self.managed_path.parents[1]
         )
         self.platform = str(platform or "").strip()
         self.source_url = str(source_url or "").strip()
+        self.resources, self.preflight = resources, preflight
 
+    @traced("ModRefreshWorker.run")
     def run(self) -> None:
-        import logging
-
+        if self.resources is not None:
+            self._run_isolated_source_sync()
+            return
         from services.mod_refresh import refresh_mod
         from services.path_lifecycle import resolve_refresh_folder
 
         self.refresh_started.emit()
+        mid = self.mod_id
         try:
+            if not mid.isdigit():
+                msg = (
+                    "Steam/Mod refresh requires mods.mod_id (SQLite PK); "
+                    "folder.name and workspace_id are not valid identity"
+                )
+                _log.error(
+                    "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 "
+                    "title=%r stage=worker_identity reason=%s exception=—",
+                    mid or "—",
+                    self.managed_path.name,
+                    msg,
+                )
+                self.refresh_failed.emit(msg)
+                return
             folder = resolve_refresh_folder(
-                self.mod_id,
+                mid,
                 self.managed_path,
             )
             if not folder.is_dir():
                 msg = f"[PATH_INVALID] Mod 目录不存在: {self.managed_path}"
-                logging.getLogger(__name__).error(
-                    "Mod refresh aborted: %s (mod_id=%s)",
+                _log.error(
+                    "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 "
+                    "title=%r stage=path_validate reason=%s exception=—",
+                    mid,
+                    self.managed_path.name,
                     msg,
-                    self.mod_id,
                 )
                 self.refresh_failed.emit(msg)
                 return
             result = refresh_mod(
-                self.mod_id,
+                mid,
                 folder,
                 platform=self.platform,
                 library_root=self.library_root,
@@ -71,21 +95,64 @@ class ModRefreshWorker(QThread):
             compat = result.to_metadata_refresh_result()
             from services.path_lifecycle import resolve_managed_folder
 
-            final = resolve_managed_folder(self.mod_id)
+            final = resolve_managed_folder(mid)
             if final.path is not None:
                 compat.managed_path = final.path
                 if compat.old_path is None:
                     compat.old_path = self.managed_path
             if not compat.success and not compat.skipped:
-                logging.getLogger(__name__).error(
-                    "Mod refresh failed: %s",
+                _log.error(
+                    "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 "
+                    "title=%r stage=provider_result reason=%s exception=—",
+                    mid,
+                    compat.title or self.managed_path.name,
                     compat.error or result.message or "元数据刷新失败",
                 )
-                self.refresh_failed.emit(compat.error or result.message or "元数据刷新失败")
+                self.refresh_failed.emit(
+                    compat.error or result.message or "元数据刷新失败"
+                )
                 return
             self.refresh_finished.emit(compat)
         except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).exception("ModRefreshWorker crashed: %s", exc)
+            log_exception(
+                "ModRefreshWorker.run",
+                mod_id=mid,
+                path=str(self.managed_path),
+            )
+            _log.exception(
+                "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 "
+                "title=%r stage=worker_crash reason=unhandled exception=%r",
+                mid or "—",
+                self.managed_path.name,
+                exc,
+            )
+            self.refresh_failed.emit(str(exc))
+
+
+    def _run_isolated_source_sync(self):
+        from core.steam_api import SteamWorkshopClient
+        from services.mod_refresh import refresh_mod
+        from services.path_lifecycle import resolve_refresh_folder
+        self.refresh_started.emit()
+        try:
+            with self.resources.bind():
+                if self.preflight is not None:
+                    self.preflight()
+                if not (self.resources.steam_api_url or self.resources.steam_public) or self.platform.lower() != 'steam':
+                    raise PermissionError('当前仅准入受控 Steam 来源元数据首次同步')
+                folder = resolve_refresh_folder(self.mod_id, self.managed_path)
+                self.resources.validate(folder)
+                if self.resources.db.is_official_metadata_synced(self.mod_id):
+                    raise ValueError('该 Mod 已完成首次来源同步；重复来源更新尚未迁移')
+                with SteamWorkshopClient(db=self.resources.db, proxy_url='', enable_scrape_fallback=False) as client:
+                    result = refresh_mod(self.mod_id, folder, platform=self.platform,
+                        library_root=self.library_root, source_url=self.source_url,
+                        db=self.resources.db, steam_client=client, download_cover=False)
+                if not result.official_attempted or not result.official_success:
+                    raise RuntimeError(result.error or result.message or '来源同步未完成')
+                compat = result.to_metadata_refresh_result()
+            self.refresh_finished.emit(compat)
+        except Exception as exc:
             self.refresh_failed.emit(str(exc))
 
 
@@ -192,8 +259,6 @@ class MetadataBatchRefreshWorker(QThread):
         self.max_workers = max(1, min(int(max_workers), 2))
 
     def run(self) -> None:
-        import logging
-
         self.refresh_started.emit()
         try:
             results = refresh_selected_mods_metadata(
@@ -206,7 +271,9 @@ class MetadataBatchRefreshWorker(QThread):
                 return
             self.refresh_finished.emit(results)
         except Exception as exc:  # noqa: BLE001
-            logging.getLogger(__name__).exception(
-                "MetadataBatchRefreshWorker crashed: %s", exc
+            _log.exception(
+                "[MOD_REFRESH_FAILED] mod_id=— workspace_id=— app_id=0 "
+                "title=— stage=batch_worker_crash reason=unhandled exception=%r",
+                exc,
             )
             self.refresh_failed.emit(str(exc))

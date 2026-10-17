@@ -136,7 +136,7 @@ class SyncCenterView(QWidget):
 
         self.proxy_edit = QLineEdit()
         self.proxy_edit.setPlaceholderText(
-            "可选，例如 http://127.0.0.1:7890（本地加速器/梯子端口）"
+            "留空则自动检测系统代理；也可手动填写 http://127.0.0.1:<端口> 或 socks5://127.0.0.1:<端口>"
         )
         self.proxy_edit.editingFinished.connect(self._save_proxy_setting)
         proxy_col = QVBoxLayout()
@@ -294,7 +294,20 @@ class SyncCenterView(QWidget):
             self.proxy_edit.setText(saved)
 
     def _save_proxy_setting(self) -> None:
-        self._settings.setValue(_SETTING_PROXY, self.proxy_url())
+        url = self.proxy_url()
+        self._settings.setValue(_SETTING_PROXY, url)
+        from services.proxy_resolver import (
+            MODE_AUTO,
+            MODE_MANUAL,
+            SETTING_PROXY_MODE,
+            refresh_system_proxy,
+        )
+
+        self._settings.setValue(SETTING_PROXY_MODE, MODE_MANUAL if url else MODE_AUTO)
+        try:
+            refresh_system_proxy()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _restore_steam_cookie_setting(self) -> None:
         saved = self._settings.value(_SETTING_STEAM_COOKIE, "", str)
@@ -507,12 +520,23 @@ class SyncCenterView(QWidget):
         self.progress_bar.setValue(100)
         summary = summarize_result(result)
         self.status_label.setText(summary + "  ·  可切换到「Mod 库」查看。")
-        if result.failed:
+        if result.failed or result.registration_failed:
             details = "\n".join(
                 f"• {(m.published_file_id if m else '?')}: {err}"
                 for m, err in result.failed[:8]
             )
-            extra = "" if len(result.failed) <= 8 else f"\n…另有 {len(result.failed) - 8} 项"
+            if result.registration_failed:
+                reg_lines = "\n".join(
+                    f"• {wid}: {err}"
+                    for wid, err in result.registration_failed[:8]
+                )
+                details = (
+                    (details + "\n" if details else "")
+                    + "实体注册失败：\n"
+                    + reg_lines
+                )
+            fail_n = len(result.failed) + len(result.registration_failed)
+            extra = "" if fail_n <= 8 else f"\n…另有失败项"
             QMessageBox.warning(
                 self,
                 "部分同步失败",

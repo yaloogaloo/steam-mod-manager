@@ -1,4 +1,10 @@
-"""Steam Workshop importer — preserves existing Workshop ID identity."""
+"""Steam Workshop importer.
+
+Identity flow (do not invert):
+    Steam Workshop ID → external_id → workspace_id
+Internal PK (``mods.mod_id``) is database-only. For Steam the PK historically
+equals Workshop ID; that coincidence must not be treated as Internal → Workspace.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from core.mod_platform import PLATFORM_STEAM, ModFilesBundle, steam_workshop_url
-from core.models import ModMetadata
 from services.importers.importer_base import (
     ImportContext,
     ImportResult,
@@ -17,6 +22,15 @@ from services.importers.importer_base import (
 )
 from services.importers.materialize import materialize_imported_mod
 from services.importers.source_files import apply_steam_file_semantics
+
+
+def parse_workshop_id(value):
+    """The existing Steam importer input contract, shared with preview."""
+    mid=str(value or '').strip()
+    if not mid:raise ValueError('缺少 Workshop ID')
+    if not mid.isdigit() and 'id=' in mid:mid=mid.split('id=',1)[-1].split('&',1)[0].strip()
+    if not mid.isdigit():raise ValueError(f'无效的 Workshop ID：{value}')
+    return mid
 
 
 class SteamImporter(ModImporter):
@@ -41,20 +55,8 @@ class SteamImporter(ModImporter):
         context: ImportContext | dict[str, Any] | None = None,
         **_kwargs: Any,
     ) -> ImportResult:
-        mid = str(workshop_id or "").strip()
-        if not mid:
-            return ImportResult(
-                success=False, error="缺少 Workshop ID", platform=self.platform
-            )
-        if not mid.isdigit():
-            if "id=" in mid:
-                mid = mid.split("id=", 1)[-1].split("&", 1)[0].strip()
-            if not mid.isdigit():
-                return ImportResult(
-                    success=False,
-                    error=f"无效的 Workshop ID：{workshop_id}",
-                    platform=self.platform,
-                )
+        try:mid=parse_workshop_id(workshop_id)
+        except ValueError as exc:return ImportResult(success=False,error=str(exc),platform=self.platform)
 
         ctx = coerce_import_context(context, game_id=app_id, game_name=game_name, app_id=app_id)
         resolved = resolve_game_for_import(
@@ -99,22 +101,33 @@ class SteamImporter(ModImporter):
                 platform=self.platform,
             )
 
-        name = (title or "").strip() or f"Unknown_Mod_{mid}"
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=name,
-                app_id=int(resolved_app_id or 0),
-            )
+        name = (title or "").strip()
+        from core.models import is_unknown_mod_title, library_mod_folder_fallback
+        from services.identity_service import create_mod_identity
+
+        # Folder materialization uses ``Mod_<id>`` when title is missing;
+        # DB/UI may still resolve display via effective_title placeholders.
+        folder_title = (
+            name
+            if name and not is_unknown_mod_title(name, published_file_id=mid)
+            else library_mod_folder_fallback(mid)
         )
-        info = db.update_mod_platform_info(
-            mid,
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_STEAM,
-            source_url=url,
+            workshop_id=mid,
             external_id=mid,
-            title=name,
+            source_url=url,
+            title=folder_title,
             app_id=int(resolved_app_id or 0),
+            game_name=resolved_game,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="Steam identity create failed", platform=self.platform
+            )
+        internal_mod_id = str(created.mod_id).strip()
         # Single Workshop Content semantics: empty bundle → deploy whole Mod.
         # Optional file_entries (tests / advanced) are annotated as steam_content.
         raw_entries = _kwargs.get("file_entries")
@@ -128,14 +141,14 @@ class SteamImporter(ModImporter):
             bundle = apply_steam_file_semantics(ModFilesBundle(files=files))
         else:
             bundle = ModFilesBundle()
-        db.set_mod_files(mid, bundle)
+        db.set_mod_files(internal_mod_id, bundle)
 
         managed = ""
         if library_root:
             dest = materialize_imported_mod(
                 library_root=library_root,
-                mod_id=mid,
-                title=name,
+                internal_id=internal_mod_id,
+                title=folder_title,
                 game_name=resolved_game,
                 source_folder=folder if folder and folder.is_dir() else None,
                 cover_source=_kwargs.get("cover_source") or _kwargs.get("cover_path"),
@@ -146,7 +159,7 @@ class SteamImporter(ModImporter):
 
         return ImportResult(
             success=True,
-            mod_id=mid,
+            mod_id=internal_mod_id,
             platform=PLATFORM_STEAM,
             external_id=mid,
             source_url=url,

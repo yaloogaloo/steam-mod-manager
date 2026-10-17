@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +108,3 @@ class BrowserSnapshotBackend:
         if not str(html).strip():
             raise BrowserSnapshotError("Empty HTML from browser")
         return str(html)
-
-
-def capture_with_browser(url: str, **kwargs: Any) -> str:
-    """Convenience wrapper around ``BrowserSnapshotBackend.capture``."""
-    return BrowserSnapshotBackend(**kwargs).capture(url)

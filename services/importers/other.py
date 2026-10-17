@@ -1,4 +1,8 @@
-"""「其它」来源 — 纯本地 Mod，源链接 / 离线页面均可选。"""
+"""「其它」来源 — 纯本地 Mod，源链接 / 离线页面均可选。
+
+Workspace ID is system-generated. Never ``workspace_id = internal_id``.
+``external_id`` is a local placeholder (``local/...``), not a user Mod ID.
+"""
 
 from __future__ import annotations
 
@@ -49,12 +53,40 @@ class OtherImporter(ModImporter):
                 error="Mod目录不存在",
                 platform=self.platform,
             )
+        try:
+            from services.mod_path_validation import (
+                InvalidModRootError,
+                validate_import_source_root,
+            )
+
+            validate_import_source_root(folder, library_root=library_root or None)
+        except InvalidModRootError as exc:
+            return ImportResult(
+                success=False,
+                error=str(exc),
+                platform=self.platform,
+            )
 
         url = str(source_url or "").strip()
         suffix = str(_kwargs.get("external_id_suffix") or "").strip()
-        local_key = suffix or folder.name
-        external_id = f"local/{local_key}"
-        name = (title or "").strip() or local_key
+        explicit = str(_kwargs.get("external_id") or "").strip()
+        if explicit.startswith("local/"):
+            external_id = explicit
+            local_key = explicit.removeprefix("local/")
+        elif suffix:
+            from services.importers.nexus import local_nexus_external_id
+
+            local_key = suffix
+            external_id = local_nexus_external_id(local_key)
+        else:
+            import uuid
+
+            from services.importers.nexus import local_nexus_external_id
+
+            # Import-time mint only — never derive external_id from path/folder.
+            local_key = uuid.uuid4().hex
+            external_id = local_nexus_external_id(local_key)
+        name = (title or "").strip() or Path(folder).name or local_key
 
         db = self._database()
         from services.importers.duplicate_check import check_import_duplicate
@@ -73,7 +105,10 @@ class OtherImporter(ModImporter):
             folder,
             file_entries=_kwargs.get("file_entries"),
         )
-        info = db.register_external_mod(
+        from services.identity_service import create_mod_identity
+
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_OTHER,
             external_id=external_id,
             source_url=url,
@@ -82,6 +117,11 @@ class OtherImporter(ModImporter):
             game_name=ctx.game_name,
             mod_files=bundle,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="identity create failed", platform=PLATFORM_OTHER
+            )
 
         managed = ""
         if library_root:

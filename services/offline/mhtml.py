@@ -32,10 +32,6 @@ _HTTP_URL_RE = re.compile(
 )
 
 
-def is_mhtml_path(path: str | Path) -> bool:
-    return Path(path).suffix.lower() in MHTML_SUFFIXES
-
-
 def _clean_cid(value: str) -> str:
     text = unquote(str(value or "").strip())
     if text.lower().startswith("cid:"):
@@ -265,7 +261,9 @@ def import_mhtml_snapshot(
     """
     html_text, assets, cid_map = extract_mhtml(mhtml_path)
     target = Path(output_dir)
-    assets_root = target / "assets"
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets_root = resolve_capture_assets_dir(target)
     assets_root.mkdir(parents=True, exist_ok=True)
 
     cid_to_href: dict[str, str] = {}
@@ -291,7 +289,6 @@ def store_mhtml_snapshot(
     """Write MHTML into ``output_dir/index.html`` and return ``(index, asset_count)``."""
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
-    (target / "assets").mkdir(parents=True, exist_ok=True)
 
     rewritten, asset_count, _cid = import_mhtml_snapshot(mhtml_path, target)
     index = target / "index.html"

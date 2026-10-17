@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import subprocess
@@ -25,7 +26,7 @@ from core.mod_platform import (
     normalize_platform,
 )
 from services.importers.local_scanner import is_history_version_path
-from core.paths import data_dir, project_root
+from core.paths import import_cache_dir, project_root
 from services.importers.github import GithubImporter
 from services.importers.importer_base import ImportResult, ModImporter
 from services.importers.modio import ModioImporter
@@ -36,7 +37,6 @@ from services.importers.steam import SteamImporter
 
 logger = logging.getLogger(__name__)
 
-IMPORT_CACHE_DIR_NAME = "import_cache"
 ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
 # Used only as a *hint* when choosing a nested Mod root — never as an import gate.
 _MOD_FILE_SUFFIXES = {".pak", ".dll", ".json", ".ini", ".cfg"}
@@ -45,13 +45,13 @@ UNSUPPORTED_FMT_MSG = "部署失败：不支持的压缩格式"
 RAR_ERROR_PYTHON_SUPPORT_MISSING = "RAR_PYTHON_SUPPORT_MISSING"
 RAR_ERROR_TOOL_UNAVAILABLE = "RAR_TOOL_UNAVAILABLE"
 RAR_ERROR_EXECUTION_FAILED = "RAR_EXECUTION_FAILED"
+RAR_ERROR_EXECUTABLE_INVALID = "RAR_EXECUTABLE_INVALID"
 RAR_PYTHON_SUPPORT_MISSING_MSG = (
     "部署失败: 缺少 Python RAR 支持组件(rarfile)，请安装项目依赖"
 )
 RAR_TOOL_UNAVAILABLE_MSG = "部署失败: 未找到 RAR 解压执行组件(UnRAR)"
 # Backward-compatible alias for older tests / persisted deploy_error strings.
 TOOL_UNAVAILABLE_MSG = RAR_TOOL_UNAVAILABLE_MSG
-EMPTY_ARCHIVE_MSG = "压缩包为空"
 # Kept for older imports / tests that still reference the message string.
 NO_MOD_FILES_MSG = "压缩包中未找到 Mod 文件（.pak / .dll / .json / .ini 等）"
 
@@ -83,6 +83,34 @@ def _raise_rar_tool_unavailable(exc: BaseException | None = None) -> None:
     raise RarExtractError(RAR_ERROR_TOOL_UNAVAILABLE, RAR_TOOL_UNAVAILABLE_MSG)
 
 
+def _raise_rar_executable_invalid(exc: BaseException | None = None) -> None:
+    msg = "部署失败: RAR 解压执行组件无效或架构不兼容"
+    if exc is not None:
+        raise RarExtractError(RAR_ERROR_EXECUTABLE_INVALID, msg) from exc
+    raise RarExtractError(RAR_ERROR_EXECUTABLE_INVALID, msg)
+
+
+def _unrar_executable_usable(tool: Path) -> bool:
+    """
+    Reject placeholder / wrong-architecture UnRAR binaries before subprocess.
+
+    Real bundled UnRAR is hundreds of KB; tiny ``MZ`` stubs fail with WinError 216.
+    """
+    try:
+        if not tool.is_file():
+            return False
+        size = int(tool.stat().st_size)
+        if size < 50_000:
+            return False
+        if platform.system() == "Windows":
+            with tool.open("rb") as fh:
+                if fh.read(2) != b"MZ":
+                    return False
+        return True
+    except OSError:
+        return False
+
+
 def _raise_rar_execution_failed(
     detail: str,
     *,
@@ -98,14 +126,12 @@ def _raise_rar_execution_failed(
 
 
 def import_cache_root() -> Path:
-    path = data_dir() / IMPORT_CACHE_DIR_NAME
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return import_cache_dir()
 
 
 def cleanup_import_cache(path: str | Path | None = None) -> bool:
     """
-    Delete a temporary extract directory under ``data/import_cache/``.
+    Delete a temporary extract directory under ``cache/import_cache/``.
 
     Only removes paths that resolve inside the import cache root.
     Returns True when something was removed.
@@ -152,20 +178,105 @@ def find_system_unrar_executable() -> str | None:
     return None
 
 
+class Py7zrUnsupportedFeatureError(RuntimeError):
+    """py7zr cannot decode this archive (BCJ2 / unsupported filter or method)."""
+
+
+def is_py7zr_unsupported_feature(exc: BaseException) -> bool:
+    """True when py7zr failed due to an unsupported codec/filter, not a corrupt file."""
+    name = type(exc).__name__.lower()
+    if "unsupportedcompression" in name:
+        return True
+    text = str(exc).lower()
+    needles = (
+        "bcj2",
+        "is not supported by py7zr",
+        "filter is not supported",
+        "unsupported compression",
+        "unsupported method",
+        "unsupported filter",
+        "compression method is not supported",
+    )
+    return any(needle in text for needle in needles)
+
+
+def _clear_dir_contents(dest: Path) -> None:
+    """Remove partial extract output so a provider fallback starts clean."""
+    try:
+        for child in dest.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        logger.debug("failed to clear partial extract dest=%s", dest, exc_info=True)
+
+
+SEVEN_ZIP_FALLBACK_MISSING_MSG = (
+    "部署失败：该 7z 使用了 py7zr 不支持的压缩方法（例如 BCJ2）。"
+    "已回退到系统 7-Zip，但未找到 7z.exe。"
+    "请安装 7-Zip 后重试。"
+)
+
+
+def _log_extract_event(**fields: object) -> None:
+    parts = [f"{key}={fields[key]}" for key in fields]
+    logger.info("[DEPLOY_EXTRACT] %s", " ".join(parts))
+
+
+def _7z_from_windows_registry() -> str | None:
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    keys = (
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\7-Zip"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\7-Zip"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\7-Zip"),
+    )
+    for hive, sub in keys:
+        try:
+            with winreg.OpenKey(hive, sub) as key:
+                for name in ("Path", "Path64"):
+                    try:
+                        value, _ = winreg.QueryValueEx(key, name)
+                    except OSError:
+                        continue
+                    exe = Path(str(value)) / "7z.exe"
+                    if exe.is_file():
+                        return str(exe)
+        except OSError:
+            continue
+    return None
+
+
 def find_7z_executable() -> str | None:
     """Return path to ``7z`` / ``7zz`` if available on PATH or common install dirs."""
+    registered = _7z_from_windows_registry()
     candidates = (
         "7z",
         "7z.exe",
         "7zz",
         "7za",
+        "7za.exe",
         r"C:\Program Files\7-Zip\7z.exe",
         r"C:\Program Files (x86)\7-Zip\7z.exe",
+        r"C:\Program Files\7-Zip\7za.exe",
+        r"C:\Program Files\NanaZip\7z.exe",
+        str(Path.home() / "AppData" / "Local" / "Programs" / "7-Zip" / "7z.exe"),
         "/usr/bin/7z",
         "/usr/local/bin/7z",
         "/opt/homebrew/bin/7z",
+        str(project_root() / "bin" / "tools" / "7z.exe"),
+        str(project_root() / "bin" / "tools" / "7za.exe"),
     )
-    for name in candidates:
+    ordered = (registered,) + candidates if registered else candidates
+    for name in ordered:
+        if not name:
+            continue
         found = shutil.which(name) if "\\" not in name and "/" not in name else (
             name if Path(name).is_file() else None
         )
@@ -221,7 +332,7 @@ def resolve_bundled_unrar_tool() -> Path | None:
             for name in names:
                 candidate = base / folder / name
                 try:
-                    if candidate.is_file():
+                    if candidate.is_file() and _unrar_executable_usable(candidate):
                         return candidate.resolve()
                 except OSError:
                     continue
@@ -272,23 +383,25 @@ def find_mod_root(extract_root: str | Path) -> Path | None:
     back to a single wrapper folder or the extract root itself — import never
     requires known Mod file types.
     """
+    from services.deploy_fs import safe_iter_dirs, safe_iter_files
+
     root = Path(extract_root).expanduser().resolve()
     if not root.is_dir():
         return None
 
     candidates: list[tuple[int, int, Path]] = []  # (-score, depth, path)
 
-    for path in root.rglob("*"):
+    for path in safe_iter_dirs(root, name="LogicMods"):
         if is_history_version_path(path):
             continue
-        if path.is_dir() and path.name.lower() == "logicmods":
-            parent = path.parent
-            if is_history_version_path(parent):
-                continue
-            depth = len(parent.relative_to(root).parts)
-            candidates.append((-(_dir_score(parent) + 30), depth, parent))
+        parent = path.parent
+        if is_history_version_path(parent):
             continue
-        if not path.is_file():
+        depth = len(parent.relative_to(root).parts)
+        candidates.append((-(_dir_score(parent) + 30), depth, parent))
+
+    for path in safe_iter_files(root):
+        if is_history_version_path(path):
             continue
         if path.name.startswith("."):
             continue
@@ -331,6 +444,8 @@ def find_mod_root(extract_root: str | Path) -> Path | None:
 
 def _has_files_outside(root: Path, inner: Path) -> bool:
     """True when *root* contains files that are not under *inner*."""
+    from services.deploy_fs import safe_iter_files
+
     try:
         inner_r = inner.resolve()
         root_r = root.resolve()
@@ -339,10 +454,10 @@ def _has_files_outside(root: Path, inner: Path) -> bool:
     if inner_r == root_r:
         return False
     try:
-        for path in root_r.rglob("*"):
+        for path in safe_iter_files(root_r):
             if is_history_version_path(path):
                 continue
-            if not path.is_file() or path.name.startswith("."):
+            if path.name.startswith("."):
                 continue
             try:
                 path.relative_to(inner_r)
@@ -359,11 +474,10 @@ def _fallback_content_root(root: Path) -> Path | None:
 
     Returns ``None`` only when the extract tree has no files at all.
     """
+    from services.deploy_fs import safe_has_any_file
+
     try:
-        has_files = any(
-            p.is_file() and not p.name.startswith(".")
-            for p in root.rglob("*")
-        )
+        has_files = safe_has_any_file(root)
     except OSError:
         return None
     if not has_files:
@@ -383,10 +497,10 @@ def extract_archive(
     dest_dir: str | Path | None = None,
 ) -> Path:
     """
-    Extract *archive_path* into ``data/import_cache/{uuid}/`` (or *dest_dir*).
+    Extract *archive_path* into ``cache/import_cache/{uuid}/`` (or *dest_dir*).
 
     ``.zip`` → stdlib ``zipfile``.
-    ``.7z`` → system ``7z`` CLI when present, else ``py7zr``.
+    ``.7z`` → ``py7zr`` first; system ``7z.exe x`` on BCJ2 / unsupported filters.
     ``.rar`` → bundled UnRAR, then system ``unrar``, then ``7z`` CLI fallback.
     """
     src = Path(archive_path).expanduser().resolve()
@@ -407,16 +521,73 @@ def extract_archive(
         _extract_rar(src, out)
         return out
 
-    seven = find_7z_executable()
-    if seven:
-        _extract_with_7z(seven, src, out)
-        return out
-
     if suffix == ".7z":
-        _extract_7z_with_py7zr(src, out)
-        return out
+        return _extract_7z_with_provider_fallback(src, out)
 
     raise RuntimeError(f"{UNSUPPORTED_FMT_MSG} {suffix}")
+
+
+def _extract_7z_with_provider_fallback(src: Path, dest: Path) -> Path:
+    """Prefer py7zr; fall back to ``7z.exe x`` for BCJ2 / unsupported codecs."""
+    _log_extract_event(
+        archive_path=src,
+        archive_type=src.suffix.lower() or ".7z",
+        extractor_selected="py7zr",
+        fallback_triggered=False,
+        seven_executable_path="",
+    )
+    py7zr_exc: BaseException | None = None
+    try:
+        _extract_7z_with_py7zr(src, dest)
+        _log_extract_event(
+            archive_path=src,
+            archive_type=".7z",
+            extractor_selected="py7zr",
+            fallback_triggered=False,
+            result="ok",
+        )
+        return dest
+    except ImportError as exc:
+        logger.warning("py7zr missing; falling back to 7z.exe archive=%s", src)
+        py7zr_exc = exc
+        _log_extract_event(
+            archive_path=src,
+            py7zr_exception=exc,
+            fallback_triggered=True,
+            fallback_reason="py7zr_missing",
+        )
+    except Py7zrUnsupportedFeatureError as exc:
+        logger.warning(
+            "py7zr unsupported feature archive=%s error=%s; falling back to 7z.exe x",
+            src,
+            exc,
+        )
+        py7zr_exc = exc
+        _clear_dir_contents(dest)
+        _log_extract_event(
+            archive_path=src,
+            archive_type=".7z",
+            extractor_selected="py7zr",
+            py7zr_exception=repr(exc),
+            fallback_triggered=True,
+            fallback_reason="unsupported_feature",
+        )
+
+    seven = find_7z_executable()
+    _log_extract_event(
+        archive_path=src,
+        fallback_triggered=True,
+        seven_executable_path=seven or "",
+    )
+    if seven:
+        logger.info("7z extract provider=7z.exe archive=%s dest=%s", src, dest)
+        _extract_with_7z(seven, src, dest)
+        return dest
+    if isinstance(py7zr_exc, ImportError):
+        raise RuntimeError("部署失败：缺少 7z 解压组件（py7zr / 7z.exe）") from py7zr_exc
+    raise RuntimeError(
+        f"{SEVEN_ZIP_FALLBACK_MISSING_MSG} py7zr={py7zr_exc}"
+    ) from py7zr_exc
 
 
 def _extract_zip(src: Path, dest: Path) -> None:
@@ -439,6 +610,14 @@ def _extract_zip(src: Path, dest: Path) -> None:
 
 def _extract_with_7z(seven: str, src: Path, dest: Path) -> None:
     cmd = [seven, "x", str(src), f"-o{dest}", "-y"]
+    _log_extract_event(
+        archive_path=src,
+        archive_type=src.suffix.lower(),
+        extractor_selected="7z.exe",
+        fallback_triggered=True,
+        seven_executable_path=seven,
+        seven_command=" ".join(cmd),
+    )
     try:
         proc = subprocess.run(
             cmd,
@@ -448,27 +627,51 @@ def _extract_with_7z(seven: str, src: Path, dest: Path) -> None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        _log_extract_event(
+            archive_path=src,
+            extractor_selected="7z.exe",
+            seven_executable_path=seven,
+            seven_command=" ".join(cmd),
+            seven_exit_code="spawn_error",
+            seven_stderr=exc,
+        )
         if src.suffix.lower() == ".rar":
             raise RuntimeError(f"RAR 部署失败: {exc}") from exc
         raise RuntimeError(f"解压失败：{exc}") from exc
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    _log_extract_event(
+        archive_path=src,
+        extractor_selected="7z.exe",
+        seven_executable_path=seven,
+        seven_command=" ".join(cmd),
+        seven_exit_code=proc.returncode,
+        seven_stdout=(stdout[:2000] if stdout else ""),
+        seven_stderr=(stderr[:2000] if stderr else ""),
+    )
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+        err = stderr or stdout or f"exit {proc.returncode}"
         if src.suffix.lower() == ".rar":
             raise RuntimeError(_format_rar_failure(err)) from None
         raise RuntimeError(f"解压失败：{err}")
 
 
 def _extract_7z_with_py7zr(src: Path, dest: Path) -> None:
-    """Fallback 7z extract via py7zr — no user install / PATH setup."""
+    """Primary 7z extract via py7zr. Unsupported codecs raise for 7z.exe fallback."""
     try:
         import py7zr
-    except ImportError as exc:  # pragma: no cover - dependency declared in requirements
-        raise RuntimeError(f"部署失败：缺少 7z 解压组件（py7zr）") from exc
+    except ImportError:
+        raise
 
     try:
         with py7zr.SevenZipFile(src, mode="r") as archive:
             archive.extractall(path=dest)
+    except Py7zrUnsupportedFeatureError:
+        raise
     except Exception as exc:  # noqa: BLE001
+        logger.warning("py7zr extract failed archive=%s error=%s", src, exc)
+        if is_py7zr_unsupported_feature(exc):
+            raise Py7zrUnsupportedFeatureError(str(exc)) from exc
         raise RuntimeError(f"解压失败：{exc}") from exc
 
 
@@ -492,19 +695,32 @@ def _extract_rar(src: Path, dest: Path) -> None:
     """
     Extract ``.rar`` with backend priority:
 
-    1. Project-bundled UnRAR (``bin/tools``)
-    2. System ``unrar`` on PATH
+    1. Project-bundled UnRAR (``bin/tools``) — subprocess with timeout
+    2. System ``unrar`` on PATH — subprocess with timeout
     3. System 7-Zip CLI fallback
+    4. rarfile + explicit UnRAR binary (last resort)
     """
     bundled = resolve_bundled_unrar_tool()
     if bundled is not None:
-        _extract_rar_with_rarfile(src, dest, unrar_tool=bundled)
-        return
+        try:
+            _extract_rar_with_unrar_subprocess(bundled, src, dest)
+            return
+        except RarExtractError as exc:
+            if exc.code != RAR_ERROR_EXECUTABLE_INVALID:
+                raise
+            logger.warning("bundled UnRAR unusable: %s", bundled)
 
     system = find_system_unrar_executable()
     if system is not None:
-        _extract_rar_with_rarfile(src, dest, unrar_tool=system)
-        return
+        system_path = Path(system)
+        if _unrar_executable_usable(system_path):
+            try:
+                _extract_rar_with_unrar_subprocess(system_path, src, dest)
+                return
+            except RarExtractError as exc:
+                if exc.code != RAR_ERROR_EXECUTABLE_INVALID:
+                    raise
+                logger.warning("system UnRAR unusable: %s", system_path)
 
     seven = find_7z_executable()
     if seven is not None:
@@ -516,6 +732,36 @@ def _extract_rar(src: Path, dest: Path) -> None:
     except ImportError as exc:  # pragma: no cover
         _raise_rar_python_support_missing(exc)
     _raise_rar_tool_unavailable()
+
+
+def _extract_rar_with_unrar_subprocess(
+    tool: Path | str,
+    src: Path,
+    dest: Path,
+    *,
+    timeout: int = 600,
+) -> None:
+    """Run UnRAR with a hard timeout — avoids rarfile blocking indefinitely."""
+    dest.mkdir(parents=True, exist_ok=True)
+    cmd = [str(tool), "x", "-o+", "-inul", str(src), str(dest) + os.sep]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"RAR 部署失败: 解压超时（>{timeout}s）") from exc
+    except OSError as exc:
+        winerr = getattr(exc, "winerror", None)
+        if winerr == 216 or "216" in str(exc):
+            _raise_rar_executable_invalid(exc)
+        _raise_rar_tool_unavailable(exc)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+        raise RuntimeError(_format_rar_failure(err)) from None
 
 
 def _extract_rar_with_rarfile(
@@ -788,8 +1034,14 @@ class ArchiveImporter(ModImporter):
         db = self._database()
         name = (title or "").strip() or archive.stem
         cover_source = _kwargs.get("cover_source") or _kwargs.get("cover_path")
+        wid = str(workshop_id or "").strip()
+        if not wid.isdigit():
+            return ImportResult(
+                success=False,
+                error="Steam archive import requires an explicit Workshop ID",
+            )
         result = SteamImporter(db=db).import_mod(
-            workshop_id=workshop_id or archive.stem,
+            workshop_id=wid,
             title=name,
             source_folder=resolved,
             library_root=library_root,
@@ -951,6 +1203,9 @@ class ArchiveImporter(ModImporter):
         else:
             raw_url = nexus_url
             nid = nexus_id or parse_nexus_id(raw_url, "")
+            local_archive = not str(nid or "").strip()
+            if local_archive:
+                nid = archives[0].stem
             result = NexusImporter(db=db).import_mod(
                 source_folder=staging_dir,
                 title=name,
@@ -959,6 +1214,7 @@ class ArchiveImporter(ModImporter):
                 library_root=library_root,
                 game_name=game_name,
                 app_id=app_id,
+                is_batch_mode=local_archive,
                 **cover_kwargs,
             )
 
@@ -996,12 +1252,8 @@ class ArchiveImporter(ModImporter):
             result.managed_path = str(dest)
         elif dest is not None:
             result.managed_path = str(dest)
-        if dest is not None and dest.is_dir():
-            try:
-                from services.file_ops import apply_missing_content_marker
-
-                apply_missing_content_marker(dest)
-            except Exception:  # noqa: BLE001
-                pass
+        # ARCHITECTURE RULE: Archive import must not stamp Content Missing.
+        # Sticky is_missing_content / content_status=content_missing belong to
+        # content_status_eval (Refresh). Do not call apply_missing_content_marker.
         if staging_dir is not None:
             cleanup_import_cache(staging_dir)

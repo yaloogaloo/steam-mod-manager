@@ -68,8 +68,9 @@ class GithubOfflineProvider(OfflineProvider):
         managed_path: str | Path | None = None,
         library_root: str | Path | None = None,
         metadata: Any | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
-        del metadata
+        del metadata, force_refresh
         mid = str(mod_id).strip()
         root = Path(library_root) if library_root else default_mod_library()
         path = Path(managed_path) if managed_path else find_managed_mod_path(root, mid)
@@ -107,6 +108,11 @@ class GithubOfflineProvider(OfflineProvider):
             error = getattr(snap, "error", None) or getattr(snap, "failure_reason", None)
             # Injected path must not invent fallback pages either.
             if success and not used_fallback:
+                from services.info_asset_runtime import require_cas_finalize
+
+                require_cas_finalize(
+                    output_dir, mod_id=mid, context=f"github-injected:{mid}"
+                )
                 status = OFFLINE_STATUS_ARCHIVED
             else:
                 status = OFFLINE_STATUS_FAILED
@@ -141,14 +147,25 @@ class GithubOfflineProvider(OfflineProvider):
             title=title,
         )
 
+        if not result.success or not result.html_path.is_file():
+            get_db().update_mod_offline_status(
+                mid,
+                status=status,
+                provider=self.get_provider_name(),
+            )
+            raise RuntimeError(result.error or "GitHub Playwright snapshot failed")
+
+        from services.info_asset_runtime import require_cas_finalize
+
+        require_cas_finalize(
+            output_dir, mod_id=mid, context=f"github:{mid}"
+        )
+
         get_db().update_mod_offline_status(
             mid,
             status=status,
             provider=self.get_provider_name(),
         )
-
-        if not result.success or not result.html_path.is_file():
-            raise RuntimeError(result.error or "GitHub Playwright snapshot failed")
 
         return OfflineUpdateResult(
             mod_id=mid,

@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from core.db_manager import DatabaseManager
-from core.mod_platform import PLATFORM_NEXUS, PLATFORM_OTHER
+from core.mod_platform import PLATFORM_OTHER
 from services.importers.directory_batch import discover_mod_directories
 from ui.import_thread import ImportWorker
 
@@ -39,9 +39,11 @@ def _run(
     library: Path,
     folder: Path,
     is_batch_mode: bool,
-    platform: str = PLATFORM_NEXUS,
+    platform: str = PLATFORM_OTHER,
     title: str = "",
 ) -> object:
+    # Mode-boundary fixtures are local folders without official platform IDs.
+    # Use PLATFORM_OTHER (not Nexus folder-name placeholders).
     worker = ImportWorker(
         platform=platform,
         library_root=library,
@@ -50,8 +52,7 @@ def _run(
             "use_archive": False,
             "title": (title if title else ("" if is_batch_mode else folder.name)),
             "is_batch_mode": is_batch_mode,
-            "nexus_url": "",
-            "nexus_id": folder.name,
+            "source_url": "",
             "cover_source": "",
             "offline_html_path": "",
             **_ctx(),
@@ -181,7 +182,7 @@ def test_g_single_archive_stays_one_mod(tmp_path: Path, db: DatabaseManager, mon
     spy = MagicMock(wraps=discover_mod_directories)
     monkeypatch.setattr("ui.import_thread.discover_mod_directories", spy)
     worker = ImportWorker(
-        platform=PLATFORM_NEXUS,
+        platform=PLATFORM_OTHER,
         library_root=lib,
         params={
             "source_path": str(archive),
@@ -189,8 +190,7 @@ def test_g_single_archive_stays_one_mod(tmp_path: Path, db: DatabaseManager, mon
             "archive_paths": [str(archive)],
             "title": "MyMod",
             "is_batch_mode": False,
-            "nexus_url": "",
-            "nexus_id": "mymod-zip",
+            "source_url": "",
             **_ctx(),
         },
     )

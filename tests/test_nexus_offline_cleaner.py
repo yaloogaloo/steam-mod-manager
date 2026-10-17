@@ -288,11 +288,14 @@ def qapp():
 
 
 def test_dialog_clean_checkbox_default_on(qapp, tmp_path: Path) -> None:
+    from PySide6.QtWidgets import QWidget
     from core.mod_platform import PLATFORM_NEXUS
     from ui.mod_import_dialog import ModImportDialog
 
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path / "lib",
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     dlg.radio_nexus.setChecked(True)

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod, prove_managed_folder
 
 pytest.importorskip("PySide6")
 
@@ -14,9 +14,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
-from core.models import ModMetadata
 from services.deploy_status import resolve_game_install_path
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from ui.edit_mod_dialog import EditModDialog
 from ui.mod_detail_panel import ModDetailPanel
 
@@ -60,24 +58,10 @@ def _mod_folder(
     root: Path,
     *,
     game: str,
-    mid: str,
     title: str,
-    app_id: int,
 ) -> Path:
     folder = root / game / title
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": title,
-                "app_id": app_id,
-                "game_name": game,
-            }
-        ),
-        encoding="utf-8",
-    )
+    folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
@@ -99,10 +83,14 @@ def test_resolve_game_install_path_from_mod(db: DatabaseManager, tmp_path: Path)
     install = tmp_path / "BG3Root"
     install.mkdir()
     _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
-    db.upsert_mod(
-        ModMetadata(published_file_id="88001", title="PakMod", app_id=BG3_APP_ID)
+    created = create_steam_test_mod(
+        db, external_id="88001", title="PakMod", app_id=BG3_APP_ID
     )
-    assert resolve_game_install_path(mod_id="88001", db=db) == str(install)
+
+    assert resolve_game_install_path(mod_pk=str(created.mod_id), db=db) == str(install)
+    assert resolve_game_install_path(internal_id=str(created.internal_id), db=db) == str(
+        install
+    )
     assert resolve_game_install_path(app_id=BG3_APP_ID, db=db) == str(install)
 
 
@@ -112,15 +100,17 @@ def test_bg3_edit_dialog_browse_starts_at_bg3_root(
     install = tmp_path / "Baldurs Gate 3"
     install.mkdir()
     _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
-    folder = _mod_folder(
-        tmp_path / "library",
-        game="BG3",
-        mid="88011",
+    folder = _mod_folder(tmp_path / "library", game="BG3", title="CoolPak")
+    created = create_steam_test_mod(
+        db, external_id="88011", title="CoolPak", app_id=BG3_APP_ID
+    )
+    prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
         title="CoolPak",
         app_id=BG3_APP_ID,
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id="88011", title="CoolPak", app_id=BG3_APP_ID)
+        game_name="BG3",
     )
 
     panel = ModDetailPanel()
@@ -150,15 +140,17 @@ def test_anno_edit_dialog_browse_starts_at_anno_root(
     install = tmp_path / "Anno 1800"
     install.mkdir()
     _seed_game(db, app_id=ANNO_APP_ID, name="Anno 1800", install=install)
-    folder = _mod_folder(
-        tmp_path / "library",
-        game="Anno",
-        mid="88022",
+    folder = _mod_folder(tmp_path / "library", game="Anno", title="AnnoMod")
+    created = create_steam_test_mod(
+        db, external_id="88022", title="AnnoMod", app_id=ANNO_APP_ID
+    )
+    prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
         title="AnnoMod",
         app_id=ANNO_APP_ID,
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id="88022", title="AnnoMod", app_id=ANNO_APP_ID)
+        game_name="Anno",
     )
 
     panel = ModDetailPanel()
@@ -177,25 +169,29 @@ def test_multi_game_mods_open_different_install_roots(
     _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=bg3_install)
     _seed_game(db, app_id=ANNO_APP_ID, name="Anno 1800", install=anno_install)
 
-    bg3_folder = _mod_folder(
-        tmp_path / "library",
-        game="BG3",
-        mid="88031",
+    bg3_folder = _mod_folder(tmp_path / "library", game="BG3", title="Bg3Mod")
+    anno_folder = _mod_folder(tmp_path / "library", game="Anno", title="AnnoMod")
+    bg3 = create_steam_test_mod(
+        db, external_id="88031", title="Bg3Mod", app_id=BG3_APP_ID
+    )
+    prove_managed_folder(
+        db,
+        bg3_folder,
+        handle=bg3.mod_id,
         title="Bg3Mod",
         app_id=BG3_APP_ID,
+        game_name="BG3",
     )
-    anno_folder = _mod_folder(
-        tmp_path / "library",
-        game="Anno",
-        mid="88032",
+    anno = create_steam_test_mod(
+        db, external_id="88032", title="AnnoMod", app_id=ANNO_APP_ID
+    )
+    prove_managed_folder(
+        db,
+        anno_folder,
+        handle=anno.mod_id,
         title="AnnoMod",
         app_id=ANNO_APP_ID,
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id="88031", title="Bg3Mod", app_id=BG3_APP_ID)
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id="88032", title="AnnoMod", app_id=ANNO_APP_ID)
+        game_name="Anno",
     )
 
     panel = ModDetailPanel()
@@ -209,17 +205,56 @@ def test_multi_game_mods_open_different_install_roots(
     assert bg3_cap["install"] != anno_cap["install"]
 
 
-def test_dialog_resolves_install_path_from_mod_id_alone(
+def test_dialog_resolves_install_path_from_internal_id_alone(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """Even if caller forgets game_install_path, mod_id alone is enough."""
+    """Even if caller forgets game_install_path, internal_id alone is enough."""
     install = tmp_path / "GameRoot"
     install.mkdir()
     _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
-    db.upsert_mod(
-        ModMetadata(published_file_id="88041", title="OnlyModId", app_id=BG3_APP_ID)
-    )
+    created = create_steam_test_mod(db, external_id="88041", title="OnlyModId", app_id=BG3_APP_ID)
 
-    dlg = EditModDialog(mod_id="88041")  # no game_install_path / game_id
+    dlg = EditModDialog(mod_id=str(created.mod_id))  # no game_install_path / game_id
     assert dlg.browse_start_directory() == str(install)
     dlg.close()
+
+
+def test_open_edit_info_opens_when_metadata_and_managed_path_exist(
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
+) -> None:
+    """Edit Info must open EditModDialog when metadata + managed_path are present."""
+    install = tmp_path / "BG3Root"
+    install.mkdir()
+    _seed_game(db, app_id=BG3_APP_ID, name="Baldur's Gate 3", install=install)
+    folder = _mod_folder(tmp_path / "library", game="BG3", title="HasMetaAndPath")
+    created = create_steam_test_mod(
+        db, external_id="88051", title="HasMetaAndPath", app_id=BG3_APP_ID
+    )
+    prove_managed_folder(
+        db,
+        folder,
+        handle=created.mod_id,
+        title="HasMetaAndPath",
+        app_id=BG3_APP_ID,
+        game_name="BG3",
+    )
+
+    panel = ModDetailPanel()
+    panel.show_mod(folder, mod_id="88051", game_id=BG3_APP_ID)
+    assert panel._managed_path is not None
+    assert panel._metadata is not None
+
+    opened: dict[str, object] = {}
+
+    def _fake_exec(self: EditModDialog) -> int:
+        opened["ok"] = True
+        opened["dialog"] = self
+        opened["game_id"] = self._game_id
+        return int(QDialog.DialogCode.Rejected)
+
+    monkeypatch.setattr(EditModDialog, "exec", _fake_exec)
+    panel.open_edit_info_dialog()
+
+    assert opened.get("ok") is True
+    assert isinstance(opened.get("dialog"), EditModDialog)
+    assert opened.get("game_id") == BG3_APP_ID

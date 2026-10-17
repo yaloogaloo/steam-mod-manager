@@ -383,17 +383,6 @@ QComboBox QListView::item:selected {{
     outline: none;
 }}
 
-QPushButton#detailButton {{
-    background-color: {BACKGROUND_BUTTON_PRESSED};
-    border: 1px solid {BORDER_STRONG};
-    padding: 6px 10px;
-}}
-
-QPushButton#detailButton:hover {{
-    border-color: {ACCENT_PRIMARY};
-    color: {ACCENT_PRIMARY};
-}}
-
 QProgressBar {{
     border: 1px solid {BORDER_DEFAULT};
     border-radius: 6px;
@@ -460,6 +449,79 @@ QPushButton#libraryHeaderButton:hover {{
 }}
 
 QPushButton#libraryHeaderButton:disabled {{
+    background-color: {BACKGROUND_BUTTON_DISABLED};
+    color: {TEXT_MUTED};
+    border-color: {BORDER_SUBTLE};
+}}
+
+/* D1 Library presentation scope: preserve global controls and card geometry. */
+QFrame#libraryPageHeader {{
+    background-color: {BACKGROUND_PANEL};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 8px;
+}}
+
+QFrame#libraryPageHeader QLabel#pageTitle {{
+    color: {TEXT_PRIMARY};
+    font-size: 20px;
+    font-weight: 600;
+}}
+
+QFrame#libraryPageHeader QLabel#subtitleLabel {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+}}
+
+QWidget#libraryFilterColumn,
+QWidget#libraryRecordActions {{
+    background-color: {BACKGROUND_PANEL};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 6px;
+}}
+
+QLabel#librarySectionCaption {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+}}
+
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton[libraryPrimaryAction="true"] {{
+    background-color: {BACKGROUND_BUTTON};
+    border-color: {ACCENT_PRIMARY};
+    color: {TEXT_PRIMARY};
+    font-weight: 600;
+}}
+
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton[libraryPrimaryAction="true"]:hover {{
+    background-color: {BACKGROUND_BUTTON_HOVER};
+}}
+
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton[libraryPrimaryAction="true"]:disabled {{
+    background-color: {BACKGROUND_BUTTON_DISABLED};
+    border-color: {BORDER_SUBTLE};
+    color: {TEXT_MUTED};
+}}
+
+QWidget#libraryFilterColumn QLineEdit#librarySearchBox:focus,
+QWidget#libraryFilterColumn QComboBox#librarySortCombo:focus {{
+    border-color: {BORDER_FOCUS};
+}}
+
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:checked {{
+    background-color: {BACKGROUND_CARD_SELECTED};
+    color: {ACCENT_PRIMARY};
+    border-color: {ACCENT_SELECTION};
+}}
+
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:hover,
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:focus,
+QFrame#libraryPageHeader QPushButton#libraryHeaderButton:focus {{
+    border-color: {BORDER_FOCUS};
+}}
+
+QWidget#libraryRecordActions QWidget#libraryTaskButtons QToolButton#libraryActionButton:disabled {{
     background-color: {BACKGROUND_BUTTON_DISABLED};
     color: {TEXT_MUTED};
     border-color: {BORDER_SUBTLE};
@@ -645,8 +707,79 @@ QFrame#modCard {{
     border-radius: 10px;
 }}
 
+QFrame#collectionCard,
+QFrame#collectionCreateCard {{
+    background-color: {BACKGROUND_CARD};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 10px;
+}}
+
 QFrame#modCard:hover {{
     border-color: {BORDER_STRONG};
+}}
+
+QFrame#collectionCard:hover,
+QFrame#collectionCreateCard:hover {{
+    border-color: {BORDER_STRONG};
+}}
+
+QLabel#collectionCreatePlus {{
+    color: {TEXT_MUTED};
+}}
+
+QLabel#collectionCountOverlay {{
+    background-color: rgba(20, 24, 32, 200);
+    color: {TEXT_PRIMARY};
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 5px;
+}}
+
+QPushButton#collectionIconButton {{
+    background: transparent;
+    border: none;
+    padding: 0;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+    color: {TEXT_SECONDARY};
+}}
+
+QPushButton#collectionIconButton:hover {{
+    color: {ACCENT_PRIMARY};
+    background: transparent;
+    border: none;
+}}
+
+QPushButton#collectionIconButton:pressed {{
+    color: {ACCENT_PRIMARY_HOVER};
+    background: transparent;
+    border: none;
+}}
+
+QPushButton#collectionIconDangerButton {{
+    background: transparent;
+    border: none;
+    padding: 0;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+    color: {TEXT_SECONDARY};
+}}
+
+QPushButton#collectionIconDangerButton:hover {{
+    color: {ACCENT_ERROR};
+    background: transparent;
+    border: none;
+}}
+
+QPushButton#collectionIconDangerButton:pressed {{
+    color: {ACCENT_ERROR};
+    background: {ACCENT_ERROR_BG};
+    border: none;
 }}
 
 QFrame#modCard[selected="true"] {{
@@ -706,21 +839,50 @@ QListWidget#gameList {{
     outline: none;
 }}
 
-QToolButton#libraryDeploymentRecordButton {{
+QToolButton#libraryDeploymentRecordButton,
+QWidget#libraryRecordActions QToolButton#libraryActionButton {{
     background-color: {BACKGROUND_SECTION};
     color: {TEXT_BODY};
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 6px;
-    padding: 4px 10px;
+    padding: 0px 10px;
     font-size: 12px;
+    font-weight: 500;
+    min-width: 118px;
+    max-width: 118px;
+    min-height: 28px;
+    max-height: 28px;
 }}
 
-QToolButton#libraryDeploymentRecordButton:hover {{
+QToolButton#libraryDeploymentRecordButton:hover,
+QWidget#libraryRecordActions QToolButton#libraryActionButton:hover {{
     border-color: {ACCENT_PRIMARY};
     color: {ACCENT_PRIMARY};
 }}
 
-QToolButton#libraryDeploymentRecordButton::menu-button {{
+QToolButton#libraryDeploymentRecordButton:pressed,
+QWidget#libraryRecordActions QToolButton#libraryActionButton:pressed {{
+    background-color: {BACKGROUND_BUTTON};
+    border-color: {ACCENT_PRIMARY};
+    color: {ACCENT_PRIMARY};
+}}
+
+QToolButton#libraryDeploymentRecordButton:checked,
+QWidget#libraryRecordActions QToolButton#libraryActionButton:checked {{
+    background-color: {BACKGROUND_CARD_SELECTED};
+    border-color: {ACCENT_PRIMARY};
+    color: {ACCENT_PRIMARY};
+}}
+
+QToolButton#libraryDeploymentRecordButton:disabled,
+QWidget#libraryRecordActions QToolButton#libraryActionButton:disabled {{
+    color: {TEXT_MUTED};
+    border-color: {BORDER_SUBTLE};
+    background-color: {BACKGROUND_SECTION};
+}}
+
+QToolButton#libraryDeploymentRecordButton::menu-button,
+QWidget#libraryRecordActions QToolButton#libraryActionButton::menu-button {{
     border: none;
     width: 0px;
 }}
@@ -787,7 +949,9 @@ QPushButton#libraryFilterChip {{
     min-height: 26px;
 }}
 
-QWidget#libraryFilterBar {{
+QWidget#libraryFilterBar,
+QWidget#libraryToolbar,
+QWidget#libraryFilterColumn {{
     background: transparent;
 }}
 
@@ -947,10 +1111,6 @@ QFrame#detailStatusBanner[tone="error"] {{
     background-color: {ACCENT_ERROR_BG};
     border: 1px solid {ACCENT_ERROR_BORDER};
 }}
-QFrame#detailStatusBanner[tone="success"] {{
-    background-color: {ACCENT_SUCCESS_BG};
-    border: 1px solid {ACCENT_SUCCESS_BORDER};
-}}
 QLabel#detailStatusBannerBody {{
     font-size: 13px;
     line-height: 1.4;
@@ -958,9 +1118,6 @@ QLabel#detailStatusBannerBody {{
 }}
 QFrame#detailStatusBanner[tone="error"] QLabel#detailStatusBannerBody {{
     color: {ACCENT_ERROR};
-}}
-QFrame#detailStatusBanner[tone="success"] QLabel#detailStatusBannerBody {{
-    color: {ACCENT_SUCCESS};
 }}
 QFrame#detailActionArea {{
     background-color: {BACKGROUND_SECTION};
@@ -1001,6 +1158,24 @@ QLabel#detailMetaLine {{
     line-height: 1.55;
     padding: 1px 0;
 }}
+QFrame#detailMetaDescFrame {{
+    background-color: {BACKGROUND_INPUT};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 6px;
+}}
+QLabel#detailMetaDescription {{
+    color: {TEXT_BODY};
+    font-size: 13px;
+    line-height: 1.55;
+    background: transparent;
+    border: none;
+    padding: 0;
+}}
+QLabel#detailMetaDescTruncated {{
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    padding: 2px 0 0 0;
+}}
 QPushButton#detailFlagChip {{
     background-color: {BACKGROUND_INPUT};
     border: 1px solid {BORDER_DEFAULT};
@@ -1019,9 +1194,6 @@ QPushButton#detailFlagChip:checked {{
     border-color: {ACCENT_ERROR_BORDER};
     color: {ACCENT_ERROR};
     font-weight: 600;
-}}
-QWidget#detailHeaderActions {{
-    min-width: 140px;
 }}
 QLabel#detailPanelSection {{
     color: {ACCENT_PRIMARY};
@@ -1088,6 +1260,67 @@ QPushButton#dependencyPillButton:disabled {{
     color: {TEXT_MUTED};
     border-color: {BORDER_SUBTLE};
     background-color: transparent;
+}}
+QFrame#dependencyItem {{
+    background-color: {BACKGROUND_CARD};
+    border: 1px solid {BORDER_SUBTLE};
+    border-radius: 8px;
+}}
+QFrame#dependencyItem:hover {{
+    background-color: {BACKGROUND_CARD_SELECTED};
+    border-color: {BORDER_DEFAULT};
+}}
+QLabel#dependencyItemIcon {{
+    background: transparent;
+    font-size: 16px;
+    padding: 0;
+}}
+QLabel#dependencyItemName {{
+    color: {TEXT_PRIMARY};
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+}}
+QLabel#dependencyItemId {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    background: transparent;
+}}
+QLabel#dependencyItemDeployDot {{
+    min-width: 8px;
+    max-width: 8px;
+    min-height: 8px;
+    max-height: 8px;
+    border-radius: 4px;
+    background-color: {TEXT_MUTED};
+}}
+QLabel#dependencyItemDeployDot[tone="deployed"] {{
+    background-color: {ACCENT_SUCCESS};
+    border-color: {ACCENT_SUCCESS};
+}}
+QLabel#dependencyItemDeployDot[tone="failed"] {{
+    background-color: {ACCENT_ERROR};
+    border-color: {ACCENT_ERROR};
+}}
+QLabel#dependencyItemDeployDot[tone="not_deployed"] {{
+    background-color: {TEXT_MUTED};
+    border-color: {TEXT_MUTED};
+}}
+QPushButton#dependencyItemRemove {{
+    background: transparent;
+    border: none;
+    color: {TEXT_MUTED};
+    font-size: 14px;
+    min-width: 22px;
+    max-width: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 0;
+    border-radius: 4px;
+}}
+QPushButton#dependencyItemRemove:hover {{
+    color: {ACCENT_ERROR};
+    background-color: {ACCENT_ERROR_BG};
 }}
 QPushButton#panelDangerButton {{
     background-color: {ACCENT_ERROR_BG};
@@ -1176,10 +1409,6 @@ QLabel#detailFilesPrimary {{
     font-size: 13px;
 }}
 QLabel#detailFilesSecondary {{
-    color: {TEXT_MUTED};
-    font-size: 11px;
-}}
-QLabel#detailFilesLegacyHint {{
     color: {TEXT_MUTED};
     font-size: 11px;
 }}

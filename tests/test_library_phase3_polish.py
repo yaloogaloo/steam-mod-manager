@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    patch_library_get_db,
+    seed_steam_managed_mod,
+)
 
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
+from core.game_info import GameInfo
+from services.mod_library_cache import ModCardData
 from ui.library_view import ALL_GAMES_LABEL, GAME_ROLE, ModLibraryView
 from ui.mod_card import OFFLINE_MISSING_LABEL, ModCardWidget
 
@@ -29,36 +33,46 @@ def qapp() -> QApplication:
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
     manager = DatabaseManager.instance(tmp_path / "phase3.db")
+    manager.upsert_game(
+        GameInfo(app_id=1623730, name="Palworld", folder_name="Palworld")
+    )
+    manager.upsert_game(
+        GameInfo(app_id=1623731, name="OtherGame", folder_name="OtherGame")
+    )
     yield manager
     DatabaseManager.reset_instance()
 
 
-def _seed(root: Path, game: str, pub_id: str, title: str) -> Path:
-    folder = root / game / title
-    info = folder / ".info"
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": pub_id,
-                "title": title,
-                "game_name": game,
-            }
-        ),
-        encoding="utf-8",
+def _seed(
+    db: DatabaseManager,
+    root: Path,
+    game: str,
+    pub_id: str,
+    title: str,
+    *,
+    app_id: int,
+) -> tuple[Path, str]:
+    seeded = seed_steam_managed_mod(
+        db,
+        root,
+        external_id=pub_id,
+        title=title,
+        game_folder=game,
+        app_id=app_id,
+        game_name=game,
+        files={"a.txt": "x"},
     )
-    return folder
+    return seeded.folder, seeded.internal_id
 
 
 def test_game_list_shows_mod_counts(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     lib = tmp_path / "library"
-    _seed(lib, "Palworld", "93001", "A")
-    _seed(lib, "Palworld", "93002", "B")
-    _seed(lib, "OtherGame", "93003", "C")
-    for mid, title in (("93001", "A"), ("93002", "B"), ("93003", "C")):
-        db.upsert_mod(ModMetadata(published_file_id=mid, title=title))
+    _seed(db, lib, "Palworld", "93001", "A", app_id=1623730)
+    _seed(db, lib, "Palworld", "93002", "B", app_id=1623730)
+    _seed(db, lib, "OtherGame", "93003", "C", app_id=1623731)
+    patch_library_get_db(monkeypatch, db)
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -103,36 +117,26 @@ def test_search_box_ui_present_and_editable(
 
 
 def test_card_tooltip_is_simple_title(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: QApplication, tmp_path: Path
 ) -> None:
-    from unittest.mock import MagicMock
-
     mod = tmp_path / "G" / "M"
     (mod / ".info").mkdir(parents=True)
-    info = MagicMock(
-        steam_name="Steam Title Long Enough",
-        display_name="Display",
-        user_display_name="Display",
-        favorite=False,
+    data = ModCardData(
+        id="1",
+        title="Display",
         platform="steam",
-        source_url="",
-        external_id="1",
-        mod_version="",
-        installed_version="",
+        cover="",
+        description="",
+        tags="",
+        size=None,
+        updated_time=0.0,
+        managed_path=str(mod),
+        game_folder="G",
+        steam_name="Steam Title Long Enough",
+        has_offline=False,
         offline_status="none",
     )
-    db = MagicMock()
-    db.get_mod_display_info.return_value = info
-    db.get_mod_deploy_info.return_value = None
-    db.get_mod_status.return_value = None
-    db.is_mod_enabled.return_value = True
-    db.get_mods_tag_flags.return_value = {}
-    db.get_relationship_counts.return_value = {}
-    monkeypatch.setattr("ui.mod_card.get_db", lambda: db)
-
-    card = ModCardWidget(
-        mod, ModMetadata(published_file_id="1", title="Steam Title Long Enough")
-    )
+    card = ModCardWidget(mod, card_data=data)
     assert not hasattr(card, "steam_label")
     assert not hasattr(card, "meta_label")
     tip = card.toolTip()
@@ -147,7 +151,10 @@ def test_card_tooltip_is_simple_title(
 
 
 def test_selecting_mod_does_not_touch_archive(
-    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    qapp: QApplication,
+    tmp_path: Path,
+    db: DatabaseManager,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Clicking a card must not archive, network, or read index.html contents."""
     calls: list[str] = []
@@ -166,11 +173,12 @@ def test_selecting_mod_does_not_touch_archive(
     )
 
     lib = tmp_path / "library"
-    folder = _seed(lib, "G", "94001", "SafeSelect")
+    db.upsert_game(GameInfo(app_id=94001, name="G", folder_name="G"))
+    folder, mid = _seed(db, lib, "G", "94001", "SafeSelect", app_id=94001)
     index = folder / ".info" / "index.html"
     index.write_text("<html>heavy</html>", encoding="utf-8")
+    patch_library_get_db(monkeypatch, db)
 
-    # Fail if anyone reads the full HTML for status
     real_read = Path.read_text
 
     def guarded_read(self: Path, *a, **k):
@@ -185,26 +193,32 @@ def test_selecting_mod_does_not_touch_archive(
     view.set_target_root(str(lib))
     view.refresh()
     assert view._cards
-    view.on_mod_selected(folder)
+    view.on_mod_selected(mid)
     assert view.detail_panel.view_title.text()
     assert calls == []
 
 
 def test_detail_panel_sections_and_footer(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     from ui.mod_detail_panel import MODE_VIEW, ModDetailPanel
 
     lib = tmp_path / "library"
-    folder = _seed(lib, "Palworld", "93111", "SectionMod")
-    db.upsert_mod(ModMetadata(published_file_id="93111", title="SectionMod"))
+    folder, mid = _seed(
+        db, lib, "Palworld", "93111", "SectionMod", app_id=1623730
+    )
+    patch_library_get_db(monkeypatch, db)
+    monkeypatch.setattr("ui.mod_detail_panel.get_db", lambda: db)
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     assert panel._mode == MODE_VIEW
-    assert panel.view_title.text() == "SectionMod"
-    assert panel.view_title.toolTip() == "SectionMod"
-    assert "名称：SectionMod" in panel.meta_name_line.text()
+    # Soft hyphen / ZWSP may be injected for wrapping — compare stripped text.
+    title = panel.view_title.text().replace("\u200b", "").replace("\u00ad", "")
+    assert title == "SectionMod"
+    tip = (panel.view_title.toolTip() or "").replace("\u200b", "").replace("\u00ad", "")
+    assert tip == "SectionMod"
+    assert "名称：SectionMod" in panel.meta_name_line.text().replace("\u200b", "")
     assert panel.meta_source_line.text().startswith("来源：")
     # Action strip is independent; Deploy lives in footer
     assert panel.btn_folder is not None

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from ui.library_view import ModLibraryView
 from ui.mod_card import ModCardWidget
 
@@ -33,33 +37,40 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _seed_mod(root: Path, *, pub_id: str, title: str) -> Path:
+def _seed_mod(
+    db: DatabaseManager, root: Path, *, pub_id: str, title: str
+) -> Path:
+    created = create_steam_test_mod(db, external_id=pub_id, title=title)
     folder = root / "Palworld" / title
-    info = folder / ".info"
-    info.mkdir(parents=True)
-    (info / "mod.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": pub_id,
-                "title": title,
-                "game_name": "Palworld",
-            }
-        ),
-        encoding="utf-8",
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
+        title=title,
+        external_id=pub_id,
+        workspace_id=str(created.workspace_id or pub_id),
+        game_name="Palworld",
     )
+    bind_managed_path(db, created.mod_id, folder, title=title)
     return folder
 
 
+def _assert_card_parented(card: ModCardWidget, view: ModLibraryView) -> None:
+    parent = card.parent()
+    assert parent is not None
+    expected = view._cards_host if view._cards_host is not None else view.library_host
+    assert parent is expected
+    assert not card.isWindow()
+
+
 def test_render_cards_always_have_parent(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    patch_library_get_db(monkeypatch, db)
     lib = tmp_path / "library"
     for i in range(5):
         pub = str(93000 + i)
-        path = _seed_mod(lib, pub_id=pub, title=f"Mod {i}")
-        db.upsert_mod(
-            ModMetadata(published_file_id=pub, title=f"Mod {i}", managed_path=str(path))
-        )
+        _seed_mod(db, lib, pub_id=pub, title=f"Mod {i}")
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -69,9 +80,7 @@ def test_render_cards_always_have_parent(
     assert len(view._cards) == 5
     for card in view._cards:
         assert isinstance(card, ModCardWidget)
-        assert card.parent() is not None
-        assert card.parent() is view.library_host
-        assert not card.isWindow()
+        _assert_card_parented(card, view)
 
 
 def _visible_toplevel_mod_cards() -> list[ModCardWidget]:
@@ -83,19 +92,13 @@ def _visible_toplevel_mod_cards() -> list[ModCardWidget]:
 
 
 def test_refresh_does_not_spawn_toplevel_mod_cards(
-    qapp: QApplication, tmp_path: Path, db: DatabaseManager
+    qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    patch_library_get_db(monkeypatch, db)
     lib = tmp_path / "library"
     for i in range(8):
         pub = str(94000 + i)
-        path = _seed_mod(lib, pub_id=pub, title=f"Refresh Mod {i}")
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=pub,
-                title=f"Refresh Mod {i}",
-                managed_path=str(path),
-            )
-        )
+        _seed_mod(db, lib, pub_id=pub, title=f"Refresh Mod {i}")
 
     view = ModLibraryView()
     view.set_target_root(str(lib))
@@ -112,9 +115,7 @@ def test_refresh_does_not_spawn_toplevel_mod_cards(
                 # but must never be visible (the blank-window bug).
                 assert not w.isVisible()
         for card in view._cards:
-            assert card.parent() is not None
-            assert card.parent() is view.library_host
-            assert not card.isWindow()
+            _assert_card_parented(card, view)
 
     _assert_cards_safe()
 

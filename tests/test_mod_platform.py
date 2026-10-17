@@ -5,16 +5,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 from core.db_manager import (
-    NON_STEAM_MOD_ID_BASE,
     PLATFORM_GITHUB,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
     DatabaseManager,
 )
 from core.mod_platform import ModFileEntry, ModFilesBundle, steam_workshop_url
-from core.models import ModMetadata
+from services.identity_service import identity_create_scope
 
 
 @pytest.fixture()
@@ -69,15 +69,17 @@ def test_migration_adds_platform_columns(tmp_path: Path) -> None:
     info = manager.get_mod_display_info(4242)
     assert info is not None
     assert info.platform == PLATFORM_STEAM
-    assert info.external_id == "4242"
-    assert "filedetails/?id=4242" in info.source_url
+    # Contiguous PK remapping forbids backfilling Workshop digits from mod_id.
+    assert str(info.external_id or "") == ""
     manager.close()
     DatabaseManager.reset_instance()
 
 
 def test_steam_upsert_sets_platform_fields(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="555", title="Cool"))
-    info = db.get_mod_display_info(555)
+    created = create_steam_test_mod(db, external_id="555", title="Cool")
+    pk = str(created.mod_id)
+
+    info = db.get_mod_display_info(pk)
     assert info is not None
     assert info.platform == PLATFORM_STEAM
     assert info.external_id == "555"
@@ -103,7 +105,8 @@ def test_nexus_multi_file_stays_one_mod(db: DatabaseManager) -> None:
         game_name="Palworld",
         mod_files=bundle,
     )
-    assert int(info.mod_id) >= NON_STEAM_MOD_ID_BASE
+    assert str(info.mod_id).isdigit()
+    assert int(info.mod_id) >= 1
     assert info.platform == PLATFORM_NEXUS
     assert info.external_id == "12345"
     files = db.get_mod_files(info.mod_id)
@@ -135,32 +138,40 @@ def test_github_register(db: DatabaseManager) -> None:
     )
     assert info.platform == PLATFORM_GITHUB
     assert info.external_id == "owner/repo"
-    found = db.find_mod_by_external(PLATFORM_GITHUB, "owner/repo", app_id=1623730)
+    # Registration lookup is (platform, app_id, workspace_id) — not external_id.
+    found = db.find_mod_for_registration(
+        PLATFORM_GITHUB, 1623730, str(info.workspace_id)
+    )
     assert found is not None
     assert found.mod_id == info.mod_id
+    assert found.external_id == "owner/repo"
 
 
 def test_set_mod_files_roundtrip(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="77", title="Pak"))
+    created = create_steam_test_mod(db, external_id="77", title="Pak")
+    pk = str(created.mod_id)
+
     db.set_mod_files(
-        77,
+        pk,
         {
             "files": [
                 {"name": "A", "type": "main", "path": "a.pak", "enabled": True},
             ]
         },
     )
-    got = db.get_mod_files(77)
+    got = db.get_mod_files(pk)
     assert len(got.files) == 1
     assert got.files[0].name == "A"
     assert got.to_dict()["files"][0]["path"] == "a.pak"
 
 
-def test_allocate_mod_id_high_range(db: DatabaseManager) -> None:
-    a = db.allocate_mod_id()
-    assert a == NON_STEAM_MOD_ID_BASE
+def test_allocate_mod_id_contiguous(db: DatabaseManager) -> None:
+    with identity_create_scope():
+        a = db.allocate_mod_id()
+    assert a >= 1
     db.update_mod_platform_info(
         a, platform=PLATFORM_NEXUS, external_id="1", title="X"
     )
-    b = db.allocate_mod_id()
+    with identity_create_scope():
+        b = db.allocate_mod_id()
     assert b == a + 1

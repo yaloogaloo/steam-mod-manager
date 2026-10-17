@@ -220,8 +220,9 @@ class ModioOfflineProvider(OfflineProvider):
         managed_path: str | Path | None = None,
         library_root: str | Path | None = None,
         metadata: Any | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
-        del metadata
+        del metadata, force_refresh
         mid = str(mod_id).strip()
         database = get_db()
         root = Path(library_root) if library_root else default_mod_library()

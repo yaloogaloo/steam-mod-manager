@@ -7,7 +7,6 @@ Reuses ``SteamWorkshopClient.refresh_details`` and folder sanitize helpers.
 from __future__ import annotations
 
 import gc
-import json
 import logging
 import os
 import time
@@ -17,10 +16,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 from core.models import ModMetadata, is_unknown_mod_title
+from services.crash_trace import log_exception, traced
 from core.mod_platform import (
-    PLATFORM_MODIO,
     PLATFORM_NEXUS,
     PLATFORM_STEAM,
+    is_internal_mod_id,
     normalize_platform,
     silent_correct_nexus_workspace_id,
 )
@@ -35,6 +35,67 @@ from services.file_ops import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_mod_refresh_failed(
+    *,
+    mod_id: str = "",
+    workspace_id: str = "",
+    app_id: int | str = 0,
+    title: str = "",
+    stage: str = "",
+    reason: str = "",
+    exception: BaseException | None = None,
+) -> None:
+    """Structured refresh failure — never silent."""
+    payload = (
+        "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=%s app_id=%s title=%r "
+        "stage=%s reason=%s exception=%s"
+    )
+    args = (
+        str(mod_id or "").strip() or "—",
+        str(workspace_id or "").strip() or "—",
+        str(app_id or 0),
+        str(title or "").strip() or "—",
+        str(stage or "").strip() or "—",
+        str(reason or "").strip() or "—",
+        repr(exception) if exception is not None else "—",
+    )
+    if exception is not None:
+        logger.exception(payload, *args)
+    else:
+        logger.error(payload, *args)
+
+
+def resolve_steam_workshop_external_id(database: Any, mod_id: str) -> str:
+    """Steam Workshop published_file_id from the entity row — never treat PK as Workshop.
+
+    *mod_id* must be ``mods.mod_id`` (SQLite PK). Workshop id comes from
+    ``external_id`` or ``workspace_id`` on that row. Never invent Workshop
+    identity from the PK digits alone (PK may be a small sequential id).
+    """
+    mid = str(mod_id or "").strip()
+    if not mid.isdigit() or database is None:
+        return ""
+    try:
+        info = database.get_mod_display_info(mid)
+    except Exception as exc:  # noqa: BLE001
+        _log_mod_refresh_failed(
+            mod_id=mid,
+            stage="resolve_steam_workshop_external_id",
+            reason="get_mod_display_info raised",
+            exception=exc,
+        )
+        return ""
+    if info is None:
+        return ""
+    for candidate in (
+        str(getattr(info, "external_id", "") or "").strip(),
+        str(getattr(info, "workspace_id", "") or "").strip(),
+    ):
+        if candidate.isdigit() and not is_internal_mod_id(candidate):
+            return candidate
+    return ""
 
 MetadataProgress = Callable[[int, int, str], None]
 
@@ -54,6 +115,7 @@ __all__ = [
     "refresh_steam_mod_metadata",
     "refresh_steam_mods_metadata",
     "rename_managed_folder_for_title",
+    "resolve_steam_workshop_external_id",
     "safe_directory_rename",
 ]
 
@@ -102,12 +164,8 @@ def _persist_cleared_fetch_error(managed_path: Path) -> None:
     if not data or "fetch_error" not in data:
         return
     data.pop("fetch_error", None)
-    info = Path(managed_path) / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    meta_file = info / "metadata.json"
-    meta_file.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    persist_unified_metadata_dict(
+        managed_path, data, sync_backup=False, sync_reason="refresh"
     )
 
 
@@ -145,11 +203,8 @@ def _clear_placeholder_display_name(mod_id: str, managed_path: Path) -> None:
         dn = str(data.get("display_name") or "").strip()
         if is_unknown_mod_title(dn, published_file_id=mid):
             data.pop("display_name", None)
-            info = folder / INFO_DIR_NAME
-            info.mkdir(parents=True, exist_ok=True)
-            (info / "metadata.json").write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            persist_unified_metadata_dict(
+                folder, data, sync_backup=False, sync_reason="refresh"
             )
 
     # SQLite user override column
@@ -529,11 +584,14 @@ def rename_managed_folder_for_title(
     if desired == folder.name:
         return folder, False
 
-    # Only rename away from unknown / numeric leaf names (safe for deployed state:
-    # deploy tracks mod_id, not folder path).
-    if not is_unknown_mod_title(folder.name, published_file_id=meta.published_file_id):
-        # Folder already has a human name; still allow rename when it is clearly
-        # the placeholder style, otherwise keep path stable.
+    # Only rename away from unknown / numeric / clean ``Mod_<id>`` leaf names
+    # (safe for deployed state: deploy tracks mod_id, not folder path).
+    from core.models import is_placeholder_library_folder_name
+
+    if not is_placeholder_library_folder_name(
+        folder.name, published_file_id=meta.published_file_id
+    ):
+        # Folder already has a human name; keep path stable.
         return folder, False
 
     target = unique_destination(
@@ -553,6 +611,7 @@ def rename_managed_folder_for_title(
     return target, True
 
 
+@traced("refresh_steam_mod_metadata")
 def refresh_steam_mod_metadata(
     mod_id: str | int,
     managed_path: str | Path,
@@ -568,7 +627,7 @@ def refresh_steam_mod_metadata(
     Re-fetch Steam Workshop metadata for one managed Mod and persist results.
 
     When *force* is False (default), healthy mods are skipped (Feature 3).
-    When *allow_official_sync* is False or ``official_metadata_synced`` is set,
+    When *allow_official_sync* is False, or an automatic refresh was already synced,
     no network I/O is performed.
     """
     from core.db_manager import get_db
@@ -584,12 +643,87 @@ def refresh_steam_mod_metadata(
     folder = Path(managed_path).expanduser().resolve()
     database = db if db is not None else get_db()
 
+    title_hint = folder.name
+    app_id_hint: int | str = 0
+    workspace_hint = ""
+    existing_row = None
+    if not mid.isdigit():
+        _log_mod_refresh_failed(
+            mod_id=mid,
+            title=title_hint,
+            stage="identity_validate",
+            reason="mod_id must be mods.mod_id (SQLite PK); folder.name/workspace_id forbidden",
+        )
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=False,
+            managed_path=folder,
+            old_path=folder,
+            error="Steam refresh requires mods.mod_id (internal PK)",
+        )
+    try:
+        existing_row = database.get_mod_display_info(mid)
+    except Exception as exc:  # noqa: BLE001
+        _log_mod_refresh_failed(
+            mod_id=mid,
+            title=title_hint,
+            stage="identity_validate",
+            reason="get_mod_display_info raised",
+            exception=exc,
+        )
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=False,
+            managed_path=folder,
+            old_path=folder,
+            error=f"Steam refresh identity lookup failed: {exc}",
+        )
+    if existing_row is None:
+        _log_mod_refresh_failed(
+            mod_id=mid,
+            title=title_hint,
+            stage="identity_validate",
+            reason="mods row missing for mod_id (do not pass workspace_id/published_file_id as PK)",
+        )
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=False,
+            managed_path=folder,
+            old_path=folder,
+            error="Steam refresh target mods row not found",
+        )
+    workspace_hint = str(getattr(existing_row, "workspace_id", "") or "").strip()
+    app_id_hint = int(getattr(existing_row, "app_id", 0) or 0)
+    title_hint = (
+        str(getattr(existing_row, "display_name", "") or "").strip()
+        or str(getattr(existing_row, "steam_name", "") or "").strip()
+        or title_hint
+    )
+
+    steam_external_id = resolve_steam_workshop_external_id(database, mid)
+    if not steam_external_id:
+        _log_mod_refresh_failed(
+            mod_id=mid,
+            workspace_id=workspace_hint,
+            app_id=app_id_hint,
+            title=title_hint,
+            stage="resolve_workshop_id",
+            reason="external_id/workspace_id missing; will not use mod_id as published_file_id",
+        )
+        return MetadataRefreshResult(
+            mod_id=mid,
+            success=False,
+            managed_path=folder,
+            old_path=folder,
+            error="Steam identity unresolved; refresh will not use internal mod_id as published_file_id",
+        )
+
     from services.path_lifecycle import record_filesystem_rename, resolve_managed_folder
 
     resolved = resolve_managed_folder(mid, hint_path=folder, db=database)
     folder = resolved.path or folder
 
-    if not allow_official_sync or database.is_official_metadata_synced(mid):
+    if not allow_official_sync or (database.is_official_metadata_synced(mid) and not force):
         existing = None
         try:
             root = Path(library_root) if library_root else (
@@ -634,20 +768,35 @@ def refresh_steam_mod_metadata(
         else ""
     )
 
+    from services.file_ops import read_info_metadata_dict
+    from services.metadata_backup_sync import metadata_fingerprint
+
+    # Capture before any provider write — compare after to gate backup dirty.
+    pre_refresh_fp = metadata_fingerprint(read_info_metadata_dict(folder) or {})
+
     owns_client = client is None
     api = client or SteamWorkshopClient(enable_scrape_fallback=False)
     try:
         try:
             # Manual refresh: only this mod id, API retries, no workshop scrape fan-out.
             fetched_list = api.refresh_details(
-                [mid],
+                [steam_external_id],
                 enable_scrape_fallback=False,
             )
             fetched = fetched_list[0] if fetched_list else ModMetadata(
-                published_file_id=mid,
+                published_file_id=steam_external_id,
                 fetch_error="Empty response from Steam API",
             )
         except Exception as exc:  # noqa: BLE001
+            _log_mod_refresh_failed(
+                mod_id=mid,
+                workspace_id=workspace_hint or steam_external_id,
+                app_id=app_id_hint,
+                title=title_hint,
+                stage="steam_api_fetch",
+                reason="Steam metadata fetch raised",
+                exception=exc,
+            )
             return MetadataRefreshResult(
                 mod_id=mid,
                 success=False,
@@ -657,11 +806,11 @@ def refresh_steam_mod_metadata(
             )
 
         if fetched.fetch_error or is_unknown_mod_title(
-            fetched.title, published_file_id=mid
+            fetched.title, published_file_id=steam_external_id
         ):
             # Persist failure marker so UI / next retry still see fetch_error.
-            failed = existing or ModMetadata(published_file_id=mid)
-            failed.published_file_id = mid
+            failed = existing or ModMetadata(published_file_id=steam_external_id)
+            failed.published_file_id = steam_external_id
             if fetched.title:
                 failed.title = fetched.title
             failed.fetch_error = (
@@ -673,6 +822,14 @@ def refresh_steam_mod_metadata(
                 mgr.save_metadata(failed, folder)
             except OSError:
                 pass
+            _log_mod_refresh_failed(
+                mod_id=mid,
+                workspace_id=workspace_hint or steam_external_id,
+                app_id=app_id_hint or getattr(fetched, "app_id", 0) or 0,
+                title=failed.title or title_hint,
+                stage="steam_api_payload",
+                reason=failed.fetch_error,
+            )
             return MetadataRefreshResult(
                 mod_id=mid,
                 success=False,
@@ -683,8 +840,11 @@ def refresh_steam_mod_metadata(
             )
 
         # Merge into existing sidecar fields we want to keep.
-        meta = existing or ModMetadata(published_file_id=mid)
-        meta.published_file_id = mid
+        if app_id_hint and fetched.app_id and int(fetched.app_id) != int(app_id_hint):
+            return MetadataRefreshResult(mod_id=mid, success=False, managed_path=folder,
+                old_path=folder, error='Steam 来源所属游戏与当前 Mod 不匹配，拒绝更新')
+        meta = existing or ModMetadata(published_file_id=steam_external_id)
+        meta.published_file_id = steam_external_id
         meta.title = fetched.title.strip()
         official_description = str(fetched.description or "").strip()
         if official_description and should_apply_official_field(
@@ -708,8 +868,15 @@ def refresh_steam_mod_metadata(
         local_cover = (
             str(display_info.cover_path or "").strip()
             if display_info
-            else str(meta.cover_path or "")
-        )
+            else ""
+        ) or str(meta.cover_path or "")
+        if not local_cover:
+            try:
+                disk = mgr.find_local_cover(folder)
+            except Exception:  # noqa: BLE001
+                disk = None
+            if disk is not None:
+                local_cover = str(disk)
 
         # Cover under .info/
         cover_path = ""
@@ -747,6 +914,15 @@ def refresh_steam_mod_metadata(
                 folder, meta, library_root=root
             )
         except OSError as exc:
+            _log_mod_refresh_failed(
+                mod_id=mid,
+                workspace_id=workspace_hint or steam_external_id,
+                app_id=app_id_hint or meta.app_id,
+                title=meta.title or title_hint,
+                stage="folder_rename",
+                reason="Folder rename failed",
+                exception=exc,
+            )
             return MetadataRefreshResult(
                 mod_id=mid,
                 success=False,
@@ -768,6 +944,14 @@ def refresh_steam_mod_metadata(
                 db=database,
             )
             if not path_commit.success:
+                _log_mod_refresh_failed(
+                    mod_id=mid,
+                    workspace_id=workspace_hint or steam_external_id,
+                    app_id=app_id_hint or meta.app_id,
+                    title=meta.title or title_hint,
+                    stage="path_commit",
+                    reason=path_commit.error or "路径提交失败",
+                )
                 return MetadataRefreshResult(
                     mod_id=mid,
                     success=False,
@@ -799,22 +983,57 @@ def refresh_steam_mod_metadata(
         else:
             meta.json_display_name = local_display
 
-        # Upsert Steam title first so sidecar merge / Detail see the real name.
+        # Update Steam catalog fields on the existing mods.mod_id row only.
+        # Never upsert_mod(published_file_id=workshop) — Workshop is not PK.
         try:
-            from core.db_manager import get_db
-
-            upsert_meta = ModMetadata(
-                published_file_id=mid,
-                title=meta.title,
-                description=official_description or meta.description or "",
-                preview_url=meta.preview_url,
-                app_id=meta.app_id,
-            )
-            database.upsert_mod(upsert_meta)
+            row_now = database.get_mod_display_info(mid)
+            if row_now is None:
+                _log_mod_refresh_failed(
+                    mod_id=mid,
+                    workspace_id=workspace_hint or steam_external_id,
+                    app_id=app_id_hint or meta.app_id,
+                    title=meta.title or title_hint,
+                    stage="db_write",
+                    reason="target mods row missing before official field update",
+                )
+                return MetadataRefreshResult(
+                    mod_id=mid,
+                    success=False,
+                    managed_path=new_path,
+                    old_path=folder,
+                    renamed=renamed,
+                    title=meta.title,
+                    error="Steam refresh target mods row not found",
+                    cover_path=cover_path,
+                )
+            update_kwargs: dict[str, Any] = {
+                "title": meta.title,
+                "description": official_description or meta.description or "",
+                "preview_url": meta.preview_url or "",
+            }
+            if int(meta.app_id or 0) > 0:
+                update_kwargs["app_id"] = int(meta.app_id)
+            database.update_mod_platform_info(mid, **update_kwargs)
             _clear_placeholder_display_name(mid, new_path)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "DB upsert after metadata refresh failed for %s: %s", mid, exc
+            _log_mod_refresh_failed(
+                mod_id=mid,
+                workspace_id=workspace_hint or steam_external_id,
+                app_id=app_id_hint or meta.app_id,
+                title=meta.title or title_hint,
+                stage="db_write",
+                reason="update_mod_platform_info failed",
+                exception=exc,
+            )
+            return MetadataRefreshResult(
+                mod_id=mid,
+                success=False,
+                managed_path=new_path,
+                old_path=folder,
+                renamed=renamed,
+                title=meta.title,
+                error=f"DB update after metadata refresh failed: {exc}",
+                cover_path=cover_path,
             )
 
         try:
@@ -824,6 +1043,8 @@ def refresh_steam_mod_metadata(
                 from services.importers.image_picker import relative_cover_path
 
                 cover_rel = relative_cover_path(new_path, Path(cover_path))
+            # Preserve sidecar keys not in the official Steam payload
+            # (including Witcher 3 ONLY game_version — never a Workshop field).
             merged_sidecar = merge_official_sidecar_fields(
                 read_info_metadata_dict(new_path) or {},
                 mod_id=mid,
@@ -842,6 +1063,15 @@ def refresh_steam_mod_metadata(
             _persist_cleared_fetch_error(new_path)
             _clear_placeholder_display_name(mid, new_path)
         except OSError as exc:
+            _log_mod_refresh_failed(
+                mod_id=mid,
+                workspace_id=workspace_hint or steam_external_id,
+                app_id=app_id_hint or meta.app_id,
+                title=meta.title or title_hint,
+                stage="sidecar_write",
+                reason="Failed to write metadata.json",
+                exception=exc,
+            )
             return MetadataRefreshResult(
                 mod_id=mid,
                 success=False,
@@ -854,9 +1084,17 @@ def refresh_steam_mod_metadata(
             )
 
         try:
-            from services.metadata_backup_sync import sync_after_metadata_change
+            from services.file_ops import read_info_metadata_dict
+            from services.metadata_backup_sync import (
+                metadata_fingerprint,
+                sync_after_metadata_change,
+            )
 
-            sync_after_metadata_change(mid, new_path, "refresh")
+            # ARCHITECTURE RULE: Refresh dirties backup only when metadata
+            # actually changed. Identical provider payload → no enqueue.
+            new_fp = metadata_fingerprint(read_info_metadata_dict(new_path) or {})
+            if new_fp != pre_refresh_fp:
+                sync_after_metadata_change(mid, new_path, "refresh")
         except Exception:  # noqa: BLE001
             pass
 
@@ -1001,6 +1239,8 @@ def filter_steam_batch_entries(
     for mid, path, plat in entries:
         if normalize_platform(plat) != PLATFORM_STEAM:
             continue
+        if is_internal_mod_id(mid):
+            continue
         out.append((str(mid), Path(path)))
     return out
 
@@ -1075,6 +1315,12 @@ def refresh_selected_mods_metadata(
                 silent_correct_nexus_workspace_id(mid)
             results.append(result)
         except Exception as exc:  # noqa: BLE001
+            log_exception(
+                "refresh_selected_mods_metadata.item",
+                mod_id=mid,
+                platform=plat,
+                path=str(path),
+            )
             results.append(
                 MetadataRefreshResult(
                     mod_id=mid,

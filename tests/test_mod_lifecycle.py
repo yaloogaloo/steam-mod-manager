@@ -8,6 +8,7 @@ import pytest
 
 from core.db_manager import DatabaseManager, ModVersionInfo
 from core.models import ModMetadata
+from tests.helpers.identity import create_steam_test_mod
 
 
 @pytest.fixture()
@@ -70,9 +71,10 @@ def test_version_migration(tmp_path: Path) -> None:
 
 
 def test_version_storage_and_update_flag(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="101", title="Auto Pickup"))
+    pk = int(create_steam_test_mod(db, external_id="101", title="Auto Pickup").mod_id)
+
     st = db.update_mod_version(
-        101,
+        pk,
         mod_version="1.2.0",
         installed_version="1.1.0",
         version_source="nexus",
@@ -85,19 +87,20 @@ def test_version_storage_and_update_flag(db: DatabaseManager) -> None:
     assert st.version_checked_at
 
     # Updating latest must not wipe installed unless explicitly passed
-    st2 = db.update_mod_version(101, mod_version="1.3.0", touch_checked_at=True)
+    st2 = db.update_mod_version(pk, mod_version="1.3.0", touch_checked_at=True)
     assert st2.mod_version == "1.3.0"
     assert st2.installed_version == "1.1.0"
 
-    st3 = db.update_mod_version(101, installed_version="1.3.0")
+    st3 = db.update_mod_version(pk, installed_version="1.3.0")
     assert st3.has_update is False
     assert st3.status_label == "Up to date"
 
 
 def test_get_mod_version_dict(db: DatabaseManager) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="102", title="X"))
-    db.update_mod_version(102, mod_version="2.0", installed_version="2.0")
-    d = db.get_mod_version(102).to_dict()
-    assert d["mod_id"] == "102"
+    pk = str(create_steam_test_mod(db, external_id="102", title="X").mod_id)
+
+    db.update_mod_version(pk, mod_version="2.0", installed_version="2.0")
+    d = db.get_mod_version(pk).to_dict()
+    assert d["mod_id"] == pk
     assert d["has_update"] is False
     assert d["status"] == "Up to date"

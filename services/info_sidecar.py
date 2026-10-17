@@ -17,8 +17,10 @@ from core.mod_platform import (
     METADATA_SOURCE_TYPE_KEY,
     ModFileEntry,
     ModFilesBundle,
+    is_internal_mod_id,
     normalize_file_role,
     normalize_platform,
+    normalize_platform_if_known,
     parse_metadata_platform,
 )
 from services.file_ops import (
@@ -58,7 +60,14 @@ def _badge_kind(entry: ModFileEntry) -> str | None:
 
 @dataclass
 class InfoSidecar:
-    """Full portable snapshot written beside the Mod under ``.info/``."""
+    """Portable ``.info`` snapshot.
+
+    Filesystem binding: ``internal_id`` (required after Sync/Import registration).
+    Same value as Entity ``mods.internal_id`` — not a separate Mod ID.
+    User display: ``workspace_id``.
+    Platform identity: ``url`` / ``published_file_id`` (Steam Workshop ID for
+    recovery — not a second user-facing Mod ID / not a runtime locator).
+    """
 
     display_name: str = ""
     description: str = ""
@@ -68,11 +77,17 @@ class InfoSidecar:
     custom_deploy_path: str = ""
     offline_page_path: str = ""
     cover_path: str = ""
+    # Steam Workshop ID for technical recovery only — not a second user Mod ID.
     published_file_id: str = ""
+    # Same Entity.internal_id persisted on disk (``.info/metadata.json``).
+    internal_id: str = ""
     category: str = ""
     # Workspace IDs this Mod depends on (deploy-before list).
     dependencies: list[str] = field(default_factory=list)
     file_roles: dict[str, str] = field(default_factory=dict)
+    # Witcher 3 ONLY: original | next_gen | remake. Omit when empty (other games).
+    # Never confuse with Mod.io ``version`` / Steam revision / mod_version.
+    game_version: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -89,6 +104,16 @@ class InfoSidecar:
             for x in deps
             if str(x or "").strip()
         ]
+        gv = str(data.get("game_version") or "").strip()
+        if gv:
+            data["game_version"] = gv
+        else:
+            data.pop("game_version", None)
+        # Canonical write: internal_id only (strip temporary legacy entity_key).
+        from services.mod_identity import set_info_internal_id
+
+        key = str(data.pop("internal_id", "") or "").strip()
+        data = set_info_internal_id(data, key)
         return data
 
     @classmethod
@@ -123,6 +148,12 @@ class InfoSidecar:
                     wid = str(item or "").strip()
                 if wid and wid not in dependencies:
                     dependencies.append(wid)
+        from core.witcher3_game_version import is_valid_witcher3_game_version
+        from services.mod_identity import read_internal_id
+
+        raw_gv = str(raw.get("game_version") or "").strip()
+        # Never read Mod.io / Steam ``version`` into this field.
+        game_version = raw_gv if is_valid_witcher3_game_version(raw_gv) else ""
         return cls(
             display_name=str(raw.get("display_name") or "").strip(),
             description=str(raw.get("description") or "").strip(),
@@ -140,9 +171,11 @@ class InfoSidecar:
             ).strip(),
             cover_path=str(raw.get("cover_path") or "").strip(),
             published_file_id=str(raw.get("published_file_id") or "").strip(),
+            internal_id=read_internal_id(raw),
             category=str(raw.get("category") or "").strip(),
             dependencies=dependencies,
             file_roles=roles,
+            game_version=game_version,
         )
 
 
@@ -255,6 +288,7 @@ def build_sidecar_from_db(
     category = ""
     dependencies: list[str] = []
     bundle = None
+    game_version = ""
     if info is not None:
         # Only the raw user override — never the resolved steam/unknown label.
         display_name = str(info.user_display_name or "").strip()
@@ -268,12 +302,24 @@ def build_sidecar_from_db(
         except Exception:  # noqa: BLE001
             pass
         description = str(info.custom_description or "").strip()
-        source_type = normalize_platform(info.platform)
+        source_type = normalize_platform_if_known(info.platform) or str(info.platform or "")
         url = str(info.source_url or "").strip()
-        workspace_id = str(info.workspace_id or "").strip()
+        from services.identity_service import persist_workspace_id, sidecar_published_file_id
+
+        workspace_id = persist_workspace_id(
+            platform=source_type,
+            mod_id=info.mod_id,
+            workspace_id=str(info.workspace_id or ""),
+            source_url=url,
+            external_id=str(info.external_id or ""),
+        )
         custom_deploy_path = str(info.custom_deploy_path or "").strip()
         cover_path = str(info.cover_path or "").strip()
-        published = str(info.mod_id or mod_id)
+        published = sidecar_published_file_id(
+            mod_id=info.mod_id,
+            platform=source_type,
+            external_id=str(info.external_id or ""),
+        )
         bundle = info.mod_files
         cat_tags = database.get_category_tags(str(mod_id))
         category = cat_tags[0] if cat_tags else ""
@@ -288,11 +334,26 @@ def build_sidecar_from_db(
                     str(dep_info.workspace_id or "").strip()
                     if dep_info is not None
                     else ""
-                ) or tid
+                )
+                from core.mod_platform import is_internal_mod_id
+
+                if is_internal_mod_id(wid):
+                    wid = ""
+                if not wid and tid and not is_internal_mod_id(tid):
+                    wid = tid
                 if wid not in dependencies:
                     dependencies.append(wid)
         except Exception:  # noqa: BLE001
             pass
+        from core.witcher3_game_version import (
+            is_valid_witcher3_game_version,
+            is_witcher3_game,
+        )
+
+        if is_witcher3_game("", getattr(info, "app_id", 0)) and is_valid_witcher3_game_version(
+            getattr(info, "game_version", "")
+        ):
+            game_version = str(info.game_version).strip()
     if meta is not None:
         if not display_name:
             candidate = str(meta.effective_title() or "").strip()
@@ -326,7 +387,18 @@ def build_sidecar_from_db(
         except Exception:  # noqa: BLE001
             pass
 
-    return InfoSidecar(
+    proof_internal = ""
+    if info is not None:
+        row = None
+        try:
+            row = database.get_mod_backup_row(mod_id)
+        except Exception:  # noqa: BLE001
+            row = None
+        proof_internal = str((row or {}).get("internal_id") or "").strip()
+        # Never collapse empty TEXT onto str(mod_id). Create mints a durable
+        # UUID before sidecar write. Existing collapsed rows keep their value.
+
+    sidecar = InfoSidecar(
         display_name=display_name,
         description=description,
         source_type=source_type,
@@ -336,10 +408,14 @@ def build_sidecar_from_db(
         offline_page_path=offline_page_path,
         cover_path=cover_path,
         published_file_id=published,
+        # Same Entity.internal_id persisted on disk (not a third Mod ID).
+        internal_id=proof_internal,
         category=category,
         dependencies=dependencies,
         file_roles=file_roles_from_bundle(bundle),
+        game_version=game_version,
     )
+    return sidecar
 
 
 def write_sidecar_for_mod(
@@ -358,45 +434,141 @@ def write_sidecar_for_mod(
     if not mid:
         data = read_info_metadata_dict(root)
         if data:
-            mid = str(data.get("published_file_id") or "").strip()
-    if not mid or not mid.isdigit():
+            from services.mod_identity import read_internal_id
+
+            mid = read_internal_id(data)
+    from services.mod_library_cache import dal_mod_pk
+
+    pk = dal_mod_pk(mid) if mid else ""
+    if not pk:
         return None
     try:
-        sidecar = build_sidecar_from_db(mid, root, db=db)
-        return save_info_sidecar(
+        sidecar = build_sidecar_from_db(pk, root, db=db)
+        path = save_info_sidecar(
             root, sidecar, sync_backup=sync_backup, sync_reason=sync_reason
         )
+        # Ensure entity proof + registration axes are present on disk.
+        from core.db_manager import get_db
+        from services.mod_identity import set_info_internal_id
+
+        database = db if db is not None else get_db()
+        info = database.get_mod_display_info(pk)
+        patch: dict[str, Any] = {}
+        if sidecar.internal_id:
+            patch = set_info_internal_id(patch, sidecar.internal_id)
+        if info is not None:
+            if int(getattr(info, "app_id", 0) or 0) > 0:
+                patch["app_id"] = int(info.app_id)
+            plat = normalize_platform_if_known(info.platform) or str(info.platform or "")
+            if plat:
+                patch["platform"] = plat
+                patch[METADATA_SOURCE_TYPE_KEY] = plat
+            ws = str(info.workspace_id or "").strip()
+            if ws:
+                patch["workspace_id"] = ws
+        if patch:
+            base = read_info_metadata_dict(root) or {}
+            merged = _merge_metadata_patch(base, patch)
+            persist_unified_metadata_dict(
+                root, merged, sync_backup=False, sync_reason=sync_reason
+            )
+        return path
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to write info sidecar for %s: %s", root, exc)
         return None
 
 
+def ensure_registration_info_proof(
+    managed_path: str | Path,
+    mod_id: int | str,
+    *,
+    db=None,
+) -> None:
+    """
+    After Sync/Import entity registration: require ``.info`` with
+    ``internal_id`` + ``workspace_id`` (when DB has a workspace).
+
+    ``.info/internal_id`` must equal Entity ``mods.internal_id`` — same
+    business identity persisted on disk, not a separate Mod ID.
+
+    Raises ``ValueError`` when proof cannot be written — DB entity must not
+    remain without disk identity proof. Never writes external/workshop-only
+    sidecar as sole identity. Never writes workspace_id / external_id alone.
+    """
+    from services.mod_identity import read_internal_id, set_info_internal_id
+
+    mid = str(mod_id or "").strip()
+    root = Path(managed_path)
+    if not mid.isdigit() or not root.is_dir():
+        raise ValueError("registration failed: missing managed folder or mod_id")
+    written = write_sidecar_for_mod(
+        root, mid, db=db, sync_backup=False, sync_reason="import"
+    )
+    data = read_info_metadata_dict(root) or {}
+    disk_key = read_internal_id(data)
+    if not disk_key:
+        raise ValueError(
+            f"registration failed: .info missing internal_id for mod_id={mid}"
+        )
+    try:
+        from core.db_manager import get_db
+
+        database = db if db is not None else get_db()
+        info = database.get_mod_display_info(mid)
+        expected_ws = str(getattr(info, "workspace_id", "") or "").strip() if info else ""
+        row = database.get_mod_backup_row(mid) or {}
+        expected_key = str(row.get("internal_id") or "").strip() or mid
+    except Exception:  # noqa: BLE001
+        expected_ws = ""
+        expected_key = mid
+    if expected_key and disk_key != expected_key:
+        # Force Frozen Entity.internal_id onto disk when mismatched.
+        patch = set_info_internal_id(dict(data), expected_key)
+        if expected_ws:
+            patch["workspace_id"] = expected_ws
+        from services.file_ops import persist_unified_metadata_dict
+
+        persist_unified_metadata_dict(
+            root, patch, sync_backup=False, sync_reason="import"
+        )
+        data = read_info_metadata_dict(root) or {}
+        disk_key = read_internal_id(data)
+        if disk_key != expected_key:
+            raise ValueError(
+                f"registration failed: .info internal_id mismatch "
+                f"disk={disk_key!r} db_internal_id={expected_key!r} for mod_id={mid}"
+            )
+    disk_ws = str(data.get("workspace_id") or "").strip()
+    if expected_ws and disk_ws != expected_ws:
+        raise ValueError(
+            f"registration failed: .info missing workspace_id={expected_ws!r} "
+            f"for mod_id={mid}"
+        )
+    if written is None and not root.joinpath(INFO_DIR_NAME).is_dir():
+        raise ValueError(
+            f"registration failed: could not write .info for mod_id={mid}"
+        )
+
+
 def _apply_roles_to_bundle(
     bundle: ModFilesBundle, roles: Mapping[str, str], *, platform: str
 ) -> ModFilesBundle:
-    """Apply Main/Source labels from sidecar onto scanned/existing entries."""
-    from services.mod_files import main_role_for_platform, source_role_for_platform
+    """Apply Main/Source labels from sidecar onto scanned/existing entries.
 
-    main_id = ""
-    source_id = ""
-    for entry in bundle.files:
-        name = str(entry.filename or Path(entry.path or "").name or "").strip()
-        label = roles.get(name, "")
-        if label == ROLE_MAIN and not main_id:
-            main_id = str(entry.id or "")
-        elif label == ROLE_SOURCE and not source_id:
-            source_id = str(entry.id or "")
+    Each filename keeps its own label. Multiple Main / Source keys are all
+    applied — first-wins is not used.
+    """
+    from services.mod_files import main_role_for_platform, source_role_for_platform
 
     main_role = main_role_for_platform(platform)
     source_role = source_role_for_platform(platform)
     for entry in bundle.files:
-        eid = str(entry.id or "")
         name = str(entry.filename or Path(entry.path or "").name or "").strip()
         label = roles.get(name, ROLE_OTHER)
-        if eid == main_id or label == ROLE_MAIN:
+        if label == ROLE_MAIN:
             entry.file_role = main_role
             # Role only — never force Main checked (user may uncheck for deploy).
-        elif eid == source_id or label == ROLE_SOURCE:
+        elif label == ROLE_SOURCE:
             entry.file_role = source_role
             # Source is never deployed.
             entry.set_selection(False)
@@ -421,6 +593,7 @@ def apply_sidecar_to_db(
     Returns True when a sidecar was found and applied.
     """
     from core.db_manager import get_db
+    from services.identity_service import lifecycle_scope
     from services.importers.local_scanner import scan_mod_directory
     from services.mod_files import ModFileManager as JsonMgr
 
@@ -430,19 +603,19 @@ def apply_sidecar_to_db(
         return False
 
     database = db if db is not None else get_db()
-    mid = str(mod_id or sidecar.published_file_id or "").strip()
+    pub = str(sidecar.published_file_id or "").strip()
+    if is_internal_mod_id(pub):
+        pub = ""
+    # Entity PK only — never fall back to Workshop published_file_id.
+    mid = str(mod_id or getattr(sidecar, "internal_id", "") or "").strip()
     if not mid or not mid.isdigit():
         return False
 
-    # Ensure row exists.
-    try:
-        with database._lock:  # noqa: SLF001
-            database._ensure_mod_stub(int(mid))  # noqa: SLF001
-            database._conn.commit()  # noqa: SLF001
-    except Exception:  # noqa: BLE001
-        pass
-
-    existing = database.get_mod_display_info(mid)
+    with lifecycle_scope("sidecar"):
+        existing = database.get_mod_display_info(mid)
+        if existing is None:
+            logger.warning("apply_sidecar_to_db refused create for missing mod_id=%s", mid)
+            return False
     sidecar_display = str(sidecar.display_name or "").strip()
     try:
         from core.models import is_unknown_mod_title
@@ -462,9 +635,12 @@ def apply_sidecar_to_db(
                 existing_user = ""
         except Exception:  # noqa: BLE001
             pass
+    from services.metadata_ownership import FIELD_DISPLAY_NAME, FIELD_DESCRIPTION
+    overrides = database.get_user_override_fields(mid)
     patch: dict[str, Any] = {
-        "display_name": sidecar_display or existing_user or "",
+        "display_name": existing_user if overrides.get(FIELD_DISPLAY_NAME) else (sidecar_display or existing_user or ""),
         "custom_description": (
+            existing.custom_description if overrides.get(FIELD_DESCRIPTION) else
             sidecar.description
             if sidecar.description
             else (existing.custom_description if existing else "")
@@ -472,39 +648,88 @@ def apply_sidecar_to_db(
         "user_notes": (existing.user_notes if existing else ""),
         "favorite": bool(existing.favorite) if existing else False,
     }
-    if sidecar.url:
-        patch["source_url"] = sidecar.url
-    elif existing is not None and existing.source_url:
-        patch["source_url"] = existing.source_url
-    if sidecar.source_type:
-        patch["platform"] = sidecar.source_type
-    elif existing is not None and existing.platform:
-        patch["platform"] = existing.platform
     if sidecar.custom_deploy_path:
         patch["custom_deploy_path"] = sidecar.custom_deploy_path
     elif existing is not None:
         patch["custom_deploy_path"] = existing.custom_deploy_path or ""
+    from core.witcher3_game_version import (
+        is_valid_witcher3_game_version,
+        is_witcher3_game,
+    )
+
+    if (
+        existing is not None
+        and is_witcher3_game("", getattr(existing, "app_id", 0))
+        and is_valid_witcher3_game_version(sidecar.game_version)
+    ):
+        patch["game_version"] = sidecar.game_version
     try:
         database.update_mod_user_metadata(mid, patch)
     except Exception as exc:  # noqa: BLE001
         logger.warning("apply sidecar metadata failed: %s", exc)
 
-    if sidecar.workspace_id:
-        try:
-            with database._lock:  # noqa: SLF001
-                database._conn.execute(  # noqa: SLF001
-                    "UPDATE mods SET workspace_id = ? WHERE mod_id = ?",
-                    (sidecar.workspace_id, int(mid)),
-                )
-                database._conn.commit()  # noqa: SLF001
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("apply sidecar workspace_id failed: %s", exc)
+    try:
+        from services.identity_service import persist_identity
+        from services.mod_identity import source_url_embeds_internal
 
+        ident_patch: dict[str, Any] = {}
+        url = str(sidecar.url or "").strip()
+        if url and not source_url_embeds_internal(url, internal_pk=mid):
+            ident_patch["source_url"] = url
+        ws = str(sidecar.workspace_id or "").strip()
+        if ws and not is_internal_mod_id(ws) and ws != mid:
+            ident_patch["workspace_id"] = ws
+        plat = str(sidecar.source_type or "").strip()
+        if plat and plat != "steam":
+            ident_patch["platform"] = plat
+        elif plat == "steam" and url and not source_url_embeds_internal(url, internal_pk=mid):
+            ident_patch["platform"] = plat
+        if ident_patch:
+            persist_identity(
+                database,
+                mid,
+                source="sidecar",
+                reason="apply_sidecar",
+                **ident_patch,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("apply sidecar identity persist failed: %s", exc)
+
+    cover_override = False
+    try:
+        from services.metadata_ownership import FIELD_COVER, user_has_override
+
+        cover_override = user_has_override(
+            database.get_user_override_fields(mid), FIELD_COVER
+        )
+    except Exception:  # noqa: BLE001
+        cover_override = False
+
+    foreign_cover = False
     if sidecar.cover_path:
         try:
-            database.update_mod_cover_path(mid, sidecar.cover_path)
+            from services.metadata_ownership import cover_reference_is_foreign
+
+            foreign_cover = cover_reference_is_foreign(root, sidecar.cover_path)
         except Exception:  # noqa: BLE001
-            pass
+            foreign_cover = False
+    if sidecar.cover_path:
+        if cover_override:
+            logger.info(
+                "apply sidecar skipped cover_path: user cover override mod_id=%s",
+                mid,
+            )
+        elif foreign_cover:
+            logger.info(
+                "apply sidecar rejected foreign cover_path mod_id=%s ref=%s",
+                mid,
+                sidecar.cover_path,
+            )
+        else:
+            try:
+                database.update_mod_cover_path(mid, sidecar.cover_path)
+            except Exception:  # noqa: BLE001
+                pass
 
     # File roles: rescan archives and/or remap existing bundle.
     bundle = database.get_mod_files(mid)
@@ -555,7 +780,7 @@ def apply_sidecar_to_db(
                     meta.title = sidecar.display_name
                 if sidecar.description:
                     meta.description = sidecar.description
-                if sidecar.cover_path:
+                if sidecar.cover_path and not cover_override and not foreign_cover:
                     meta.cover_path = sidecar.cover_path
                 mgr.save_metadata(meta, root)
         except Exception:  # noqa: BLE001
@@ -618,12 +843,16 @@ def rescan_mod_folder(
     mid = str(mod_id or "").strip()
     if not mid:
         sidecar = load_info_sidecar(root)
-        if sidecar and sidecar.published_file_id:
-            mid = sidecar.published_file_id
+        if sidecar is not None:
+            mid = str(getattr(sidecar, "internal_id", "") or "").strip()
+            # Never treat Workshop published_file_id as entity PK.
     if not mid:
         data = read_info_metadata_dict(root)
         if data:
-            mid = str(data.get("published_file_id") or "").strip()
+            from services.mod_identity import read_internal_id
+
+            # Prefer ``.info/internal_id``; temporary legacy entity_key accepted.
+            mid = read_internal_id(data)
 
     existing = database.get_mod_files(mid) if mid and mid.isdigit() else ModFilesBundle()
     # Prefer sidecar roles when present (portable copy).

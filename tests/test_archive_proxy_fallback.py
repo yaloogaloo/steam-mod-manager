@@ -1,4 +1,4 @@
-"""Tests: optional proxy with automatic direct fallback."""
+"""HTML Archive proxy policy: configured proxy must not fall back to direct."""
 
 from __future__ import annotations
 
@@ -6,14 +6,21 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from curl_cffi.requests.exceptions import CurlError
 
 from services import archive as archive_mod
-from services.archive import OfflinePageArchiver, SteamArchiveRateLimiter
+from services.archive import (
+    DEFAULT_TIMEOUT,
+    IMPERSONATE,
+    OfflinePageArchiver,
+    SteamArchiveRateLimiter,
+)
+from services.archive_observability import NETWORK_FAILURE, classify_archive_error
 
 
-PROXY = "socks5://127.0.0.1:7897"
+PROXY = "http://127.0.0.1:12450"
 PROXY_DICT = {"http": PROXY, "https": PROXY}
-URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=3761838546"
+URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=3636741836"
 
 
 def _ok_response() -> MagicMock:
@@ -34,8 +41,19 @@ def _no_qsettings_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(archive_mod, "STEAM_ARCHIVE_RATE_LIMITER", lim)
 
 
+def test_html_request_kwargs_match_production() -> None:
+    """Production Steam HTML GET knobs: chrome131, timeout 15, no verify override."""
+    with OfflinePageArchiver(session=MagicMock(), proxies=PROXY_DICT) as archiver:
+        kwargs = archiver._request_kwargs()
+    assert kwargs["impersonate"] == IMPERSONATE == "chrome131"
+    assert kwargs["timeout"] == DEFAULT_TIMEOUT == 15
+    assert "verify" not in kwargs
+    assert "http_version" not in kwargs
+    assert "trust_env" not in kwargs
+
+
 def test_proxy_success_skips_direct(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     calls: list[dict[str, Any] | None] = []
     session = MagicMock()
@@ -58,8 +76,8 @@ def test_proxy_success_skips_direct(
     assert "fallback direct" not in caplog.text
 
 
-def test_proxy_failure_falls_back_to_direct(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_proxy_failure_does_not_fall_back_to_direct(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     calls: list[dict[str, Any] | None] = []
     session = MagicMock()
@@ -76,19 +94,50 @@ def test_proxy_failure_falls_back_to_direct(
 
     with caplog.at_level("INFO", logger=archive_mod.logger.name):
         with OfflinePageArchiver(session=session, proxies=PROXY_DICT) as archiver:
-            resp = archiver._http_get(URL)
+            with pytest.raises(ConnectionError) as caught:
+                archiver._http_get(URL)
 
-    assert resp is not None
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert calls[0] == PROXY_DICT
-    assert calls[1] is None
+    text = str(caught.value)
+    assert "direct_fallback=not_executed" in text
+    assert PROXY in text
+    assert URL in text
+    assert "proxy down" in text
     assert "[ARCHIVE] proxy failed" in caplog.text
-    assert "fallback direct" in caplog.text
-    assert "[ARCHIVE] direct success" in caplog.text
+    assert "client=curl_cffi.Session" in caplog.text
+    assert "impersonate=chrome131" in caplog.text
+    assert "verify=default" in caplog.text
+    assert "fallback direct" not in caplog.text
+    assert "[ARCHIVE] direct success" not in caplog.text
+
+
+def test_proxy_tls_error_preserves_curl_35() -> None:
+    session = MagicMock()
+    session.cookies = {}
+    original = CurlError(
+        "curl: (35) BoringSSL SSL_connect: Connection closed abruptly "
+        "(SSL_ERROR_SYSCALL)"
+    )
+
+    def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        raise original
+
+    session.get.side_effect = fake_get
+
+    with OfflinePageArchiver(session=session, proxies=PROXY_DICT) as archiver:
+        with pytest.raises(CurlError) as caught:
+            archiver._http_get(URL)
+
+    text = str(caught.value)
+    assert "direct_fallback=not_executed" in text
+    assert "curl: (35)" in text
+    assert "SSL_ERROR_SYSCALL" in text
+    assert classify_archive_error(caught.value, proxy=PROXY) == NETWORK_FAILURE
 
 
 def test_no_proxy_uses_direct_only(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     calls: list[dict[str, Any] | None] = []
     session = MagicMock()

@@ -1,11 +1,19 @@
-"""Safe overwrite backups for deploy — original game files restored on undeploy.
+"""Deploy overwrite backups — original *game* files restored on undeploy.
 
-Centralised so deploy_rules strategies keep using copy2/copytree unchanged.
-Backups live under each Mod's ``.info/backups/``; metadata rides on the deploy
-manifest ``files[].backup`` field (optional, backward compatible).
+This is not :mod:`services.metadata_backup` (metadata / cover / offline under
+``data/mod_backup/``). Overwrite copies live under
+``data/deploy_backup/<internal_id>/`` and must never be Mod payload inside
+the Library folder or ``.info``.
+
+Ownership:
+- Missing target → no backup (first deploy write).
+- Target claimed by this Mod's last successful deploy manifest → no backup
+  (our previous payload, not an external original).
+- Other existing target → copy as external/original for rollback/undeploy.
 
 Security:
-- Backup files must resolve under ``<mod>/.info/backups/`` (no arbitrary paths).
+- New backup files must resolve under ``data/deploy_backup/<internal_id>/``.
+- Legacy ``.info/backups/`` paths remain readable for old manifests.
 - ``backup.hash`` is verified after create and before restore.
 - Partial restore failures are never silent (transaction left as ``failed``).
 """
@@ -15,7 +23,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,17 +37,68 @@ from services.deploy_rules.manifest import (
     ManifestBackupInfo,
     load_manifest,
 )
+from services.deployment_lifecycle import (
+    DeploymentLifecycleState,
+    PHASE_BACKUP_DONE,
+    PHASE_BEGIN,
+    PHASE_COMMITTED,
+    PHASE_ROLLBACK,
+    TXN_BACKUP_DONE,
+    TXN_DEPLOYED,
+    TXN_FAILED,
+    TXN_PREPARED,
+    persist_lifecycle_transaction,
+    resolve_from_transaction,
+)
 from services.file_ops import INFO_DIR_NAME, LEGACY_INFO_DIR_NAME
+from services.backup_identity import (
+    DEPLOY_BACKUP_DIR_NAME,
+    INVALID_FROZEN_INTERNAL_ID,
+    BackupIdentityError,
+)
 
 logger = logging.getLogger(__name__)
 
 BACKUPS_DIRNAME = "backups"
 TRANSACTION_FILENAME = "deploy_transaction.json"
 
-TXN_PREPARED = "prepared"
-TXN_BACKUP_DONE = "backup_done"
-TXN_DEPLOYED = "deployed"
-TXN_FAILED = "failed"
+
+def _destination_tree_absent(root: Path | None) -> bool:
+    """True when the common destination folder is missing or empty.
+
+    First deploy into a new wrapper must not ``is_file()`` thousands of
+    planned targets (or parse a prior 2k-file manifest) just to back up
+    zero originals.
+    """
+    from services.deploy_op_profile import record_op
+
+    if root is None:
+        return False
+    t0 = time.perf_counter()
+    try:
+        try:
+            if not root.exists():
+                return True
+            if root.is_file():
+                return False
+            with os.scandir(root) as it:
+                for _entry in it:
+                    return False
+            return True
+        except OSError:
+            return False
+    finally:
+        record_op(
+            "exists",
+            (time.perf_counter() - t0) * 1000.0,
+            path=str(root),
+        )
+
+
+def _data_dir() -> Path:
+    from core.paths import data_dir
+
+    return data_dir()
 
 
 class BackupIntegrityError(Exception):
@@ -57,24 +118,49 @@ def _utc_now() -> str:
 
 
 def _file_sha256(path: Path, *, chunk: int = 1024 * 1024) -> str:
+    from services.deploy_op_profile import record_op
+
+    t0 = time.perf_counter()
     digest = hashlib.sha256()
+    nbytes = 0
     with path.open("rb") as fh:
         while True:
             block = fh.read(chunk)
             if not block:
                 break
+            nbytes += len(block)
             digest.update(block)
+    record_op(
+        "hash",
+        (time.perf_counter() - t0) * 1000.0,
+        bytes_count=nbytes,
+        path=str(path),
+    )
     return digest.hexdigest()
 
 
-def backups_dir_for(managed: Path) -> Path:
-    """Prefer existing ``.info`` / ``info``; default write under ``.info/backups``."""
-    root = Path(managed)
-    modern = root / INFO_DIR_NAME
-    legacy = root / LEGACY_INFO_DIR_NAME
-    if modern.is_dir() or not legacy.is_dir():
-        return modern / BACKUPS_DIRNAME
-    return legacy / BACKUPS_DIRNAME
+def _infer_internal_id(managed: Path) -> str:
+    """Return Frozen UUID from ``.info`` (never a digit PK / workspace_id)."""
+    try:
+        from services.file_ops import read_info_metadata_dict
+        from services.mod_identity import read_internal_id
+        from services.backup_identity import is_frozen_backup_uuid
+
+        proof = str(read_internal_id(read_info_metadata_dict(managed) or {}) or "").strip()
+        if is_frozen_backup_uuid(proof):
+            return proof
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _orphan_storage_key(managed: Path) -> str:
+    try:
+        raw = str(Path(managed).resolve())
+    except OSError:
+        raw = str(managed)
+    digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"_orphan_{digest}"
 
 
 def transaction_path_for(managed: Path) -> Path:
@@ -95,6 +181,8 @@ class OverwritePrep:
     managed: Path
     # Resolved absolute target path → backup metadata (None = target did not exist)
     by_target: dict[str, ManifestBackupInfo | None] = field(default_factory=dict)
+    # First-deploy wrapper that did not exist; rollback may rmtree it.
+    absent_dest_root: Path | None = None
 
     def backup_for(self, target: str | Path) -> ManifestBackupInfo | None:
         key = _norm_target(target)
@@ -112,65 +200,183 @@ class OverwritePrep:
 
 
 def _norm_target(target: str | Path) -> str:
-    path = Path(target)
-    try:
-        return str(path.resolve())
-    except OSError:
-        return str(path)
+    from services.deploy_op_profile import cached_resolve
+
+    return cached_resolve(target)
 
 
 class BackupManager:
     """Prepare / restore / clean overwrite backups for one managed Mod folder."""
 
-    def __init__(self, managed: Path) -> None:
+    def __init__(
+        self,
+        managed: Path,
+        *,
+        internal_id: str = "",
+        mod_pk: str | int | None = None,
+    ) -> None:
+        from services.backup_identity import (
+            frozen_uuid_for_mod_pk,
+            is_frozen_backup_uuid,
+            resolve_backup_mod_pk,
+        )
+
         self.managed = Path(managed)
+        raw = str(internal_id or "").strip()
+        pk_arg = str(mod_pk or "").strip()
+        if pk_arg.isdigit():
+            self.mod_pk = pk_arg
+        elif raw.isdigit():
+            self.mod_pk = raw
+        else:
+            self.mod_pk = ""
+
+        if is_frozen_backup_uuid(raw):
+            frozen = raw
+        else:
+            frozen = _infer_internal_id(self.managed)
+            if not is_frozen_backup_uuid(frozen) and self.mod_pk:
+                frozen = frozen_uuid_for_mod_pk(self.mod_pk)
+        self.internal_id = frozen if is_frozen_backup_uuid(frozen) else ""
+        if not self.mod_pk and self.internal_id:
+            mapped = resolve_backup_mod_pk(internal_id=self.internal_id)
+            if mapped.isdigit():
+                self.mod_pk = mapped
+
+    def storage_key(self) -> str:
+        """Frozen UUID only. Digit ``mod_pk`` is never a storage key."""
+        from services.backup_identity import resolve_backup_storage_key
+
+        if self.internal_id:
+            key = resolve_backup_storage_key(
+                internal_id=self.internal_id, mod_pk=self.mod_pk or None
+            )
+        else:
+            inferred = _infer_internal_id(self.managed)
+            key = resolve_backup_storage_key(
+                internal_id=inferred, mod_pk=self.mod_pk or None
+            )
+        if key.isdigit():
+            raise BackupIdentityError(INVALID_FROZEN_INTERNAL_ID)
+        return key
 
     # ------------------------------------------------------------------
     # Path safety
     # ------------------------------------------------------------------
 
     def backups_root(self) -> Path:
-        return backups_dir_for(self.managed)
+        """New writes: ``data/deploy_backup/<UUID>/``."""
+        from services.backup_identity import deploy_backup_write_root
+
+        return deploy_backup_write_root(
+            self.internal_id or self.storage_key(),
+            mod_pk=self.mod_pk or None,
+        )
+
+    def _allowed_backup_roots(self) -> list[Path]:
+        from services.backup_identity import deploy_backup_read_root
+
+        roots: list[Path] = []
+        try:
+            roots.append(self.backups_root())
+        except BackupIdentityError:
+            pass
+        read = deploy_backup_read_root(
+            self.internal_id or None,
+            mod_pk=self.mod_pk or None,
+        )
+        if read is not None:
+            roots.append(read)
+        pk = str(self.mod_pk or "").strip()
+        if pk.isdigit():
+            roots.append(_data_dir() / DEPLOY_BACKUP_DIR_NAME / pk)
+        roots.append(self.managed / INFO_DIR_NAME / BACKUPS_DIRNAME)
+        roots.append(self.managed / LEGACY_INFO_DIR_NAME / BACKUPS_DIRNAME)
+        out: list[Path] = []
+        for root in roots:
+            try:
+                out.append(root.resolve())
+            except OSError:
+                out.append(root)
+        return out
 
     def resolve_backup_file(self, backup: ManifestBackupInfo) -> Path:
         """
-        Resolve ``backup.path`` to an absolute file under ``.info/backups/``.
+        Resolve ``backup.path`` to an absolute overwrite-backup file.
 
-        Accepts relative paths (preferred) or absolute paths that already sit
-        inside this Mod's backups directory (legacy manifests from early builds).
+        New writes: ``data/deploy_backup/<internal_id>/...``.
+        Legacy manifests: ``.info/backups/...`` under the managed folder.
         """
         raw = str(backup.path or "").strip()
         if not raw:
             raise BackupIntegrityError("backup path is empty")
 
-        # Reject traversal before resolve (relative or absolute)
-        if ".." in Path(raw).parts:
+        posix = raw.replace("\\", "/")
+        if ".." in Path(posix).parts or posix.startswith("../") or "/../" in posix:
             raise BackupIntegrityError(f"backup path traversal rejected: {raw}")
 
-        root = self.backups_root().resolve()
         candidate = Path(raw)
-        if not candidate.is_absolute():
-            # Relative to managed Mod root (``.info/backups/...``)
-            candidate = (self.managed / candidate).resolve()
-        else:
+        if candidate.is_absolute():
             candidate = candidate.resolve()
+        elif posix.startswith(DEPLOY_BACKUP_DIR_NAME + "/"):
+            candidate = self._resolve_deploy_backup_posix(posix)
+        elif posix.startswith(f"{INFO_DIR_NAME}/{BACKUPS_DIRNAME}/") or posix.startswith(
+            f"{LEGACY_INFO_DIR_NAME}/{BACKUPS_DIRNAME}/"
+        ):
+            candidate = (self.managed / posix).resolve()
+        else:
+            candidate = (self.backups_root() / Path(posix).name).resolve()
 
-        try:
-            candidate.relative_to(root)
-        except ValueError as exc:
-            raise BackupIntegrityError(
-                f"backup path escapes .info/backups: {raw}"
-            ) from exc
-        return candidate
+        for root in self._allowed_backup_roots():
+            try:
+                candidate.relative_to(root)
+                return candidate
+            except ValueError:
+                continue
+        raise BackupIntegrityError(f"backup path escapes deploy backup store: {raw}")
+
+    def _resolve_deploy_backup_posix(self, posix: str) -> Path:
+        """UUID tree first, then legacy ``deploy_backup/<mod_pk>/``."""
+        from services.backup_identity import is_frozen_backup_uuid
+
+        prefix = DEPLOY_BACKUP_DIR_NAME + "/"
+        rest = posix[len(prefix) :] if posix.startswith(prefix) else posix
+        key, _sep, tail = rest.partition("/")
+        names: list[str] = []
+        frozen = str(self.internal_id or "").strip()
+        pk = str(self.mod_pk or "").strip()
+        if is_frozen_backup_uuid(frozen):
+            names.append(frozen)
+        if key and key not in names:
+            names.append(key)
+        if pk.isdigit() and pk not in names:
+            names.append(pk)
+        chosen: Path | None = None
+        first: Path | None = None
+        for name in names:
+            rel = f"{DEPLOY_BACKUP_DIR_NAME}/{name}" + (f"/{tail}" if tail else "")
+            path = (_data_dir() / rel).resolve()
+            if first is None:
+                first = path
+            if path.is_file() or path.exists():
+                chosen = path
+                break
+        return chosen if chosen is not None else (first or (_data_dir() / posix).resolve())
 
     def relative_backup_path(self, absolute: Path) -> str:
-        """Store backup path relative to the managed Mod root (posix)."""
+        """Store backup path relative to ``data/`` when possible (posix)."""
         abs_path = Path(absolute).resolve()
+        try:
+            rel = abs_path.relative_to(_data_dir().resolve()).as_posix()
+            if rel.startswith(DEPLOY_BACKUP_DIR_NAME + "/"):
+                return rel
+        except ValueError:
+            pass
         try:
             return abs_path.relative_to(self.managed.resolve()).as_posix()
         except ValueError as exc:
             raise BackupIntegrityError(
-                f"backup is outside managed mod root: {absolute}"
+                f"backup is outside deploy backup store: {absolute}"
             ) from exc
 
     def verify_backup_hash(self, backup: ManifestBackupInfo) -> Path:
@@ -196,19 +402,31 @@ class BackupManager:
     def prepare_overwrite(
         self,
         targets: Iterable[str | Path],
+        *,
+        mod_id: str = "",
+        dest_root: Path | str | None = None,
     ) -> OverwritePrep:
         """
-        For each planned target that already exists as a file, copy it into
-        ``.info/backups/`` with a unique name. Missing targets get ``backup=None``.
+        Snapshot *external* game files that a deploy is about to overwrite.
 
-        Re-deploy while still deployed: reuse a valid prior manifest backup for
-        the same target so the original game file is not replaced by a backup of
-        the current Mod payload.
+        Missing targets are not backed up (first write). Targets claimed by
+        this Mod's last successful deploy manifest are not backed up either —
+        those are our previous payload, not originals. Existing targets with
+        no such claim are copied under ``data/deploy_backup/<internal_id>/``.
+
+        Re-deploy reuses a valid prior manifest backup for the same target so
+        the original game file is not replaced by a copy of our payload.
 
         On ``OSError`` / ``BackupIntegrityError`` / ``BackupRestoreError`` the
         transaction is marked ``failed`` (never left as ``prepared`` /
         ``backup_done``).
         """
+        from services.deploy_txn import (
+            log_txn_phase,
+            register_active_deploy_transaction,
+            unregister_active_deploy_transaction,
+        )
+
         prep = OverwritePrep(managed=self.managed)
         unique_targets: list[Path] = []
         seen: set[str] = set()
@@ -221,15 +439,107 @@ class BackupManager:
 
         target_keys = [_norm_target(t) for t in unique_targets]
         recorded: list[dict[str, Any]] = []
+        mid = str(mod_id or "").strip()
+        frozen = str(self.internal_id or "").strip() or mid
+        lifecycle: DeploymentLifecycleState | None = None
+        exists_checks = 0
+        skipped_missing_tree = False
+
+        dest_tree: Path | None = None
+        if dest_root is not None and str(dest_root).strip():
+            dest_tree = Path(dest_root)
+        elif unique_targets:
+            try:
+                dest_tree = Path(
+                    os.path.commonpath([str(t) for t in unique_targets])
+                )
+            except ValueError:
+                dest_tree = None
+        dest_missing = bool(dest_tree is not None and _destination_tree_absent(dest_tree))
 
         try:
-            self.write_transaction(
-                status=TXN_PREPARED,
+            register_active_deploy_transaction(self.managed, internal_id=frozen)
+            if dest_missing:
+                skipped_missing_tree = True
+                prep.absent_dest_root = dest_tree
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.PREPARED,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BEGIN, internal_id=frozen, managed=self.managed)
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.BACKUP_DONE,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BACKUP_DONE, internal_id=frozen, managed=self.managed)
+                try:
+                    from services.deploy_stage_log import current_deploy_timing
+
+                    sess = current_deploy_timing()
+                    if sess is not None:
+                        sess.diagnostics["backup_exists_checks"] = 0
+                        sess.diagnostics["backup_skipped_missing_tree"] = True
+                        sess.diagnostics["backup_target_count"] = len(unique_targets)
+                        sess.diagnostics["backup_prior_manifest_loaded"] = False
+                except Exception:  # noqa: BLE001
+                    pass
+                return prep
+            if not unique_targets:
+                skipped_missing_tree = True
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.PREPARED,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BEGIN, internal_id=frozen, managed=self.managed)
+                lifecycle = persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.BACKUP_DONE,
+                    current=lifecycle,
+                    targets=[],
+                    backups=[],
+                    mod_id=mid,
+                )
+                log_txn_phase(PHASE_BACKUP_DONE, internal_id=frozen, managed=self.managed)
+                try:
+                    from services.deploy_stage_log import current_deploy_timing
+
+                    sess = current_deploy_timing()
+                    if sess is not None:
+                        sess.diagnostics["backup_exists_checks"] = 0
+                        sess.diagnostics["backup_skipped_missing_tree"] = True
+                        sess.diagnostics["backup_target_count"] = len(unique_targets)
+                        sess.diagnostics["backup_prior_manifest_loaded"] = False
+                except Exception:  # noqa: BLE001
+                    pass
+                return prep
+
+            lifecycle = persist_lifecycle_transaction(
+                self,
+                DeploymentLifecycleState.PREPARED,
+                current=lifecycle,
                 targets=target_keys,
                 backups=[],
+                mod_id=mid,
             )
+            log_txn_phase(PHASE_BEGIN, internal_id=frozen, managed=self.managed)
 
-            prior_by_target = self._prior_valid_backups()
+            from services.deploy_op_profile import timed_op
+
+            with timed_op("backup_enumeration"):
+                prior_by_target = self._prior_valid_backups()
+                owned_targets = self._owned_targets_from_last_success()
             backup_root = self.backups_root()
 
             for target in unique_targets:
@@ -248,15 +558,47 @@ class BackupManager:
                     )
                     continue
 
-                try:
-                    exists = target.is_file()
-                except OSError:
-                    exists = False
-                if not exists:
+                if key in owned_targets:
+                    # Last successful deploy already claimed this path. The
+                    # file on disk is our payload, not an external original.
                     prep.by_target[key] = None
                     continue
 
-                info = self._backup_one(target, backup_root)
+                if dest_missing:
+                    prep.by_target[key] = None
+                    skipped_missing_tree = True
+                    continue
+
+                try:
+                    t_ex = time.perf_counter()
+                    exists = target.is_file()
+                    exists_checks += 1
+                    from services.deploy_op_profile import record_op
+
+                    record_op(
+                        "is_file",
+                        (time.perf_counter() - t_ex) * 1000.0,
+                        path=str(target),
+                    )
+                except OSError:
+                    exists = False
+                    exists_checks += 1
+                if not exists:
+                    # Missing destination is a valid deploy state (first deploy /
+                    # partial game tree). Skip backup — do not fail the stage.
+                    prep.by_target[key] = None
+                    continue
+
+                try:
+                    info = self._backup_one(target, backup_root)
+                except FileNotFoundError:
+                    # TOCTOU / vanished target between exists check and open —
+                    # treat as missing original, not a deploy failure.
+                    logger.info(
+                        "backup skipped; destination missing target=%s", key
+                    )
+                    prep.by_target[key] = None
+                    continue
                 prep.by_target[key] = info
                 recorded.append(
                     {
@@ -267,18 +609,35 @@ class BackupManager:
                     }
                 )
 
-            self.write_transaction(
-                status=TXN_BACKUP_DONE,
+            lifecycle = persist_lifecycle_transaction(
+                self,
+                DeploymentLifecycleState.BACKUP_DONE,
+                current=lifecycle,
                 targets=list(prep.by_target.keys()),
                 backups=recorded,
+                mod_id=mid,
             )
-            return prep
-        except (OSError, BackupIntegrityError, BackupRestoreError):
+            log_txn_phase(PHASE_BACKUP_DONE, internal_id=frozen, managed=self.managed)
             try:
-                self.write_transaction(
-                    status=TXN_FAILED,
+                from services.deploy_stage_log import current_deploy_timing
+
+                sess = current_deploy_timing()
+                if sess is not None:
+                    sess.diagnostics["backup_exists_checks"] = exists_checks
+                    sess.diagnostics["backup_skipped_missing_tree"] = skipped_missing_tree
+                    sess.diagnostics["backup_target_count"] = len(unique_targets)
+            except Exception:  # noqa: BLE001
+                pass
+            return prep
+        except (OSError, BackupIntegrityError, BackupRestoreError, BackupIdentityError):
+            try:
+                persist_lifecycle_transaction(
+                    self,
+                    DeploymentLifecycleState.FAILED,
+                    current=lifecycle,
                     targets=target_keys or list(prep.by_target.keys()),
                     backups=recorded,
+                    mod_id=mid,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -290,6 +649,15 @@ class BackupManager:
                     logger.exception(
                         "Failed to clear deploy transaction after prepare_overwrite error"
                     )
+            unregister_active_deploy_transaction(self.managed)
+            # Apply never ran — drop transaction-only copies, keep still-referenced
+            # backups from a prior successful deploy.
+            try:
+                self.prune_unreferenced_backups(set())
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to prune unreferenced backups after prepare_overwrite error"
+                )
             raise
 
     def _prior_valid_backups(self) -> dict[str, ManifestBackupInfo]:
@@ -313,8 +681,23 @@ class BackupManager:
             )
         return out
 
+    def _owned_targets_from_last_success(self) -> set[str]:
+        """Targets written by this Mod's last successful deploy manifest."""
+        existing = load_manifest(self.managed)
+        if existing is None:
+            return set()
+        owned: set[str] = set()
+        for entry in existing.files:
+            key = _norm_target(entry.target)
+            if key:
+                owned.add(key)
+        return owned
+
     def _backup_one(self, target: Path, backup_root: Path) -> ManifestBackupInfo:
-        backup_root.mkdir(parents=True, exist_ok=True)
+        from services.deploy_op_profile import record_op, timed_op
+
+        with timed_op("mkdir", path=str(backup_root)):
+            backup_root.mkdir(parents=True, exist_ok=True)
         content_hash = _file_sha256(target)
         short = content_hash[:12]
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -327,7 +710,9 @@ class BackupManager:
             token = uuid.uuid4().hex[:8]
             backup_name = f"{safe_name}.{short}.{stamp}.{token}.original"
             dest = backup_root / backup_name
+        t_copy = time.perf_counter()
         shutil.copy2(target, dest)
+        record_op("copy2", (time.perf_counter() - t_copy) * 1000.0, path=str(target))
 
         # Integrity: hash the written backup (not only the source)
         written_hash = _file_sha256(dest)
@@ -375,6 +760,17 @@ class BackupManager:
         does **not** delete backup files.
         """
         failures: list[str] = []
+        absent_root = getattr(prep, "absent_dest_root", None)
+        if absent_root is not None:
+            root = Path(absent_root)
+            try:
+                if root.is_dir():
+                    shutil.rmtree(root)
+                elif root.is_file():
+                    root.unlink()
+            except OSError as exc:
+                failures.append(f"{root} rmtree: {exc}")
+                logger.warning("rollback remove new dest failed root=%s: %s", root, exc)
         for target_key, backup in prep.by_target.items():
             target = Path(target_key)
             if backup is not None:
@@ -395,8 +791,11 @@ class BackupManager:
                         "rollback unlink failed target=%s: %s", target, exc
                     )
 
-        self.write_transaction(
-            status=TXN_FAILED,
+        cur = resolve_from_transaction(self.load_transaction())
+        persist_lifecycle_transaction(
+            self,
+            DeploymentLifecycleState.FAILED,
+            current=None if cur is DeploymentLifecycleState.CREATED else cur,
             targets=list(prep.by_target.keys()),
             backups=[
                 {
@@ -466,8 +865,11 @@ class BackupManager:
                 )
 
         if failures:
-            self.write_transaction(
-                status=TXN_FAILED,
+            cur = resolve_from_transaction(self.load_transaction())
+            persist_lifecycle_transaction(
+                self,
+                DeploymentLifecycleState.FAILED,
+                current=None if cur is DeploymentLifecycleState.CREATED else cur,
                 targets=[e.target for e in manifest.files],
                 backups=[
                     {
@@ -487,10 +889,35 @@ class BackupManager:
             )
         return restored
 
+    def listed_backup_files(self) -> list[Path]:
+        """Overwrite-backup files for this Mod (new store + leftover ``.info``)."""
+        out: list[Path] = []
+        for root in self._scan_backup_roots():
+            if not root.is_dir():
+                continue
+            out.extend(sorted(p for p in root.iterdir() if p.is_file()))
+        return out
+
+    def _scan_backup_roots(self) -> list[Path]:
+        return self._allowed_backup_roots()
+
+    def _drop_empty_backup_roots(self) -> None:
+        for root in self._scan_backup_roots():
+            if not root.is_dir():
+                continue
+            try:
+                next(root.iterdir())
+            except StopIteration:
+                try:
+                    root.rmdir()
+                except OSError as exc:
+                    logger.warning("Failed to remove empty backups dir %s: %s", root, exc)
+            except OSError:
+                continue
+
     def cleanup_backups(self) -> None:
-        """Remove ``.info/backups`` tree and clear deploy transaction."""
-        for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            root = self.managed / info_name / BACKUPS_DIRNAME
+        """Remove overwrite-backup trees and clear deploy transaction."""
+        for root in self._scan_backup_roots():
             if not root.exists():
                 continue
             try:
@@ -510,20 +937,29 @@ class BackupManager:
         targets: list[str],
         backups: list[Mapping[str, Any]],
         mod_id: str = "",
+        phase: str = "",
     ) -> Path:
+        """Low-level wire sink. Prefer :func:`persist_lifecycle_transaction`."""
+        from services.deploy_op_profile import timed_op
+
         path = transaction_path_for(self.managed)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+        with timed_op("mkdir", path=str(path.parent)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
             "mod_id": str(mod_id or ""),
             "status": str(status or ""),
             "updated_at": _utc_now(),
             "targets": list(targets),
             "backups": [dict(item) for item in backups],
         }
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        phase_s = str(phase or "").strip()
+        if phase_s:
+            payload["phase"] = phase_s
+        with timed_op("manifest_write", path=str(path), count=1):
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         return path
 
     def clear_transaction(self) -> None:
@@ -546,13 +982,19 @@ class BackupManager:
         return data if isinstance(data, dict) else None
 
     def mark_deployed(self, prep: OverwritePrep, *, mod_id: str = "") -> None:
+        """Commit transaction: mark deployed then clear txn file (success gate)."""
+        from services.deploy_txn import log_txn_phase
+
         keep_paths = {
             str(b.path).replace("\\", "/")
             for b in prep.by_target.values()
             if b is not None and str(b.path or "").strip()
         }
-        self.write_transaction(
-            status=TXN_DEPLOYED,
+        cur = resolve_from_transaction(self.load_transaction())
+        persist_lifecycle_transaction(
+            self,
+            DeploymentLifecycleState.COMPLETED,
+            current=None if cur is DeploymentLifecycleState.CREATED else cur,
             targets=list(prep.by_target.keys()),
             backups=[
                 {
@@ -565,6 +1007,11 @@ class BackupManager:
                 if b is not None
             ],
             mod_id=mod_id,
+        )
+        log_txn_phase(
+            PHASE_COMMITTED,
+            internal_id=str(self.internal_id or mod_id or ""),
+            managed=self.managed,
         )
         # Successful deploy keeps referenced backups for undeploy; drop txn + orphans.
         self.clear_transaction()
@@ -586,31 +1033,48 @@ class BackupManager:
 
     def prune_unreferenced_backups(self, keep_relative: set[str]) -> None:
         """
-        Delete backup files under ``.info/backups`` not listed in *keep_relative*.
+        Delete overwrite-backup files not listed in *keep_relative*.
 
         Always unions paths still referenced by the active deploy manifest so a
         shared/stale keep set cannot drop a still-needed backup.
         """
         keep = {str(p).replace("\\", "/") for p in keep_relative}
         keep |= self.referenced_backup_paths()
-        root = self.backups_root()
-        if not root.is_dir():
-            return
-        for path in root.iterdir():
-            if not path.is_file():
-                continue
+        keep_resolved: set[str] = set()
+        for raw in keep:
             try:
-                rel = path.resolve().relative_to(self.managed.resolve()).as_posix()
-            except ValueError:
+                resolved = self.resolve_backup_file(
+                    ManifestBackupInfo(path=raw, hash="0")
+                ).resolve()
+            except (BackupIntegrityError, OSError):
                 continue
-            if rel not in keep:
+            keep_resolved.add(str(resolved))
+        for root in self._scan_backup_roots():
+            if not root.is_dir():
+                continue
+            for path in root.iterdir():
+                if not path.is_file():
+                    continue
+                try:
+                    rel = self.relative_backup_path(path)
+                except BackupIntegrityError:
+                    rel = ""
+                try:
+                    resolved = str(path.resolve())
+                except OSError:
+                    resolved = str(path)
+                if (rel and rel in keep) or resolved in keep_resolved:
+                    continue
                 try:
                     path.unlink()
                 except OSError as exc:
-                    logger.warning("Failed to prune orphan backup %s: %s", path, exc)
+                    logger.warning(
+                        "Failed to prune orphan backup %s: %s", path, exc
+                    )
+        self._drop_empty_backup_roots()
 
     def validate_manifest_backups(self, manifest: DeployManifest) -> None:
-        """Ensure every backup path belongs to this Mod's ``.info/backups``."""
+        """Ensure every backup path belongs to this Mod's overwrite-backup store."""
         for entry in manifest.files:
             if entry.backup is None:
                 continue
@@ -635,11 +1099,21 @@ class BackupManager:
             return {"action": "none"}
 
         status = str(txn.get("status") or "").strip()
-        if status == TXN_DEPLOYED:
+        try:
+            state = resolve_from_transaction(txn, active_transaction=False)
+        except Exception:  # noqa: BLE001 — keep compat for corrupt wire values
+            return {
+                "action": "needs_attention",
+                "status": status or "unknown",
+                "message": f"unrecognized transaction status: {status!r}",
+                "transaction": txn,
+            }
+
+        if state is DeploymentLifecycleState.COMPLETED:
             self.clear_transaction()
             return {"action": "cleared_stale_deployed_marker", "status": status}
 
-        if status == TXN_FAILED:
+        if state is DeploymentLifecycleState.FAILED:
             return {
                 "action": "needs_attention",
                 "status": status,
@@ -647,7 +1121,7 @@ class BackupManager:
                 "transaction": txn,
             }
 
-        if status not in (TXN_PREPARED, TXN_BACKUP_DONE):
+        if state is not DeploymentLifecycleState.ROLLBACK_REQUIRED:
             return {
                 "action": "needs_attention",
                 "status": status or "unknown",
@@ -656,8 +1130,10 @@ class BackupManager:
             }
 
         if not auto_rollback:
-            self.write_transaction(
-                status=TXN_FAILED,
+            persist_lifecycle_transaction(
+                self,
+                DeploymentLifecycleState.FAILED,
+                current=state,
                 targets=[str(t) for t in (txn.get("targets") or [])],
                 backups=list(txn.get("backups") or []),
                 mod_id=str(txn.get("mod_id") or ""),
@@ -686,10 +1162,24 @@ class BackupManager:
             )
         try:
             self.rollback(prep)
+            from services.deploy_txn import (
+                compose_recover_deploy_error,
+                log_txn_phase,
+                unregister_active_deploy_transaction,
+            )
+
+            log_txn_phase(
+                PHASE_ROLLBACK,
+                internal_id=str(self.internal_id or txn.get("mod_id") or ""),
+                managed=self.managed,
+                extra=f"from_status={status} lifecycle={state.value}",
+            )
+            unregister_active_deploy_transaction(self.managed)
             return {
                 "action": "rolled_back",
                 "status": status,
-                "message": "interrupted deploy rolled back from transaction",
+                "lifecycle": DeploymentLifecycleState.ROLLED_BACK.value,
+                "message": compose_recover_deploy_error(""),
             }
         except BackupRestoreError as exc:
             return {
@@ -703,6 +1193,7 @@ class BackupManager:
 
 __all__ = (
     "BACKUPS_DIRNAME",
+    "DEPLOY_BACKUP_DIR_NAME",
     "TRANSACTION_FILENAME",
     "TXN_BACKUP_DONE",
     "TXN_DEPLOYED",
@@ -712,6 +1203,5 @@ __all__ = (
     "BackupManager",
     "BackupRestoreError",
     "OverwritePrep",
-    "backups_dir_for",
     "transaction_path_for",
 )

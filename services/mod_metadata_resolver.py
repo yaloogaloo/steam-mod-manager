@@ -10,7 +10,7 @@ from typing import Any
 from core.mod_platform import PLATFORM_STEAM, normalize_platform, parse_metadata_platform
 from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, read_info_metadata_dict
-from services.metadata_backup import load_backup
+from services.metadata_backup import BACKUP_OFFLINE_DIR, readable_backup_root, load_backup
 
 logger = logging.getLogger(__name__)
 
@@ -49,11 +49,52 @@ def _folder_exists(path: str | Path | None) -> bool:
         return False
 
 
+def _pick_canonical_visible_folder(mod_id: str, folders: list[Path]) -> Path:
+    """Choose one filesystem observation for a single Internal entity."""
+    from services.identity_service import is_empty_mod_placeholder
+
+    if len(folders) == 1:
+        return folders[0]
+    lkp = ""
+    try:
+        from core.db_manager import get_db
+
+        row = get_db().get_mod_backup_row(mod_id) or {}
+        lkp = str(row.get("last_known_path") or "").strip()
+    except Exception:  # noqa: BLE001
+        lkp = ""
+    ranked: list[tuple[int, int, int, str, Path]] = []
+    for folder in folders:
+        placeholder = 1 if is_empty_mod_placeholder(folder.name) else 0
+        path_match = 0
+        if lkp:
+            try:
+                path_match = 0 if str(folder.resolve()) == str(Path(lkp).resolve()) else 1
+            except OSError:
+                path_match = 1
+        content_missing = 1
+        try:
+            from services.local_file_index import has_local_mod_payload
+
+            content_missing = 0 if has_local_mod_payload(folder) else 1
+        except Exception:  # noqa: BLE001
+            try:
+                content_missing = 0 if any(folder.iterdir()) else 1
+            except OSError:
+                content_missing = 1
+        ranked.append((placeholder, content_missing, path_match, folder.name.lower(), folder))
+    ranked.sort()
+    return ranked[0][4]
+
+
 @dataclass
 class ResolvedModMetadata:
-    """Display payload after applying .info / backup / SQLite priority."""
+    """Display payload after applying .info / backup / SQLite priority.
 
-    published_file_id: str
+    ``internal_id`` is ``mods.mod_id``. Never store Workshop ID here.
+    """
+
+    internal_id: str
     display_name: str = ""
     description: str = ""
     platform: str = PLATFORM_STEAM
@@ -72,10 +113,27 @@ class ResolvedModMetadata:
     app_id: int = 0
     favorite: bool = False
     user_notes: str = ""
+    external_id: str = ""
+
+    @property
+    def published_file_id(self) -> str:
+        """Deprecated alias of ``internal_id`` — do not use for Steam Workshop."""
+        return self.internal_id
 
     def to_mod_metadata(self) -> ModMetadata:
+        from services.identity_service import sidecar_published_file_id
+
+        mid = str(self.internal_id or "").strip()
+        ext = str(self.external_id or "").strip()
+        if not ext and self.platform == PLATFORM_STEAM:
+            # Steam workspace_id is often the Workshop ID (display/registration).
+            ext = str(self.workspace_id or "").strip()
+        pub = sidecar_published_file_id(
+            mod_id=mid, platform=self.platform, external_id=ext
+        )
         meta = ModMetadata(
-            published_file_id=self.published_file_id,
+            published_file_id=pub,
+            internal_id=mid,
             title=self.title or self.display_name,
             description=self.description,
             app_id=int(self.app_id or 0),
@@ -118,75 +176,116 @@ class ModMetadataResolver:
             return self.resolve_missing_folder(mod_id, root)
 
         info = read_info_metadata_dict(root) or {}
-        mid = _first_text(
-            mod_id,
-            info.get("published_file_id"),
-            root.name if root.name.isdigit() else "",
-        )
+        mid = _first_text(mod_id)
+        if not str(mid).isdigit():
+            # Detail / resolver require caller-supplied internal_id — no path invent.
+            return None
+        # Bound folder must prove the same entity when .info is present.
+        # entity_key == Entity.internal_id (filesystem binding, not a third Mod ID).
+        from services.mod_identity import read_entity_key
 
-        backup = load_backup(mid) if str(mid).isdigit() else None
+        proof = read_entity_key(info)
+        if proof:
+            from services.mod_identity import ensure_mod_identity
+
+            bound, _payload, _changed = ensure_mod_identity(
+                root, dict(info), db=None
+            )
+            if str(bound).isdigit() and str(bound) != str(mid):
+                return None
+
+        backup = load_backup(mid) if mid else None
         sqlite = self._sqlite_row(mid)
         display = self._sqlite_display(mid)
+        entity_app = int((sqlite or {}).get("app_id") or 0)
+        if entity_app <= 0:
+            entity_app = int(getattr(display, "app_id", 0) or 0)
+
+        from services.metadata_owner_guard import metadata_payload_is_foreign
+
+        info_foreign = metadata_payload_is_foreign(info, entity_app_id=entity_app)
+        backup_foreign = bool(
+            backup is not None
+            and metadata_payload_is_foreign(backup.metadata, entity_app_id=entity_app)
+        )
+        info_owned = info if not info_foreign else {}
+        backup_meta = (
+            (backup.metadata if backup is not None else {})
+            if not backup_foreign
+            else {}
+        )
 
         display_name = _first_text(
-            info.get("display_name"),
+            info_owned.get("display_name"),
             getattr(display, "user_display_name", "") if display else "",
-            info.get("title"),
-            (backup.metadata.get("display_name") if backup else ""),
-            (backup.metadata.get("title") if backup else ""),
+            getattr(display, "display_name", "") if display else "",
+            info_owned.get("title"),
+            backup_meta.get("display_name"),
+            backup_meta.get("title"),
+            getattr(display, "steam_name", "") if display else "",
         )
         description = _first_text(
-            info.get("description"),
-            info.get("custom_description"),
-            (backup.metadata.get("description") if backup else ""),
+            info_owned.get("description"),
+            info_owned.get("custom_description"),
+            backup_meta.get("description"),
+            getattr(display, "custom_description", "") if display else "",
+            getattr(display, "steam_description", "") if display else "",
         )
-        platform = parse_metadata_platform(info) or _first_text(
-            (backup.metadata.get("source_type") if backup else ""),
-            (backup.metadata.get("platform") if backup else ""),
+        platform = parse_metadata_platform(info_owned) or _first_text(
+            backup_meta.get("source_type"),
+            backup_meta.get("platform"),
             getattr(display, "platform", "") if display else "",
             PLATFORM_STEAM,
         )
         source_url = _first_text(
-            info.get("url"),
-            info.get("source_url"),
-            info.get("website"),
-            (backup.metadata.get("url") if backup else ""),
-            (backup.metadata.get("source_url") if backup else ""),
+            info_owned.get("url"),
+            info_owned.get("source_url"),
+            info_owned.get("website"),
+            backup_meta.get("url"),
+            backup_meta.get("source_url"),
             getattr(display, "source_url", "") if display else "",
         )
         workspace_id = _first_text(
-            info.get("workspace_id"),
-            (backup.metadata.get("workspace_id") if backup else ""),
+            info_owned.get("workspace_id"),
+            backup_meta.get("workspace_id"),
             getattr(display, "workspace_id", "") if display else "",
         )
-        cover = self._cover_existing(root, info, backup, sqlite)
-        offline = self._offline_existing(root, backup)
-        deps = _dependencies_from_mapping(info)
-        if not deps and backup is not None:
-            deps = _dependencies_from_mapping(backup.metadata)
+        external_id = _first_text(
+            info_owned.get("external_id"),
+            backup_meta.get("external_id"),
+            getattr(display, "external_id", "") if display else "",
+        )
+        cover_backup = None if backup_foreign else backup
+        cover = self._cover_existing(root, info_owned, cover_backup, sqlite)
+        offline_backup = None if backup_foreign else backup
+        offline = self._offline_existing(root, offline_backup)
+        deps = _dependencies_from_mapping(info_owned)
+        if not deps and backup_meta:
+            deps = _dependencies_from_mapping(backup_meta)
         tags, category = self._tags_from_sqlite(mid)
         author = _first_text(
-            info.get("author"),
-            (backup.metadata.get("author") if backup else ""),
+            info_owned.get("author"),
+            backup_meta.get("author"),
         )
         game_name = _first_text(
-            info.get("game_name"),
-            (backup.metadata.get("game_name") if backup else ""),
+            info_owned.get("game_name"),
+            backup_meta.get("game_name"),
             root.parent.name,
         )
-        app_id = int(
-            info.get("app_id")
-            or (backup.metadata.get("app_id") if backup else 0)
-            or (sqlite.get("app_id") if sqlite else 0)
+        # Entity app_id is authoritative — never adopt foreign payload app_id.
+        app_id = entity_app or int(
+            info_owned.get("app_id")
+            or backup_meta.get("app_id")
             or 0
         )
         return ResolvedModMetadata(
-            published_file_id=str(mid),
+            internal_id=str(mid),
             display_name=display_name,
             description=description,
             platform=normalize_platform(platform),
             source_url=source_url,
             workspace_id=workspace_id,
+            external_id=external_id,
             cover_path=str(cover) if cover else "",
             offline_path=str(offline) if offline else "",
             tags=tags,
@@ -195,7 +294,7 @@ class ModMetadataResolver:
             managed_path=str(root),
             author=author,
             category=category,
-            title=_first_text(info.get("title"), display_name),
+            title=_first_text(info_owned.get("title"), display_name),
             game_name=game_name,
             app_id=app_id,
             favorite=bool(getattr(display, "favorite", False)) if display else False,
@@ -209,17 +308,27 @@ class ModMetadataResolver:
     ) -> ResolvedModMetadata | None:
         """Directory missing: backup files > SQLite cache. Never read dead ``.info``."""
         mid = _first_text(mod_id)
-        sqlite = self._sqlite_row(mid) if mid.isdigit() else None
-        if not mid.isdigit() and managed_path is not None:
-            sqlite = self._sqlite_row_by_path(managed_path) or sqlite
-            if sqlite is not None:
-                mid = str(sqlite.get("mod_id") or mid)
-        backup = load_backup(mid) if mid.isdigit() else None
-        if backup is None and sqlite is None and not mid:
+        if not mid.isdigit():
+            return None
+        sqlite = self._sqlite_row(mid)
+        backup = load_backup(mid) if mid else None
+        if backup is None and sqlite is None:
             return None
 
         bmeta: dict[str, Any] = dict(backup.metadata) if backup else {}
         display = self._sqlite_display(mid)
+        entity_app = int((sqlite or {}).get("app_id") or 0)
+        if entity_app <= 0:
+            entity_app = int(getattr(display, "app_id", 0) or 0)
+
+        from services.metadata_owner_guard import metadata_payload_is_foreign
+
+        if backup is not None and metadata_payload_is_foreign(
+            bmeta, entity_app_id=entity_app
+        ):
+            bmeta = {}
+            backup = None
+
         path = ""
         if managed_path is not None:
             path = str(managed_path)
@@ -256,6 +365,10 @@ class ModMetadataResolver:
             bmeta.get("workspace_id"),
             getattr(display, "workspace_id", "") if display else "",
         )
+        external_id = _first_text(
+            bmeta.get("external_id"),
+            getattr(display, "external_id", "") if display else "",
+        )
         cover = self._cover_missing(mid, backup, sqlite, display)
         offline = self._offline_missing(backup, sqlite)
         deps = _dependencies_from_mapping(bmeta)
@@ -265,18 +378,15 @@ class ModMetadataResolver:
             bmeta.get("game_name"),
             Path(path).parent.name if path else "",
         )
-        app_id = int(
-            bmeta.get("app_id")
-            or (sqlite.get("app_id") if sqlite else 0)
-            or 0
-        )
+        app_id = entity_app or int(bmeta.get("app_id") or 0)
         return ResolvedModMetadata(
-            published_file_id=str(mid),
+            internal_id=str(mid),
             display_name=display_name,
             description=description,
             platform=normalize_platform(platform),
             source_url=source_url,
             workspace_id=workspace_id,
+            external_id=external_id,
             cover_path=str(cover) if cover else "",
             offline_path=str(offline) if offline else "",
             tags=tags,
@@ -297,6 +407,21 @@ class ModMetadataResolver:
         mod_id: int | str | None = None,
         managed_path: str | Path | None = None,
     ) -> Path | None:
+        """Resource locator: prefer on-disk ``.info/cover.*``; never invent entity."""
+        if managed_path is not None:
+            root = Path(managed_path)
+            if root.is_dir():
+                found = _find_info_cover(root / INFO_DIR_NAME)
+                if found is not None:
+                    return found
+                info = read_info_metadata_dict(root) or {}
+                ref = _first_text(info.get("cover_path"))
+                if ref:
+                    nested = root / ref
+                    if nested.is_file():
+                        return nested.resolve()
+                    if Path(ref).is_file():
+                        return Path(ref).resolve()
         resolved = self.resolve(mod_id, managed_path)
         if resolved is None or not resolved.cover_path:
             return None
@@ -307,41 +432,67 @@ class ModMetadataResolver:
         mod_id: int | str | None = None,
         managed_path: str | Path | None = None,
     ) -> Path | None:
-        resolved = self.resolve(mod_id, managed_path)
-        if resolved is None or not resolved.offline_path:
+        """Return a file://-openable offline index under ``cache/offline_view``.
+
+        May verify Store + materialize. UI Open Offline must not call this on
+        the Qt thread — use :func:`probe_offline_open` + worker
+        :func:`prepare_offline_open`.
+        """
+        from services.info_asset_runtime import prepare_offline_open
+        from services.perf_stage import perf_stage
+
+        with perf_stage("offline_open_materialize"):
+            mid, path = self._resolve_identity(mod_id, managed_path)
+            result = prepare_offline_open(path, mod_id=str(mid or ""))
+            if result.ok and result.path is not None:
+                return result.path
             return None
-        return _usable_file(resolved.offline_path, allow_empty=True)
 
     def list_visible_mods(
         self,
         library_root: str | Path,
         game_name: str | None = None,
     ) -> list[ResolvedModMetadata]:
-        """On-disk mods plus backup-only missing mods."""
+        """On-disk mods plus backup-only missing mods.
+
+        One Internal entity produces at most one user-facing card. Multiple
+        filesystem observations of the same entity are grouped; unresolved
+        folders (including Empty Mod placeholders without official identity)
+        are not extra cards.
+        """
+        from core.db_manager import get_db
         from services.file_ops import ModFileManager
+        from services.mod_identity import resolve_existing_mod_id
 
         root = Path(library_root)
         manager = ModFileManager(root)
         folders = manager.list_managed_mods(game_name=game_name)
+        try:
+            database = get_db()
+        except Exception:  # noqa: BLE001
+            database = None
+        grouped: dict[str, list[Path]] = {}
+        for folder in folders:
+            info = dict(read_info_metadata_dict(folder) or {})
+            info["_managed_path"] = str(folder.resolve())
+            info["_folder_name"] = folder.name
+            mid = resolve_existing_mod_id(info, db=database)
+            if not mid.isdigit():
+                continue
+            grouped.setdefault(mid, []).append(folder)
+
         seen: set[str] = set()
         out: list[ResolvedModMetadata] = []
-        for folder in folders:
-            info = read_info_metadata_dict(folder) or {}
-            mid = _first_text(
-                info.get("published_file_id"),
-                folder.name if folder.name.isdigit() else "",
-            )
-            resolved = self.resolve(mid or None, folder)
+        for mid, paths in grouped.items():
+            folder = _pick_canonical_visible_folder(mid, paths)
+            resolved = self.resolve(mid, folder)
             if resolved is None:
                 continue
             out.append(resolved)
-            if resolved.published_file_id.isdigit():
-                seen.add(resolved.published_file_id)
+            seen.add(mid)
 
         try:
-            from core.db_manager import get_db
-
-            rows = get_db().list_folder_missing_mods(
+            rows = (database or get_db()).list_folder_missing_mods(
                 game_folder=game_name,
                 library_root=root,
             )
@@ -364,25 +515,17 @@ class ModMetadataResolver:
         mod_id: int | str | None,
         managed_path: str | Path | None,
     ) -> tuple[str, Path | None]:
+        """Require caller internal_id. Never invent identity from path/folder/published."""
         path = Path(managed_path) if managed_path is not None else None
         mid = _first_text(mod_id)
-        if not mid.isdigit() and path is not None and path.is_dir():
-            info = read_info_metadata_dict(path) or {}
-            mid = _first_text(
-                info.get("published_file_id"),
-                path.name if path.name.isdigit() else "",
-            )
-        if not mid.isdigit() and path is not None and not path.is_dir():
-            row = self._sqlite_row_by_path(path)
-            if row is not None:
-                mid = str(row.get("mod_id") or "")
-        if not _folder_exists(path) and mid.isdigit():
+        if not mid.isdigit():
+            return "", path
+        if not _folder_exists(path):
             sqlite = self._sqlite_row(mid)
             lkp = str((sqlite or {}).get("last_known_path") or "").strip()
-            if lkp and Path(lkp).is_dir():
+            if lkp:
                 path = Path(lkp)
-            elif path is None and lkp:
-                path = Path(lkp)
+            # Presence Reconcile owns rediscovery. Resolver is display-only.
         return mid, path
 
     def _sqlite_row(self, mod_id: str) -> dict[str, Any] | None:
@@ -478,33 +621,43 @@ class ModMetadataResolver:
         return None
 
     def _offline_existing(self, root: Path, backup) -> Path | None:
-        from services.file_ops import LEGACY_INFO_DIR_NAME
-        from services.offline.paths import resolve_offline_page as resolve_info_offline
+        from services.info_asset_runtime import probe_live_offline_available
 
-        found = resolve_info_offline(root)
-        if found is not None:
-            return found.resolve()
-        for info_name in (INFO_DIR_NAME, LEGACY_INFO_DIR_NAME):
-            for candidate in (
-                root / info_name / "offline" / "index.html",
-                root / info_name / "index.html",
-            ):
-                try:
-                    if candidate.is_file():
-                        return candidate.resolve()
-                except OSError:
-                    continue
+        # Detail resolve must NOT materialize offline_view (hash+copy on UI thread).
+        # OPEN uses resolve_offline_page → ensure_live_offline_openable.
+        marker = probe_live_offline_available(root)
+        if marker is not None:
+            return marker.resolve()
+
         if backup is not None:
+            # Presence only — do not materialize Backup offline closure here.
+            mid = str(getattr(backup, "mod_id", "") or "").strip()
+            dest_root = readable_backup_root(mid) if mid else None
+            if dest_root is not None:
+                backup_index = dest_root / BACKUP_OFFLINE_DIR / "index.html"
+                try:
+                    if backup_index.is_file():
+                        return backup_index.resolve()
+                except OSError:
+                    pass
             return _usable_file(backup.offline_path, allow_empty=True)
         return None
 
     def _offline_missing(self, backup, sqlite: dict[str, Any] | None = None) -> Path | None:
+        """Folder-absent presence marker. Does not materialize or OPEN."""
+        mid = ""
         if backup is not None:
-            found = _usable_file(backup.offline_path, allow_empty=True)
-            if found is not None:
-                return found
-        if sqlite is not None:
-            return _usable_file(sqlite.get("backup_offline_path"), allow_empty=True)
+            mid = str(getattr(backup, "mod_id", "") or "").strip()
+        if not mid and sqlite is not None:
+            mid = str(sqlite.get("mod_id") or "").strip()
+        dest_root = readable_backup_root(mid) if mid else None
+        if dest_root is not None:
+            backup_index = dest_root / BACKUP_OFFLINE_DIR / "index.html"
+            try:
+                if backup_index.is_file():
+                    return backup_index.resolve()
+            except OSError:
+                pass
         return None
 
 

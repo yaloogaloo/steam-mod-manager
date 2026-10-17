@@ -8,7 +8,8 @@ Trigger boundary (enforced by architecture):
 Public API
 ----------
 parse_nexus_offline_html(index_html_path) -> NexusOfflineCandidates
-    Pure parser. Returns candidates; never writes files or touches the DB.
+    Reads the HTML and resolves captured ``./assets/`` refs through the
+    current resource authority. Never writes Mod covers or the DB.
 
 apply_nexus_offline_candidates(mod_id, managed_path, candidates, ...)
     Merge helper. Fills only missing fields. Never overwrites existing values.
@@ -21,7 +22,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlsplit, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,8 @@ class NexusOfflineCandidates:
     title: str = ""
     source_url: str = ""
     external_id: str = ""          # Nexus numeric Mod ID as string
-    cover_asset_path: Path | None = None  # absolute path inside offline/assets/
+    cover_asset_path: Path | None = None  # resolved captured resource, if any
+    cover_resolution: str = ""     # NO_LOCAL / UNRESOLVED / REMOTE / RESOLVED
     description: str = ""
     confidence: dict[str, str] = field(default_factory=dict)
 
@@ -65,6 +67,13 @@ _NEXUS_MOD_URL_NO_GAME_RE = re.compile(
 )
 _LOGIN_TITLE_RE = re.compile(r"^\s*please\s+log\s+in\s*$", re.IGNORECASE)
 _EMPTY_MOD_FOLDER_RE = re.compile(r"^Empty Mod [0-9a-f]{8}$", re.IGNORECASE)
+
+# Cover-field outcomes. A missing gallery and a local ref the authority
+# cannot resolve are different events.
+NO_LOCAL_COVER_REFERENCE = "NO_LOCAL_COVER_REFERENCE"
+UNRESOLVED_LOCAL_RESOURCE = "UNRESOLVED_LOCAL_RESOURCE"
+REMOTE_RESOURCE_SKIPPED = "REMOTE_RESOURCE_SKIPPED"
+RESOLVED_LOCAL_COVER = "RESOLVED_LOCAL_COVER"
 
 
 def is_valid_nexus_mod_id(value: str = "") -> bool:
@@ -186,6 +195,21 @@ def _should_fill_nexus_source_url(
     cur_id = _extract_mod_id_from_url(cur)
     ext = str(current_external_id or "").strip()
     if cand_id and (cur_id == cand_id or ext == cand_id) and cur != cand:
+        # Same Nexus Mod ID digits must still share the same game slug —
+        # never allow stardewvalley/1333 to replace baldursgate3/1333.
+        def _game_slug(u: str) -> str:
+            try:
+                parts = [p for p in urlparse(u).path.split("/") if p]
+                if "mods" in parts:
+                    idx = parts.index("mods")
+                    if idx > 0:
+                        return parts[idx - 1].lower()
+            except Exception:
+                return ""
+            return ""
+
+        if _game_slug(cur) and _game_slug(cand) and _game_slug(cur) != _game_slug(cand):
+            return False
         return True
     if cand_id and _is_placeholder_nexus_external_id(ext, managed_path=managed_path):
         return True
@@ -283,62 +307,71 @@ def _extract_mod_id(soup, nexus_url: str) -> tuple[str, str]:
     return "", "none"
 
 
-def _is_local_asset(src: str) -> bool:
-    return src.startswith("./assets/") or src.startswith("assets/")
-
-
-def _resolve_asset(src: str, index_html_path: Path) -> Path | None:
-    try:
-        resolved = (index_html_path.parent / src).resolve()
-        if resolved.is_file():
-            return resolved
-    except Exception:
-        pass
-    return None
-
-
-def _extract_gallery_image(soup, index_html_path: Path) -> tuple[Path | None, str]:
-    """Find first true Mod Gallery image (local ./assets/ only; no remote URLs)."""
-
-    def _first_local(container) -> Path | None:
-        if container is None:
-            return None
-        for img in container.find_all("img"):
-            src = str(img.get("src") or "").strip()
-            if _is_local_asset(src):
-                resolved = _resolve_asset(src, index_html_path)
-                if resolved is not None:
-                    return resolved
-        return None
-
-    # Primary: #sidebargallery > ul.thumbgallery
+def _gallery_regions(soup) -> list[tuple[object, str]]:
+    """Gallery containers in the existing priority order, with confidence."""
+    regions: list[tuple[object, str]] = []
     gallery = soup.find("div", id="sidebargallery")
     if gallery:
         thumbs = gallery.find("ul", class_=re.compile(r"\bgallery\b|\bthumbgallery\b"))
         if thumbs:
-            found = _first_local(thumbs)
-            if found:
-                return found, "high"
-        found = _first_local(gallery)
-        if found:
-            return found, "high"
-
-    # Fallback 1: ul.thumbgallery anywhere
+            regions.append((thumbs, "high"))
+        regions.append((gallery, "high"))
     thumbs = soup.find("ul", class_=re.compile(r"\bgallery\b|\bthumbgallery\b"))
-    if thumbs:
-        found = _first_local(thumbs)
-        if found:
-            return found, "medium"
-
-    # Fallback 2: new Tailwind UI containers
+    if thumbs is not None:
+        regions.append((thumbs, "medium"))
     for div in soup.find_all("div", class_=True):
         cls = " ".join(div.get("class") or [])
         if "group/image" in cls or "aspect-video" in cls:
-            found = _first_local(div)
-            if found:
-                return found, "medium"
+            regions.append((div, "medium"))
+    return regions
 
-    return None, "none"
+
+def _extract_gallery_image(
+    soup, index_html_path: Path
+) -> tuple[Path | None, str, str]:
+    """Find the first captured gallery image via the resource authority.
+
+    Remote ``https`` / ``og:image`` URLs are not local covers. A ``./assets/``
+    reference that the authority cannot resolve is ``UNRESOLVED_LOCAL_RESOURCE``,
+    which is not the same as a page with no cover reference.
+    """
+    from services.offline.captured_resource import (
+        CaptureResolveStatus,
+        CapturedResourceResolver,
+    )
+
+    resolver = CapturedResourceResolver(index_html_path)
+    saw_unresolved = False
+    saw_remote = False
+    for container, confidence in _gallery_regions(soup):
+        for img in container.find_all("img"):
+            src = str(img.get("src") or "").strip()
+            if not src:
+                continue
+            found = resolver.resolve(src)
+            if (
+                found.status is CaptureResolveStatus.RESOLVED
+                and found.path is not None
+            ):
+                logger.info(
+                    "[NEXUS_SCRAPER] %s ref=%s",
+                    RESOLVED_LOCAL_COVER,
+                    found.reference,
+                )
+                return found.path, confidence, RESOLVED_LOCAL_COVER
+            if found.status is CaptureResolveStatus.UNRESOLVED_REFERENCE:
+                saw_unresolved = True
+            elif found.status is CaptureResolveStatus.REMOTE_OR_UNSUPPORTED:
+                if urlsplit(src).scheme:
+                    saw_remote = True
+    if saw_unresolved:
+        logger.info("[NEXUS_SCRAPER] %s", UNRESOLVED_LOCAL_RESOURCE)
+        return None, "none", UNRESOLVED_LOCAL_RESOURCE
+    if saw_remote:
+        logger.info("[NEXUS_SCRAPER] %s", REMOTE_RESOURCE_SKIPPED)
+        return None, "none", REMOTE_RESOURCE_SKIPPED
+    logger.info("[NEXUS_SCRAPER] %s", NO_LOCAL_COVER_REFERENCE)
+    return None, "none", NO_LOCAL_COVER_REFERENCE
 
 
 def _extract_description(soup) -> str:
@@ -358,8 +391,8 @@ def _extract_description(soup) -> str:
 def parse_nexus_offline_html(index_html_path: Path) -> NexusOfflineCandidates:
     """Parse a Nexus offline ``index.html`` and return metadata candidates.
 
-    PURE function: reads the HTML file only, writes nothing, touches no DB,
-    makes no network requests.
+    Reads the HTML file and resolves captured local resources. Writes no Mod
+    cover, touches no DB, makes no network requests.
 
     This function MUST only be invoked from the offline-HTML-import path
     (``attach_nexus_offline_page`` → ``_apply_nexus_offline_metadata``).
@@ -410,7 +443,11 @@ def parse_nexus_offline_html(index_html_path: Path) -> NexusOfflineCandidates:
 
     # gallery cover
     try:
-        c.cover_asset_path, c.confidence["cover"] = _extract_gallery_image(soup, index_html_path)
+        (
+            c.cover_asset_path,
+            c.confidence["cover"],
+            c.cover_resolution,
+        ) = _extract_gallery_image(soup, index_html_path)
     except Exception as exc:
         logger.warning("[NEXUS_SCRAPER] failed to parse gallery image: %s", exc)
         c.confidence["cover"] = "error"
@@ -440,12 +477,13 @@ def _patch_mod_db_identity(
     external_id: str | None = None,
     workspace_id: str | None = None,
 ) -> None:
-    """Patch identity columns on ``mods`` (bypasses COALESCE-only title updates)."""
-    from core.db_manager import _utc_now
+    """Patch identity columns on ``mods`` (bypasses COALESCE-only title updates).
 
+    Offline HTML merge must not bump ``mods.updated_at`` (forbidden reason).
+    """
     mid = int(str(mod_id).strip())
-    sets: list[str] = ["updated_at = ?"]
-    params: list[object] = [_utc_now()]
+    sets: list[str] = []
+    params: list[object] = []
     if title is not None and str(title).strip():
         sets.append("title = ?")
         params.append(str(title).strip())
@@ -461,7 +499,7 @@ def _patch_mod_db_identity(
     if workspace_id is not None:
         sets.append("workspace_id = ?")
         params.append(str(workspace_id).strip())
-    if len(sets) == 1:
+    if not sets:
         return
     params.append(mid)
     with database._lock:
@@ -478,23 +516,27 @@ def apply_nexus_offline_candidates(
     candidates: NexusOfflineCandidates,
     *,
     db=None,
+    merge_mode: str = "fill_missing",
 ) -> None:
-    """Apply *candidates* to an existing Mod, filling ONLY missing fields.
+    """Apply *candidates* to an existing Mod.
 
-    Merge rules
-    -----------
-    title        — write when placeholder or import-default folder title
-    display_name — write when user display override empty and not overridden
-    source_url   — write when empty, incomplete, or HTML canonical differs
-    external_id  — write when empty or system placeholder (folder/local)
-    description  — write only when currently empty AND no user override
-    cover        — copy asset only when no cover file exists AND no user override
+    ``merge_mode``
+    --------------
+    ``fill_missing`` (default)
+        Detail-panel attach: fill ONLY empty / placeholder fields.
+    ``import_overwrite``
+        Import / offline-archive consumer: rewrite title / source_url /
+        external_id / description from the offline page when the Nexus URL
+        game slug is compatible with the entity (or entity URL empty).
 
     This function MUST only be called from the offline-HTML-import path.
     NEVER call it from refresh_mod / reconcile / sync / show_mod.
+
+    Directory naming is intentionally *not* performed here.
     """
     from core.db_manager import get_db
     from core.models import is_unknown_mod_title
+    from services.importers.duplicate_check import nexus_source_urls_compatible
     from services.metadata_ownership import (
         FIELD_COVER,
         FIELD_DESCRIPTION,
@@ -503,8 +545,13 @@ def apply_nexus_offline_candidates(
         should_apply_official_field,
     )
 
+    mode = str(merge_mode or "fill_missing").strip().lower()
+    import_overwrite = mode == "import_overwrite"
+
     logger.info(
-        "[NEXUS_SCRAPER] SCRAPER TRIGGERED BY: OFFLINE_HTML_IMPORT mod_id=%s", mod_id
+        "[NEXUS_SCRAPER] SCRAPER TRIGGERED BY: OFFLINE_HTML_IMPORT mod_id=%s mode=%s",
+        mod_id,
+        mode,
     )
 
     mid = str(mod_id).strip()
@@ -519,6 +566,23 @@ def apply_nexus_offline_candidates(
 
     if info is None:
         logger.warning("[NEXUS_SCRAPER] mod_id=%s not found in DB; skipping", mid)
+        return
+
+    # Refuse cross-game offline pages against an already-scoped entity.
+    row_url = str(getattr(info, "source_url", "") or "").strip()
+    cand_url = str(candidates.source_url or "").strip()
+    if (
+        row_url
+        and cand_url
+        and not nexus_source_urls_compatible(row_url, cand_url)
+    ):
+        logger.warning(
+            "[NEXUS_SCRAPER] refuse cross-game offline page for mod_id=%s "
+            "row_url=%s cand_url=%s",
+            mid,
+            row_url,
+            cand_url,
+        )
         return
 
     try:
@@ -538,23 +602,27 @@ def apply_nexus_offline_candidates(
     current_external_id = str(getattr(info, "external_id", "") or "").strip()
     current_description = str(getattr(info, "description", "") or "").strip()
 
-    source_url_will_fill = bool(
-        candidates.source_url
-        and _should_fill_nexus_source_url(
-            current_source_url,
-            candidates.source_url,
-            current_external_id=current_external_id,
-            managed_path=dest,
+    if import_overwrite:
+        source_url_will_fill = bool(candidates.source_url)
+        external_id_will_fill = bool(candidates.external_id)
+    else:
+        source_url_will_fill = bool(
+            candidates.source_url
+            and _should_fill_nexus_source_url(
+                current_source_url,
+                candidates.source_url,
+                current_external_id=current_external_id,
+                managed_path=dest,
+            )
         )
-    )
-    external_id_will_fill = bool(
-        candidates.external_id
-        and _should_fill_nexus_external_id(
-            current_external_id,
-            candidates.external_id,
-            managed_path=dest,
+        external_id_will_fill = bool(
+            candidates.external_id
+            and _should_fill_nexus_external_id(
+                current_external_id,
+                candidates.external_id,
+                managed_path=dest,
+            )
         )
-    )
 
     # Sidecar merge (always records official title; user fields obey overrides).
     updated_meta = merge_official_sidecar_fields(
@@ -568,6 +636,9 @@ def apply_nexus_offline_candidates(
         updated_meta["url"] = candidates.source_url
     if external_id_will_fill and candidates.external_id:
         updated_meta["workspace_id"] = candidates.external_id
+    if import_overwrite and candidates.title:
+        updated_meta["title"] = candidates.title
+        updated_meta["display_name"] = candidates.title
 
     db_title: str | None = None
     db_display: str | None = None
@@ -577,7 +648,7 @@ def apply_nexus_offline_candidates(
 
     # ---- title / display_name ----
     if candidates.title:
-        if _should_fill_nexus_title(
+        if import_overwrite or _should_fill_nexus_title(
             current_title,
             mod_id=mid,
             managed_path=dest,
@@ -599,15 +670,18 @@ def apply_nexus_offline_candidates(
             or _EMPTY_MOD_FOLDER_RE.match(current_user_display)
             or _is_placeholder_nexus_external_id(current_user_display, managed_path=dest)
         )
-        if should_apply_official_field(
-            FIELD_DISPLAY_NAME,
-            overrides=overrides,
-            local_value=current_user_display,
-            mod_id=mid,
-        ) and (
-            db_title is not None
-            or is_unknown_mod_title(current_title, published_file_id=mid)
-            or (display_is_placeholder and (source_url_will_fill or external_id_will_fill))
+        if import_overwrite or (
+            should_apply_official_field(
+                FIELD_DISPLAY_NAME,
+                overrides=overrides,
+                local_value=current_user_display,
+                mod_id=mid,
+            )
+            and (
+                db_title is not None
+                or is_unknown_mod_title(current_title, published_file_id=mid)
+                or (display_is_placeholder and (source_url_will_fill or external_id_will_fill))
+            )
         ):
             db_display = candidates.title
             logger.info("[NEXUS_SCRAPER] display_name filled: %r", candidates.title)
@@ -638,10 +712,13 @@ def apply_nexus_offline_candidates(
         logger.info("[NEXUS_SCRAPER] external_id already exists, skipped")
 
     # ---- description (metadata only; DB description untouched here) ----
-    if candidates.description and should_apply_official_field(
-        FIELD_DESCRIPTION,
-        overrides=overrides,
-        local_value=current_description,
+    if candidates.description and (
+        import_overwrite
+        or should_apply_official_field(
+            FIELD_DESCRIPTION,
+            overrides=overrides,
+            local_value=current_description,
+        )
     ):
         logger.info("[NEXUS_SCRAPER] description filled")
     elif candidates.description:
@@ -671,16 +748,21 @@ def apply_nexus_offline_candidates(
             logger.warning("[NEXUS_SCRAPER] metadata.json write failed: %s", exc)
 
     # ---- cover ----
-    if candidates.cover_asset_path and should_apply_official_field(
-        FIELD_COVER,
-        overrides=overrides,
-        local_value=str(getattr(info, "cover_path", "") or "").strip(),
+    if candidates.cover_asset_path and (
+        import_overwrite
+        or should_apply_official_field(
+            FIELD_COVER,
+            overrides=overrides,
+            local_value=str(getattr(info, "cover_path", "") or "").strip(),
+        )
     ):
+        logger.info("[NEXUS_SCRAPER] %s", RESOLVED_LOCAL_COVER)
         _install_offline_cover(mid, dest, candidates.cover_asset_path)
     elif candidates.cover_asset_path:
         logger.info("[NEXUS_SCRAPER] cover already exists or overridden, skipped")
     else:
-        logger.info("[NEXUS_SCRAPER] no gallery cover found, skipped")
+        token = candidates.cover_resolution or NO_LOCAL_COVER_REFERENCE
+        logger.info("[NEXUS_SCRAPER] %s", token)
 
 
 def _install_offline_cover(

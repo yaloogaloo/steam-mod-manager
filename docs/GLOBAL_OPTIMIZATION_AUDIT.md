@@ -2,6 +2,7 @@
 
 **日期：** 2026-08-12  
 **性质：** 只读审计。本文档不修改业务代码、UI、数据库或行为。  
+**Note (Phase 12):** `.info` is metadata/index only. Leftover `.info/assets` is not Source of Truth. See `docs/asset_lifecycle_final_status.md`.  
 **约束：** 不建议大规模重写；优化路线以小步、可回滚、可测为准。  
 **范围：** `main.py`、`core/`、`services/`、`ui/`；测试与 `data/` 探针文件仅作为死代码/遗留证据。
 

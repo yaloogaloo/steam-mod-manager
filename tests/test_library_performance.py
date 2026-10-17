@@ -10,7 +10,6 @@ from unittest import mock
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 from services.library_reconcile import start_reconcile_library_async
 from services.mod_library_cache import (
@@ -18,6 +17,7 @@ from services.mod_library_cache import (
     get_library_cache,
     reset_library_cache,
 )
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -49,6 +49,7 @@ def _seed(root: Path, db: DatabaseManager, count: int, *, id_base: int = 700000)
         (info / METADATA_FILENAME).write_text(
             json.dumps(
                 {
+                    "internal_id": mid,
                     "published_file_id": mid,
                     "title": f"Perf Mod {i}",
                     "game_name": "PerfGame",
@@ -57,22 +58,11 @@ def _seed(root: Path, db: DatabaseManager, count: int, *, id_base: int = 700000)
             encoding="utf-8",
         )
         (folder / "payload.bin").write_bytes(b"x" * 16)
-        db.upsert_mod(
-            ModMetadata(
-                published_file_id=mid,
-                title=f"Perf Mod {i}",
-                managed_path=str(folder),
-                game_name="PerfGame",
-            )
+        create_steam_test_mod(
+            db, external_id=mid, title=f"Perf Mod {i}", game_name="PerfGame"
         )
-        db.update_mod_identity_fields(
-            mid,
-            source_type="steam",
-            content_status="healthy",
-            folder_present=True,
-            last_known_path=str(folder),
-            sticky_source=False,
-        )
+        bind_managed_path(db, mid, folder, game_name="PerfGame", title=f"Perf Mod {i}")
+        db.update_mod_content_status(mid, content_status="healthy", folder_present=True)
 
 
 # ---- Cases 1–9 ----
@@ -191,24 +181,23 @@ def test_case4_filter_no_filesystem(tmp_path: Path) -> None:
     reset_library_cache()
 
 
-def test_case5_snapshot_uses_batch_backup_rows(tmp_path: Path) -> None:
-    """Snapshot layer batches backup rows (Resolver may still read SQLite per resolve)."""
+def test_case5_snapshot_uses_batch_list_items(tmp_path: Path) -> None:
+    """Snapshot layer batches list rows (DB-first; no per-mod backup in card loop)."""
     db = _make_db(tmp_path, "c5.db")
     lib = tmp_path / "library"
     _seed(lib, db, 35)
     reset_library_cache()
-    batch = mock.Mock(wraps=db.get_mods_backup_rows)
-    db.get_mods_backup_rows = batch  # type: ignore[method-assign]
+    batch = mock.Mock(wraps=db.list_mod_list_items)
+    db.list_mod_list_items = batch  # type: ignore[method-assign]
     snap = build_library_snapshot(lib)
     assert snap.total_count == 35
     assert batch.call_count == 1
-    # Ensure snapshot module does not call per-mod backup in the card loop
     import inspect
     import services.mod_library_cache as mlc
 
     src = inspect.getsource(mlc.build_library_snapshot)
     assert "get_mod_backup_row(" not in src
-    assert "get_mods_backup_rows" in src
+    assert "list_mod_list_items" in src
     DatabaseManager.reset_instance()
     reset_library_cache()
 
@@ -264,7 +253,7 @@ def test_case7_detail_size_not_sync_walk(
 
     real = dir_size_mod.directory_size
 
-    def _gated(path):
+    def _gated(path, **_kwargs):
         while not gate["go"]:
             time.sleep(0.005)
         walked["n"] += 1

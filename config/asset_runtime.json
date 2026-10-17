@@ -1,0 +1,4 @@
+{
+  "cas_only_info_asset_runtime": true,
+  "_comment": "Phase 6 gate. Env SMM_CAS_ONLY_INFO_ASSET_RUNTIME overrides. Default true when file missing."
+}

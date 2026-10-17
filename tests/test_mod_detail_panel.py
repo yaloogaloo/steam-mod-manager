@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import create_steam_test_mod
 
 pytest.importorskip("PySide6")
 
@@ -59,9 +60,11 @@ def test_panel_created_once_and_reused(
 
     pub = "91001"
     folder = _mod_folder(tmp_path, pub_id=pub, title="Test Mod")
-    db.upsert_mod(ModMetadata(published_file_id=pub, title="Test Mod"))
+    create_steam_test_mod(db, external_id=pub, title="Test Mod")
 
-    panel.show_mod(folder)
+
+    # Detail bind requires caller internal_id (Identity Contract — no path invent).
+    panel.show_mod(folder, mod_id=pub)
     assert panel._mode == MODE_VIEW
     assert "Test Mod" in panel.view_title.text()
     assert hasattr(panel, "btn_edit_info")
@@ -95,9 +98,10 @@ def test_edit_does_not_rename_folder(
 ) -> None:
     pub = "91002"
     folder = _mod_folder(tmp_path, pub_id=pub, title="FolderStay")
-    db.upsert_mod(ModMetadata(published_file_id=pub, title="FolderStay"))
+    create_steam_test_mod(db, external_id=pub, title="FolderStay")
+
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=pub)
 
     def _accept(self: EditModDialog) -> int:
         self.display_name_edit.setText("Brand New Name")

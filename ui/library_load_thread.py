@@ -30,11 +30,30 @@ class LibraryLoadWorker(QThread):
 
     def run(self) -> None:
         try:
-            snapshot = get_library_cache().load_snapshot(
-                self.library_root, force=self.force
-            )
+            from services.startup_io_trace import begin as _io_begin
+
+            _io_begin("library_load", force=int(self.force))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from services.deploy_e2e import e2e_span
+
+            with e2e_span("LibraryLoadWorker.run"):
+                snapshot = get_library_cache().load_snapshot(
+                    self.library_root, force=self.force
+                )
             if self.isInterruptionRequested():
                 return
             self.loaded.emit(snapshot)
         except Exception as exc:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("LibraryLoadWorker.run")
             self.failed.emit(str(exc))
+        finally:
+            try:
+                from services.startup_io_trace import end as _io_end
+
+                _io_end("library_load")
+            except Exception:  # noqa: BLE001
+                pass

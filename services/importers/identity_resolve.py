@@ -5,6 +5,10 @@ Pipeline order (enforced by callers):
 
 Offline page snapshots are an identity *source*, not a post-import scrape step
 for the gate. Metadata scrape/attach may still run after a successful import.
+
+For Nexus Offline HTML, parsed title from ``parse_offline_page_identity``
+feeds ``canonical_nexus_offline_import_title`` so the library directory is
+named after the Mod title, not the ``Empty Mod <random>`` stub folder.
 """
 
 from __future__ import annotations
@@ -68,7 +72,7 @@ class ImportIdentity:
         return self.has_gate_fields()
 
 
-def parse_offline_page_identity(path: str | Path) -> ImportIdentity:
+def parse_offline_page_identity(path: str | Path, *, temp_root: Path | None = None) -> ImportIdentity:
     """Extract source_url / external_id / title from a saved offline HTML/MHTML page."""
     src = Path(path).expanduser()
     if not src.is_file():
@@ -89,7 +93,7 @@ def parse_offline_page_identity(path: str | Path) -> ImportIdentity:
             html_text, _assets, _cid = extract_mhtml(src)
             if not str(html_text or "").strip():
                 return ImportIdentity()
-            with tempfile.TemporaryDirectory(prefix="smm_id_gate_") as tmp:
+            with tempfile.TemporaryDirectory(prefix="smm_id_gate_", dir=temp_root) as tmp:
                 index = Path(tmp) / "index.html"
                 index.write_text(html_text, encoding="utf-8", errors="replace")
                 candidates = parse_nexus_offline_html(index)
@@ -106,6 +110,50 @@ def parse_offline_page_identity(path: str | Path) -> ImportIdentity:
     )
 
 
+def canonical_nexus_offline_import_title(
+    *,
+    user_title: str = "",
+    parsed_title: str = "",
+    folder_name: str = "",
+) -> str:
+    """Choose the title used for Nexus identity + canonical library directory name.
+
+    Why this order exists (do not drop it in a future import-flow refactor):
+
+    Offline HTML is an identity *source*. The parser runs before materialize.
+    A valid parsed Mod title MUST become the canonical directory name
+    (``<game>/<parsed title>/``). Temp stub folders named ``Empty Mod <random>``
+    exist only so an empty local path can still copy a payload; they are not
+    the final filesystem identity.
+
+    ``Empty Mod <random>`` remains a fallback only when no usable title exists.
+    Rename after materialize, if still needed, must go through path_lifecycle
+    so filesystem / DB / sidecar / identity stay aligned — never an isolated
+    ``os.rename`` / ``shutil.move``.
+    """
+    from core.models import is_unknown_mod_title
+    from services.identity_service import is_empty_mod_placeholder
+
+    def _usable(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if is_empty_mod_placeholder(text):
+            return ""
+        if is_unknown_mod_title(text):
+            return ""
+        return text
+
+    return (
+        _usable(user_title)
+        or _usable(parsed_title)
+        or _usable(folder_name)
+        or str(user_title or "").strip()
+        or str(parsed_title or "").strip()
+        or str(folder_name or "").strip()
+    )
+
+
 def resolve_import_identity(
     platform: str,
     *,
@@ -118,6 +166,7 @@ def resolve_import_identity(
     source_url: str = "",
     offline_html: str = "",
     allow_local_fallback: bool = False,
+    temp_root: Path | None = None,
 ) -> ImportIdentity | ImportResult:
     """
     Resolve identity from caller fields, then offline page if still incomplete.
@@ -174,7 +223,8 @@ def resolve_import_identity(
         or not identity.external_id
         or (plat == PLATFORM_NEXUS and not str(identity.external_id).isdigit())
     ):
-        from_page = parse_offline_page_identity(offline)
+        from_page = (parse_offline_page_identity(offline, temp_root=temp_root) if temp_root is not None
+                     else parse_offline_page_identity(offline))
         if not identity.source_url and from_page.source_url:
             identity.source_url = from_page.source_url
         if (not identity.external_id or not str(identity.external_id).isdigit()) and (
@@ -233,15 +283,11 @@ def apply_directory_import_identity(
     platform: str = "",
 ) -> ImportIdentity:
     """
-    Unify directory-import identity for batch and single flows.
+    Directory-import identity: keep official URL/ID only.
 
-    Priority:
-      1. Official ID / URL already on *identity* (unchanged)
-      2. Else use ``folder.name`` as ``external_id`` (and Steam workshop id
-         when the folder name is numeric) — same key batch mode already uses
-
-    Archives / non-directory imports must not call this helper.
-    Does not invent platform URLs.
+    Never invents workshop/external from folder names or path hashes.
+    Steam digit folder names are **not** Workshop IDs outside
+    ``steamapps/workshop/content/<appid>/<workshop_id>`` (Sync only).
     """
     plat = normalize_platform(platform or identity.platform)
     out = ImportIdentity(
@@ -251,24 +297,5 @@ def apply_directory_import_identity(
         workshop_id=str(identity.workshop_id or "").strip(),
         title=str(identity.title or "").strip(),
     )
-    folder_name = Path(folder).name.strip()
-    if not folder_name:
-        return out
-
-    # Priority 1 — keep resolved official identity.
-    if out.has_official_identity():
-        return out
-
-    # Priority 2 — directory name as external identity (matches batch).
-    # Overwrite non-official ids (e.g. parent-folder params leaked into batch).
-    if plat == PLATFORM_STEAM:
-        if folder_name.isdigit():
-            from core.mod_platform import steam_workshop_url
-
-            out.workshop_id = folder_name
-            out.external_id = folder_name
-            out.source_url = steam_workshop_url(folder_name)
-        return out
-
-    out.external_id = folder_name
+    _ = Path(folder).name  # directory name never participates
     return out

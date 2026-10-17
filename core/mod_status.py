@@ -1,4 +1,22 @@
-"""Mod lifecycle status (invalid / conflict) — SQLite-backed, not .info."""
+"""Mod lifecycle status (invalid / conflict) — SQLite-backed, not .info.
+
+ARCHITECTURE RULE
+-----------------
+Conflict is **user annotation** only — equivalent to invalid / abandoned.
+
+Legal writers: ``services.user_annotation`` (Detail Panel flag chips only)
+via ``DatabaseManager.update_mod_conflict_annotation``.
+
+System modules (Import, Deploy, Reconcile, Refresh, Startup, Archive,
+ConflictDetector, identity_repair) MUST NOT infer or create conflict.
+File overlap / deploy overwrite / relationships are diagnostics or
+user-declared edges — never ``conflict_status=conflict``.
+
+``update_mod_status`` cannot write conflict columns.
+
+Do not add automatic conflict detection that writes this column.
+Do not "heal" conflict on refresh — that hides pollution.
+"""
 
 from __future__ import annotations
 

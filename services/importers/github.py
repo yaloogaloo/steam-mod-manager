@@ -1,4 +1,8 @@
-"""GitHub importer — URL + local scan, no GitHub API."""
+"""GitHub importer — URL + local scan, no GitHub API.
+
+Workspace ID is system-generated. Never copied from Internal ID.
+``external_id`` is owner/repo (platform identity), not a user Mod ID.
+"""
 
 from __future__ import annotations
 
@@ -73,9 +77,15 @@ class GithubImporter(ModImporter):
                 return ImportResult(
                     success=False, error="缺少 GitHub URL", platform=self.platform
                 )
-            local_key = suffix or folder.name
-            external_id = f"local/{local_key}"
-            name = (title or "").strip() or local_key
+            from services.importers.nexus import local_nexus_external_id
+            import uuid
+
+            if suffix:
+                external_id = local_nexus_external_id(suffix)
+                name = (title or "").strip() or suffix
+            else:
+                external_id = local_nexus_external_id(uuid.uuid4().hex)
+                name = (title or "").strip() or folder.name
             canonical = ""
         else:
             repo = self.parse_repo(url)
@@ -108,7 +118,10 @@ class GithubImporter(ModImporter):
             folder,
             file_entries=_kwargs.get("file_entries"),
         )
-        info = db.register_external_mod(
+        from services.identity_service import create_mod_identity
+
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_GITHUB,
             external_id=external_id,
             source_url=canonical,
@@ -117,6 +130,11 @@ class GithubImporter(ModImporter):
             game_name=ctx.game_name,
             mod_files=bundle,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="GitHub identity create failed", platform=PLATFORM_GITHUB
+            )
 
         managed = ""
         if library_root:

@@ -19,12 +19,13 @@ from core.mod_platform import (
     FILE_ROLE_UNKNOWN,
     FILE_TYPE_MAIN,
     FILE_TYPE_OPTIONAL,
+    PLATFORM_NEXUS,
     ModFileEntry,
     ModFilesBundle,
     SOURCE_TYPE_GITHUB,
 )
-from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
+from services.identity_service import create_mod_identity
 from services.mod_files import ModFileManager
 from ui.mod_detail_panel import ModDetailPanel
 from ui.mod_files_ux import file_badge_kind, file_description, sort_files_for_detail
@@ -53,12 +54,65 @@ def _seed(lib: Path, *, mid: str, title: str) -> Path:
     info.mkdir(parents=True)
     (info / "mod.json").write_text(
         json.dumps(
-            {"published_file_id": mid, "title": title},
+            {
+                "published_file_id": mid,
+                "internal_id": mid,
+                "title": title,
+            },
             ensure_ascii=False,
         ),
         encoding="utf-8",
     )
     return folder
+
+
+def _register_mod(
+    db: DatabaseManager,
+    lib: Path,
+    *,
+    title: str,
+    platform: str = PLATFORM_GITHUB,
+    bundle: ModFilesBundle | None = None,
+    token: str = "",
+) -> tuple[Path, str]:
+    slug = (token or title).lower().replace(" ", "-")
+    plat = str(platform or "").strip().lower()
+    if plat == PLATFORM_NEXUS or plat == "nexus":
+        nid = str(abs(hash(slug)) % 900000 + 100000)
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_NEXUS,
+            external_id=nid,
+            source_url=f"https://www.nexusmods.com/palworld/mods/{nid}",
+            title=title,
+            app_id=1623730,
+            game_name="Palworld",
+            operation="import",
+            mod_files=bundle,
+        )
+    else:
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_GITHUB,
+            external_id=f"owner/{slug}",
+            source_url=f"https://github.com/owner/{slug}",
+            title=title,
+            app_id=1623730,
+            game_name="Palworld",
+            operation="import",
+            mod_files=bundle,
+        )
+    mid = str(created.mod_id)
+    folder = _seed(lib, mid=mid, title=title)
+    db.update_mod_identity_fields(
+        mid,
+        folder_present=True,
+        last_known_path=str(folder.resolve()),
+        platform=plat or PLATFORM_GITHUB,
+    )
+    if bundle is not None:
+        db.set_mod_files(mid, bundle)
+    return folder, mid
 
 
 def _multi_bundle() -> ModFilesBundle:
@@ -149,14 +203,11 @@ def test_files_section_hidden_when_single_file(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9101", title="Single")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9101", title="Single", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9101", platform=PLATFORM_GITHUB)
-    db.set_mod_files(
-        "9101",
-        ModFilesBundle(
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="Single",
+        bundle=ModFilesBundle(
             files=[
                 ModFileEntry(
                     id="only",
@@ -170,7 +221,7 @@ def test_files_section_hidden_when_single_file(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
     assert panel._files_section_frame.isHidden()
 
@@ -199,14 +250,11 @@ def test_unified_list_shows_all_filenames_sorted(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9105", title="Similar")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9105", title="Similar", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9105", platform=PLATFORM_GITHUB)
-    db.set_mod_files(
-        "9105",
-        ModFilesBundle(
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="Similar",
+        bundle=ModFilesBundle(
             files=[
                 ModFileEntry(
                     id="u",
@@ -238,7 +286,7 @@ def test_unified_list_shows_all_filenames_sorted(
         ),
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     rows = _file_rows(panel)
@@ -277,15 +325,10 @@ def test_files_section_unified_list_and_other_edit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9102", title="Multi")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9102", title="Multi", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9102", platform=PLATFORM_GITHUB)
-    db.set_mod_files("9102", _multi_bundle())
+    folder, mid = _register_mod(db, lib, title="Multi", bundle=_multi_bundle())
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     assert not panel._files_section_frame.isHidden()
@@ -321,7 +364,7 @@ def test_files_section_unified_list_and_other_edit(
     )
     panel._on_edit_file_description("dev", "开发者包")
     qapp.processEvents()
-    updated = {f.id: f for f in ModFileManager(db).get_files("9102")}
+    updated = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert updated["dev"].metadata.get("description") == "CI 构建产物"
 
 
@@ -329,61 +372,179 @@ def test_context_menu_role_remap_resorts(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9103", title="Remap")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9103", title="Remap", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9103", platform=PLATFORM_GITHUB)
-    db.set_mod_files("9103", _multi_bundle())
+    folder, mid = _register_mod(db, lib, title="Remap", bundle=_multi_bundle())
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     panel._apply_file_badge_role("dev", "Main")
     qapp.processEvents()
 
-    files = {f.id: f for f in ModFileManager(db).get_files("9103")}
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert files["dev"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
-    assert files["main"].file_role == FILE_ROLE_UNKNOWN
+    assert files["main"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
     assert files["src"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
     assert file_badge_kind(files["dev"]) == "Main"
+    assert file_badge_kind(files["main"]) == "Main"
 
     names = [_row_primary(r) for r in _file_rows(panel)]
-    assert names[0] == "dev.zip"
+    assert names[0] in {"dev.zip", "release.zip"}
     assert names[-1] == "source.zip"
     assert "release.zip" in names
+    assert "dev.zip" in names
+    main_badges = [
+        lab.text()
+        for lab in panel.mod_files_host.findChildren(QLabel)
+        if lab.objectName() == "detailFileBadgeMain"
+    ]
+    assert main_badges.count("Main") == 2
 
 
-def test_set_file_role_mapping_exclusive(db: DatabaseManager, tmp_path: Path) -> None:
+def test_set_multiple_main_roles_allowed(db: DatabaseManager, tmp_path: Path) -> None:
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9104", title="Map")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9104", title="Map", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9104", platform=PLATFORM_GITHUB)
-    db.set_mod_files("9104", _multi_bundle())
+    folder, mid = _register_mod(db, lib, title="Map", bundle=_multi_bundle())
 
     mgr = ModFileManager(db)
-    mgr.set_file_role_mapping(
-        "9104",
-        main_file_id="dev",
-        source_file_id="main",
-        platform=PLATFORM_GITHUB,
-    )
-    files = {f.id: f for f in mgr.get_files("9104")}
+    mgr.set_file_badge_role(mid, "dev", "Main", platform=PLATFORM_GITHUB)
+    files = {f.id: f for f in mgr.get_files(mid)}
     assert files["dev"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
     assert files["dev"].selected_for_deploy is True
-    assert files["main"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
-    assert files["main"].selected_for_deploy is False
-    assert files["src"].file_role == FILE_ROLE_UNKNOWN
+    assert files["main"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
+    assert files["src"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
+    assert files["src"].selected_for_deploy is False
+
+
+def test_two_files_set_main(db: DatabaseManager, tmp_path: Path) -> None:
+    lib = tmp_path / "library"
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="TwoMain",
+        bundle=ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="a",
+                    filename="release-v1.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                ),
+                ModFileEntry(
+                    id="b",
+                    filename="release-v2.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                ),
+            ]
+        ),
+    )
+    mgr = ModFileManager(db)
+    mgr.set_file_badge_role(mid, "a", "Main", platform=PLATFORM_GITHUB)
+    mgr.set_file_badge_role(mid, "b", "Main", platform=PLATFORM_GITHUB)
+    files = {f.id: f for f in mgr.get_files(mid)}
+    assert files["a"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
+    assert files["b"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
+    assert file_badge_kind(files["a"]) == "Main"
+    assert file_badge_kind(files["b"]) == "Main"
+
+
+def test_two_files_set_source(db: DatabaseManager, tmp_path: Path) -> None:
+    lib = tmp_path / "library"
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="TwoSrc",
+        bundle=ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="s1",
+                    filename="source-main.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                    selected_for_deploy=True,
+                ),
+                ModFileEntry(
+                    id="s2",
+                    filename="source-dev.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                    selected_for_deploy=True,
+                ),
+            ]
+        ),
+    )
+    mgr = ModFileManager(db)
+    mgr.set_file_badge_role(mid, "s1", "Source", platform=PLATFORM_GITHUB)
+    mgr.set_file_badge_role(mid, "s2", "Source", platform=PLATFORM_GITHUB)
+    files = {f.id: f for f in mgr.get_files(mid)}
+    assert files["s1"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
+    assert files["s2"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
+    assert file_badge_kind(files["s1"]) == "Source"
+    assert file_badge_kind(files["s2"]) == "Source"
+
+
+def test_source_never_selected_for_deploy(db: DatabaseManager, tmp_path: Path) -> None:
+    from core.mod_platform import is_entry_selected_for_deploy, normalize_file_role
+    from services.deploy import resolve_deploy_sources
+
+    lib = tmp_path / "library"
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="SrcDeploy",
+        bundle=ModFilesBundle(
+            files=[
+                ModFileEntry(
+                    id="s1",
+                    filename="source-a.zip",
+                    path="source-a.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                    selected_for_deploy=True,
+                ),
+                ModFileEntry(
+                    id="s2",
+                    filename="source-b.zip",
+                    path="source-b.zip",
+                    file_role=FILE_ROLE_UNKNOWN,
+                    source_type=SOURCE_TYPE_GITHUB,
+                    selected_for_deploy=True,
+                ),
+            ]
+        ),
+    )
+    (folder / "source-a.zip").write_bytes(b"PK")
+    (folder / "source-b.zip").write_bytes(b"PK")
+    mgr = ModFileManager(db)
+    mgr.set_file_badge_role(mid, "s1", "Source", platform=PLATFORM_GITHUB)
+    mgr.set_file_badge_role(mid, "s2", "Source", platform=PLATFORM_GITHUB)
+    files = {f.id: f for f in mgr.get_files(mid)}
+    for entry in files.values():
+        assert normalize_file_role(entry.file_role) == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
+        assert entry.selected_for_deploy is False
+        assert is_entry_selected_for_deploy(entry) is False
+    allowed = resolve_deploy_sources(mid, folder, db=db)
+    assert allowed is None or "source-a.zip" not in allowed
+    assert allowed is None or "source-b.zip" not in allowed
+
+
+def test_legacy_one_main_one_source_unchanged(
+    db: DatabaseManager, tmp_path: Path
+) -> None:
+    lib = tmp_path / "library"
+    folder, mid = _register_mod(db, lib, title="Legacy", bundle=_multi_bundle())
+
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
+    assert files["main"].file_role == FILE_ROLE_GITHUB_RELEASE_ASSET
+    assert files["src"].file_role == FILE_ROLE_GITHUB_SOURCE_ARCHIVE
+    assert files["dev"].file_role == FILE_ROLE_GITHUB_DEVELOPER_BUILD
+    assert files["main"].selected_for_deploy is True
     assert files["src"].selected_for_deploy is False
 
 
 def test_nexus_context_menu_sets_category_and_selection(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
-    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
     from core.mod_platform import (
         FILE_ROLE_NEXUS_OPTIONAL,
         FILE_ROLE_UNKNOWN,
@@ -392,14 +553,12 @@ def test_nexus_context_menu_sets_category_and_selection(
     from ui.mod_files_ux import nexus_category_label
 
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9202", title="NexusCtx")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9202", title="NexusCtx", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9202", platform=DB_NEXUS)
-    db.set_mod_files(
-        "9202",
-        ModFilesBundle(
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="NexusCtx",
+        platform=PLATFORM_NEXUS,
+        bundle=ModFilesBundle(
             files=[
                 ModFileEntry(
                     id="f1",
@@ -413,7 +572,7 @@ def test_nexus_context_menu_sets_category_and_selection(
         ),
     )
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     from PySide6.QtWidgets import QMenu
@@ -437,20 +596,20 @@ def test_nexus_context_menu_sets_category_and_selection(
 
     panel._apply_nexus_category("f1", "汉化")
     qapp.processEvents()
-    files = {f.id: f for f in ModFileManager(db).get_files("9202")}
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert nexus_category_label(files["f1"]) == "汉化"
     assert files["f1"].selected_for_deploy is False
     assert files["f1"].metadata.get("category") == "汉化"
 
     panel._apply_nexus_category("f1", "Main")
     qapp.processEvents()
-    files = {f.id: f for f in ModFileManager(db).get_files("9202")}
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert nexus_category_label(files["f1"]) == "Main"
     assert files["f1"].selected_for_deploy is True
 
     panel._apply_nexus_category("f1", "Optional")
     qapp.processEvents()
-    files = {f.id: f for f in ModFileManager(db).get_files("9202")}
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert nexus_category_label(files["f1"]) == "Optional"
     assert files["f1"].file_role == FILE_ROLE_NEXUS_OPTIONAL
     assert files["f1"].selected_for_deploy is False
@@ -461,7 +620,6 @@ def test_nexus_badge_colors_and_edit_visible_for_all(
 ) -> None:
     from PySide6.QtWidgets import QPushButton
 
-    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
     from core.mod_platform import (
         FILE_ROLE_NEXUS_MAIN,
         FILE_ROLE_UNKNOWN,
@@ -470,14 +628,12 @@ def test_nexus_badge_colors_and_edit_visible_for_all(
     from ui.styles import PANEL_STYLE
 
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9203", title="NexusBadge")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9203", title="NexusBadge", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9203", platform=DB_NEXUS)
-    db.set_mod_files(
-        "9203",
-        ModFilesBundle(
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="NexusBadge",
+        platform=PLATFORM_NEXUS,
+        bundle=ModFilesBundle(
             files=[
                 ModFileEntry(
                     id="m1",
@@ -504,7 +660,7 @@ def test_nexus_badge_colors_and_edit_visible_for_all(
     panel.setStyleSheet(PANEL_STYLE)
     panel.setFixedWidth(420)
     panel.show()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     by_id = {r.property("file_id"): r for r in _file_rows(panel)}
@@ -546,7 +702,6 @@ def test_nexus_flat_list_badges_main_checked_optional_unchecked(
 ) -> None:
     from PySide6.QtWidgets import QTreeWidget
 
-    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
     from core.mod_platform import (
         FILE_ROLE_NEXUS_MAIN,
         FILE_ROLE_NEXUS_OPTIONAL,
@@ -554,14 +709,12 @@ def test_nexus_flat_list_badges_main_checked_optional_unchecked(
     )
 
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9201", title="NexusMulti")
-    db.upsert_mod(
-        ModMetadata(published_file_id="9201", title="NexusMulti", managed_path=str(folder))
-    )
-    db.update_mod_platform_info("9201", platform=DB_NEXUS)
-    db.set_mod_files(
-        "9201",
-        ModFilesBundle(
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="NexusMulti",
+        platform=PLATFORM_NEXUS,
+        bundle=ModFilesBundle(
             files=[
                 ModFileEntry(
                     id="m1",
@@ -592,7 +745,7 @@ def test_nexus_flat_list_badges_main_checked_optional_unchecked(
     )
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     assert not panel._files_section_frame.isHidden()
@@ -634,7 +787,6 @@ def test_main_checkbox_unlocked_and_toggle_stays_quiet(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     """Main may be unchecked; toggle must not emit tags_saved (no card flash/popup)."""
-    from core.db_manager import PLATFORM_NEXUS as DB_NEXUS
     from core.mod_platform import (
         FILE_ROLE_NEXUS_MAIN,
         FILE_ROLE_NEXUS_OPTIONAL,
@@ -642,18 +794,12 @@ def test_main_checkbox_unlocked_and_toggle_stays_quiet(
     )
 
     lib = tmp_path / "library"
-    folder = _seed(lib, mid="9210", title="MainUnlock")
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="9210",
-            title="MainUnlock",
-            managed_path=str(folder),
-        )
-    )
-    db.update_mod_platform_info("9210", platform=DB_NEXUS)
-    db.set_mod_files(
-        "9210",
-        ModFilesBundle(
+    folder, mid = _register_mod(
+        db,
+        lib,
+        title="MainUnlock",
+        platform=PLATFORM_NEXUS,
+        bundle=ModFilesBundle(
             files=[
                 ModFileEntry(
                     id="m1",
@@ -680,7 +826,7 @@ def test_main_checkbox_unlocked_and_toggle_stays_quiet(
     panel = ModDetailPanel()
     emitted: list[object] = []
     panel.tags_saved.connect(lambda p: emitted.append(p))
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
 
     row = next(r for r in _file_rows(panel) if r.property("file_id") == "m1")
@@ -692,13 +838,13 @@ def test_main_checkbox_unlocked_and_toggle_stays_quiet(
     qapp.processEvents()
 
     assert emitted == []
-    files = {f.id: f for f in ModFileManager(db).get_files("9210")}
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert files["m1"].selected_for_deploy is False
 
     # Sidecar re-apply / show_mod must not force Main back on.
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
-    files = {f.id: f for f in ModFileManager(db).get_files("9210")}
+    files = {f.id: f for f in ModFileManager(db).get_files(mid)}
     assert files["m1"].selected_for_deploy is False
     row = next(r for r in _file_rows(panel) if r.property("file_id") == "m1")
     cb = row.findChildren(QCheckBox)[0]

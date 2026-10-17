@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod, write_info_sidecar
 
 pytest.importorskip("PySide6")
 
@@ -18,6 +19,24 @@ from core.models import ModMetadata
 from services.file_ops import INFO_DIR_NAME
 from services.importers.materialize import materialize_imported_mod
 from ui.mod_detail_panel import ModDetailPanel
+
+
+def _wait_open_worker(widget, qapp: QApplication, timeout_ms: int = 8000) -> None:
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    qapp.processEvents()
+    worker = getattr(widget, "_offline_open_worker", None)
+    if worker is None or not worker.isRunning():
+        qapp.processEvents()
+        return
+    loop = QEventLoop()
+    worker.finished.connect(loop.quit)
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    timer.start(timeout_ms)
+    loop.exec()
+    qapp.processEvents()
 
 
 @pytest.fixture(scope="module")
@@ -58,7 +77,8 @@ def test_open_offline_blocks_empty_path(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
     folder = _seed_mod(tmp_path / "lib", mid="92001", title="No Offline")
-    db.upsert_mod(ModMetadata(published_file_id="92001", title="No Offline"))
+    create_steam_test_mod(db, external_id="92001", title="No Offline")
+
     panel = ModDetailPanel()
     panel.show_mod(folder)
 
@@ -85,17 +105,37 @@ def test_open_offline_uses_from_local_file(
     index = folder / INFO_DIR_NAME / "offline" / "index.html"
     index.parent.mkdir(parents=True)
     index.write_text("<html><body>ok</body></html>", encoding="utf-8")
-    meta = ModMetadata(
-        published_file_id="92002",
+    created = create_steam_test_mod(db, external_id="92002", title="Has Offline")
+    write_info_sidecar(
+        folder,
+        internal_id=str(created.mod_id),
         title="Has Offline",
-        offline_page_path=str(index),
-        managed_path=str(folder),
+        external_id="92002",
+        workspace_id=str(created.workspace_id or "92002"),
     )
-    db.upsert_mod(meta)
+    bind_managed_path(db, created.mod_id, folder, title="Has Offline")
+    # Case B: catalog/path fields only (identity already exists)
+    db.upsert_mod(
+        ModMetadata(
+            published_file_id="92002",
+            title="Has Offline",
+            offline_page_path=str(index),
+            managed_path=str(folder),
+        )
+    )
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+    from services.offline_view_cache import is_offline_view_path
+
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
 
     panel = ModDetailPanel()
-    panel.show_mod(folder)
-    panel._metadata.offline_page_path = str(index)
+    panel.show_mod(folder, mod_id=str(created.mod_id))
+    if panel._metadata is not None:
+        panel._metadata.offline_page_path = str(index)
 
     opened: list[QUrl] = []
     monkeypatch.setattr(
@@ -104,9 +144,12 @@ def test_open_offline_uses_from_local_file(
     )
 
     panel._open_offline()
+    _wait_open_worker(panel, qapp)
     assert len(opened) == 1
     assert opened[0].isLocalFile()
-    assert Path(opened[0].toLocalFile()).resolve() == index.resolve()
+    opened_path = Path(opened[0].toLocalFile()).resolve()
+    assert is_offline_view_path(opened_path)
+    assert opened_path != index.resolve()
 
 
 def test_materialize_does_not_import_offline_mhtml(

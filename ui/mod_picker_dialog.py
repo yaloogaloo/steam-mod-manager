@@ -30,6 +30,9 @@ class ModPickerDialog(QDialog):
 
     ``candidates``: list of dicts with keys
     ``mod_id``, ``title``, ``platform``, ``game_name``.
+
+    ARCHITECTURE RULE: pass an explicit parent. See ui.window_lifecycle
+    (Import Mod orphan float accident).
     """
 
     def __init__(
@@ -39,7 +42,11 @@ class ModPickerDialog(QDialog):
         title: str = "Select Mod",
         parent: QWidget | None = None,
     ) -> None:
+        from ui.window_lifecycle import register_toplevel
+
         super().__init__(parent)
+        if parent is not None:
+            register_toplevel(self)
         self.setWindowTitle(title)
         self.setMinimumSize(420, 480)
         self._all = list(candidates)

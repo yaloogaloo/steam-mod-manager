@@ -15,9 +15,9 @@ if str(_ROOT) not in sys.path:
 
 from core.db_manager import DatabaseManager  # noqa: E402
 from core.paths import data_dir, default_mod_library  # noqa: E402
-from services.mod_identity_repair import (  # noqa: E402
+from services.identity_repair_service import (  # noqa: E402
     audit_severity_counts,
-    repair_mod_library_identity,
+    get_identity_repair_service,
 )
 from services.mod_library_integrity_audit import audit_mod_library_integrity  # noqa: E402
 
@@ -64,18 +64,18 @@ def cmd_repair(library: Path, apply: bool, out: Path | None) -> int:
     if apply:
         os.environ.setdefault("SMM_IDENTITY_RECOVERY", "1")
     db = _db()
-    plan = repair_mod_library_identity(library, db=db, apply=apply)
-    text = json.dumps(plan.to_dict(), ensure_ascii=False, indent=2)
+    result = get_identity_repair_service().repair(db, library, apply=apply)
+    text = json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
     if out:
         out.write_text(text, encoding="utf-8")
         print(f"Wrote {out}")
     else:
         print(text)
     DatabaseManager.reset_instance()
-    if not plan.success:
+    if not result.success:
         return 1
     if apply:
-        after = plan.after
+        after = result.severity_after
         if after.get("CRITICAL", 0) or after.get("HIGH", 0):
             return 2
     return 0
@@ -105,6 +105,16 @@ def main(argv: list[str] | None = None) -> int:
     p_verify = sub.add_parser("verify", help="Alias of audit with exit code gate")
     p_verify.add_argument("--out", type=Path, default=None)
 
+    p_id = sub.add_parser(
+        "identity-repair",
+        help="Entity identity repair via IdentityRepairService (dry-run by default)",
+    )
+    p_id.add_argument("--audit", action="store_true", help="Read-only plan (default)")
+    p_id.add_argument("--apply", action="store_true", help="Apply mutations")
+    p_id.add_argument("--yes", action="store_true", help="Required for --apply")
+    p_id.add_argument("--out", type=Path, default=None)
+    p_id.add_argument("--db", type=Path, default=None)
+
     args = parser.parse_args(argv)
     library = Path(args.library) if args.library else Path(default_mod_library())
     out = getattr(args, "out", None)
@@ -114,6 +124,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "repair":
         apply = bool(args.apply) and not bool(args.dry_run)
         return cmd_repair(library, apply=apply, out=out)
+    if args.cmd == "identity-repair":
+        from services.identity_repair_service import get_identity_repair_service
+
+        DatabaseManager.reset_instance()
+        db_path = Path(args.db) if args.db else data_dir() / "mod_manager.db"
+        db = DatabaseManager.instance(db_path)
+        svc = get_identity_repair_service()
+        if args.apply:
+            if not args.yes:
+                print("--apply requires --yes", file=sys.stderr)
+                DatabaseManager.reset_instance()
+                return 2
+            result = svc.repair(db, library, apply=True)
+            payload = svc.report(result, path=out)
+            print(json.dumps(payload if out is None else {"wrote": str(out)}, indent=2))
+            DatabaseManager.reset_instance()
+            return 0 if result.success else 1
+        detection = svc.detect(db, library)
+        payload = svc.report(detection, path=out)
+        if out is None:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"Wrote {out}")
+        DatabaseManager.reset_instance()
+        return 0
     return 1
 
 

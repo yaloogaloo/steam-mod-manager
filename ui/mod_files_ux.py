@@ -146,6 +146,7 @@ def file_badge_kind(entry: Any) -> str | None:
     """
     Return ``\"Main\"`` / ``\"Source\"`` for badge rows, or ``None`` for Other.
 
+    Per-file: many GitHub entries may be Main or Source at once.
     Other rows show a gray description + edit control instead of a badge.
     """
     role = normalize_file_role(getattr(entry, "file_role", None))

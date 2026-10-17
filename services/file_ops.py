@@ -15,6 +15,20 @@ from core.sanitize import sanitize_folder_name, unique_destination
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_mod_pk_for_metadata(metadata: ModMetadata | None) -> str:
+    """Frozen UUID or stored PK → SQLite ``mods.mod_id``. Never folder names."""
+    from services.mod_library_cache import dal_mod_pk
+
+    if metadata is None:
+        return ""
+    stored = str(metadata.mod_pk or "").strip()
+    pk = dal_mod_pk(stored) if stored else ""
+    if pk:
+        return pk
+    frozen = str(metadata.entity_internal_id() or "").strip()
+    return dal_mod_pk(frozen) if frozen else ""
+
 INFO_DIR_NAME = ".info"
 LEGACY_INFO_DIR_NAME = "info"
 METADATA_FILENAME = "metadata.json"
@@ -42,6 +56,7 @@ def is_missing_mod_content(
     managed_path: str | Path,
     *,
     mod_id: int | str | None = None,
+    db: Any = None,
 ) -> bool:
     """
     True when the managed folder has no local Mod payload outside ``.info`` / ``info``.
@@ -56,7 +71,7 @@ def is_missing_mod_content(
     if mid is None and root.is_dir():
         data = read_info_metadata_dict(root) or {}
         mid = str(data.get("published_file_id") or "").strip() or None
-    return not has_local_mod_payload(root, mod_id=mid)
+    return not has_local_mod_payload(root, mod_id=mid, db=db)
 
 
 def set_is_missing_content(managed_path: str | Path, missing: bool) -> None:
@@ -74,7 +89,15 @@ def apply_missing_content_marker(
     *,
     sync_backup: bool = True,
 ) -> bool:
-    """Detect empty payload, write ``is_missing_content``, return the flag."""
+    """Detect empty payload, write ``is_missing_content``, return the flag.
+
+    ARCHITECTURE RULE
+    -----------------
+    This updates the sticky ``.info`` marker only. It must **not** be used by
+    Import / Deploy / Archive / Reconcile as a shortcut to set
+    ``mods.content_status=content_missing``. Persist missing via
+    ``services.content_status_eval`` (Refresh) instead.
+    """
     missing = is_missing_mod_content(managed_path)
     root = Path(managed_path)
     if not root.is_dir():
@@ -189,16 +212,45 @@ class ModFileManager:
 
     def mod_folder_name(self, metadata: ModMetadata) -> str:
         """
-        Sanitized Mod folder name from the real title.
+        Sanitized Mod folder name from a real title when available.
 
-        Never returns a pure numeric ID. Missing titles become
-        ``Unknown_Mod_<id>``.
+        Never persists ``Unknown Mod …`` / ``Unknown_Mod_*`` as a library
+        folder name. Missing titles use ``Mod_<id>``.
         """
-        fallback = f"Unknown_Mod_{metadata.published_file_id}"
-        raw = metadata.effective_title()
-        name = sanitize_folder_name(raw, fallback=fallback)
-        if name.isdigit() or name == metadata.published_file_id:
-            name = sanitize_folder_name(fallback, fallback=fallback)
+        from core.models import (
+            is_placeholder_library_folder_name,
+            is_unknown_mod_title,
+            library_mod_folder_fallback,
+        )
+
+        mid = str(
+            metadata.entity_internal_id() or metadata.published_file_id or ""
+        ).strip()
+        clean_fallback = library_mod_folder_fallback(mid)
+
+        raw = ""
+        title = (metadata.title or "").strip()
+        if title and not title.isdigit() and not is_unknown_mod_title(
+            title, published_file_id=mid
+        ):
+            raw = title
+        else:
+            custom = (metadata.json_display_name or "").strip()
+            if custom and not is_unknown_mod_title(custom, published_file_id=mid):
+                raw = custom
+
+        if not raw:
+            return clean_fallback
+
+        name = sanitize_folder_name(raw, fallback=clean_fallback)
+        if (
+            not name
+            or name.isdigit()
+            or (mid and name == mid)
+            or is_placeholder_library_folder_name(name, published_file_id=mid)
+            or is_unknown_mod_title(name, published_file_id=mid)
+        ):
+            return clean_fallback
         return name
 
     def allocate_destination(self, metadata: ModMetadata) -> Path:
@@ -233,27 +285,35 @@ class ModFileManager:
                 continue
 
             meta = self.load_metadata(folder)
-            title = (meta.title if meta else "") or ""
-            pub_id = (
-                meta.published_file_id
-                if meta and meta.published_file_id
-                else folder.name
-            )
+            if meta is None:
+                logger.info(
+                    "Skip numeric folder rename (no .info identity): %s", folder
+                )
+                continue
+            pk = _resolve_mod_pk_for_metadata(meta)
+            if not pk:
+                logger.info(
+                    "Skip numeric folder rename (unresolved identity): %s", folder
+                )
+                continue
 
-            if not title.strip() or title.strip().isdigit():
-                db_meta = db.get_mod(pub_id)
+            title = (meta.title or "").strip()
+            if not title or title.isdigit():
+                try:
+                    db_meta = db.get_mod(pk)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Numeric folder migration get_mod failed pk=%s folder=%s: %s",
+                        pk,
+                        folder,
+                        exc,
+                    )
+                    continue
                 if db_meta and db_meta.title.strip() and not db_meta.title.strip().isdigit():
                     title = db_meta.title.strip()
-                    if meta is None:
-                        meta = ModMetadata(published_file_id=str(pub_id), title=title)
-                    else:
-                        meta.title = title
-                        if db_meta.description and not meta.description:
-                            meta.description = db_meta.description
-                        if db_meta.preview_url and not meta.preview_url:
-                            meta.preview_url = db_meta.preview_url
-                        if db_meta.app_id and not meta.app_id:
-                            meta.app_id = db_meta.app_id
+                    meta.title = title
+                    if db_meta.app_id and not meta.app_id:
+                        meta.app_id = db_meta.app_id
 
             if not title.strip() or title.strip().isdigit():
                 logger.info(
@@ -261,10 +321,7 @@ class ModFileManager:
                 )
                 continue
 
-            if meta is None:
-                meta = ModMetadata(published_file_id=str(pub_id), title=title)
-            else:
-                meta.title = title
+            meta.title = title
 
             # Keep game folder; only rename the Mod leaf
             desired_name = self.mod_folder_name(meta)
@@ -274,7 +331,7 @@ class ModFileManager:
             target = unique_destination(
                 folder.parent,
                 desired_name,
-                published_file_id=str(pub_id),
+                published_file_id=str(meta.published_file_id or ""),
             )
             # unique_destination skips existing paths — if it picked the
             # current numeric folder somehow, bail
@@ -306,7 +363,10 @@ class ModFileManager:
         try:
             from core.db_manager import get_db
 
-            cached = get_db().get_mod(metadata.published_file_id)
+            pk = _resolve_mod_pk_for_metadata(metadata)
+            if not pk:
+                return metadata
+            cached = get_db().get_mod(pk)
         except Exception:  # noqa: BLE001
             return metadata
         if cached and cached.title.strip() and not cached.title.strip().isdigit():
@@ -336,7 +396,7 @@ class ModFileManager:
         """
         if not metadata.source_path:
             raise ValueError(
-                f"Mod {metadata.published_file_id} has no source_path"
+                f"Mod {metadata.entity_internal_id() or metadata.published_file_id} has no source_path"
             )
 
         source = Path(metadata.source_path)
@@ -401,6 +461,9 @@ class ModFileManager:
         path = Path(managed_path or metadata.managed_path or "")
         if not path:
             raise ValueError("managed_path is required to save metadata")
+        from services.mutation_context import assert_mutation_allowed
+
+        assert_mutation_allowed(path)
 
         existing = read_info_metadata_dict(path) or {}
         info = self.ensure_info_dir(path)
@@ -414,13 +477,24 @@ class ModFileManager:
             if value in (None, "", {}, []):
                 continue
             merged[key] = value
-        written = _write_unified_metadata(info, merged)
-        if sync_backup:
+        written, wrote = _commit_unified_metadata(info, merged)
+        if sync_backup and wrote:
             try:
+                from services.metadata_backup import prove_backup_storage_key
                 from services.metadata_backup_sync import sync_after_metadata_change
+                from services.backup_identity import is_frozen_backup_uuid
 
-                mid = str(metadata.published_file_id or "").strip() or None
-                sync_after_metadata_change(mid, path, sync_reason)
+                mid = prove_backup_storage_key(
+                    metadata.entity_internal_id(),
+                    managed_path=path,
+                )
+                if not is_frozen_backup_uuid(mid):
+                    logger.warning(
+                        "save_metadata backup skipped: entity unresolved path=%s",
+                        path,
+                    )
+                else:
+                    sync_after_metadata_change(mid, path, sync_reason)
             except Exception:  # noqa: BLE001
                 pass
         return written
@@ -493,29 +567,66 @@ class ModFileManager:
             mods.extend(self._list_mod_dirs(entry))
         return mods
 
-    def index_by_published_id(self) -> dict[str, Path]:
-        """Build ``published_file_id → managed folder`` once (O(n)), then reuse."""
+    def index_by_internal_id(self) -> dict[str, Path]:
+        """Build ``internal_id → managed folder`` from ``.info`` only (no DB bind).
+
+        Does **not** call ``ensure_mod_identity`` — indexing is a resource map,
+        not entity creation. Prefer :meth:`find_by_internal_id` / path cache for
+        hot lookups.
+        """
         if self._pub_index is not None:
             return self._pub_index
+        from services.mod_identity import read_internal_id
+
         mapping: dict[str, Path] = {}
         for folder in self.list_managed_mods():
-            mid = ""
-            meta = self.load_metadata(folder)
-            if meta and str(meta.published_file_id or "").strip():
-                mid = str(meta.published_file_id).strip()
-            if not mid.isdigit() and folder.name.isdigit():
-                mid = folder.name
-            if mid.isdigit():
-                mapping[mid] = folder
+            raw = dict(read_info_metadata_dict(folder) or {})
+            iid = read_internal_id(raw)
+            if not iid:
+                continue
+            mapping[iid] = folder
         self._pub_index = mapping
         return mapping
 
-    def find_by_published_id(self, published_file_id: str) -> Path | None:
-        """Locate an already-managed Mod by ID stored in ``.info/metadata.json``."""
-        needle = str(published_file_id or "").strip()
+    def clear_internal_id_index(self) -> None:
+        """Drop cached folder index (call after Reconcile / bulk moves)."""
+        self._pub_index = None
+
+    def index_by_published_id(self) -> dict[str, Path]:
+        """Deprecated alias of :meth:`index_by_internal_id`.
+
+        Despite the name, this indexes by Frozen Entity ``internal_id`` via
+        ``.info/internal_id`` — never by Steam ``published_file_id``. Prefer
+        :meth:`index_by_internal_id`.
+        """
+        return self.index_by_internal_id()
+
+    def find_by_internal_id(self, mod_id: str) -> Path | None:
+        """Locate managed folder by ``.info/internal_id`` (same Entity.internal_id)."""
+        needle = str(mod_id or "").strip()
         if not needle:
             return None
-        return self.index_by_published_id().get(needle)
+        try:
+            from services.path_lifecycle import resolve_managed_folder
+
+            resolved = resolve_managed_folder(
+                needle,
+                library_root=self.target_root,
+                db=None,
+            )
+            if resolved.path is not None and resolved.path.is_dir():
+                return resolved.path
+        except Exception:  # noqa: BLE001
+            pass
+        return self.index_by_internal_id().get(needle)
+
+    def find_by_published_id(self, published_file_id: str) -> Path | None:
+        """Deprecated name — Internal ID lookup only (ignores Workshop axis).
+
+        Parameter is ``mods.mod_id``, not Steam ``published_file_id``. Prefer
+        :meth:`find_by_internal_id`.
+        """
+        return self.find_by_internal_id(str(published_file_id or "").strip())
 
     def game_name_for_path(self, managed_path: Path) -> str:
         """Infer game folder name from ``…/<game>/<mod>`` layout."""
@@ -533,13 +644,25 @@ class ModFileManager:
         return "Unknown Game"
 
     def _list_mod_dirs(self, game_dir: Path) -> list[Path]:
+        import time
+
+        from services.deploy_op_profile import record_op
+
+        t0 = time.perf_counter()
         try:
-            return sorted(
-                (p for p in game_dir.iterdir() if p.is_dir()),
-                key=lambda p: p.name.lower(),
+            try:
+                return sorted(
+                    (p for p in game_dir.iterdir() if p.is_dir()),
+                    key=lambda p: p.name.lower(),
+                )
+            except PermissionError:
+                return []
+        finally:
+            record_op(
+                "iterdir",
+                (time.perf_counter() - t0) * 1000.0,
+                path=str(game_dir),
             )
-        except PermissionError:
-            return []
 
     @staticmethod
     def _is_legacy_flat_mod(path: Path) -> bool:
@@ -573,11 +696,57 @@ def _remove_legacy_mod_json(info_dir: Path) -> None:
             logger.warning("Failed to remove legacy mod.json %s: %s", legacy, exc)
 
 
-def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
+_UNREADABLE_METADATA = object()
+
+
+def _canonical_metadata_json(payload: Mapping[str, Any]) -> str:
+    """Stable JSON for semantic equality (not the on-disk indent-2 serializer)."""
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _read_existing_metadata_object(meta_file: Path) -> Any:
+    """Parsed metadata dict, ``None`` if missing, or unreadable sentinel."""
+    if not meta_file.is_file():
+        return None
+    try:
+        parsed = json.loads(meta_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _UNREADABLE_METADATA
+    if not isinstance(parsed, dict):
+        return _UNREADABLE_METADATA
+    return parsed
+
+
+def _commit_unified_metadata(
+    info_dir: Path, payload: Mapping[str, Any]
+) -> tuple[Path, bool]:
+    """Write ``metadata.json`` only when semantic content would change.
+
+    Returns ``(path, wrote)``. Missing or unreadable files always write
+    (create / recover). Identical normalized JSON does not touch mtime.
+    """
     info_dir.mkdir(parents=True, exist_ok=True)
     meta_file = info_dir / METADATA_FILENAME
+    # Canonical filesystem Entity proof: ``.info/internal_id`` == Entity.internal_id.
+    # Temporary legacy ``entity_key`` is migrated in and stripped — never written.
+    from services.mod_identity import normalize_info_identity_payload
+
+    normalized, _changed = normalize_info_identity_payload(dict(payload))
+    existing = _read_existing_metadata_object(meta_file)
+    if existing is not None and existing is not _UNREADABLE_METADATA:
+        existing_norm, existing_changed = normalize_info_identity_payload(existing)
+        if (
+            not existing_changed
+            and _canonical_metadata_json(existing_norm)
+            == _canonical_metadata_json(normalized)
+        ):
+            _remove_legacy_mod_json(info_dir)
+            return meta_file, False
+
     meta_file.write_text(
-        json.dumps(dict(payload), ensure_ascii=False, indent=2),
+        json.dumps(normalized, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     _remove_legacy_mod_json(info_dir)
@@ -587,7 +756,12 @@ def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
         invalidate_metadata(info_dir.parent)
     except Exception:  # noqa: BLE001
         pass
-    return meta_file
+    return meta_file, True
+
+
+def _write_unified_metadata(info_dir: Path, payload: Mapping[str, Any]) -> Path:
+    path, _wrote = _commit_unified_metadata(info_dir, payload)
+    return path
 
 
 def _backfill_mod_runtime_paths(metadata: ModMetadata, managed_path: Path) -> None:
@@ -626,8 +800,8 @@ def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
     if offline:
         payload["offline_page_path"] = offline
         payload["offline_page"] = offline
-    mid = str(metadata.published_file_id or "").strip()
-    if mid.isdigit():
+    mid = _resolve_mod_pk_for_metadata(metadata)
+    if mid:
         try:
             from core.db_manager import get_db
             from services.info_sidecar import build_sidecar_from_db
@@ -645,6 +819,19 @@ def _build_unified_payload(metadata: ModMetadata) -> dict[str, Any]:
                     continue
                 if key in ("url", "offline_page_path", "offline_page"):
                     continue
+                # Never clobber an in-memory cover_path with a stale DB/sidecar
+                # fallback. apply_cover_to_mod saves metadata BEFORE the DB row
+                # is updated; the sidecar snapshot still holds the previous
+                # (often absolute, other-tree) cover_path.
+                if key == "cover_path":
+                    if str(payload.get("cover_path") or "").strip():
+                        continue
+                    from services.metadata_ownership import cover_reference_is_foreign
+
+                    if cover_reference_is_foreign(
+                        metadata.managed_path, str(value or "")
+                    ):
+                        continue
                 if value not in (None, "", {}, []):
                     payload[key] = value
             if sidecar.url and not url:
@@ -672,13 +859,27 @@ def persist_unified_metadata_dict(
     """Write ``metadata.json`` at *managed_path* and optionally sync backup."""
     root = Path(managed_path)
     info = root / INFO_DIR_NAME
-    written = _write_unified_metadata(info, payload)
-    if sync_backup:
+    written, wrote = _commit_unified_metadata(info, payload)
+    if sync_backup and wrote:
         try:
+            from services.metadata_backup import prove_backup_storage_key
             from services.metadata_backup_sync import sync_after_metadata_change
+            from services.metadata_owner_guard import resolve_owner_mod_id_from_info
+            from services.backup_identity import is_frozen_backup_uuid
 
-            mid = str(payload.get("published_file_id") or "").strip() or None
-            sync_after_metadata_change(mid, root, sync_reason)
+            mid = prove_backup_storage_key(
+                resolve_owner_mod_id_from_info(dict(payload)),
+                managed_path=root,
+                info=dict(payload),
+            )
+            if not is_frozen_backup_uuid(mid):
+                logger.warning(
+                    "persist_unified_metadata_dict backup skipped: "
+                    "entity unresolved path=%s",
+                    root,
+                )
+            else:
+                sync_after_metadata_change(mid, root, sync_reason)
         except Exception:  # noqa: BLE001
             pass
     return written
@@ -686,6 +887,7 @@ def persist_unified_metadata_dict(
 
 def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
     from core.mod_platform import parse_metadata_platform
+    from services.mod_identity import read_internal_id
 
     path_str = str(Path(managed_path).expanduser().resolve())
     title = str(data.get("title") or "")
@@ -719,5 +921,7 @@ def _metadata_from_dict(data: dict, managed_path: Path) -> ModMetadata:
         author=str(data.get("author") or "").strip(),
         source_type=parse_metadata_platform(data),
         json_display_name=display_name,
+        # Disk proof: ``.info/internal_id`` == Entity.internal_id (not a third Mod ID).
+        internal_id=read_internal_id(data),
     )
     return meta

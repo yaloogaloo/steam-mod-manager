@@ -7,6 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -87,23 +92,33 @@ def test_resolve_falls_back_to_steam_index(tmp_path: Path) -> None:
 def test_open_offline_opens_modio_offline_index(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager, monkeypatch
 ) -> None:
-    folder = _seed_folder(tmp_path / "lib", mid="91003", title="BiggerHarbour")
+    created = create_steam_test_mod(db, external_id="91003", title="BiggerHarbour")
+    mid = str(created.mod_id)
+    folder = _seed_folder(tmp_path / "lib", mid=mid, title="BiggerHarbour")
+    write_info_sidecar(
+        folder,
+        internal_id=mid,
+        title="BiggerHarbour",
+        external_id="91003",
+        workspace_id=str(created.workspace_id or "91003"),
+    )
+    bind_managed_path(db, mid, folder, title="BiggerHarbour")
     legacy = folder / INFO_DIR_NAME / "index.html"
     legacy.write_text("<html>wrong</html>", encoding="utf-8")
     preferred = folder / INFO_DIR_NAME / "offline" / "index.html"
     preferred.parent.mkdir(parents=True)
     preferred.write_text("<html>modio</html>", encoding="utf-8")
+    from core.paths import asset_store_dir
+    from services.asset_store import AssetStore
+    from services.info_asset_runtime import finalize_live_offline_to_cas
+    from services.offline_view_cache import is_offline_view_path
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91003",
-            title="BiggerHarbour",
-            offline_page_path=".info/index.html",
-            managed_path=str(folder),
-        )
-    )
+    assert finalize_live_offline_to_cas(
+        folder, store=AssetStore(root=asset_store_dir())
+    ).ok
+
     panel = ModDetailPanel()
-    panel.show_mod(folder)
+    panel.show_mod(folder, mod_id=mid)
     panel._metadata.offline_page_path = ".info/index.html"
 
     opened: list = []
@@ -112,8 +127,21 @@ def test_open_offline_opens_modio_offline_index(
         lambda url: opened.append(url) or True,
     )
     panel._open_offline()
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    worker = getattr(panel, "_offline_open_worker", None)
+    if worker is not None and worker.isRunning():
+        loop = QEventLoop()
+        worker.finished.connect(loop.quit)
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(loop.quit)
+        timer.start(8000)
+        loop.exec()
+    qapp.processEvents()
     assert len(opened) == 1
-    assert Path(opened[0].toLocalFile()).resolve() == preferred.resolve()
+    assert is_offline_view_path(Path(opened[0].toLocalFile()))
+    assert Path(opened[0].toLocalFile()).resolve() != preferred.resolve()
 
 
 def test_strip_modio_cookie_banner_removes_notice() -> None:

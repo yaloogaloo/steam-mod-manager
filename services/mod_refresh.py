@@ -13,18 +13,15 @@ from core.mod_platform import (
     normalize_platform,
     silent_correct_nexus_workspace_id,
 )
-from services.library_reconcile import _folder_has_metadata, _folder_missing_content
-from services.library_status import (
-    compute_content_status,
-    content_status_to_library_status,
-    row_content_status,
-)
+from services.library_reconcile import _folder_has_metadata
+from services.library_status import CONTENT_CONTENT_MISSING
 from services.metadata_ownership import (
     FIELD_COVER,
     FIELD_DESCRIPTION,
     FIELD_DISPLAY_NAME,
     should_apply_official_field,
 )
+from services.crash_trace import log_exception, traced
 from services.metadata_refresh import MetadataRefreshResult
 
 logger = logging.getLogger(__name__)
@@ -105,14 +102,15 @@ def reconcile_local_state(
 ) -> LocalReconcileResult:
     """
     Recompute folder/content/backup-related state from disk — no network I/O.
+
+    ARCHITECTURE RULE: Content Missing is persisted only via
+    ``services.content_status_eval.persist_evaluated_content_status``.
+    Do not reintroduce direct ``content_status=content_missing`` writes here
+    outside that evaluator.
     """
     from core.db_manager import get_db
-    from services.file_ops import (
-        apply_missing_content_marker,
-        clear_missing_content_if_present,
-    )
+    from services.content_status_eval import persist_evaluated_content_status
     from services.metadata_backup import mark_missing
-    from services.metadata_backup_sync import sync_after_metadata_change
 
     database = db if db is not None else get_db()
     mid = str(mod_id or "").strip()
@@ -136,16 +134,20 @@ def reconcile_local_state(
         mark_missing(mid)
         row = database.get_mod_backup_row(mid) or {}
         bstatus = str(row.get("backup_status") or "").strip()
-        cs = compute_content_status(folder_present=False, backup_status=bstatus)
+        cs = persist_evaluated_content_status(
+            mid,
+            None,
+            db=database,
+            folder_present=False,
+            backup_status=bstatus,
+            sync_sticky_marker=False,
+        )
         try:
-            database.update_mod_identity_fields(
-                mid,
-                content_status=cs,
-                library_status=content_status_to_library_status(cs),
-                folder_present=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("update folder_missing failed for %s: %s", mid, exc)
+            from services.mod_fs_observer import touch_observation_stamp
+
+            touch_observation_stamp(mid, db=database, managed_path=None)
+        except Exception:  # noqa: BLE001
+            logger.debug("fs observation stamp after missing failed for %s", mid)
         logger.info(
             "[refresh] mod_id=%s folder missing content_status=%s",
             mid,
@@ -162,13 +164,10 @@ def reconcile_local_state(
     meta_missing = not _folder_has_metadata(folder)
     row = database.get_mod_backup_row(mid) or {}
     backup_status = str(row.get("backup_status") or "").strip()
-    missing = _folder_missing_content(folder, mod_id=mid, db=database)
 
-    try:
-        if sync_after_metadata_change(mid, folder, "refresh"):
-            notes.append("backup_synced")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("backup sync during refresh failed for %s: %s", mid, exc)
+    # ARCHITECTURE RULE: local reconcile is path/content fact evaluation.
+    # It must not unconditionally mark_backup_dirty — only real metadata
+    # writes (provider refresh / user edit / import) may dirty backup.
 
     # Local archive / sidecar rescan (no remote providers)
     try:
@@ -185,43 +184,43 @@ def reconcile_local_state(
         logger.debug("local rescan failed for %s: %s", mid, exc)
 
     try:
-        from services.local_file_index import (
-            has_local_mod_payload,
-            reconcile_local_files,
-        )
+        from services.local_file_index import reconcile_local_files
 
         recon = reconcile_local_files(mid, managed_path=folder, db=database)
         if recon.updated:
             notes.append("archive_source_reconciled")
+            try:
+                from services.mod_fs_observer import note_mod_files_projection_touch
+
+                note_mod_files_projection_touch(mid)
+            except Exception:  # noqa: BLE001
+                pass
         if recon.replacement_candidates:
             notes.append(
                 f"archive_replacement_candidates={len(recon.replacement_candidates)}"
             )
-        missing = not has_local_mod_payload(folder, mod_id=mid, db=database)
-        if clear_missing_content_if_present(folder):
-            notes.append("cleared_stale_missing_flag")
-        elif apply_missing_content_marker(folder, sync_backup=False):
-            notes.append("marked_missing_content")
     except Exception as exc:  # noqa: BLE001 — local file errors must not block refresh
         logger.debug("local file reconcile failed for %s: %s", mid, exc)
         notes.append("local_file_reconcile_failed")
 
-    cs = compute_content_status(
+    # Sole legal writer of content_missing / healthy for present folders.
+    cs = persist_evaluated_content_status(
+        mid,
+        folder,
+        db=database,
         folder_present=True,
-        missing_content=missing,
-        metadata_missing=meta_missing,
         backup_status=backup_status,
+        metadata_missing=meta_missing,
+        sync_sticky_marker=True,
     )
+    missing = cs == CONTENT_CONTENT_MISSING
+
     try:
-        database.update_mod_identity_fields(
-            mid,
-            content_status=cs,
-            library_status=content_status_to_library_status(cs),
-            folder_present=True,
-            last_known_path=str(folder.resolve()),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("update local content_status failed for %s: %s", mid, exc)
+        from services.mod_fs_observer import touch_observation_stamp
+
+        touch_observation_stamp(mid, db=database, managed_path=folder)
+    except Exception:  # noqa: BLE001
+        logger.debug("fs observation stamp after reconcile failed for %s", mid)
 
     logger.info(
         "[refresh] mod_id=%s local reconcile done content_status=%s folder_present=1",
@@ -253,6 +252,7 @@ def _resolve_refresh_folder(
     return resolve_refresh_folder(mid, managed_path, db=db)
 
 
+@traced("refresh_mod")
 def refresh_mod(
     mod_id: int | str,
     managed_path: str | Path,
@@ -261,90 +261,154 @@ def refresh_mod(
     library_root: str | Path | None = None,
     source_url: str = "",
     db=None,
+    steam_client=None,
+    download_cover=True,
 ) -> ModRefreshResult:
     """
     Detail refresh entry: local reconcile always; official provider at most once
     per mod lifetime (until first successful sync).
     """
     from core.db_manager import get_db
+    from services.identity_service import lifecycle_scope
     from services.path_lifecycle import resolve_managed_folder
 
     database = db if db is not None else get_db()
     mid = str(mod_id or "").strip()
     plat = normalize_platform(platform)
 
-    folder = _resolve_refresh_folder(mid, managed_path, db=database)
+    with lifecycle_scope("refresh"):
+        folder = _resolve_refresh_folder(mid, managed_path, db=database)
 
-    local = reconcile_local_state(
-        mid, folder, library_root=library_root, db=database
-    )
-
-    if not _should_attempt_official_sync(database, mid):
-        logger.info(
-            "[refresh] mod_id=%s official metadata already synced; network refresh skipped",
-            mid,
-        )
-        msg = "已刷新本地状态"
-        if not local.folder_present:
-            msg = "已刷新本地状态（Mod 目录缺失）"
-        return ModRefreshResult(
-            mod_id=mid,
-            success=True,
-            local=local,
-            official_attempted=False,
-            official_synced=True,
-            managed_path=folder,
-            message=msg,
+        local = reconcile_local_state(
+            mid, folder, library_root=library_root, db=database
         )
 
-    logger.info(
-        "[refresh] mod_id=%s official metadata not synced; attempting initial provider sync",
-        mid,
-    )
-
-    provider_result: MetadataRefreshResult | None = None
-    try:
-        if plat == PLATFORM_STEAM:
-            from services.metadata_refresh import refresh_steam_mod_metadata
-
-            provider_result = refresh_steam_mod_metadata(
+        if not _should_attempt_official_sync(database, mid):
+            logger.info(
+                "[refresh] mod_id=%s official metadata already synced; network refresh skipped",
                 mid,
-                folder,
-                library_root=library_root,
-                force=True,
-                allow_official_sync=True,
-                db=database,
             )
-        elif plat == PLATFORM_MODIO:
-            from services.modio_metadata_refresh import refresh_modio_mod_metadata
-
-            provider_result = refresh_modio_mod_metadata(
-                mid,
-                folder,
-                library_root=library_root,
-                source_url=source_url,
-                allow_official_sync=True,
-                db=database,
-            )
-        else:
-            # Nexus / GitHub / other — local only; mark synced if folder exists
-            if local.folder_present:
-                database.set_official_metadata_synced(mid, True)
+            msg = "已刷新本地状态"
+            if not local.folder_present:
+                msg = "已刷新本地状态（Mod 目录缺失）"
             return ModRefreshResult(
                 mod_id=mid,
                 success=True,
                 local=local,
                 official_attempted=False,
-                official_synced=database.is_official_metadata_synced(mid),
+                official_synced=True,
                 managed_path=folder,
-                message="已刷新本地状态",
+                message=msg,
             )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception(
-            "[refresh] mod_id=%s official metadata sync failed; remains unsynced",
+
+        logger.info(
+            "[refresh] mod_id=%s official metadata not synced; attempting initial provider sync",
             mid,
         )
+
+        provider_result: MetadataRefreshResult | None = None
+        try:
+            if plat == PLATFORM_STEAM:
+                from services.metadata_refresh import refresh_steam_mod_metadata
+
+                provider_result = refresh_steam_mod_metadata(
+                    mid,
+                    folder,
+                    library_root=library_root,
+                    client=steam_client,
+                    download_cover=download_cover,
+                    force=True,
+                    allow_official_sync=True,
+                    db=database,
+                )
+            elif plat == PLATFORM_MODIO:
+                from services.modio_metadata_refresh import refresh_modio_mod_metadata
+
+                provider_result = refresh_modio_mod_metadata(
+                    mid,
+                    folder,
+                    library_root=library_root,
+                    source_url=source_url,
+                    allow_official_sync=True,
+                    db=database,
+                )
+            else:
+                # Nexus / GitHub / other — local only; mark synced if folder exists
+                if local.folder_present:
+                    database.set_official_metadata_synced(mid, True)
+                return ModRefreshResult(
+                    mod_id=mid,
+                    success=True,
+                    local=local,
+                    official_attempted=False,
+                    official_synced=database.is_official_metadata_synced(mid),
+                    managed_path=folder,
+                    message="已刷新本地状态",
+                )
+        except Exception as exc:  # noqa: BLE001
+            log_exception(
+                "refresh_mod.provider_sync_callback",
+                mod_id=mid,
+                platform=plat,
+            )
+            logger.exception(
+                "[refresh] mod_id=%s official metadata sync failed; remains unsynced",
+                mid,
+            )
+            database.set_official_metadata_synced(mid, False)
+            return ModRefreshResult(
+                mod_id=mid,
+                success=True,
+                local=local,
+                official_attempted=True,
+                official_success=False,
+                official_synced=False,
+                managed_path=folder,
+                error=str(exc),
+                message="本地状态已刷新，官方信息同步失败",
+            )
+
+        assert provider_result is not None
+        if provider_result.success and not provider_result.skipped:
+            database.set_official_metadata_synced(mid, True)
+            logger.info(
+                "[refresh] mod_id=%s official metadata sync succeeded; marked synced",
+                mid,
+            )
+            # Reconcile again after official writes (.info / rename / cover)
+            final_path = provider_result.managed_path or folder
+            local = reconcile_local_state(
+                mid, final_path, library_root=library_root, db=database
+            )
+            return ModRefreshResult(
+                mod_id=mid,
+                success=True,
+                local=local,
+                official_attempted=True,
+                official_success=True,
+                official_synced=True,
+                provider=provider_result,
+                managed_path=final_path,
+                message="已刷新本地状态，并同步官方信息",
+            )
+
         database.set_official_metadata_synced(mid, False)
+        logger.error(
+            "[MOD_REFRESH_FAILED] mod_id=%s workspace_id=— app_id=0 title=— "
+            "stage=official_sync reason=%s exception=—",
+            mid,
+            provider_result.error or "official metadata sync failed",
+        )
+        logger.warning(
+            "[refresh] mod_id=%s official metadata sync failed; remains unsynced error=%s",
+            mid,
+            provider_result.error,
+        )
+        fail_path = (
+            provider_result.managed_path
+            or resolve_managed_folder(mid, db=database).path
+            or folder
+        )
         return ModRefreshResult(
             mod_id=mid,
             success=True,
@@ -352,55 +416,8 @@ def refresh_mod(
             official_attempted=True,
             official_success=False,
             official_synced=False,
-            managed_path=folder,
-            error=str(exc),
+            provider=provider_result,
+            managed_path=fail_path,
+            error=provider_result.error,
             message="本地状态已刷新，官方信息同步失败",
         )
-
-    assert provider_result is not None
-    if provider_result.success and not provider_result.skipped:
-        database.set_official_metadata_synced(mid, True)
-        logger.info(
-            "[refresh] mod_id=%s official metadata sync succeeded; marked synced",
-            mid,
-        )
-        # Reconcile again after official writes (.info / rename / cover)
-        final_path = provider_result.managed_path or folder
-        local = reconcile_local_state(
-            mid, final_path, library_root=library_root, db=database
-        )
-        return ModRefreshResult(
-            mod_id=mid,
-            success=True,
-            local=local,
-            official_attempted=True,
-            official_success=True,
-            official_synced=True,
-            provider=provider_result,
-            managed_path=final_path,
-            message="已刷新本地状态，并同步官方信息",
-        )
-
-    database.set_official_metadata_synced(mid, False)
-    logger.warning(
-        "[refresh] mod_id=%s official metadata sync failed; remains unsynced error=%s",
-        mid,
-        provider_result.error,
-    )
-    fail_path = (
-        provider_result.managed_path
-        or resolve_managed_folder(mid, db=database).path
-        or folder
-    )
-    return ModRefreshResult(
-        mod_id=mid,
-        success=True,
-        local=local,
-        official_attempted=True,
-        official_success=False,
-        official_synced=False,
-        provider=provider_result,
-        managed_path=fail_path,
-        error=provider_result.error,
-        message="本地状态已刷新，官方信息同步失败",
-    )

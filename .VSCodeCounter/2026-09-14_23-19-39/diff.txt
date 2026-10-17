@@ -1,0 +1,150 @@
+Date : 2026-09-14 23:19:39
+Directory : d:\project\steam-mod-manager
+Total : 109 files,  979 codes, 17 comments, 117 blanks, all 1113 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| Markdown |          9 |      1,194 |          0 |        186 |      1,380 |
+| JSON     |          1 |          1 |          0 |          0 |          1 |
+| Python   |         99 |       -216 |         17 |        -69 |       -268 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++-------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                            | files      | code       | comment    | blank      | total      |
++-------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                               |        109 |        979 |         17 |        117 |      1,113 |
+| .VSCodeCounter                                                                                  |          5 |        805 |          0 |         26 |        831 |
+| .VSCodeCounter\2026-09-14_20-58-06                                                              |          5 |        805 |          0 |         26 |        831 |
+| core                                                                                            |          1 |          0 |          1 |          0 |          1 |
+| docs                                                                                            |          5 |        390 |          0 |        160 |        550 |
+| services                                                                                        |          9 |     -5,141 |       -258 |       -527 |     -5,926 |
+| tests                                                                                           |         48 |        303 |          9 |         66 |        378 |
+| tests (Files)                                                                                   |         25 |     -5,032 |       -143 |     -1,106 |     -6,281 |
+| tests\contract                                                                                  |         11 |      2,435 |         72 |        390 |      2,897 |
+| tests\regression                                                                                |         12 |      2,900 |         80 |        782 |      3,762 |
+| tools                                                                                           |         39 |      4,562 |        255 |        389 |      5,206 |
+| tools (Files)                                                                                   |         18 |     -2,681 |       -130 |       -393 |     -3,204 |
+| tools\archive                                                                                   |         21 |      7,243 |        385 |        782 |      8,410 |
+| tools\archive (Files)                                                                           |         14 |      3,351 |        158 |        357 |      3,866 |
+| tools\archive\legacy_asset_tools                                                                |          7 |      3,892 |        227 |        425 |      4,544 |
+| ui                                                                                              |          2 |         60 |         10 |          3 |         73 |
++-------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++-------------------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                                                                        | language | code       | comment    | blank      | total      |
++-------------------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| d:\project\steam-mod-manager\.VSCodeCounter\2026-09-14_20-58-06\details.md                      | Markdown |        741 |          0 |          6 |        747 |
+| d:\project\steam-mod-manager\.VSCodeCounter\2026-09-14_20-58-06\diff-details.md                 | Markdown |          9 |          0 |          6 |         15 |
+| d:\project\steam-mod-manager\.VSCodeCounter\2026-09-14_20-58-06\diff.md                         | Markdown |         12 |          0 |          7 |         19 |
+| d:\project\steam-mod-manager\.VSCodeCounter\2026-09-14_20-58-06\results.json                    | JSON     |          1 |          0 |          0 |          1 |
+| d:\project\steam-mod-manager\.VSCodeCounter\2026-09-14_20-58-06\results.md                      | Markdown |         42 |          0 |          7 |         49 |
+| d:\project\steam-mod-manager\core\cas_runtime.py                                                | Python   |          0 |          1 |          0 |          1 |
+| d:\project\steam-mod-manager\docs\asset_lifecycle_final_status.md                               | Markdown |        -10 |          0 |         -6 |        -16 |
+| d:\project\steam-mod-manager\docs\phase12_1_asset_zero_final_report.md                          | Markdown |         60 |          0 |         33 |         93 |
+| d:\project\steam-mod-manager\docs\phase14_cleanup_report.md                                     | Markdown |        120 |          0 |         56 |        176 |
+| d:\project\steam-mod-manager\docs\phase15_code_governance_audit.md                              | Markdown |        152 |          0 |         54 |        206 |
+| d:\project\steam-mod-manager\docs\phase15_dead_code_audit.md                                    | Markdown |         68 |          0 |         23 |         91 |
+| d:\project\steam-mod-manager\services\backup_asset_migration.py                                 | Python   |         -8 |         -4 |         -3 |        -15 |
+| d:\project\steam-mod-manager\services\backup_manifest_debt.py                                   | Python   |       -262 |        -17 |        -33 |       -312 |
+| d:\project\steam-mod-manager\services\fast_info_asset_purge.py                                  | Python   |       -636 |        -18 |        -69 |       -723 |
+| d:\project\steam-mod-manager\services\legacy_backup_asset_cleanup.py                            | Python   |       -938 |        -37 |        -92 |     -1,067 |
+| d:\project\steam-mod-manager\services\legacy_backup_finalize.py                                 | Python   |       -457 |        -14 |        -33 |       -504 |
+| d:\project\steam-mod-manager\services\legacy_info_asset_cleanup.py                              | Python   |     -1,238 |        -97 |       -138 |     -1,473 |
+| d:\project\steam-mod-manager\services\legacy_info_manifest_rebuild.py                           | Python   |       -730 |        -43 |        -78 |       -851 |
+| d:\project\steam-mod-manager\services\legacy_workspace_backup.py                                | Python   |       -802 |        -17 |        -69 |       -888 |
+| d:\project\steam-mod-manager\services\library_diagnostics.py                                    | Python   |        -70 |        -11 |        -12 |        -93 |
+| d:\project\steam-mod-manager\tests\contract\test_asset_final_contract.py                        | Python   |        132 |          3 |         27 |        162 |
+| d:\project\steam-mod-manager\tests\contract\test_asset_lifecycle_contract.py                    | Python   |        179 |          1 |         40 |        220 |
+| d:\project\steam-mod-manager\tests\contract\test_backup_asset_migration.py                      | Python   |        229 |         13 |         44 |        286 |
+| d:\project\steam-mod-manager\tests\contract\test_cache_contract.py                              | Python   |        210 |          2 |         36 |        248 |
+| d:\project\steam-mod-manager\tests\contract\test_cas_only_backup_contract.py                    | Python   |        162 |          9 |         25 |        196 |
+| d:\project\steam-mod-manager\tests\contract\test_cas_only_info_contract.py                      | Python   |        176 |          6 |         26 |        208 |
+| d:\project\steam-mod-manager\tests\contract\test_info_asset_migration.py                        | Python   |        190 |         16 |         38 |        244 |
+| d:\project\steam-mod-manager\tests\contract\test_info_manifest_rebuild_contract.py              | Python   |        229 |          3 |         35 |        267 |
+| d:\project\steam-mod-manager\tests\contract\test_manifest_migration_plan.py                     | Python   |        448 |         15 |         32 |        495 |
+| d:\project\steam-mod-manager\tests\contract\test_mod_type_legacy_migration.py                   | Python   |        288 |          1 |         52 |        341 |
+| d:\project\steam-mod-manager\tests\contract\test_offline_open_contract.py                       | Python   |        192 |          3 |         35 |        230 |
+| d:\project\steam-mod-manager\tests\regression\test_backup_backlog.py                            | Python   |        209 |          4 |         30 |        243 |
+| d:\project\steam-mod-manager\tests\regression\test_cleanup_duplicate_workspace_mods.py          | Python   |        441 |         13 |         46 |        500 |
+| d:\project\steam-mod-manager\tests\regression\test_cleanup_legacy_suffix_folders.py             | Python   |        276 |          8 |         38 |        322 |
+| d:\project\steam-mod-manager\tests\regression\test_cleanup_stardew_workspace_duplicates.py      | Python   |        212 |         12 |         30 |        254 |
+| d:\project\steam-mod-manager\tests\regression\test_detail_legacy_cleanup.py                     | Python   |        129 |          4 |         36 |        169 |
+| d:\project\steam-mod-manager\tests\regression\test_fast_info_asset_purge.py                     | Python   |        224 |          1 |         42 |        267 |
+| d:\project\steam-mod-manager\tests\regression\test_identity_data_migration_review.py            | Python   |        156 |          4 |         24 |        184 |
+| d:\project\steam-mod-manager\tests\regression\test_info_asset_cleanup.py                        | Python   |        394 |          3 |         52 |        449 |
+| d:\project\steam-mod-manager\tests\regression\test_legacy_backup_asset_cleanup.py               | Python   |        314 |         16 |         48 |        378 |
+| d:\project\steam-mod-manager\tests\regression\test_orphan_backup_safe_cleanup.py                | Python   |        180 |          2 |         30 |        212 |
+| d:\project\steam-mod-manager\tests\regression\test_redeploy_cleanup.py                          | Python   |         99 |          2 |         22 |        123 |
+| d:\project\steam-mod-manager\tests\regression\test_relative_status_cleanup.py                   | Python   |        266 |         11 |        384 |        661 |
+| d:\project\steam-mod-manager\tests\test_backup_asset_migration.py                               | Python   |       -229 |        -13 |        -44 |       -286 |
+| d:\project\steam-mod-manager\tests\test_cleanup_duplicate_workspace_mods.py                     | Python   |       -441 |        -13 |        -46 |       -500 |
+| d:\project\steam-mod-manager\tests\test_cleanup_legacy_suffix_folders.py                        | Python   |       -276 |         -8 |        -38 |       -322 |
+| d:\project\steam-mod-manager\tests\test_cleanup_stardew_workspace_duplicates.py                 | Python   |       -212 |        -12 |        -30 |       -254 |
+| d:\project\steam-mod-manager\tests\test_detail_legacy_cleanup.py                                | Python   |       -129 |         -4 |        -36 |       -169 |
+| d:\project\steam-mod-manager\tests\test_fast_info_asset_purge.py                                | Python   |       -224 |         -1 |        -42 |       -267 |
+| d:\project\steam-mod-manager\tests\test_identity_data_migration_review.py                       | Python   |       -156 |         -4 |        -24 |       -184 |
+| d:\project\steam-mod-manager\tests\test_info_asset_migration.py                                 | Python   |       -190 |        -16 |        -38 |       -244 |
+| d:\project\steam-mod-manager\tests\test_legacy_backup_asset_cleanup.py                          | Python   |       -314 |        -16 |        -48 |       -378 |
+| d:\project\steam-mod-manager\tests\test_library_scroll_jump.py                                  | Python   |        257 |          8 |         53 |        318 |
+| d:\project\steam-mod-manager\tests\test_manifest_migration_plan.py                              | Python   |       -448 |        -15 |        -32 |       -495 |
+| d:\project\steam-mod-manager\tests\test_mod_type_legacy_migration.py                            | Python   |       -288 |         -1 |        -52 |       -341 |
+| d:\project\steam-mod-manager\tests\test_no_live_asset_leftover.py                               | Python   |         58 |          1 |         14 |         73 |
+| d:\project\steam-mod-manager\tests\test_orphan_backup_safe_cleanup.py                           | Python   |       -180 |         -2 |        -30 |       -212 |
+| d:\project\steam-mod-manager\tests\test_phase10_cache_contract.py                               | Python   |       -210 |         -2 |        -36 |       -248 |
+| d:\project\steam-mod-manager\tests\test_phase11_open_hardening.py                               | Python   |       -192 |         -3 |        -35 |       -230 |
+| d:\project\steam-mod-manager\tests\test_phase12_asset_final_contract.py                         | Python   |       -132 |         -3 |        -27 |       -162 |
+| d:\project\steam-mod-manager\tests\test_phase41_backup_backlog.py                               | Python   |       -209 |         -4 |        -30 |       -243 |
+| d:\project\steam-mod-manager\tests\test_phase5_cas_only_backup.py                               | Python   |       -162 |         -9 |        -25 |       -196 |
+| d:\project\steam-mod-manager\tests\test_phase6_cas_only_info.py                                 | Python   |       -177 |         -6 |        -26 |       -209 |
+| d:\project\steam-mod-manager\tests\test_phase7_info_asset_cleanup.py                            | Python   |       -394 |         -3 |        -52 |       -449 |
+| d:\project\steam-mod-manager\tests\test_phase8_manifest_rebuild.py                              | Python   |       -229 |         -3 |        -35 |       -267 |
+| d:\project\steam-mod-manager\tests\test_phase9_asset_lifecycle.py                               | Python   |       -190 |         -1 |        -41 |       -232 |
+| d:\project\steam-mod-manager\tests\test_redeploy_cleanup.py                                     | Python   |        -99 |         -2 |        -22 |       -123 |
+| d:\project\steam-mod-manager\tests\test_relative_status_cleanup.py                              | Python   |       -266 |        -11 |       -384 |       -661 |
+| d:\project\steam-mod-manager\tools\__init__.py                                                  | Python   |          0 |          0 |          1 |          1 |
+| d:\project\steam-mod-manager\tools\_query_db_games.py                                           | Python   |         -9 |          0 |         -2 |        -11 |
+| d:\project\steam-mod-manager\tools\_repro_dialog_import.py                                      | Python   |        -94 |         -1 |        -25 |       -120 |
+| d:\project\steam-mod-manager\tools\_repro_e3_detail.py                                          | Python   |        -92 |         -1 |        -22 |       -115 |
+| d:\project\steam-mod-manager\tools\_repro_import_crash.py                                       | Python   |       -158 |         -2 |        -39 |       -199 |
+| d:\project\steam-mod-manager\tools\_repro_real_import.py                                        | Python   |       -131 |         -1 |        -31 |       -163 |
+| d:\project\steam-mod-manager\tools\_repro_real_library_refresh.py                               | Python   |       -100 |         -1 |        -24 |       -125 |
+| d:\project\steam-mod-manager\tools\archive\__init__.py                                          | Python   |          0 |          1 |          1 |          2 |
+| d:\project\steam-mod-manager\tools\archive\audit_cas_only_runtime.py                            | Python   |        221 |         16 |         30 |        267 |
+| d:\project\steam-mod-manager\tools\archive\audit_legacy_backup_assets.py                        | Python   |        258 |         15 |         25 |        298 |
+| d:\project\steam-mod-manager\tools\archive\audit_legacy_info_assets.py                          | Python   |         96 |         10 |         14 |        120 |
+| d:\project\steam-mod-manager\tools\archive\audit_legacy_info_assets_manifest.py                 | Python   |         65 |          9 |         11 |         85 |
+| d:\project\steam-mod-manager\tools\archive\cleanup_legacy_workspace_backup.py                   | Python   |        163 |         11 |         15 |        189 |
+| d:\project\steam-mod-manager\tools\archive\finalize_legacy_backups.py                           | Python   |         79 |          2 |         13 |         94 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\__init__.py                       | Python   |          0 |          4 |          1 |          5 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\backup_manifest_debt.py           | Python   |        262 |         17 |         33 |        312 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\fast_info_asset_purge.py          | Python   |        636 |         18 |         69 |        723 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\legacy_backup_asset_cleanup.py    | Python   |        938 |         37 |         92 |      1,067 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\legacy_info_asset_cleanup.py      | Python   |      1,238 |         97 |        138 |      1,473 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\legacy_info_manifest_rebuild.py   | Python   |        730 |         43 |         78 |        851 |
+| d:\project\steam-mod-manager\tools\archive\legacy_asset_tools\migrate_backup_assets_to_store.py | Python   |         88 |         11 |         14 |        113 |
+| d:\project\steam-mod-manager\tools\archive\legacy_backup_finalize.py                            | Python   |        457 |         14 |         33 |        504 |
+| d:\project\steam-mod-manager\tools\archive\legacy_workspace_backup.py                           | Python   |        802 |         17 |         69 |        888 |
+| d:\project\steam-mod-manager\tools\archive\library_diagnostics.py                               | Python   |         70 |         11 |         12 |         93 |
+| d:\project\steam-mod-manager\tools\archive\p0_data_hygiene_audit.py                             | Python   |        490 |         14 |         48 |        552 |
+| d:\project\steam-mod-manager\tools\archive\phase6_validate_info_cas_runtime.py                  | Python   |        257 |         14 |         29 |        300 |
+| d:\project\steam-mod-manager\tools\archive\probe_balatro_miss_cover.py                          | Python   |        183 |          5 |         26 |        214 |
+| d:\project\steam-mod-manager\tools\archive\probe_library_refresh.py                             | Python   |        210 |         19 |         31 |        260 |
+| d:\project\steam-mod-manager\tools\audit_cas_only_runtime.py                                    | Python   |       -221 |        -16 |        -30 |       -267 |
+| d:\project\steam-mod-manager\tools\audit_legacy_backup_assets.py                                | Python   |       -258 |        -15 |        -25 |       -298 |
+| d:\project\steam-mod-manager\tools\audit_legacy_info_assets.py                                  | Python   |        -96 |        -10 |        -14 |       -120 |
+| d:\project\steam-mod-manager\tools\audit_legacy_info_assets_manifest.py                         | Python   |        -65 |         -9 |        -11 |        -85 |
+| d:\project\steam-mod-manager\tools\cleanup_legacy_workspace_backup.py                           | Python   |       -163 |        -11 |        -15 |       -189 |
+| d:\project\steam-mod-manager\tools\finalize_legacy_backups.py                                   | Python   |        -79 |         -2 |        -13 |        -94 |
+| d:\project\steam-mod-manager\tools\migrate_backup_assets_to_store.py                            | Python   |        -77 |         -9 |         -9 |        -95 |
+| d:\project\steam-mod-manager\tools\p0_data_hygiene_audit.py                                     | Python   |       -490 |        -14 |        -48 |       -552 |
+| d:\project\steam-mod-manager\tools\phase6_validate_info_cas_runtime.py                          | Python   |       -255 |        -14 |        -29 |       -298 |
+| d:\project\steam-mod-manager\tools\probe_balatro_miss_cover.py                                  | Python   |       -183 |         -5 |        -26 |       -214 |
+| d:\project\steam-mod-manager\tools\probe_library_refresh.py                                     | Python   |       -210 |        -19 |        -31 |       -260 |
+| d:\project\steam-mod-manager\ui\library_view.py                                                 | Python   |         60 |          6 |          3 |         69 |
+| d:\project\steam-mod-manager\ui\mod_card.py                                                     | Python   |          0 |          4 |          0 |          4 |
+| Total                                                                                           |          |        979 |         17 |        117 |      1,113 |
++-------------------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+

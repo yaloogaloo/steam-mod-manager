@@ -89,9 +89,10 @@ class NexusManualOfflineProvider(OfflineProvider):
         managed_path: str | Path | None = None,
         library_root: str | Path | None = None,
         metadata: Any | None = None,
+        force_refresh: bool = False,
     ) -> OfflineUpdateResult:
         """Auto-download is disabled — callers must use ``import_offline_page``."""
-        del managed_path, library_root, metadata
+        del managed_path, library_root, metadata, force_refresh
         mid = str(mod_id).strip()
         get_db().update_mod_offline_status(
             mid,
@@ -110,7 +111,12 @@ class NexusManualOfflineProvider(OfflineProvider):
         clean: bool = True,
     ) -> OfflineUpdateResult:
         """Import a user-saved Nexus HTML/MHTML snapshot into ``.info/offline/``."""
-        mid = str(mod_id).strip()
+        from services.mod_library_cache import dal_mod_pk
+
+        token = str(mod_id or "").strip()
+        mid = dal_mod_pk(token)
+        if not mid:
+            raise ValueError(f"Mod not found in database: {token}")
         root = Path(library_root) if library_root else default_mod_library()
         path = Path(managed_path) if managed_path else find_managed_mod_path(root, mid)
         if path is None:
@@ -118,7 +124,7 @@ class NexusManualOfflineProvider(OfflineProvider):
 
         info = get_db().get_mod_display_info(mid)
         if info is None:
-            raise ValueError(f"Mod not found in database: {mid}")
+            raise ValueError(f"Mod not found in database: {token}")
 
         mgr = ModFileManager(root)
         info_dir = mgr.ensure_info_dir(path)
@@ -141,6 +147,10 @@ class NexusManualOfflineProvider(OfflineProvider):
                 provider=self.get_provider_name(),
             )
             raise
+
+        from services.info_asset_runtime import require_cas_finalize
+
+        require_cas_finalize(output_dir, mod_id=mid, context=f"nexus:{mid}")
 
         get_db().update_mod_offline_status(
             mid,

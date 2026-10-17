@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
     PLATFORM_GITHUB,
@@ -113,14 +114,12 @@ def test_browser_save_directory_copies_assets(tmp_path: Path) -> None:
     index, count = store_snapshot(page, out, source_url="https://www.nexusmods.com/x/mods/1")
     assert index.is_file()
     assert count >= 2
-    # Companion folder is imported; refs rewrite into typed asset dirs when resolved.
-    assert (out / "assets" / "files" / "style.css").is_file()
-    assert (out / "assets" / "files" / "cover.png").is_file()
     html = index.read_text(encoding="utf-8")
     assert "assets/" in html
     assert "style.css" in html
     assert "cover.png" in html
     assert "PalAnalyzer_files/" not in html
+    assert (out / "manifest.json").is_file()
 
 
 def test_file_url_rewrite_when_asset_exists(tmp_path: Path) -> None:
@@ -198,14 +197,13 @@ def test_steam_and_github_still_routed(
     from services.archive import OfflinePageArchiver
     from services.offline.layout_snapshot import LayoutSnapshotResult
 
-    lib = tmp_path / "library"
-    lib.mkdir()
+    # Align with conftest isolated library root (Path Lifecycle).
+    lib = tmp_path / "_smm_isolate_mod"
+    lib.mkdir(exist_ok=True)
 
-    steam_folder = _seed(lib, mid="111", title="S", game="Game")
-    db.upsert_mod(
-        ModMetadata(published_file_id="111", title="S", managed_path=str(steam_folder))
-    )
-    db.update_mod_platform_info("111", platform=PLATFORM_STEAM, external_id="111")
+    steam = create_steam_test_mod(db, external_id="111", title="S")
+    steam_folder = _seed(lib, mid=steam.mod_id, title="S", game="Game")
+    bind_managed_path(db, steam.mod_id, steam_folder, title="S")
 
     github = db.register_external_mod(
         platform=PLATFORM_GITHUB,
@@ -241,7 +239,8 @@ def test_steam_and_github_still_routed(
             GithubOfflineProvider(layout_provider=FakeLayout()),
         ),
     )
-    r1 = mgr.update_mod_offline("111", managed_path=steam_folder)
+    # Offline APIs take mods.mod_id (PK), never Workshop / external ID.
+    r1 = mgr.update_mod_offline(steam.mod_id, managed_path=steam_folder)
     r3 = mgr.update_mod_offline(github.mod_id, managed_path=github_folder)
     assert r1.provider == PROVIDER_STEAM_ARCHIVE
     assert r3.provider == PROVIDER_GITHUB_SNAPSHOT

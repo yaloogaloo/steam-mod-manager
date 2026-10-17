@@ -20,7 +20,7 @@ def _make_mod_tree(root: Path, *, title: str = "Test Mod") -> Path:
     folder = root / "Palworld" / title
     info = folder / ".info"
     info.mkdir(parents=True)
-    (info / "mod.json").write_text(
+    (info / "metadata.json").write_text(
         json.dumps(
             {
                 "published_file_id": "3761838546",

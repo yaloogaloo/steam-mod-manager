@@ -1,5 +1,7 @@
 # Steam Mod Manager
 
+正式启动：`python main.py`（WebEngine，正常可写）。安全只读：`python main.py --read-only`。沿用现有数据库、游戏路径及 `paths/target_dir` 指定的 Mod 归档，不迁移本体。已准入能力与限制见 [前端运行说明](frontend/README.md)。
+
 一个面向 Steam 游戏玩家的本地 Mod 管理工具。
 
 支持：

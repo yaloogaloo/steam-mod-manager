@@ -1,4 +1,8 @@
-"""mod.io manual folder importer (Anno 1800 / Baldur's Gate 3 in UI)."""
+"""mod.io manual importer, independent of official API game mappings.
+
+Workspace ID is system-generated unless a stable numeric platform id is bound
+as external_id. Internal PK must never become Workspace ID.
+"""
 
 from __future__ import annotations
 
@@ -79,10 +83,18 @@ class ModioImporter(ModImporter):
 
         url = str(modio_url or source_url or "").strip()
         ext = parse_modio_id(url, modio_id)
-        if not ext:
-            ext = folder.name
-        name = (title or "").strip() or folder.name
         is_batch = bool(_kwargs.get("is_batch_mode"))
+        if not ext or (
+            not str(ext).isdigit()
+            and not str(ext).startswith("local/")
+            and not url
+        ):
+            import uuid
+
+            from services.importers.nexus import local_nexus_external_id
+
+            ext = local_nexus_external_id(uuid.uuid4().hex)
+        name = (title or "").strip() or folder.name
         if is_batch:
             # Batch folder import: never invent / default source URLs.
             url = ""
@@ -110,7 +122,10 @@ class ModioImporter(ModImporter):
             folder,
             file_entries=_kwargs.get("file_entries"),
         )
-        info = db.register_external_mod(
+        from services.identity_service import create_mod_identity
+
+        created = create_mod_identity(
+            db,
             platform=PLATFORM_MODIO,
             external_id=ext,
             source_url=url,
@@ -119,6 +134,11 @@ class ModioImporter(ModImporter):
             game_name=ctx.game_name,
             mod_files=bundle,
         )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="mod.io identity create failed", platform=PLATFORM_MODIO
+            )
 
         managed = ""
         if library_root:

@@ -49,6 +49,11 @@ class IdentityIssueCode(str, Enum):
     DUPLICATE_DIRECTORY_IDENTITY = "DUPLICATE_DIRECTORY_IDENTITY"
     PLATFORM_URL_MISMATCH = "PLATFORM_URL_MISMATCH"
     WORKSPACE_ID_POLLUTION = "WORKSPACE_ID_POLLUTION"
+    INTERNAL_ID_USED_AS_WORKSPACE_ID = "INTERNAL_ID_USED_AS_WORKSPACE_ID"
+    INTERNAL_ID_USED_AS_EXTERNAL_ID = "INTERNAL_ID_USED_AS_EXTERNAL_ID"
+    INTERNAL_ID_USED_IN_PLATFORM_URL = "INTERNAL_ID_USED_IN_PLATFORM_URL"
+    INTERNAL_ID_EXPOSED_IN_USER_UI = "INTERNAL_ID_EXPOSED_IN_USER_UI"
+    AMBIGUOUS_MOD_ID_USAGE = "AMBIGUOUS_MOD_ID_USAGE"
 
 
 @dataclass(frozen=True)
@@ -137,12 +142,12 @@ def validate_db_row_identity(
             )
         )
 
-    if ws and mid and ws == mid and is_internal_mod_id(mid) and plat != PLATFORM_STEAM:
+    if ws and mid and ws == mid and is_internal_mod_id(mid):
         findings.append(
             IdentityFinding(
                 code=IdentityIssueCode.WORKSPACE_ID_POLLUTION,
                 severity=IdentitySeverity.CORRUPTED,
-                message="workspace_id equals internal mod_id on non-Steam mod",
+                message="workspace_id equals internal mod_id",
                 mod_id=mid,
                 platform=plat,
                 external_id=ext,
@@ -281,7 +286,18 @@ def validate_metadata_identity(
                     )
                 )
 
-    if ext and is_modio_external_id_pollution(ext, mod_id=mid):
+    if pub and is_internal_mod_id(pub) and plat == PLATFORM_STEAM:
+        findings.append(
+            IdentityFinding(
+                code=IdentityIssueCode.INTERNAL_ID_AS_PUBLISHED_FILE_ID_POLLUTION,
+                severity=IdentitySeverity.CORRUPTED,
+                message="Steam metadata published_file_id is an internal id",
+                mod_id=mid,
+                platform=plat,
+                expected="steam workshop id",
+                actual=pub,
+            )
+        )
         findings.append(
             IdentityFinding(
                 code=IdentityIssueCode.MODIO_ID_POLLUTION,
@@ -408,45 +424,3 @@ def validate_mod_identity(
         )
     )
     return report
-
-
-def classify_identity_confidence(
-    *,
-    platform: str,
-    external_id: str = "",
-    source_url: str = "",
-    mod_id: str = "",
-    metadata: Mapping[str, Any] | None = None,
-) -> str:
-    """
-    Return identity match confidence: ``strong``, ``weak``, or ``conflict``.
-
-    Used to gate auto-recovery vs manual review.
-    """
-    plat = normalize_platform(platform)
-    ext = _text(external_id)
-    url = normalize_source_url(source_url)
-    meta = dict(metadata or {})
-
-    if is_provisional_external_id(ext) or is_modio_external_id_pollution(ext, mod_id=mod_id):
-        if url and plat:
-            return "strong" if url else "weak"
-        return "weak"
-
-    if plat == PLATFORM_MODIO:
-        if is_modio_api_mod_id(ext) or _text(meta.get("modio_mod_id")):
-            return "strong"
-        if url and "mod.io" in url.lower():
-            return "strong"
-        return "weak"
-
-    if plat == PLATFORM_STEAM and ext.isdigit() and not is_internal_mod_id(ext):
-        return "strong"
-
-    if url and plat:
-        return "strong"
-
-    if ext and plat:
-        return "weak"
-
-    return "conflict"

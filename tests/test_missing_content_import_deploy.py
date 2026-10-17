@@ -21,6 +21,7 @@ from services.file_ops import (
 from services.importers.archive import ArchiveImporter
 from services.importers.importer_base import ImportContext
 from services.importers.nexus import NexusImporter
+from tests.helpers.identity import frozen_from_pk
 
 
 @pytest.fixture()
@@ -57,6 +58,7 @@ def test_empty_directory_import_marks_missing(db: DatabaseManager, tmp_path: Pat
 
 
 def test_empty_zip_import_marks_missing(db: DatabaseManager, tmp_path: Path) -> None:
+    """Empty archive may import; Content Missing is Refresh/eval — not Archive stamp."""
     library = tmp_path / "library"
     library.mkdir()
     empty_zip = tmp_path / "empty.zip"
@@ -76,9 +78,9 @@ def test_empty_zip_import_marks_missing(db: DatabaseManager, tmp_path: Path) -> 
     assert result.success, result.error
     assert result.managed_path
     managed = Path(result.managed_path)
-    assert read_is_missing_content(managed)
-    meta = read_info_metadata_dict(managed) or {}
-    assert meta.get(MISSING_CONTENT_METADATA_KEY) is True
+    assert managed.is_dir()
+    # Archive import must not sticky-stamp Content Missing (Refresh owns that).
+    assert not read_is_missing_content(managed)
 
 
 def test_deploy_blocks_missing_content(db: DatabaseManager, tmp_path: Path) -> None:
@@ -97,7 +99,8 @@ def test_deploy_blocks_missing_content(db: DatabaseManager, tmp_path: Path) -> N
         context=ImportContext(game_id=1623730, game_name="Palworld"),
     )
     assert result.success
-    mid = str(result.mod_id)
+    pk = str(result.mod_id)
+    iid = frozen_from_pk(db, pk)
     apply_missing_content_marker(result.managed_path)
 
     install = tmp_path / "game" / "mods"
@@ -110,7 +113,7 @@ def test_deploy_blocks_missing_content(db: DatabaseManager, tmp_path: Path) -> N
         deploy_type="palworld_pak",
     )
 
-    out = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    out = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert out.get("success") is False
     assert MISSING_CONTENT_DEPLOY_ERROR in str(out.get("error") or "")
     assert out.get("is_missing_content") is True

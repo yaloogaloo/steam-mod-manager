@@ -6,8 +6,43 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+# Canonical create / infer label for a game's extension Type.
+# Display text only — never the runtime unlock key for「分类」.
+MOD_TYPE_EXTENSION = "拓展"
+# Display names that also unlock the same「分类」field as 拓展.
+MOD_TYPE_BEAUTIFY = "美化"
+MOD_TYPE_SKIN = "皮肤"
+
+
+def visible_extension_category(
+    category: str | None,
+    *,
+    app_id: int | str = 0,
+    type_id: int | str | None = None,
+) -> str:
+    """Category text shown in detail UI, or empty to hide the row entirely.
+
+    Unlock is the stamped 拓展 Type ID, or a Type currently named「美化」
+    or「皮肤」. Renaming the stamped 拓展 Type must not hide this.
+    """
+    text = str(category or "").strip()
+    if not text:
+        return ""
+    from services.mod_type_catalog import get_mod_type_catalog
+
+    if not get_mod_type_catalog().unlocks_subcategory(app_id, type_id):
+        return ""
+    return text
+
+
 _UNKNOWN_TITLE_RE = re.compile(
     r"^Unknown[_\s]?Mod(?:[_\s]*(\d+))?\s*$",
+    re.IGNORECASE,
+)
+
+# Clean library-folder fallback (never use ``Unknown Mod …`` on disk).
+_LIBRARY_MOD_FALLBACK_RE = re.compile(
+    r"^Mod[_\s\-]?(\d+)\s*$",
     re.IGNORECASE,
 )
 
@@ -32,9 +67,61 @@ def is_unknown_mod_title(title: str | None, *, published_file_id: str = "") -> b
     return False
 
 
+def library_mod_folder_fallback(published_file_id: str | int | None) -> str:
+    """
+    Stable, clean library folder name when no real title is available.
+
+    UI may still show ``Unknown Mod …``; filesystem folders must not.
+    """
+    mid = str(published_file_id or "").strip()
+    return f"Mod_{mid}" if mid else "Mod"
+
+
+def is_placeholder_library_folder_name(
+    name: str | None, *, published_file_id: str = ""
+) -> bool:
+    """
+    True when a managed folder leaf is a temporary/placeholder name.
+
+    Includes ``Unknown Mod*`` / ``Unknown_Mod_*`` and clean ``Mod_<id>`` fallbacks
+    so refresh can rename them once a real title exists.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return True
+    if is_unknown_mod_title(text, published_file_id=published_file_id):
+        return True
+    mid = str(published_file_id or "").strip()
+    if _LIBRARY_MOD_FALLBACK_RE.match(text):
+        return True
+    if mid and text in {
+        f"Mod_{mid}",
+        f"Mod-{mid}",
+        f"Mod {mid}",
+    }:
+        return True
+    return False
+
+
 @dataclass
 class ModMetadata:
-    """Metadata for a single Steam Workshop item."""
+    """Metadata for a single Mod (Steam Workshop item or local entity).
+
+    Field semantics (Frozen Identity Contract)::
+
+        Frozen ``internal_id`` — TEXT ``mods.internal_id`` (business Entity Identity)
+        ``mods.mod_id``        — SQLite PK / FK handle (not Frozen identity)
+        published_file_id      — Steam Workshop ID only (API + source association)
+        workspace_id           — not stored here; platform display lives in DB
+
+    ``ModMetadata.internal_id`` is Frozen Entity UUID (``mods.internal_id``).
+    ``ModMetadata.mod_pk`` is the SQLite ``mods.mod_id`` handle for DAL.
+
+    Prefer :func:`services.identity_service.resolve_mod_pk` when a Frozen
+    TEXT identity must become a DB PK.
+
+    Never treat ``published_file_id`` as the internal entity key.
+    """
 
     published_file_id: str
     title: str = ""
@@ -62,6 +149,20 @@ class ModMetadata:
     source_type: str = ""
     # Portable UI label from JSON ``display_name`` (not the ``display_name`` property).
     json_display_name: str = ""
+    # Frozen Entity UUID (``mods.internal_id``). Empty on unbound Steam stubs.
+    internal_id: str = ""
+    # SQLite ``mods.mod_id`` — DAL / FK only. Empty on unbound Steam stubs.
+    mod_pk: str = ""
+
+    def entity_internal_id(self) -> str:
+        """Frozen Entity UUID (``mods.internal_id``). Never SQLite PK.
+
+        Never falls back to ``published_file_id`` / Workspace ID. Unbound
+        Steam stubs leave this empty until the entity is bound. Backup
+        writers must prove ``internal_id → resolve_mod_pk() → mod_id``
+        and refuse to write when that proof fails.
+        """
+        return str(self.internal_id or "").strip()
 
     @property
     def game_display_name(self) -> str:
@@ -74,9 +175,15 @@ class ModMetadata:
 
     @property
     def workshop_url(self) -> str:
+        """Steam Workshop URL — only when ``published_file_id`` is a Workshop ID."""
+        from core.mod_platform import is_internal_mod_id
+
+        pub = str(self.published_file_id or "").strip()
+        if not pub.isdigit() or is_internal_mod_id(pub):
+            return ""
         return (
             "https://steamcommunity.com/sharedfiles/filedetails/"
-            f"?id={self.published_file_id}"
+            f"?id={pub}"
         )
 
     @property

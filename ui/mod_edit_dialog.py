@@ -19,7 +19,11 @@ from core.db_manager import ModDisplayInfo, get_db
 
 
 class ModEditDialog(QDialog):
-    """Edit display name / custom description / notes / favorite → SQLite."""
+    """Edit display name / custom description / notes / favorite → SQLite.
+
+    ARCHITECTURE RULE: pass an explicit parent. See ui.window_lifecycle
+    (Import Mod orphan float accident).
+    """
 
     def __init__(
         self,
@@ -28,7 +32,11 @@ class ModEditDialog(QDialog):
         steam_name: str = "",
         parent: QWidget | None = None,
     ) -> None:
+        from ui.window_lifecycle import register_toplevel
+
         super().__init__(parent)
+        if parent is not None:
+            register_toplevel(self)
         self.mod_id = str(mod_id)
         self.steam_name = (steam_name or "").strip()
         self._saved: ModDisplayInfo | None = None
@@ -44,8 +52,11 @@ class ModEditDialog(QDialog):
         root = QVBoxLayout(self)
         root.setSpacing(12)
 
+        ws = ""
+        if info is not None:
+            ws = str(info.workspace_id or "").strip()
         hint = QLabel(
-            f"Mod ID: {self.mod_id}"
+            f"Workspace ID: {ws or '—'}"
             + (f"\nSteam 原名: {self.steam_name}" if self.steam_name else "")
         )
         hint.setObjectName("subtitleLabel")

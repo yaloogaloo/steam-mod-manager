@@ -1,0 +1,2110 @@
+{
+  "baseline": "smm-pre-release-retirement-20261015",
+  "baseline_commit": "f1dadba25f83477c863747e38521c5cde9a43160",
+  "note": "109 P1检查项与93历史绑定处理函数分别记录，均不等于独立功能数量。EQUIVALENT必须同时具备正式运行证据和真实接线检查。",
+  "features": [
+    {
+      "id": 1,
+      "name": "导航：同步 / 库 / 部署配置",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "左侧导航<br>`ui/main_window.py` PAGE_*",
+      "contract": "三页 QStackedWidget",
+      "new_entry_and_chain": "左侧资产库/部署工作台/获取与同步<br>frontend/web/acquisition.js:showSpace；web_bridge → 各旧服务",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 2,
+      "name": "会话记忆（几何/页/游戏筛选/库路径）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "自动<br>`main_window._restore_settings`",
+      "contract": "QSettings Org SteamModManager",
+      "new_entry_and_chain": "正常窗口自动记忆游戏/工作区/几何<br>WebLibraryWindow + LibraryBridge.remember_session → 原 QSettings 键",
+      "remaining": "**本轮已整改；按证据限制结论**：会话恢复代码已接；正式重启复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 3,
+      "name": "无边框窗口控制",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "标题栏<br>`ui/window_chrome.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "原生主窗口标题栏<br>frontend/web_window.py → ui.window_chrome；标准 Windows 窗口控制",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 4,
+      "name": "新建/编辑游戏部署配置",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "游戏部署 → 保存配置<br>`ui/game_deploy_view.py`, `db_manager.update_game_deploy_config`",
+      "contract": "AppID/名称/路径",
+      "new_entry_and_chain": "游戏菜单 → 管理当前游戏<br>game_configuration.save → update_game_deploy_config",
+      "remaining": "**本轮已整改；按证据限制结论**：名称正式 UI 修改并恢复；配置与切换器重读成功",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 5,
+      "name": "浏览安装/Mod/Workshop 路径",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "浏览…<br>`game_deploy_view.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "管理当前游戏 → 选择目录<br>frontend/game_configuration.py:pick → QFileDialog",
+      "remaining": "**部分接入 / NOT CLOSED**：原生选择器已接；所有合法路径兼容性待验证",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 6,
+      "name": "测试部署路径",
+      "required_for_parity": true,
+      "status": "EQUIVALENT",
+      "legacy_entry_and_service": "测试路径<br>`validate_deploy_paths`",
+      "contract": "仅安装+Mod 目录",
+      "new_entry_and_chain": "管理当前游戏 → 测试路径<br>原 validate_deploy_paths（迁至 services.game_path_validation；旧调用保留别名）",
+      "remaining": "**本轮已整改；按证据限制结论**：python main.py 正式 UI 点击通过；群星实际空 Mod 路径返回原错误，未保存或移动资源；30-main-real-path-check.png",
+      "formal_result": "D:/smm-parity-evidence/30-main-real-path-check.png；实际 main.py → 原 validate_deploy_paths；不保存配置",
+      "checks": [
+        {
+          "file": "frontend/web/game_configuration.js",
+          "symbol": "$('game-path-check').onclick"
+        },
+        {
+          "file": "frontend/web_bridge.py",
+          "symbol": "game-path-check"
+        },
+        {
+          "file": "services/game_path_validation.py",
+          "symbol": "def validate_deploy_paths"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "选择部署类型（UI）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "部署类型 combo<br>`SUPPORTED_DEPLOY_TYPES`",
+      "contract": "UI 仅 `folder_copy`/`palworld_pak`；多数策略按 AppID 自动",
+      "new_entry_and_chain": "管理游戏 → 原有部署类型<br>同原 DAL SUPPORTED_DEPLOY_TYPES",
+      "remaining": "**本轮已整改；按证据限制结论**：配置保存已接；不等同所有部署策略完成验收",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 8,
+      "name": "刷新游戏列表",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "刷新列表<br>`game_deploy_view.refresh`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "游戏菜单；创建/保存后自动重读<br>game_configuration.js → bootstrap → DatabaseManager.list_games",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 9,
+      "name": "游戏商店预览图",
+      "required_for_parity": true,
+      "status": "MISSING",
+      "legacy_entry_and_service": "同步中心选游戏<br>`sync_view`, `game_info_worker`, `core/steam_api`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无对应操作<br>见旧版权威实现",
+      "remaining": "**漏接 / NOT CLOSED**：游戏预览图没有新投影",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 10,
+      "name": "删除游戏记录",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "游戏列表右键 stub<br>`delete_game_record` 存在；`_on_game_list_context_menu` 空",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：legacy_unreachable",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 11,
+      "name": "自动探测已装 Steam 游戏",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>Steam 客户端辅助",
+      "contract": "无「探测游戏」按钮",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 12,
+      "name": "按游戏浏览库",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "左栏游戏列表<br>`library_view`, `mod_library_cache`",
+      "contract": "含「全部游戏」",
+      "new_entry_and_chain": "无完整入口<br>见旧版权威实现",
+      "remaining": "**部分接入 / NOT CLOSED**：缺“全部游戏”视图",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 13,
+      "name": "文本搜索",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "搜索框<br>`library_query.filter_sort_entries`",
+      "contract": "防抖",
+      "new_entry_and_chain": "资产库搜索<br>原 get_mods_search_fields/get_mods_tag_flags → 独立 search_fields",
+      "remaining": "**本轮已整改；按证据限制结论**：名称、原名、备注、Workspace ID、游戏、标签、分类、URL、外部 ID、平台已接；正式 UI 来源字段搜索通过，其他字段真实 DAL 回归通过",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 14,
+      "name": "状态筛选芯片",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "全部/内容缺失/异常/已部署/收藏<br>`STATUS_FILTER_LABELS`",
+      "contract": "「异常」= 用户标记",
+      "new_entry_and_chain": "资产库状态菜单<br>library_query_adapter → 原 matches_status_filter",
+      "remaining": "**本轮已整改；按证据限制结论**：已恢复缺失/用户异常/禁用等独立语义；正式筛选复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 15,
+      "name": "列表排序",
+      "required_for_parity": true,
+      "status": "EQUIVALENT",
+      "legacy_entry_and_service": "最近修改/名称/大小<br>`SORT_LABELS`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "工具栏 → 最近修改/名称/大小<br>library_query_adapter → 原 sort_key",
+      "remaining": "名称、最近修改、大小使用原 sort_key；排序作用于整个查询结果，不局限于已渲染卡片。",
+      "formal_result": "D:/smm-equivalence-evidence/formal-sources-and-sort.json：正式 main.py，群星 390 项，三种排序完整序列一致；10-global-library-sort.png",
+      "checks": [
+        {
+          "file": "frontend/web/app.js",
+          "symbol": "$('library-sort')"
+        },
+        {
+          "file": "frontend/library_query_adapter.py",
+          "symbol": "sort_key"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "name": "名称降序排序",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`SORT_NAME_DESC` 定义未进 combo",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 17,
+      "name": "类型/分类筛选",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "分类 combo<br>`category_combo`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "资产库类型/分类筛选<br>web_bridge.library → 原 type_id 目录；app.js:filter",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 18,
+      "name": "平台筛选芯片",
+      "required_for_parity": false,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "—<br>`PLATFORM_FILTER_*` 逻辑就绪",
+      "contract": "view 硬编码 ALL",
+      "new_entry_and_chain": "工具栏来源筛选浮层 → 当前游戏完整结果集合筛选",
+      "remaining": "旧版仅有未开放的筛选逻辑；本轮提供可达入口，不计为原版可达功能等价。",
+      "formal_result": "formal-sources-and-sort.json platform_filters：正式 WH3 536 项中四来源集合逐项一致；13-platform-filter.png。",
+      "checks": [
+        {
+          "file": "frontend/web/app.js",
+          "symbol": "$('platform').value"
+        },
+        {
+          "file": "frontend/web/index.html",
+          "symbol": "id=\"library-filters\""
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "name": "离线页有无筛选",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`FILTER_OFFLINE_*`",
+      "contract": "未进芯片",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 20,
+      "name": "刷新库",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "刷新<br>`library_view.refresh`",
+      "contract": "强制刷新可触发 presence reconcile",
+      "new_entry_and_chain": "资产库刷新<br>app.js:load → LibraryAdapter.assets；缺强制 presence reconcile",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 21,
+      "name": "多选（Ctrl/Shift/Ctrl+A）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "卡片交互<br>`on_mod_selected`, `select_all_mods`",
+      "contract": "Detail 切批量面板",
+      "new_entry_and_chain": "独立勾选、Ctrl/Shift、Ctrl+A<br>app.js selectionUI + 选择后批量编辑",
+      "remaining": "**本轮已整改；按证据限制结论**：Ctrl/Shift已补；人工交互待验收",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 22,
+      "name": "虚拟化卡片网格",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "滚动区<br>`library_viewport`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "资产库虚拟宫格<br>app.js:reflow/renderGrid；现实现替代旧 Qt 虚拟化",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 23,
+      "name": "空状态引导",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "overlay CTA<br>清搜索/选全部游戏/导入",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "资产库空状态 → 清除筛选<br>app.js:filter/reset-filter",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 24,
+      "name": "收藏开关",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "卡片右键/筛选「收藏」<br>`mods.favorite`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "卡片/Inspector 封面星标<br>favorite-set → DatabaseManager.update_mod_user_metadata",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 25,
+      "name": "设置 Mod 类型",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "右键「设置分类」<br>`mod_type_catalog`, 批量可用",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "编辑 → 类型 → 保存类型<br>type_management → DatabaseManager.set_mod_type_id",
+      "remaining": "**本轮已整改；按证据限制结论**：正式 UI 写入/重读/恢复通过；不混用分类标签",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 26,
+      "name": "管理游戏类型目录",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "新增/删除类型<br>`library_view`",
+      "contract": "按当前游戏",
+      "new_entry_and_chain": "编辑 → 管理当前游戏类型目录<br>ModTypeCatalog.add_type/delete_type",
+      "remaining": "**本轮已整改；按证据限制结论**：正式 UI 创建/绑定/解除/删除验证类型通过",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 27,
+      "name": "拓展子分类字段",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "编辑信息 → 分类<br>`edit_mod_dialog`",
+      "contract": "特定类型显示",
+      "new_entry_and_chain": "Inspector 分类铅笔/编辑 → 分类<br>metadata-save → DatabaseManager.update_mod_user_metadata(category)",
+      "remaining": "**部分接入 / NOT CLOSED**：已接独立分类；旧特定类型显隐未保持",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 28,
+      "name": "自由分类标签",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail → Category Tags<br>`mod_tags` / Detail",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → 管理标签<br>execute_organize → add_mod_tag/remove_mod_tag(category)",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 29,
+      "name": "合集工作区（列表/内容）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "合集模式<br>`services/collection.py`, `COLLECTION_MODE_*`",
+      "contract": "浏览/整理，不部署",
+      "new_entry_and_chain": "资产库 → 合集<br>organization.js → services.collection",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 30,
+      "name": "合集 CRUD + 卡片排序",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "合集卡片<br>`create/rename/delete/reorder_collections`",
+      "contract": "成员不可排序 API",
+      "new_entry_and_chain": "合集 → CRUD / 拖动卡片排序<br>services.collection CRUD/move_collection_in_order/reorder_collections",
+      "remaining": "**本轮已整改；按证据限制结论**：CRUD 已有正式证据；本轮补排序，正式复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 31,
+      "name": "设置合集成员",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "右键「设置合集」<br>`collection_membership_dialog`",
+      "contract": "多选可批量",
+      "new_entry_and_chain": "合集成员 / 选择后批量编辑 → 合集关系<br>services.collection.apply_collection_memberships",
+      "remaining": "**本轮已整改；按证据限制结论**：同游戏一次事务；本轮补批量入口，正式复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 32,
+      "name": "合集封面",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "合集卡片封面<br>`collection_cover.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "合集 → 封面 → 本地/成员<br>services.collection.set_collection_cover/from_member",
+      "remaining": "**本轮已整改；按证据限制结论**：独立封面存储及预览已接；正式 UI 复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 33,
+      "name": "单 Mod 导入（多源）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "导入 Mod → 导入单个<br>`mod_import_dialog`, importers/*",
+      "contract": "Steam/Nexus/GitHub/mod.io/Other；文件夹或压缩包",
+      "new_entry_and_chain": "添加 Mod → 本地内容 → 来源/目录/压缩包<br>原 ImportWorker → 各来源 Importer/ArchiveImporter",
+      "remaining": "五来源 URL/身份注册及原目录/压缩包入口已接线；正式证明 Other 目录与 GitHub URL；其他输入组合仍需逐项正式复验。 已恢复可选名称和 mod.io 数字身份输入；实际命名仍由原 Importer 决定。",
+      "formal_result": "formal-workflow.json：Other 真实目录导入；formal-sources-and-sort.json：GitHub URL 持久化、Steam 数字 ID 关联；其余不得推定等价。",
+      "checks": [
+        {
+          "file": "frontend/web/registration.js",
+          "symbol": "$('library-add').onclick"
+        },
+        {
+          "file": "frontend/registration.py",
+          "symbol": "SteamImporter(db=db)"
+        },
+        {
+          "file": "frontend/registration.py",
+          "symbol": "NexusImporter(db=db)"
+        },
+        {
+          "file": "frontend/registration.py",
+          "symbol": "ModioImporter(db=db)"
+        },
+        {
+          "file": "frontend/registration.py",
+          "symbol": "importer(db=db).import_mod"
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "name": "批量导入目录",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "批量导入目录<br>`directory_batch.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "添加 Mod → 本地内容 → 批量目录<br>原 discover_mod_directories → ImportWorker._do_batch_folder_import",
+      "remaining": "**本轮已整改；按证据限制结论**：正式 UI 两个真实目录导入/哈希/独立重开通过；单项异常继续隔离验证。Other 无来源身份按旧版每次分配新身份，重复导入不会按名称合并",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 35,
+      "name": "批量导入离线 HTML",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "批量导入离线页面<br>`offline_html_batch.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "添加 Mod → Nexus HTML/MHTML 批量<br>offline_registration.py → ImportWorker → 原离线解析/归档",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 36,
+      "name": "导入时选封面",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "导入对话框<br>`image_picker.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "本地导入 → 附加资源 → 封面<br>原 validate_cover_image / ImportWorker cover_source",
+      "remaining": "**本轮已整改；按证据限制结论**：选择器及提交指纹已接；真实导入资源回归通过，正式 UI 附加封面待验",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 37,
+      "name": "导入时附离线页",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "导入对话框<br>`mod_import_dialog`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "Nexus 本地导入 → 附加资源 → 离线网页<br>原 inspect_page / ImportWorker offline_html_path",
+      "remaining": "**本轮已整改；按证据限制结论**：HTML/MHTML 身份与游戏检查已接；本轮新增附加页面分支正式 UI 未验，不宣称 PASS",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 38,
+      "name": "导入去重",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "自动<br>`duplicate_check.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "注册预览/确认重新判重<br>registration.py → importers.duplicate_check；尚未覆盖所有旧来源",
+      "remaining": "**部分接入 / NOT CLOSED**：已接来源判重，尚缺其他来源完整导入",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 39,
+      "name": "孤儿目录扫描导入",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`orphan_import.py`",
+      "contract": "无 UI",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 40,
+      "name": "Workshop 全量同步",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "同步中心 → 全量同步<br>`services/sync.py`, `SyncWorker`",
+      "contract": "需 Workshop 路径",
+      "new_entry_and_chain": "获取与同步 → 扫描并同步全部 Mod<br>start_all → SyncWorker → ModSyncService.sync → SteamWorkshopClient",
+      "remaining": "**本轮已整改；按证据限制结论**：正式系统代理 enabled，受控三项真实同步跳过3/失败0。Stellaris原配置未做整库写入试验；无按 AppID 的代理特例",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 41,
+      "name": "强制覆盖同步",
+      "required_for_parity": true,
+      "status": "MISSING",
+      "legacy_entry_and_service": "强制覆盖 checkbox<br>`SyncOptions`",
+      "contract": "离线页不在此覆盖范围",
+      "new_entry_and_chain": "无对应操作<br>见旧版权威实现",
+      "remaining": "**漏接 / NOT CLOSED**：SyncOptions.overwrite_files 被 BusinessResources 一律拒绝",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 42,
+      "name": "批量同步 Steam 离线页",
+      "required_for_parity": true,
+      "status": "MISSING",
+      "legacy_entry_and_service": "同步 Steam 离线网页<br>`OfflinePagesSyncWorker`",
+      "contract": "可选 Cookie",
+      "new_entry_and_chain": "无对应操作<br>见旧版权威实现",
+      "remaining": "**漏接 / NOT CLOSED**：OfflinePagesSyncWorker 未接入任务生命周期/资源上下文",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 43,
+      "name": "网络代理",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "同步中心<br>`proxy_resolver.py`",
+      "contract": "启动可自动系统代理",
+      "new_entry_and_chain": "左下角设置 → 来源网络<br>app_settings.py → QSettings → services.proxy_resolver",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 44,
+      "name": "Steam Cookie",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "同步中心<br>QSettings",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "左下角设置 → Steam Cookie<br>app_settings.py → 原 QSettings network/steam_cookie；密码框不回填",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 45,
+      "name": "设置本地 Mod 库根",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "本地 Mod 目标库<br>Sync + paths",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无完整入口<br>见旧版权威实现",
+      "remaining": "**部分接入 / NOT CLOSED**：根路径只读，旧路径切换入口被缩减",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 46,
+      "name": "同步后跳转库",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "查看 Mod 库<br>nav",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "获取任务 → 在资产库查看<br>acquisition.js → load/inspect",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 47,
+      "name": "刷新官方元数据",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail ⟳；多选批量<br>`metadata_refresh.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → 官方/本地/来源刷新（按平台）<br>mod_operations → reconcile_local_state/metadata_refresh/refresh_mod",
+      "remaining": "**本轮已整改；按证据限制结论**：已恢复本地重扫、mod.io 原首次 API 路径、正式代理和 Steam 封面下载；新增分支正式复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 48,
+      "name": "编辑 Mod 信息",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "编辑信息<br>`edit_mod_dialog.py`",
+      "contract": "名称/描述/来源/类型/自定义部署路径等",
+      "new_entry_and_chain": "编辑 → 用户信息 / 来源与部署配置<br>update_mod_user_metadata → 原 write_sidecar_for_mod / persist_entity_metadata_to_backup",
+      "remaining": "来源平台、URL 与原 DAL/侧车/元数据备份接通；所有高级字段组合尚未完成正式复验。",
+      "formal_result": "formal-workflow.json：正式编辑 Other→GitHub 与链接，独立重开确认；Frozen UUID、Workspace ID、external_id、部署状态保持。",
+      "checks": [
+        {
+          "file": "frontend/web/advanced_editor.js",
+          "symbol": "advancedEditorValues"
+        },
+        {
+          "file": "frontend/web_bridge.py",
+          "symbol": "action == 'metadata-save'"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "name": "Witcher3 `game_version`",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "编辑 → 版本<br>`core/witcher3_game_version`",
+      "contract": "仅 W3；original/next_gen/remake",
+      "new_entry_and_chain": "编辑 → 来源与部署配置 → W3版本<br>原 Witcher3 validator + DAL",
+      "remaining": "**本轮已整改；按证据限制结论**：仅 Witcher3显示，三枚举；正式版本记录待验证",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 50,
+      "name": "每 Mod 自定义部署目录",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "编辑信息<br>deploy path lifecycle",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "编辑 → 来源与部署配置 → 自定义目录<br>原 resolve_game_install_path / QFileDialog / DAL",
+      "remaining": "**本轮已整改；按证据限制结论**：已接保存；自定义目标的部署写入边界仍未闭合，不宣称部署等价",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 51,
+      "name": "批量改平台",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "多选 → 批量编辑<br>EditModDialog batch",
+      "contract": "名/描/URL 锁定",
+      "new_entry_and_chain": "多选 → 批量编辑 → 来源平台<br>原 update_mod_user_metadata + 原侧车/备份",
+      "remaining": "**本轮已整改；按证据限制结论**：只改平台，锁定名称/描述/URL；正式复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 52,
+      "name": "用户标记芯片",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail 标记<br>`user_annotation.py`",
+      "contract": "冲突/失效/停更",
+      "new_entry_and_chain": "更多 → 文件、关系与用户标记 → 用户标记<br>原 user_annotation / update_mod_status / add_mod_tag(abandoned)",
+      "remaining": "**本轮已整改；按证据限制结论**：失效正式 UI 标记及恢复通过；其他标记隔离真实 DAL 已验证",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 53,
+      "name": "状态操作（启用/禁用等）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail Status<br>`mod_detail_panel`",
+      "contract": "可见性依状态；部分 Mark 按钮隐藏",
+      "new_entry_and_chain": "同上 → 启用 Mod<br>原 enable_mod/disable_mod + WH3 sync_used_mods_txt",
+      "remaining": "**本轮已整改；按证据限制结论**：入口已接；正式启用/投影尚未复验",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 54,
+      "name": "打开离线页面",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "打开离线页面<br>`offline_open.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → 打开离线页面<br>mod_operations.py → info_asset_runtime.prepare_offline_open → 安全阅读器",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 55,
+      "name": "导入/保存离线页面",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail；多选批量保存<br>`offline/*`, `offline_archive_thread`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → Nexus 导入/Steam、GitHub、mod.io 保存<br>mod_operations.py → attach_nexus_offline_page/OfflineManager；批量保存缺失",
+      "remaining": "**部分接入 / NOT CLOSED**：单项已接，缺多选批量离线保存",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 56,
+      "name": "打开来源 URL",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "打开官网<br>Detail / 卡片",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → 打开来源网页<br>原 QDesktopServices + 来源 URL",
+      "remaining": "**本轮已整改；按证据限制结论**：Other 自定义 HTTP/HTTPS 错限已纠正；当前来源菜单不变",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 57,
+      "name": "更换封面（用户覆盖）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "更换封面<br>`apply_cover_to_mod`",
+      "contract": "用户覆盖后刷新不得覆盖",
+      "new_entry_and_chain": "更多 → 更换封面<br>原 apply_cover_to_mod / persist_miss_cover",
+      "remaining": "**本轮已整改；按证据限制结论**：已恢复归档缺失时写 Backup；此新增分支正式写入尚未验证",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 58,
+      "name": "元数据刷新带封面更新",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "刷新信息<br>`metadata_refresh`",
+      "contract": "有 user_override.cover 时跳过封面",
+      "new_entry_and_chain": "Steam 官方刷新<br>原 metadata_refresh download_cover=True（正式）",
+      "remaining": "**本轮已整改；按证据限制结论**：用户封面保护保持；新增正式封面下载复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 59,
+      "name": "版本更新检测展示",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail Version 区<br>`update_sources/*`, `mod_update.py`",
+      "contract": "Steam/Nexus checker stub；无「检查更新/升级」产品动作",
+      "new_entry_and_chain": "尚未完成逐分支接管<br>旧服务保留",
+      "remaining": "**NOT CLOSED**：缺正式 UI 等价证据",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 60,
+      "name": "旧 Detail/Edit 弹窗",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`mod_detail_dialog`, `mod_edit_dialog`",
+      "contract": "已被面板替代",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：legacy_unreachable",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 61,
+      "name": "Detail 内联编辑栈页",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "stack 残留<br>`_build_edit_page`",
+      "contract": "`enter_edit` 已改开对话框",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：legacy_unreachable",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 62,
+      "name": "复制 ID / 复制全部信息",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "按钮始终隐藏<br>`mod_detail_panel`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：legacy_unreachable",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 63,
+      "name": "打开本地目录",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "打开目录<br>Detail / 卡片",
+      "contract": "MISS 时禁用",
+      "new_entry_and_chain": "更多 → 打开托管归档目录<br>content-open → path_lifecycle → QDesktopServices",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "已有受控正式证据；非全分支",
+      "checks": []
+    },
+    {
+      "id": 64,
+      "name": "部署文件勾选",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "文件区 Select All/Main/Clear<br>`mod_files_ux.py`",
+      "contract": "文件数>1 才显示",
+      "new_entry_and_chain": "更多 → 文件、关系与用户标记 → 部署文件<br>原 ModFileManager 选择/all/main/optional/default",
+      "remaining": "**本轮已整改；按证据限制结论**：真实 GitHub 归档文件选择 UI 写入与恢复通过；高级批量选择正式复验待记录",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 65,
+      "name": "文件角色 Main/Source/Other",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "文件行右键<br>Detail",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "部署文件 → 角色与文件说明<br>原 set_file_badge_role/set_nexus_file_category/set_file_description",
+      "remaining": "**本轮已整改；按证据限制结论**：Main/Source/Other 与 Nexus 文件类别独立；正式复验待记录",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 66,
+      "name": "部署时解压压缩包",
+      "required_for_parity": true,
+      "status": "MISSING",
+      "legacy_entry_and_service": "部署流水线内<br>`archive_extractor`, deploy rules",
+      "contract": "非独立「解压」菜单",
+      "new_entry_and_chain": "无对应操作<br>见旧版权威实现",
+      "remaining": "**漏接 / NOT CLOSED**：旧解包部署仍被 validate_deploy 拒绝",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 67,
+      "name": "部署",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail/卡片「部署」<br>`ModDeployer.deploy_mod`",
+      "contract": "单 Mod",
+      "new_entry_and_chain": "Inspector 主按钮部署<br>LibraryBridge._start_deploy → DeployWorker → ModDeployer.deploy_mod；策略受限",
+      "remaining": "正式路径误套隔离目录、追踪日志越界、相对备份路径误拒已修；历史复制 manifest 和未逐项验收策略仍精确受限。",
+      "formal_result": "D:/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
+      "checks": [
+        {
+          "file": "frontend/web/app.js",
+          "symbol": "runCommand(button.dataset.command"
+        },
+        {
+          "file": "frontend/web_bridge.py",
+          "symbol": "DeployWorker("
+        },
+        {
+          "file": "services/production_resources.py",
+          "symbol": "def deployment_scope"
+        },
+        {
+          "file": "services/deploy.py",
+          "symbol": "apply_file_plan(file_plan)"
+        }
+      ]
+    },
+    {
+      "id": 68,
+      "name": "重新部署",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "重新部署/更新部署<br>`redeploy_mod` ≡ undeploy+deploy",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "Inspector 动态主按钮重新部署<br>DeployWorker → 原 redeploy_mod；策略受限",
+      "remaining": "正式路径误套隔离目录、追踪日志越界、相对备份路径误拒已修；历史复制 manifest 和未逐项验收策略仍精确受限。",
+      "formal_result": "D:/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
+      "checks": [
+        {
+          "file": "frontend/web/app.js",
+          "symbol": "runCommand(button.dataset.command"
+        },
+        {
+          "file": "frontend/web_bridge.py",
+          "symbol": "DeployWorker("
+        },
+        {
+          "file": "services/production_resources.py",
+          "symbol": "def deployment_scope"
+        },
+        {
+          "file": "services/deploy.py",
+          "symbol": "apply_file_plan(file_plan)"
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "name": "取消部署",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "取消部署<br>`undeploy_mod`",
+      "contract": "仅删 manifest 目标",
+      "new_entry_and_chain": "Inspector 取消部署<br>DeployWorker → 原 undeploy_mod；历史 manifest 被拒绝",
+      "remaining": "正式路径误套隔离目录、追踪日志越界、相对备份路径误拒已修；历史复制 manifest 和未逐项验收策略仍精确受限。",
+      "formal_result": "D:/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
+      "checks": [
+        {
+          "file": "frontend/web/app.js",
+          "symbol": "runCommand(button.dataset.command"
+        },
+        {
+          "file": "frontend/web_bridge.py",
+          "symbol": "DeployWorker("
+        },
+        {
+          "file": "services/production_resources.py",
+          "symbol": "def deployment_scope"
+        },
+        {
+          "file": "services/deploy.py",
+          "symbol": "apply_file_plan(file_plan)"
+        }
+      ]
+    },
+    {
+      "id": 70,
+      "name": "批量部署",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>无 public 多 Mod API",
+      "contract": "多选不触发部署",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 71,
+      "name": "从库删除 Mod",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "UI 已移除入口<br>`mod_remove.py` 仍在",
+      "contract": "注释标明 unhooked",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：legacy_unreachable",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 72,
+      "name": "排序模式（已部署集合）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "排序模式<br>`order_backend`, activation/*",
+      "contract": "CK3/Stellaris/WH3/BG3；W3 无 backend",
+      "new_entry_and_chain": "部署工作台 → 原 WH3/Paradox/BG3 Backend；BusinessResources 精确投影授权与轻量恢复点",
+      "remaining": "WH3 原验收保留；群星/CK3/BG3 真实临时文件投影回归通过，正式 UI 读取通过，正式顺序写入往返未关闭。",
+      "formal_result": "formal-sources-and-sort.json backend_views；12-backend-*.png；boundary-regression-fixed.log 与 paradox-worker-regression-fixed.log 仅为辅助回归。",
+      "checks": [
+        {
+          "file": "frontend/web/deployment.js",
+          "symbol": "order-save"
+        },
+        {
+          "file": "frontend/deployment.py",
+          "symbol": "backend.persist_order"
+        },
+        {
+          "file": "frontend/deployment.py",
+          "symbol": "backend.sync_projection"
+        },
+        {
+          "file": "services/production_resources.py",
+          "symbol": "def game_projection"
+        }
+      ]
+    },
+    {
+      "id": 73,
+      "name": "拖拽重排",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "卡片拖放<br>`mod_card` mime + `apply_card_drop`",
+      "contract": "即时写 JSON + 投影",
+      "new_entry_and_chain": "部署工作台拖拽 → order-save → 当前游戏原 Backend",
+      "remaining": "四个既有 Backend 已接线；人工拖拽体验及非 WH3 正式排序往返仍待验收。",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 74,
+      "name": "置顶/上移/下移/置底",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "卡片右键<br>`apply_order_move`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "工作台 → 置顶/置底/上移/下移<br>同一个 order-save → 原 Backend",
+      "remaining": "四方向按钮共享原 Backend 保存与投影；非 WH3 正式写入往返未验收，不能由临时文件回归推定。",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 75,
+      "name": "保存当前部署为记录",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "💾 部署记录 ▼<br>`deployment_record.create_or_update_record`",
+      "contract": "快照已部署 PK",
+      "new_entry_and_chain": "部署工作台 → 部署快照 → 保存<br>snapshots.py → services.deployment_record.create_or_update_record",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 76,
+      "name": "更新/重命名/删除记录",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "同菜单<br>service CRUD",
+      "contract": "不影响 Mod/deploy",
+      "new_entry_and_chain": "快照 → 覆盖/重命名/删除<br>snapshots.py → 原 deployment_record CRUD",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 77,
+      "name": "按记录筛选 + 相对徽章",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "选记录名<br>`FILTER_DEPLOYMENT_RECORD`",
+      "contract": "记录缺失/额外部署",
+      "new_entry_and_chain": "快照 → 成员差异 → 查看 Mod<br>snapshots.py → canonical deployed 与记录 PK 集合；原库筛选入口未接",
+      "remaining": "**部分接入 / NOT CLOSED**：有真实差异比较，缺旧库内记录筛选/徽章",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 78,
+      "name": "一键恢复环境（按记录重部署）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "README 声称<br>**无实现**",
+      "contract": "设计冻结：Record ≠ Deploy",
+      "new_entry_and_chain": "尚未完成逐分支接管<br>旧服务保留",
+      "remaining": "**NOT CLOSED**：缺正式 UI 等价证据",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 79,
+      "name": "元数据/资产系统备份",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "自动；徽章<br>`metadata_backup*`, `data/mod_backup/`",
+      "contract": "MISS/Backup 徽章",
+      "new_entry_and_chain": "同步/导入/封面保存自动<br>原 metadata_backup_sync；新版详情备份徽章未接",
+      "remaining": "**部分接入 / NOT CLOSED**：后台服务保留；缺详情备份状态展示",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 80,
+      "name": "部署事务备份（覆盖回滚）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "部署/取消部署内<br>`backup_manager.py`",
+      "contract": "无用户「还原备份」页",
+      "new_entry_and_chain": "已准入部署/撤出自动<br>原 backup_manager；其他策略未验证",
+      "remaining": "**部分接入 / NOT CLOSED**：仅受限策略往返，历史事务失败仍有风险",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 81,
+      "name": "用户向导式备份/还原",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>—",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 82,
+      "name": "添加依赖（Workspace ID）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail 依赖 +<br>`mod_relationships.add_dependency_by_workspace_id`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → 文件、关系与用户标记 → 依赖与关系<br>原 add_dependency_by_workspace_id / add_mod_relationship",
+      "remaining": "**本轮已整改；按证据限制结论**：同游戏真实关系正式 UI 增加通过；Workspace ID 分支隔离已验",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 83,
+      "name": "移除依赖",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "依赖行 ×<br>`dependency_item_widget`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "依赖与关系 → 移除关系<br>原 remove_mod_relationship",
+      "remaining": "**本轮已整改；按证据限制结论**：正式 UI 增删往返，其他 Mod 保留",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 84,
+      "name": "关系：冲突/插件/补丁",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Tags & Relations<br>Detail",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "依赖与关系 → 类型选择<br>原 add_mod_relationship 白名单",
+      "remaining": "**本轮已整改；按证据限制结论**：四类已接；依赖正式 UI通过，其他三类待正式复验",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 85,
+      "name": "文件冲突检测",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Status → 冲突详情<br>`conflict.ConflictDetector`",
+      "contract": "部署后可调度扫描",
+      "new_entry_and_chain": "Inspector 更多 → 文件、关系与用户标记 → 用户标记与启用 → 检查当前 Mod → 原 ConflictDetector.check_mod(persist=False)",
+      "remaining": "只读诊断入口已恢复；不重写用户冲突标记，不宣称游戏兼容性保证。非空冲突正式展示仍未验收。",
+      "formal_result": "formal-sources-and-sort.json conflict_query；11-readonly-conflict-report.png；实际查询后未写诊断文件。",
+      "checks": [
+        {
+          "file": "frontend/web/asset_management.js",
+          "symbol": "checkManagementConflicts"
+        },
+        {
+          "file": "frontend/asset_management.py",
+          "symbol": "persist=False"
+        },
+        {
+          "file": "frontend/web_bridge.py",
+          "symbol": "operation=='conflict-report'"
+        }
+      ]
+    },
+    {
+      "id": 86,
+      "name": "用户冲突/失效标注",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "标记芯片<br>`user_annotation`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "用户标记与启用<br>原 user_annotation / update_mod_status",
+      "remaining": "**本轮已整改；按证据限制结论**：正式失效标记往返已验，未改变 deploy_status",
+      "formal_result": "本轮受控正式 UI 通过已注明分支",
+      "checks": []
+    },
+    {
+      "id": 87,
+      "name": "离屏「用户标记」编辑器",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "隐藏 section<br>`_build_offscreen_user_tags_section`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：legacy_unreachable",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 88,
+      "name": "内容缺失 / 异常筛选",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "筛选芯片<br>`library_query`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "状态筛选 → 内容缺失/用户异常<br>原 matches_status_filter",
+      "remaining": "**本轮已整改；按证据限制结论**：不再将业务异常与目录缺失合并；正式筛选待复验",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 89,
+      "name": "Presence 对账（LIVE/MISS）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "强制刷新后后台<br>`presence_reconcile.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无完整入口<br>见旧版权威实现",
+      "remaining": "**部分接入 / NOT CLOSED**：刷新不触发旧 presence reconcile",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 90,
+      "name": "启动身份对账",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "默认关闭<br>`library_reconcile`, `startup_reconcile_policy`",
+      "contract": "无用户开关 UI",
+      "new_entry_and_chain": "无完整入口<br>见旧版权威实现",
+      "remaining": "**部分接入 / NOT CLOSED**：旧默认关闭策略保留，启动合同待核",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 91,
+      "name": "Paradox Playset 提示",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "启动/部署后<br>`paradox_activation` QMessageBox",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无完整入口<br>见旧版权威实现",
+      "remaining": "**部分接入 / NOT CLOSED**：缺 Paradox playset 异常提示",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 92,
+      "name": "身份修复/污染工具",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "tools/scripts<br>`identity_repair*`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 93,
+      "name": "库维护/孤儿扫描",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`library_maintenance`, `orphan_import`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 94,
+      "name": "崩溃/卡顿追踪日志",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "自动日志<br>`crash_trace`, `ui_block_trace`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 95,
+      "name": "启动 WH3（写 used_mods + 进程）",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`wh3_activation.launch_wh3`",
+      "contract": "测试断言无「启动游戏」UI",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 96,
+      "name": "启动任意游戏",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>—",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 97,
+      "name": "游戏状态条（路径缺失提示）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Library header<br>`game_status.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "当前游戏/获取中心路径提示<br>game-config/acquisition；旧版完整 game_status 尚缺",
+      "remaining": "**部分接入 / NOT CLOSED**：路径摘要不等同旧状态条",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 98,
+      "name": "体积展示",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "卡片/Detail<br>`dir_size`, `size_observation`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "卡片/Inspector 大小<br>权威 local_size_bytes 读取；不以0替代未知",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 99,
+      "name": "`.info` sidecar 写入",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "保存路径自动<br>`info_sidecar.py`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "编辑保存/文件选择保存自动<br>原 write_sidecar_for_mod / metadata_backup",
+      "remaining": "**本轮已整改；按证据限制结论**：已补 metadata-save 的缺步；隔离侧车及正式文件选择往返通过",
+      "formal_result": "待本轮正式复验",
+      "checks": []
+    },
+    {
+      "id": 100,
+      "name": "Playwright 可读离线快照",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "离线保存/同步路径<br>`offline/browser_snapshot/*`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "更多 → 保存离线网页<br>原 OfflineManager → browser_snapshot/Playwright",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 101,
+      "name": "Mod.io API Key 配置 UI",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`modio_config.py`",
+      "contract": "env/config",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 102,
+      "name": "启动对账开关 UI",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>policy 仅配置/环境",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 103,
+      "name": "FS 观察调度",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "—<br>`mod_fs_observer.schedule_*`",
+      "contract": "审计称未用",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 104,
+      "name": "UI 校验工具链",
+      "required_for_parity": false,
+      "status": "MISSING",
+      "legacy_entry_and_service": "tools/<br>`tools/ui_validation_d0/`",
+      "contract": "开发工具",
+      "new_entry_and_chain": "无原版可达入口<br>未新增虚构能力",
+      "remaining": "**旧版未开放（不冒充迁移完成）**：code_only_no_entry",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 105,
+      "name": "部署策略自动选择（多游戏）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "部署时<br>`deploy_rules/__init__.resolve_strategy`",
+      "contract": "WH3/Paradox/BG3/Anno/…",
+      "new_entry_and_chain": "部署前策略判断<br>原 resolve_strategy；production_resources 拒绝多数旧策略",
+      "remaining": "**部分接入 / NOT CLOSED**：多数真实策略被隔离准入规则错误推广到正式",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 106,
+      "name": "部署运行时状态轴",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "Detail 按钮使能<br>`deploy_status.resolve_deployment_status`",
+      "contract": "deployed/outdated/conflict",
+      "new_entry_and_chain": "Inspector 状态/动态按钮<br>DB deploy_status + validate_deploy；outdated/conflict 轴未完整展示",
+      "remaining": "**部分接入 / NOT CLOSED**：未完整迁移运行时状态轴",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 107,
+      "name": "部署并发锁（同 Mod）",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "自动<br>`deploy_operation_lock`",
+      "contract": "保持原入口所调用业务及副作用",
+      "new_entry_and_chain": "已接通部署自动<br>原 deploy_operation_lock",
+      "remaining": "**已接线；正式等价未关闭**：需完整正式 UI 证据",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 108,
+      "name": "180s 部署 UI 看门狗",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "自动<br>DeployWorker UI",
+      "contract": "不杀线程",
+      "new_entry_and_chain": "窗口退出等待 Worker<br>WebLibraryWindow.closeEvent/LibraryBridge.shutdown；旧180s看门狗未接",
+      "remaining": "**部分接入 / NOT CLOSED**：退出等待已接，缺原看门狗反馈",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    },
+    {
+      "id": 109,
+      "name": "合集与排序模式互斥",
+      "required_for_parity": true,
+      "status": "PARTIAL",
+      "legacy_entry_and_service": "UI 规则<br>`test_collection_ui` + library_view",
+      "contract": "工作区互斥",
+      "new_entry_and_chain": "合集与部署工作台独立视图<br>organization.js/showSpace；不会将合集作为部署成员",
+      "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
+      "formal_result": "未逐项正式验收",
+      "checks": []
+    }
+  ],
+  "legacy_handlers": [
+    {
+      "id": "ui/library_view.py::refresh",
+      "legacy_file": "ui/library_view.py",
+      "line": 970,
+      "handler": "refresh",
+      "authority_calls": "`LibraryLoadWorker`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_flush_pending_library_load",
+      "legacy_file": "ui/library_view.py",
+      "line": 1171,
+      "handler": "_flush_pending_library_load",
+      "authority_calls": "`LibraryLoadWorker`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_library_loaded",
+      "legacy_file": "ui/library_view.py",
+      "line": 1206,
+      "handler": "_on_library_loaded",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_flush_projection_patches",
+      "legacy_file": "ui/library_view.py",
+      "line": 1378,
+      "handler": "_flush_projection_patches",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_clamp_viewport_after_layout",
+      "legacy_file": "ui/library_view.py",
+      "line": 1647,
+      "handler": "_clamp_viewport_after_layout",
+      "authority_calls": "`dr.get_record_mod_ids`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_import_single_mod",
+      "legacy_file": "ui/library_view.py",
+      "line": 1785,
+      "handler": "_on_import_single_mod",
+      "authority_calls": "`LibraryLoadWorker`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_import_batch_directory",
+      "legacy_file": "ui/library_view.py",
+      "line": 1817,
+      "handler": "_on_import_batch_directory",
+      "authority_calls": "`ImportWorker`, `LibraryLoadWorker`, `QFileDialog.getExistingDirectory`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`, `set_last_import_directory`"
+    },
+    {
+      "id": "ui/library_view.py::_on_import_batch_offline_html",
+      "legacy_file": "ui/library_view.py",
+      "line": 1937,
+      "handler": "_on_import_batch_offline_html",
+      "authority_calls": "`ImportWorker`, `LibraryLoadWorker`, `QFileDialog.getOpenFileNames`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`, `set_last_import_directory`"
+    },
+    {
+      "id": "ui/library_view.py::_on_ok",
+      "legacy_file": "ui/library_view.py",
+      "line": 2016,
+      "handler": "_on_ok",
+      "authority_calls": "`LibraryLoadWorker`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_wh3_sort_mode_toggled",
+      "legacy_file": "ui/library_view.py",
+      "line": 2456,
+      "handler": "_on_wh3_sort_mode_toggled",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_collection_mode_toggled",
+      "legacy_file": "ui/library_view.py",
+      "line": 2526,
+      "handler": "_on_collection_mode_toggled",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_open_collection_content",
+      "legacy_file": "ui/library_view.py",
+      "line": 2564,
+      "handler": "_open_collection_content",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_return_to_collection_list",
+      "legacy_file": "ui/library_view.py",
+      "line": 2596,
+      "handler": "_return_to_collection_list",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_wh3_sort_drop",
+      "legacy_file": "ui/library_view.py",
+      "line": 2684,
+      "handler": "_on_wh3_sort_drop",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_wh3_sort_move",
+      "legacy_file": "ui/library_view.py",
+      "line": 2700,
+      "handler": "_on_wh3_sort_move",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_set_library_status_filter",
+      "legacy_file": "ui/library_view.py",
+      "line": 2717,
+      "handler": "_set_library_status_filter",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_save_deployment_record",
+      "legacy_file": "ui/library_view.py",
+      "line": 2815,
+      "handler": "_on_save_deployment_record",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.create_or_update_record`, `dr.find_record_by_name`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_rebuild_deployment_record_menu",
+      "legacy_file": "ui/library_view.py",
+      "line": 2904,
+      "handler": "_rebuild_deployment_record_menu",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `dr.list_records`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_rename_deployment_record_clicked",
+      "legacy_file": "ui/library_view.py",
+      "line": 2969,
+      "handler": "_on_rename_deployment_record_clicked",
+      "authority_calls": "`dr.find_record_by_name`, `dr.list_records`, `dr.rename_record`"
+    },
+    {
+      "id": "ui/library_view.py::_on_update_deployment_record_clicked",
+      "legacy_file": "ui/library_view.py",
+      "line": 2981,
+      "handler": "_on_update_deployment_record_clicked",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.create_or_update_record`, `dr.get_record_mod_ids`, `dr.list_records`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_delete_deployment_record_clicked",
+      "legacy_file": "ui/library_view.py",
+      "line": 2987,
+      "handler": "_on_delete_deployment_record_clicked",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.delete_record`, `dr.find_record_by_name`, `dr.get_record_mod_ids`, `dr.list_records`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_status_filter_toggled",
+      "legacy_file": "ui/library_view.py",
+      "line": 3091,
+      "handler": "_on_status_filter_toggled",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_category_changed",
+      "legacy_file": "ui/library_view.py",
+      "line": 3103,
+      "handler": "_on_category_changed",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_delete_game_type",
+      "legacy_file": "ui/library_view.py",
+      "line": 3193,
+      "handler": "_on_delete_game_type",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_sort_changed",
+      "legacy_file": "ui/library_view.py",
+      "line": 3262,
+      "handler": "_on_sort_changed",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_apply_view_filter",
+      "legacy_file": "ui/library_view.py",
+      "line": 3266,
+      "handler": "_apply_view_filter",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_library_scroll_value",
+      "legacy_file": "ui/library_view.py",
+      "line": 3519,
+      "handler": "_on_library_scroll_value",
+      "authority_calls": "`dr.get_record_mod_ids`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_library_scroll_covers",
+      "legacy_file": "ui/library_view.py",
+      "line": 3527,
+      "handler": "_on_library_scroll_covers",
+      "authority_calls": "`dr.get_record_mod_ids`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_batch_set_category",
+      "legacy_file": "ui/library_view.py",
+      "line": 3913,
+      "handler": "_on_batch_set_category",
+      "authority_calls": "`db.set_mod_type_id`"
+    },
+    {
+      "id": "ui/library_view.py::_on_batch_platform_saved",
+      "legacy_file": "ui/library_view.py",
+      "line": 3974,
+      "handler": "_on_batch_platform_saved",
+      "authority_calls": "`dr.get_record_mod_ids`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/library_view.py::_on_deploy_action",
+      "legacy_file": "ui/library_view.py",
+      "line": 4058,
+      "handler": "_on_deploy_action",
+      "authority_calls": "`DeployWorker`, `get_db().check_relationship_deploy_warnings`, `get_db().get_mod_status`, `get_db().get_mods_tag_flags`, `get_db().get_mods_tag_flags([pk]).get`"
+    },
+    {
+      "id": "ui/library_view.py::_on_deploy_requested",
+      "legacy_file": "ui/library_view.py",
+      "line": 4175,
+      "handler": "_on_deploy_requested",
+      "authority_calls": "`DeployWorker`, `get_db().check_relationship_deploy_warnings`, `get_db().get_mod_status`, `get_db().get_mods_tag_flags`, `get_db().get_mods_tag_flags([pk]).get`"
+    },
+    {
+      "id": "ui/library_view.py::_on_deploy_finished",
+      "legacy_file": "ui/library_view.py",
+      "line": 4189,
+      "handler": "_on_deploy_finished",
+      "authority_calls": "`dr.get_record_mod_ids`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_deploy_failed",
+      "legacy_file": "ui/library_view.py",
+      "line": 4269,
+      "handler": "_on_deploy_failed",
+      "authority_calls": "`dr.get_record_mod_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_game_item_changed",
+      "legacy_file": "ui/library_view.py",
+      "line": 4619,
+      "handler": "_on_game_item_changed",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_create_collection",
+      "legacy_file": "ui/library_view.py",
+      "line": 5386,
+      "handler": "_on_create_collection",
+      "authority_calls": "`coll.create_collection`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_rename_collection",
+      "legacy_file": "ui/library_view.py",
+      "line": 5414,
+      "handler": "_on_rename_collection",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `coll.rename_collection`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_collection_cover_requested",
+      "legacy_file": "ui/library_view.py",
+      "line": 5446,
+      "handler": "_on_collection_cover_requested",
+      "authority_calls": "`QFileDialog.getOpenFileName`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `coll.set_collection_cover`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`, `set_last_import_directory`"
+    },
+    {
+      "id": "ui/library_view.py::_on_delete_collection",
+      "legacy_file": "ui/library_view.py",
+      "line": 5514,
+      "handler": "_on_delete_collection",
+      "authority_calls": "`coll.delete_collection`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_set_collections_requested",
+      "legacy_file": "ui/library_view.py",
+      "line": 5539,
+      "handler": "_on_set_collections_requested",
+      "authority_calls": "`coll.apply_collection_memberships`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `coll.membership_check_states`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_collection_sort_drop",
+      "legacy_file": "ui/library_view.py",
+      "line": 5574,
+      "handler": "_on_collection_sort_drop",
+      "authority_calls": "`coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `coll.move_collection_in_order`, `coll.reorder_collections`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_empty_action",
+      "legacy_file": "ui/library_view.py",
+      "line": 5836,
+      "handler": "_on_empty_action",
+      "authority_calls": "`LibraryLoadWorker`, `coll.get_collection`, `coll.list_collection_member_ids`, `coll.list_collections`, `db.list_games`, `db.list_mod_list_items`, `dr.get_record_mod_ids`, `get_db().get_game_deploy_config`, `get_db().get_mods_app_ids`"
+    },
+    {
+      "id": "ui/library_view.py::_on_card_favorite_toggle",
+      "legacy_file": "ui/library_view.py",
+      "line": 5874,
+      "handler": "_on_card_favorite_toggle",
+      "authority_calls": "`get_db().get_mod_display_info`, `get_db().update_mod_user_metadata`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::enter_edit",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 909,
+      "handler": "enter_edit",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().batch_update_platform`, `get_db().get_category_tags`, `get_db().get_game`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `get_db().set_mod_type_id`, `get_db().update_mod_user_metadata`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::open_edit_info_dialog",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 1000,
+      "handler": "open_edit_info_dialog",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().batch_update_platform`, `get_db().get_category_tags`, `get_db().get_game`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `get_db().set_mod_type_id`, `get_db().update_mod_user_metadata`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_change_cover",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3046,
+      "handler": "_change_cover",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `QFileDialog.getOpenFileName`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_refresh_mod",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3097,
+      "handler": "_on_refresh_mod",
+      "authority_calls": "`MetadataBatchRefreshWorker`, `ModRefreshWorker`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_metadata_refresh_finished",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3292,
+      "handler": "_on_metadata_refresh_finished",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_metadata_refresh_failed",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3342,
+      "handler": "_on_metadata_refresh_failed",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_file_row_context_menu",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3765,
+      "handler": "_on_file_row_context_menu",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_edit_file_description",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3878,
+      "handler": "_on_edit_file_description",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_mod_file_toggled",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3913,
+      "handler": "_on_mod_file_toggled",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_files_select_all",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3947,
+      "handler": "_on_files_select_all",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_all_selection`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_files_main_only",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3958,
+      "handler": "_on_files_main_only",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).select_main_only`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_files_clear_optional",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3969,
+      "handler": "_on_files_clear_optional",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).clear_optional_selection`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_files_reset_default",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 3980,
+      "handler": "_on_files_reset_default",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).reset_default_selection`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `get_db().get_mod_display_info`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_add_dependency_pill",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4115,
+      "handler": "_on_add_dependency_pill",
+      "authority_calls": "`add_dependency_by_workspace_id`, `get_db().get_mod_deploy_info`, `get_db().get_mod_relationships`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_add_relationship",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4176,
+      "handler": "_on_add_relationship",
+      "authority_calls": "`get_db().add_mod_relationship`, `get_db().get_mod_deploy_info`, `get_db().get_mod_relationships`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_remove_relationship",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4206,
+      "handler": "_on_remove_relationship",
+      "authority_calls": "`get_db().get_mod_deploy_info`, `get_db().get_mod_relationships`, `get_db().remove_mod_relationship`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_remove_dependency_item",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4216,
+      "handler": "_on_remove_dependency_item",
+      "authority_calls": "`get_db().get_mod_deploy_info`, `get_db().get_mod_relationships`, `get_db().remove_mod_relationship`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_enable_mod",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4306,
+      "handler": "_on_enable_mod",
+      "authority_calls": "`get_db().enable_mod`, `get_db().get_category_tags`, `get_db().get_mod_status`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `sync_used_mods_txt`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_disable_mod",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4316,
+      "handler": "_on_disable_mod",
+      "authority_calls": "`get_db().disable_mod`, `get_db().get_category_tags`, `get_db().get_mod_status`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `sync_used_mods_txt`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_add_category_tag",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4337,
+      "handler": "_on_add_category_tag",
+      "authority_calls": "`get_db().add_category_tag`, `get_db().get_category_tags`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_remove_category_tag",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4352,
+      "handler": "_on_remove_category_tag",
+      "authority_calls": "`get_db().get_category_tags`, `get_db().remove_category_tag`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_mark_invalid",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4501,
+      "handler": "_on_mark_invalid",
+      "authority_calls": "`get_db().get_mod_display_info`, `get_db().get_mod_tags`, `get_db().update_mod_status`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_mark_valid",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4507,
+      "handler": "_on_mark_valid",
+      "authority_calls": "`get_db().get_mod_display_info`, `get_db().get_mod_tags`, `get_db().update_mod_status`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_mark_conflict",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4510,
+      "handler": "_on_mark_conflict",
+      "authority_calls": "`apply_conflict_annotation`, `get_db().get_mod_display_info`, `get_db().get_mod_tags`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_clear_conflict",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4516,
+      "handler": "_on_clear_conflict",
+      "authority_calls": "`apply_conflict_annotation`, `get_db().get_mod_display_info`, `get_db().get_mod_tags`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_flag_conflict_toggled",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4565,
+      "handler": "_on_flag_conflict_toggled",
+      "authority_calls": "`apply_conflict_annotation`, `get_db().get_mod_display_info`, `get_db().get_mod_tags`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_flag_invalid_toggled",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4575,
+      "handler": "_on_flag_invalid_toggled",
+      "authority_calls": "`get_db().get_mod_display_info`, `get_db().get_mod_tags`, `get_db().update_mod_status`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_flag_abandoned_toggled",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4597,
+      "handler": "_on_flag_abandoned_toggled",
+      "authority_calls": "`get_db().add_mod_tag`, `get_db().remove_mod_tag`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_toggle_conflict_detail",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4616,
+      "handler": "_on_toggle_conflict_detail",
+      "authority_calls": "`ConflictDetector`, `ConflictDetector(self._library_root, db=get_db()).check_mod`, `get_db().get_mod_display_info`, `get_db().get_mod_status`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_save_user_tags",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 4781,
+      "handler": "_save_user_tags",
+      "authority_calls": "`db.add_mod_tag`, `db.get_mod_relations`, `db.get_mod_tags`, `db.remove_mod_tag`, `db.set_mod_conflict_targets`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_download_offline_page",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5109,
+      "handler": "_download_offline_page",
+      "authority_calls": "`OfflineArchiveWorker`, `OfflineHtmlImportWorker`, `QFileDialog.getOpenFileName`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_offline_archive_finished",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5248,
+      "handler": "_on_offline_archive_finished",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_offline_archive_skipped",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5270,
+      "handler": "_on_offline_archive_skipped",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_offline_archive_thread_finished",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5301,
+      "handler": "_on_offline_archive_thread_finished",
+      "authority_calls": "`OfflineArchiveWorker`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_open_offline",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5308,
+      "handler": "_open_offline",
+      "authority_calls": "`QDesktopServices.openUrl`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_cancel_edit",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5437,
+      "handler": "_cancel_edit",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_save_edit",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5445,
+      "handler": "_save_edit",
+      "authority_calls": "`ModFilesJsonManager`, `ModFilesJsonManager(get_db()).set_file_description`, `ModFilesJsonManager(get_db()).set_file_selection`, `ModFilesJsonManager(get_db()).set_nexus_file_category`, `db.get_mod_relations`, `db.get_mod_tags`, `get_db().get_category_tags`, `get_db().get_game_deploy_config`, `get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`, `get_db().get_mod_display_info`, `get_db().get_mod_relationships`, `get_db().get_mod_status`, `get_db().get_mod_tags`, `get_db().get_mod_version`, `get_db().is_mod_enabled`, `get_db().update_mod_user_metadata`, `persist_entity_metadata_to_backup`, `write_sidecar_for_mod`"
+    },
+    {
+      "id": "ui/mod_detail_panel.py::_on_deploy_runtime_status_ready",
+      "legacy_file": "ui/mod_detail_panel.py",
+      "line": 5875,
+      "handler": "_on_deploy_runtime_status_ready",
+      "authority_calls": "`get_db().get_mod_backup_row`, `get_db().get_mod_deploy_info`"
+    },
+    {
+      "id": "ui/game_deploy_view.py::refresh",
+      "legacy_file": "ui/game_deploy_view.py",
+      "line": 222,
+      "handler": "refresh",
+      "authority_calls": "`db.list_games`"
+    },
+    {
+      "id": "ui/game_deploy_view.py::_on_save",
+      "legacy_file": "ui/game_deploy_view.py",
+      "line": 360,
+      "handler": "_on_save",
+      "authority_calls": "`db.list_games`"
+    },
+    {
+      "id": "ui/game_deploy_view.py::_on_test_paths",
+      "legacy_file": "ui/game_deploy_view.py",
+      "line": 400,
+      "handler": "_on_test_paths",
+      "authority_calls": "`validate_deploy_paths`"
+    },
+    {
+      "id": "ui/sync_view.py::refresh_games",
+      "legacy_file": "ui/sync_view.py",
+      "line": 263,
+      "handler": "refresh_games",
+      "authority_calls": "`GameInfoWorker`"
+    },
+    {
+      "id": "ui/sync_view.py::_on_game_selected",
+      "legacy_file": "ui/sync_view.py",
+      "line": 324,
+      "handler": "_on_game_selected",
+      "authority_calls": "`GameInfoWorker`"
+    },
+    {
+      "id": "ui/sync_view.py::start_sync",
+      "legacy_file": "ui/sync_view.py",
+      "line": 413,
+      "handler": "start_sync",
+      "authority_calls": "`SyncWorker`"
+    },
+    {
+      "id": "ui/sync_view.py::start_offline_pages_sync",
+      "legacy_file": "ui/sync_view.py",
+      "line": 476,
+      "handler": "start_offline_pages_sync",
+      "authority_calls": "`OfflinePagesSyncWorker`"
+    },
+    {
+      "id": "ui/mod_import_dialog.py::_browse_offline_html",
+      "legacy_file": "ui/mod_import_dialog.py",
+      "line": 708,
+      "handler": "_browse_offline_html",
+      "authority_calls": "`QFileDialog.getOpenFileName`, `set_last_import_directory`"
+    },
+    {
+      "id": "ui/mod_import_dialog.py::_browse_cover",
+      "legacy_file": "ui/mod_import_dialog.py",
+      "line": 730,
+      "handler": "_browse_cover",
+      "authority_calls": "`QFileDialog.getOpenFileName`, `set_last_import_directory`"
+    },
+    {
+      "id": "ui/mod_import_dialog.py::_browse_folder",
+      "legacy_file": "ui/mod_import_dialog.py",
+      "line": 763,
+      "handler": "_browse_folder",
+      "authority_calls": "`QFileDialog.getExistingDirectory`, `set_last_import_directory`"
+    },
+    {
+      "id": "ui/mod_import_dialog.py::_on_import",
+      "legacy_file": "ui/mod_import_dialog.py",
+      "line": 856,
+      "handler": "_on_import",
+      "authority_calls": "`ImportWorker`"
+    },
+    {
+      "id": "ui/edit_mod_dialog.py::_browse_custom_deploy",
+      "legacy_file": "ui/edit_mod_dialog.py",
+      "line": 380,
+      "handler": "_browse_custom_deploy",
+      "authority_calls": "`QFileDialog.getExistingDirectory`"
+    }
+  ]
+}

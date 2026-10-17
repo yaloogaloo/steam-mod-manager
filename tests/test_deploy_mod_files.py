@@ -7,10 +7,15 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
+from core.game_info import GameInfo
 from core.mod_platform import FILE_TYPE_MAIN, FILE_TYPE_OPTIONAL, ModFileEntry, ModFilesBundle
 from services.deploy import ModDeployer, resolve_deploy_sources
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    frozen_deploy_id,
+    write_info_sidecar,
+)
 
 
 @pytest.fixture()
@@ -23,7 +28,8 @@ def db(tmp_path: Path) -> DatabaseManager:
 
 
 def test_resolve_deploy_sources_none_when_empty(db: DatabaseManager, tmp_path: Path) -> None:
-    db.upsert_mod(ModMetadata(published_file_id="1", title="Steam"))
+    create_steam_test_mod(db, external_id="1", title="Steam")
+
     source = tmp_path / "mod"
     source.mkdir()
     assert resolve_deploy_sources("1", source, db=db) is None
@@ -38,20 +44,25 @@ def test_disabled_files_not_deployed(db: DatabaseManager, tmp_path: Path) -> Non
     mod.mkdir(parents=True)
     (mod / "main.bin").write_bytes(b"MAIN")
     (mod / "hat.bin").write_bytes(b"HAT")
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        '{"published_file_id":"8001","title":"Multi","app_id":100}\n',
-        encoding="utf-8",
-    )
-
-    from core.game_info import GameInfo
 
     db.upsert_game(GameInfo(app_id=100, name="SomeGame"))
-    db.upsert_mod(ModMetadata(published_file_id="8001", title="Multi", app_id=100))
     db.update_game_deploy_config(100, name="SomeGame", mod_path=str(install_mods))
+    created = create_steam_test_mod(db, external_id="8001", title="Multi", app_id=100)
+    pk = str(created.mod_id)
+    iid = frozen_deploy_id(created)
+    write_info_sidecar(
+        mod,
+        internal_id=iid,
+        title="Multi",
+        external_id="8001",
+        workspace_id=str(created.workspace_id or "8001"),
+        app_id=100,
+        game_name="SomeGame",
+    )
+    bind_managed_path(db, pk, mod, title="Multi", game_name="SomeGame")
+
     db.set_mod_files(
-        "8001",
+        pk,
         ModFilesBundle(
             files=[
                 ModFileEntry(
@@ -72,12 +83,12 @@ def test_disabled_files_not_deployed(db: DatabaseManager, tmp_path: Path) -> Non
         ),
     )
 
-    allowed = resolve_deploy_sources("8001", mod, db=db)
+    allowed = resolve_deploy_sources(pk, mod, db=db)
     assert allowed is not None
     assert "main.bin" in allowed
     assert "hat.bin" not in allowed
 
-    result = ModDeployer(library_root=library, db=db).deploy_mod("8001")
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
 
     dest = install_mods / "Multi"

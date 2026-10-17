@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,13 +104,26 @@ class ResolvedDeploySource:
 
 
 def _sha256_file(path: Path, *, chunk: int = 1024 * 1024) -> str:
+    import time
+
+    from services.deploy_op_profile import record_op
+
+    t0 = time.perf_counter()
     digest = hashlib.sha256()
+    nbytes = 0
     with path.open("rb") as fh:
         while True:
             block = fh.read(chunk)
             if not block:
                 break
+            nbytes += len(block)
             digest.update(block)
+    record_op(
+        "hash",
+        (time.perf_counter() - t0) * 1000.0,
+        bytes_count=nbytes,
+        path=str(path),
+    )
     return digest.hexdigest()
 
 
@@ -127,24 +141,21 @@ def _resolve_managed_path(
     managed_path: Path | str | None = None,
     db: DatabaseManager | None = None,
 ) -> Path | None:
-    if managed_path is not None:
-        root = Path(managed_path).expanduser()
-        if root.is_dir():
-            return root
+    from services.deploy_paths import resolve_deploy_managed_path
+    from core.paths import default_mod_library
+
     database = db if db is not None else get_db()
-    mid = str(mod_id).strip()
-    if mid.isdigit():
-        row = database.get_mod_backup_row(mid) or {}
-        lkp = str(row.get("last_known_path") or "").strip()
-        if lkp and Path(lkp).is_dir():
-            return Path(lkp)
-        info = database.get_mod_display_info(mid)
-        if info:
-            for raw in (getattr(info, "managed_path", None), getattr(info, "local_path", None)):
-                text = str(raw or "").strip()
-                if text and Path(text).is_dir():
-                    return Path(text)
-    return None
+    library_root = None
+    try:
+        library_root = default_mod_library()
+    except Exception:  # noqa: BLE001
+        library_root = None
+    return resolve_deploy_managed_path(
+        mod_id,
+        db=database,
+        library_root=library_root,
+        explicit=managed_path,
+    )
 
 
 def _entry_path_names(entry: ModFileEntry) -> list[str]:
@@ -638,20 +649,71 @@ def validate_content_root(
 
 
 def enrich_manifest_source_hashes(manifest: Any) -> None:
-    """Attach optional ``source_hash`` to manifest file entries (backward compatible)."""
+    """Attach optional ``source_hash`` to manifest file entries (backward compatible).
+
+    Memoize by resolved source path — Anno archives share one zip across thousands
+    of members; hashing that zip once per entry is a confirmed multi-minute stall.
+
+    Prefer hashes already computed during Core Apply copy so large payloads
+    (WARHAMMER III ``.pack``) are not read a second time.
+    """
+    cache: dict[str, str] = {}
+    try:
+        from services.deploy_apply import current_apply_source_hashes
+
+        cache.update(current_apply_source_hashes())
+    except Exception:  # noqa: BLE001
+        pass
+    hashed_from_disk = 0
+    hashed_bytes = 0
+    reused = 0
+    from services.deploy_op_profile import cached_resolve, record_op
+
     for entry in list(getattr(manifest, "files", None) or []):
         raw = str(getattr(entry, "source", "") or "").strip()
         if not raw:
             continue
         path = Path(raw)
-        if not path.is_file():
-            continue
+        t_ex = time.perf_counter()
         try:
-            digest = _sha256_file(path)
+            exists = path.is_file()
         except OSError:
+            exists = False
+        record_op("is_file", (time.perf_counter() - t_ex) * 1000.0, path=raw)
+        if not exists:
             continue
+        digest = cache.get(raw) or cache.get(str(path))
+        if digest is None:
+            try:
+                key = cached_resolve(path)
+            except OSError:
+                key = str(path)
+            digest = cache.get(key)
+        if digest is None:
+            try:
+                hashed_bytes += int(path.stat().st_size)
+            except OSError:
+                hashed_bytes += 0
+            try:
+                digest = _sha256_file(path)
+            except OSError:
+                continue
+            cache[key] = digest
+            hashed_from_disk += 1
+        else:
+            reused += 1
         if hasattr(entry, "source_hash"):
             entry.source_hash = digest
+    try:
+        from services.deploy_stage_log import current_deploy_timing
+
+        sess = current_deploy_timing()
+        if sess is not None:
+            sess.diagnostics["hash_from_disk_files"] = hashed_from_disk
+            sess.diagnostics["hash_from_disk_bytes"] = hashed_bytes
+            sess.diagnostics["hash_reused_from_copy"] = reused
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # Backward-compatible aliases

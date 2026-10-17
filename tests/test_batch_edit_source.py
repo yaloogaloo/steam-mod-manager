@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from core.db_manager import DatabaseManager
 from core.game_info import GameInfo
 from core.mod_platform import PLATFORM_GITHUB, PLATFORM_NEXUS, PLATFORM_OTHER, PLATFORM_STEAM
+from tests.helpers.identity import create_steam_test_mod, create_test_mod_identity
 from ui.edit_mod_dialog import EditModDialog
 
 
@@ -60,27 +61,51 @@ def test_edit_dialog_batch_locks_non_source_fields(qapp: QApplication) -> None:
 
 
 def test_batch_update_platform_only_touches_platform(db: DatabaseManager) -> None:
-    for mid, plat, url, name in (
-        (900001, PLATFORM_STEAM, "https://steam/a", "A"),
-        (900002, PLATFORM_NEXUS, "https://nexus/b", "B"),
-    ):
-        db.update_mod_user_metadata(
-            mid,
-            {
-                "display_name": name,
-                "custom_description": f"desc-{name}",
-                "user_notes": "note",
-                "favorite": False,
-                "platform": plat,
-                "source_url": url,
-            },
-        )
+    a_id = create_steam_test_mod(
+        db,
+        external_id="900001",
+        title="A",
+        app_id=1623730,
+        game_name="Palworld",
+        source_url="https://steam/a",
+    ).mod_id
+    b_id = create_test_mod_identity(
+        db,
+        platform=PLATFORM_NEXUS,
+        external_id="900002",
+        title="B",
+        app_id=1623730,
+        game_name="Palworld",
+        source_url="https://nexus/b",
+    ).mod_id
+    db.update_mod_user_metadata(
+        a_id,
+        {
+            "display_name": "A",
+            "custom_description": "desc-A",
+            "user_notes": "note",
+            "favorite": False,
+            "platform": PLATFORM_STEAM,
+            "source_url": "https://steam/a",
+        },
+    )
+    db.update_mod_user_metadata(
+        b_id,
+        {
+            "display_name": "B",
+            "custom_description": "desc-B",
+            "user_notes": "note",
+            "favorite": False,
+            "platform": PLATFORM_NEXUS,
+            "source_url": "https://nexus/b",
+        },
+    )
 
-    updated = db.batch_update_platform([900001, 900002], PLATFORM_OTHER)
+    updated = db.batch_update_platform([a_id, b_id], PLATFORM_OTHER)
     assert updated == 2
 
-    a = db.get_mod_display_info(900001)
-    b = db.get_mod_display_info(900002)
+    a = db.get_mod_display_info(a_id)
+    b = db.get_mod_display_info(b_id)
     assert a is not None and b is not None
     assert a.platform == PLATFORM_OTHER
     assert b.platform == PLATFORM_OTHER

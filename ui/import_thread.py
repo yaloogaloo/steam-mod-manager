@@ -40,6 +40,7 @@ class ImportWorker(QThread):
     progress_changed = Signal(str)
     import_finished = Signal(object)  # ImportResult
     import_failed = Signal(str)
+    item_finished = Signal(object)
 
     def __init__(
         self,
@@ -48,15 +49,27 @@ class ImportWorker(QThread):
         library_root: str | Path,
         params: dict[str, Any],
         parent=None,
+        resources=None,
+        preflight=None,
     ) -> None:
         super().__init__(parent)
         self.platform = normalize_platform(platform)
         self.library_root = Path(library_root)
         self.params = dict(params)
+        self.resources, self.preflight = resources, preflight
+        self.batch_items = []
 
     def run(self) -> None:
         try:
-            result = self._do_import()
+            if self.resources is not None:
+                with self.resources.bind():
+                    if self.preflight is not None:
+                        self.preflight()
+                    if self.library_root != self.resources.path('mod'):
+                        raise PermissionError('导入归档库与隔离上下文不匹配')
+                    result = self._do_import()
+            else:
+                result = self._do_import()
             if self.isInterruptionRequested():
                 return
             if result.success or result.is_duplicate:
@@ -64,7 +77,19 @@ class ImportWorker(QThread):
             else:
                 self.import_failed.emit(result.error or "导入失败")
         except Exception as exc:  # noqa: BLE001
-            self.import_failed.emit(str(exc))
+            from services.crash_trace import log_exception
+
+            try:
+                if self.resources is None:
+                    log_exception("ImportWorker.run")
+                else:
+                    with self.resources.bind():
+                        log_exception("ImportWorker.run")
+            except Exception:
+                # Logging must not suppress the terminal business failure.
+                pass
+            finally:
+                self.import_failed.emit(str(exc))
 
     def _emit_progress(self, message: str) -> None:
         if not self.isInterruptionRequested():
@@ -99,27 +124,63 @@ class ImportWorker(QThread):
         offline_html: str = "",
     ) -> ImportResult:
         """After a successful Nexus import, optionally attach user-saved HTML/MHTML."""
-        if not result.success:
+        if self.resources and self.params.get('offline_expected') and result.is_duplicate:
+            # A concurrent registration must never turn a skip into an overwrite.
+            return result
+        if not result.mod_id:
+            return result
+        if not result.success and not result.is_duplicate:
             return result
         if self.platform != PLATFORM_NEXUS:
             return result
         html = str(offline_html or "").strip() or self._offline_html_path()
         if not html:
             return result
+        if self.resources and self.params.get('offline_expected') and result.success and not result.is_duplicate:
+            self._offline_created_pk = int(result.mod_id)
         self._emit_progress("正在导入离线页面…")
         clean = self.params.get("offline_clean")
         if clean is None:
             clean = True
         try:
-            attach_nexus_offline_page(
+            attached = attach_nexus_offline_page(
                 result.mod_id,
                 html,
                 managed_path=result.managed_path or None,
                 library_root=self.library_root,
                 clean=bool(clean),
+                merge_mode="import_overwrite",
             )
+            if self.resources and getattr(attached, 'status', None) != 'archived':
+                raise RuntimeError(getattr(attached, 'error', '') or '离线资源未完整归档')
         except Exception:  # noqa: BLE001
+            from services.crash_trace import log_exception
+
+            log_exception("ImportWorker._maybe_attach_nexus_offline")
+            if self.resources:
+                raise
             # Missing / invalid offline pages must never fail the Mod import.
+            pass
+        try:
+            from services.path_lifecycle import resolve_managed_folder
+
+            resolved = resolve_managed_folder(
+                result.mod_id,
+                hint_path=result.managed_path or None,
+                db=get_db(),
+            )
+            if resolved.path is not None and resolved.path.is_dir():
+                result.managed_path = str(resolved.path)
+            info = get_db().get_mod_display_info(result.mod_id)
+            if info is not None:
+                result.title = str(
+                    getattr(info, "display_name", "")
+                    or getattr(info, "steam_name", "")
+                    or result.title
+                    or ""
+                ).strip() or result.title
+                result.display = info
+        except Exception:  # noqa: BLE001
             pass
         return result
 
@@ -177,6 +238,7 @@ class ImportWorker(QThread):
             or str(params.get("source_url") or params.get("other_url") or "").strip(),
             offline_html=offline_html or self._offline_html_path(),
             allow_local_fallback=allow_local_fallback,
+            temp_root=self.resources.path("cache/temp") if self.resources else None,
         )
         if isinstance(resolved, ImportResult):
             return resolved
@@ -195,6 +257,7 @@ class ImportWorker(QThread):
             source_url=resolved.source_url,
             workshop_id=resolved.workshop_id,
             app_id=app_id,
+            title=str(resolved.title or self.params.get("title") or "").strip(),
         )
         if dup is not None:
             return dup
@@ -217,7 +280,6 @@ class ImportWorker(QThread):
             cover_source=cover_source,
             offline_html=offline_html,
         )
-        folder_title = (title or "").strip() or folder.name
 
         prepared = self._prepare_identity(
             offline_html=offline,
@@ -233,11 +295,17 @@ class ImportWorker(QThread):
             ),
         )
         if isinstance(prepared, ImportResult):
+            # Same-scope duplicate still accepts offline HTML overwrite refresh.
+            if prepared.is_duplicate and prepared.mod_id:
+                return self._maybe_attach_nexus_offline(
+                    prepared, offline_html=offline
+                )
             return prepared
 
         from services.importers.identity_resolve import (
             ImportIdentity,
             apply_directory_import_identity,
+            canonical_nexus_offline_import_title,
         )
 
         # Directory import: unify batch/single identity before Importer.import_mod.
@@ -246,6 +314,17 @@ class ImportWorker(QThread):
             folder=folder,
             platform=self.platform,
         )
+
+        if self.platform == PLATFORM_NEXUS and str(offline or "").strip():
+            # Offline HTML metadata participates in final directory naming.
+            # Valid parsed title wins over Empty Mod <random> stub folders.
+            folder_title = canonical_nexus_offline_import_title(
+                user_title=title,
+                parsed_title=prepared.title,
+                folder_name=folder.name,
+            )
+        else:
+            folder_title = (title or "").strip() or folder.name
 
         if self.platform == PLATFORM_STEAM:
             workshop_id = (
@@ -267,6 +346,13 @@ class ImportWorker(QThread):
 
         if self.platform == PLATFORM_GITHUB:
             github_url = prepared.source_url or str(params.get("github_url") or "").strip()
+            local_ext = str(prepared.external_id or "").strip()
+            # Path-stable local/… suffix — never bare folder.name.
+            local_suffix = (
+                local_ext.removeprefix("local/")
+                if local_ext.startswith("local/")
+                else ""
+            )
             result = GithubImporter(db=db).import_mod(
                 github_url=github_url,
                 source_folder=str(folder),
@@ -276,8 +362,7 @@ class ImportWorker(QThread):
                 app_id=int(params.get("game_id") or params.get("app_id") or 0),
                 context=context,
                 cover_source=cover,
-                # Batch: allow unique external ids via folder name suffix.
-                external_id_suffix=folder.name if batch else "",
+                external_id_suffix=local_suffix if (batch or not github_url) else "",
                 is_batch_mode=batch or bool(params.get("is_batch_mode")),
             )
             return result
@@ -293,7 +378,7 @@ class ImportWorker(QThread):
                 ),
                 modio_id=(
                     prepared.external_id
-                    or (folder.name if batch else str(params.get("modio_id") or ""))
+                    or ("" if batch else str(params.get("modio_id") or ""))
                 ),
                 library_root=self.library_root,
                 game_name=str(params.get("game_name") or ""),
@@ -305,6 +390,12 @@ class ImportWorker(QThread):
             return result
 
         if self.platform == PLATFORM_OTHER:
+            local_ext = str(prepared.external_id or "").strip()
+            local_suffix = (
+                local_ext.removeprefix("local/")
+                if local_ext.startswith("local/")
+                else ""
+            )
             result = OtherImporter(db=db).import_mod(
                 source_folder=str(folder),
                 title=folder_title,
@@ -323,13 +414,13 @@ class ImportWorker(QThread):
                 app_id=int(params.get("game_id") or params.get("app_id") or 0),
                 context=context,
                 cover_source=cover,
-                external_id_suffix=folder.name if batch else "",
+                external_id_suffix=local_suffix,
                 is_batch_mode=batch or bool(params.get("is_batch_mode")),
             )
             return result
 
-        # Nexus — unified identity (official URL/id, else folder.name).
-        nexus_id = str(prepared.external_id or "").strip() or folder.name
+        # Nexus — unified identity (official URL/id, else local/…).
+        nexus_id = str(prepared.external_id or "").strip()
         nexus_url = "" if batch else str(prepared.source_url or "").strip()
         result = NexusImporter(db=db).import_mod(
             source_folder=str(folder),
@@ -362,13 +453,19 @@ class ImportWorker(QThread):
             self._emit_progress(
                 f"正在导入 ({index}/{len(mod_dirs)})：{folder.name}"
             )
-            result = self._import_one_folder(
-                folder,
-                title=str(self.params.get("title") or "").strip() or folder.name,
-                cover_source=shared_cover,
-                offline_html=shared_offline,
-                batch=True,
-            )
+            try:
+                result = self._import_one_folder(
+                    folder,
+                    title=str(self.params.get("title") or "").strip() or folder.name,
+                    cover_source=shared_cover,
+                    offline_html=shared_offline,
+                    batch=True,
+                )
+            except Exception as exc:
+                result=ImportResult(success=False,error=str(exc),platform=self.platform)
+            item={**result.as_dict(),'source':str(folder)}
+            self.batch_items.append(item)
+            self.item_finished.emit(item)
             if result.success:
                 successes.append(result)
             elif result.is_duplicate:
@@ -383,6 +480,7 @@ class ImportWorker(QThread):
                 error="; ".join(failures) if failures else "导入失败",
                 platform=self.platform,
                 skipped_count=skipped,
+                failed_count=len(failures),
             )
 
         if successes:
@@ -394,6 +492,7 @@ class ImportWorker(QThread):
             last.error = ""
         last.imported_count = len(successes)
         last.skipped_count = skipped
+        last.failed_count = len(failures)
         if failures:
             last.error = (
                 f"成功 {len(successes)} 个，跳过 {skipped} 个"
@@ -403,6 +502,9 @@ class ImportWorker(QThread):
 
     def _do_batch_offline_html_import(self, html_paths: list[Path]) -> ImportResult:
         """Each offline HTML/MHTML file is one Mod import task (identity from page)."""
+        if self.resources:
+            from services.importers.offline_admission import import_scoped_batch
+            return import_scoped_batch(self, html_paths)
         successes: list[ImportResult] = []
         duplicates: list[ImportResult] = []
         failures: list[str] = []
@@ -425,6 +527,12 @@ class ImportWorker(QThread):
                     batch=False,
                 )
             except Exception as exc:  # noqa: BLE001
+                from services.crash_trace import log_exception
+
+                log_exception(
+                    "ImportWorker._do_batch_offline_html_import",
+                    html=str(html),
+                )
                 failures.append(f"{html.name}: {exc}")
                 continue
             if result.success:
@@ -476,9 +584,8 @@ class ImportWorker(QThread):
 
         raw_html_list = params.get("offline_html_paths")
         if isinstance(raw_html_list, (list, tuple)) and raw_html_list:
-            html_paths = normalize_offline_html_paths(
-                [str(p) for p in raw_html_list]
-            )
+            html_paths = ([Path(str(p)) for p in dict.fromkeys(raw_html_list)] if self.resources else
+                          normalize_offline_html_paths([str(p) for p in raw_html_list]))
             if not html_paths:
                 return ImportResult(
                     success=False,
@@ -514,12 +621,23 @@ class ImportWorker(QThread):
                 self._emit_progress("正在解压...")
             else:
                 self._emit_progress("正在准备压缩包...")
+            archive_title = title or prepared.title
+            if self.platform == PLATFORM_NEXUS and str(offline_html or "").strip():
+                from services.importers.identity_resolve import (
+                    canonical_nexus_offline_import_title,
+                )
+
+                archive_title = canonical_nexus_offline_import_title(
+                    user_title=title,
+                    parsed_title=prepared.title,
+                    folder_name="",
+                )
             result = ArchiveImporter(db=db).import_mod(
                 archive_path=archive_paths[0] if archive_paths else source,
                 archive_paths=archive_paths or None,
                 platform=self.platform,
                 library_root=self.library_root,
-                title=title or prepared.title,
+                title=archive_title,
                 workshop_id=prepared.workshop_id
                 or str(params.get("workshop_id") or ""),
                 nexus_url=prepared.source_url
@@ -555,11 +673,9 @@ class ImportWorker(QThread):
         # Single Import: selected folder is the only Mod Root. Never discover children.
         if is_batch_mode and folder is not None and folder.is_dir():
             mod_dirs = discover_mod_directories(folder)
-            if len(mod_dirs) > 1:
+            if mod_dirs:
                 self._emit_progress(f"检测到 {len(mod_dirs)} 个子目录，开始批量导入…")
                 return self._do_batch_folder_import(mod_dirs)
-            if mod_dirs:
-                folder = mod_dirs[0]
 
         self._emit_progress("正在扫描Mod文件...")
         if folder is not None and folder.is_dir():

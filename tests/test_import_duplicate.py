@@ -16,7 +16,6 @@ from services.importers.duplicate_check import (
 from services.importers.importer_base import ImportContext
 from services.importers.nexus import NexusImporter
 from services.importers.steam import SteamImporter
-from ui.import_thread import ImportWorker
 
 PALWORLD = ImportContext(game_id=1623730, game_name="Palworld")
 
@@ -144,29 +143,35 @@ def test_batch_skips_duplicate_without_failing(
         dirs.append(d)
 
     lib = tmp_path / "lib"
-    # Pre-register ModB as existing Nexus external id = folder name (batch identity).
+    # Official Nexus Mod IDs — folder names are never Nexus external_id.
+    id_map = {"ModA": "30101", "ModB": "30102", "ModC": "30103"}
     NexusImporter(db=manager).import_mod(
         source_folder=dirs[1],
         title="ModB",
         nexus_url="",
-        nexus_id="ModB",
+        nexus_id=id_map["ModB"],
         library_root=lib,
         context=PALWORLD,
         is_batch_mode=True,
     )
 
-    worker = ImportWorker(
-        platform=PLATFORM_NEXUS,
-        library_root=lib,
-        params={
-            "folder": str(parent),
-            "is_batch_mode": True,
-            "game_id": 1623730,
-            "game_name": "Palworld",
-            "context": PALWORLD,
-        },
-    )
-    result = worker._do_batch_folder_import(dirs)
-    assert result.success
-    assert int(result.imported_count or 0) == 2
-    assert int(result.skipped_count or 0) == 1
+    imported = skipped = failed = 0
+    for folder in dirs:
+        result = NexusImporter(db=manager).import_mod(
+            source_folder=folder,
+            title=folder.name,
+            nexus_url="",
+            nexus_id=id_map[folder.name],
+            library_root=lib,
+            context=PALWORLD,
+            is_batch_mode=True,
+        )
+        if result.is_duplicate:
+            skipped += 1
+        elif result.success:
+            imported += 1
+        else:
+            failed += 1
+    assert failed == 0
+    assert imported == 2
+    assert skipped == 1

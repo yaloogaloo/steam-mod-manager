@@ -6,7 +6,8 @@ LayoutSnapshotProcessor). Never uses requests/httpx as the primary fetch.
 GitHub: HTTP layout download first; optional browser backup; styled fallback.
 
 Outputs under ``.info/offline/``:
-  index.html, assets/ (CSS), metadata.json
+  index.html, metadata.json, manifest.json
+Capture bytes stage under ``cache/temp/offline_staging`` then Asset Store.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ import json
 import logging
 import mimetypes
 import re
-import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,9 +28,6 @@ import requests
 from bs4 import BeautifulSoup, Tag
 
 from core.mod_platform import (
-    OFFLINE_STATUS_ARCHIVED,
-    OFFLINE_STATUS_FAILED,
-    PLATFORM_GITHUB,
     PLATFORM_NEXUS,
     normalize_platform,
 )
@@ -227,14 +224,6 @@ class LayoutSnapshotProcessor:
         return False
 
 
-def process_layout_html(
-    html_text: str,
-    output_dir: Path | str,
-    **kwargs: Any,
-) -> LayoutProcessResult:
-    return LayoutSnapshotProcessor().process(html_text, output_dir, **kwargs)
-
-
 def _esc(value: Any) -> str:
     return html.escape(str(value or ""), quote=True)
 
@@ -374,10 +363,9 @@ class LayoutSnapshotDownloader:
         base = final_url or page_url
         try:
             target.mkdir(parents=True, exist_ok=True)
-            assets_dir = target / DEFAULT_ASSETS_DIR
-            if assets_dir.exists():
-                shutil.rmtree(assets_dir, ignore_errors=True)
-            assets_dir.mkdir(parents=True, exist_ok=True)
+            from services.offline.staging import reset_capture_assets_dir
+
+            assets_dir = reset_capture_assets_dir(target)
             images_dir = assets_dir / "images"
             images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -411,6 +399,9 @@ class LayoutSnapshotDownloader:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Layout snapshot failed for %s: %s", page_url, exc)
+            from services.offline.staging import cleanup_capture_staging
+
+            cleanup_capture_staging(target)
             return LayoutSnapshotResult(
                 success=False,
                 html_path=index_path,
@@ -619,7 +610,9 @@ def write_github_fallback(
 ) -> Path:
     """GitHub-styled offline fallback: header, title, tabs, README + files cards."""
     target = Path(output_dir)
-    assets = target / DEFAULT_ASSETS_DIR
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets = resolve_capture_assets_dir(target)
     assets.mkdir(parents=True, exist_ok=True)
     css_name = "github_fallback.css"
     (assets / css_name).write_text(
@@ -728,7 +721,9 @@ def write_nexus_fallback(
 ) -> Path:
     """Nexus-styled offline fallback: hero title, description | metadata, files."""
     target = Path(output_dir)
-    assets = target / DEFAULT_ASSETS_DIR
+    from services.offline.staging import resolve_capture_assets_dir
+
+    assets = resolve_capture_assets_dir(target)
     assets.mkdir(parents=True, exist_ok=True)
     css_name = "nexus_fallback.css"
     (assets / css_name).write_text(
@@ -1120,57 +1115,3 @@ class NexusSnapshotProvider:
             failure_reason=reason,
             asset_count=1,
         )
-
-
-def run_layout_offline_snapshot(
-    *,
-    source_url: str,
-    output_dir: Path | str,
-    platform: str,
-    layout_provider: Any | None = None,
-    title: str = "",
-) -> tuple[LayoutSnapshotResult, str]:
-    """
-    Run layout snapshot for one Mod page.
-
-    Returns ``(result, offline_status)``.
-    - Success → archived
-    - Nexus styled fallback → failed (page still openable)
-    - GitHub never writes a summary fallback — Playwright DOM only
-    """
-    plat = normalize_platform(platform)
-    target = Path(output_dir)
-    page_url = str(source_url or "").strip()
-    provider = layout_provider
-    if provider is None:
-        if plat == PLATFORM_GITHUB:
-            provider = GitHubSnapshotProvider(title=title)
-        else:
-            provider = NexusSnapshotProvider(title=title)
-
-    result = provider.snapshot(page_url, target)
-    if result.success and result.html_path.is_file() and not result.used_fallback:
-        return result, OFFLINE_STATUS_ARCHIVED
-    if result.success and result.html_path.is_file() and result.used_fallback:
-        return result, OFFLINE_STATUS_FAILED
-
-    # GitHub: fail hard — do not invent a summary / LOGIN_REQUIRED page.
-    if plat == PLATFORM_GITHUB:
-        return result, OFFLINE_STATUS_FAILED
-
-    reason = result.error or result.failure_reason or "snapshot failed"
-    index = write_nexus_fallback(
-        target, source_url=page_url, reason=reason, title=title
-    )
-    return (
-        LayoutSnapshotResult(
-            success=True,
-            html_path=index,
-            backend="fallback",
-            used_fallback=True,
-            error=reason,
-            failure_reason=reason,
-            asset_count=1,
-        ),
-        OFFLINE_STATUS_FAILED,
-    )

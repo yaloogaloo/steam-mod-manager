@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +11,7 @@ from services.deploy_rules.base import (
     DeployStrategy,
     StrategyResult,
     is_rel_path_allowed,
+    inert_strategy_deploy,
 )
 from services.deploy_rules.manifest import (
     DeployManifest,
@@ -62,13 +62,11 @@ def find_smapi_mod_roots(content_root: Path) -> list[Path]:
     root = Path(content_root).resolve()
     if not root.is_dir():
         return []
+    from services.deploy_fs import safe_iter_files
+
     found: list[Path] = []
     seen: set[Path] = set()
-    for manifest in sorted(root.rglob(SMAPI_MANIFEST_NAME)):
-        if not manifest.is_file():
-            continue
-        if manifest.name != SMAPI_MANIFEST_NAME:
-            continue
+    for manifest in sorted(safe_iter_files(root, name=SMAPI_MANIFEST_NAME)):
         try:
             rel_parts = manifest.relative_to(root).parts
         except ValueError:
@@ -87,23 +85,14 @@ def _flat_mod_dirname(ctx: DeployContext) -> str:
     """
     Name for a flat archive (manifest at content root).
 
-    Prefer the single archive stem under the managed folder; otherwise the
-    managed library folder name.
+    ASCII library basename stays unchanged. Han basename becomes
+    ``mod_{workspace_id}``. A single archive stem is used only when the
+    library basename is ASCII and matches the archive-only layout.
     """
-    managed = ctx.library_folder()
-    try:
-        from services.importers.archive import is_archive_path
+    from services.deploy_rules.generic import deploy_wrapper_folder
 
-        archives = [
-            p
-            for p in sorted(managed.iterdir())
-            if p.is_file() and is_archive_path(p)
-        ]
-    except OSError:
-        archives = []
-    if len(archives) == 1:
-        return archives[0].stem
-    return managed.name
+    managed = ctx.library_folder()
+    return deploy_wrapper_folder(managed.name, ctx.workspace_id)
 
 
 def _target_dirname(mod_root: Path, content_root: Path, ctx: DeployContext) -> str:
@@ -121,10 +110,10 @@ def _iter_mod_files(
     content_root: Path,
     allowed_rel_paths: frozenset[str] | None,
 ) -> list[Path]:
+    from services.deploy_fs import safe_iter_files
+
     files: list[Path] = []
-    for path in sorted(mod_root.rglob("*")):
-        if not path.is_file():
-            continue
+    for path in sorted(safe_iter_files(mod_root)):
         try:
             rel_parts = path.relative_to(content_root).parts
         except ValueError:
@@ -142,11 +131,6 @@ def _iter_mod_files(
                     continue
         files.append(path)
     return files
-
-
-def _copy_file(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
 
 
 class StardewValleyStrategy(DeployStrategy):
@@ -211,79 +195,8 @@ class StardewValleyStrategy(DeployStrategy):
         )
 
     def deploy(self, ctx: DeployContext) -> StrategyResult:
-        planned = self.plan(ctx)
-        if not planned.success:
-            return planned
-
-        mods = _mods_root(ctx)
-        if isinstance(mods, StrategyResult):
-            return mods
-
-        try:
-            mods.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            err = str(exc).lower()
-            if "permission" in err or "denied" in err:
-                return StrategyResult(
-                    success=False,
-                    error=f"Permission denied：无法创建 Mods 目录（{exc}）",
-                    deploy_type=self.deploy_type,
-                )
-            return StrategyResult(
-                success=False,
-                error=f"无法创建 Mods 目录：{mods}（{exc}）",
-                deploy_type=self.deploy_type,
-            )
-
-        copied: list[ManifestFileEntry] = []
-        for entry in planned.files:
-            src = Path(entry.source)
-            dst = Path(entry.target)
-            try:
-                _copy_file(src, dst)
-            except OSError as exc:
-                err = str(exc).lower()
-                if "permission" in err or "denied" in err:
-                    return StrategyResult(
-                        success=False,
-                        error=f"Permission denied：{src} → {dst}（{exc}）",
-                        deploy_type=self.deploy_type,
-                    )
-                return StrategyResult(
-                    success=False,
-                    error=f"复制失败：{src} → {dst}（{exc}）",
-                    deploy_type=self.deploy_type,
-                )
-            copied.append(
-                ManifestFileEntry(
-                    source=str(src.resolve()),
-                    target=str(dst.resolve()),
-                    type=entry.type or ENTRY_TYPE_SMAPI,
-                )
-            )
-
-        when = _utc_now()
-        manifest = DeployManifest(
-            mod_id=ctx.mod_id,
-            deploy_time=when,
-            deploy_type=self.deploy_type,
-            files=copied,
-        )
-        logger.info(
-            "[DEPLOY] stardew_valley mod_id=%s files=%s target=%s",
-            ctx.mod_id,
-            len(copied),
-            planned.target,
-        )
-        return StrategyResult(
-            success=True,
-            target=planned.target,
-            copied_files=len(copied),
-            deploy_type=self.deploy_type,
-            deploy_time=when,
-            files=copied,
-            manifest=manifest,
-        )
+        """Inert — Core Apply consumes ``plan()`` FilePlan entries."""
+        return inert_strategy_deploy(self.deploy_type)
 
     def undeploy(
         self,

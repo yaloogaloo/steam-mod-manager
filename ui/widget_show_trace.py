@@ -4,6 +4,12 @@ Install via ``install_widget_show_trace(app)`` from ``launch_gui``.
 
 Wraps ``QWidget.show`` / ``QWidget.setVisible`` and logs
 ``TOP LEVEL CHILD SUSPECT`` when a control becomes visible without a parent.
+
+Prefer ``ui.window_lifecycle.install_window_ownership_guard`` for enforcement;
+this module remains a diagnostic tracer when ``ui_trace`` is enabled.
+
+ARCHITECTURE RULE: Import Mod once spawned orphan Qt floats from parentless
+``setVisible`` — never bypass window ownership (see ``ui.window_lifecycle``).
 """
 
 from __future__ import annotations
@@ -12,7 +18,7 @@ import logging
 import traceback
 from typing import Any, Callable
 
-from PySide6.QtCore import QObject, Qt
+from PySide6.QtCore import QObject
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,33 +26,21 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QToolButton,
     QWidget,
 )
+
+from ui.window_lifecycle import describe_show_widget
+from ui.window_lifecycle import is_illegal_toplevel
 
 logger = logging.getLogger("widget_show_trace")
 
 _ORIG_SHOW: Callable[..., Any] | None = None
 _ORIG_SET_VISIBLE: Callable[..., Any] | None = None
 _STATE: WidgetShowTraceState | None = None  # type: ignore[name-defined]
-
-_ALLOWED_TOPLEVEL_TYPES = (
-    QMainWindow,
-    QDialog,
-    QMessageBox,
-    QMenu,
-)
-
-_CONTROL_TYPES = (
-    QPushButton,
-    QLabel,
-    QCheckBox,
-    QToolButton,
-    QFrame,
-)
 
 
 def _stack_text(limit: int = 12) -> str:
@@ -59,53 +53,8 @@ def _stack_text(limit: int = 12) -> str:
     return "\n".join(lines[-limit:])
 
 
-def _widget_text(w: QWidget) -> str:
-    try:
-        if hasattr(w, "text") and callable(w.text):
-            return str(w.text() or "")[:80]
-    except Exception:  # noqa: BLE001
-        pass
-    return ""
-
-
-def _is_allowed_toplevel(w: QWidget) -> bool:
-    """True for intentional windows/popups — never for orphan controls."""
-    # Control widgets shown without a parent are never "allowed".
-    if isinstance(w, _CONTROL_TYPES):
-        return False
-    if isinstance(w, _ALLOWED_TOPLEVEL_TYPES):
-        return True
-    # Use windowType() — do NOT bitwise-test Popup against Window flags;
-    # Qt Popup includes the Window bit so every QWidget window would match.
-    try:
-        wtype = w.windowType()
-    except Exception:  # noqa: BLE001
-        return False
-    if wtype in (
-        Qt.WindowType.Popup,
-        Qt.WindowType.ToolTip,
-        Qt.WindowType.SplashScreen,
-    ):
-        return True
-    if type(w).__name__ in {"QTipLabel", "QComboBoxPrivateContainer"}:
-        return True
-    return False
-
-
 def geom_is_tiny(w: QWidget, *, max_side: int = 48) -> bool:
     return int(w.width()) <= max_side and int(w.height()) <= max_side
-
-
-def describe_show_widget(w: QWidget) -> str:
-    geom = w.geometry()
-    return (
-        f"class={type(w).__name__} objectName={w.objectName()!r} "
-        f"text={_widget_text(w)!r} parent={w.parent()!r} "
-        f"flags=0x{int(w.windowFlags()):x} "
-        f"geom={geom.width()}x{geom.height()}+{geom.x()}+{geom.y()} "
-        f"visible={w.isVisible()} toplevel={w.isWindow()} "
-        f"isWindow={w.isWindow()}"
-    )
 
 
 class WidgetShowTraceState(QObject):
@@ -128,9 +77,7 @@ def _probe_becoming_visible(w: QWidget) -> None:
     detail = describe_show_widget(w)
     logger.info("QWidget.Show %s", detail)
 
-    if w.parent() is not None:
-        return
-    if _is_allowed_toplevel(w):
+    if not is_illegal_toplevel(w):
         return
 
     state.suspect_count += 1
@@ -154,7 +101,9 @@ def _probe_becoming_visible(w: QWidget) -> None:
         except Exception:  # noqa: BLE001
             pass
 
-    if isinstance(w, _CONTROL_TYPES) or (w.isWindow() and geom_is_tiny(w)):
+    if isinstance(
+        w, (QPushButton, QRadioButton, QLabel, QCheckBox, QToolButton, QFrame)
+    ) or (w.isWindow() and geom_is_tiny(w)):
         warn = (
             f"Illegal top level widget detected: "
             f"{type(w).__name__} objectName={w.objectName()!r} "
@@ -208,6 +157,7 @@ def install_widget_show_trace(
         for cls in (
             QWidget,
             QPushButton,
+            QRadioButton,
             QLabel,
             QCheckBox,
             QToolButton,

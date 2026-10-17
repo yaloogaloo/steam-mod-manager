@@ -9,8 +9,12 @@ from pathlib import Path
 import pytest
 
 from core.db_manager import DatabaseManager
-from core.models import ModMetadata
 from services.deploy import ModDeployer
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 from services.deploy_rules import (
     DEPLOY_TYPE_STARDEW_VALLEY,
     load_manifest,
@@ -20,7 +24,6 @@ from services.deploy_rules.stardew_valley import (
     STARDEW_VALLEY_APP_ID,
     find_smapi_mod_roots,
 )
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
 
 SV_APP = STARDEW_VALLEY_APP_ID
 
@@ -54,31 +57,32 @@ def _write_smapi_manifest(folder: Path, *, unique_id: str = "Test.Mod") -> None:
 
 
 def _seed_managed_with_zip(
+    db: DatabaseManager,
     library: Path,
     *,
     mid: str,
     title: str,
     zip_name: str,
     zip_members: dict[str, bytes],
-) -> Path:
+) -> tuple[Path, str, str]:
     mod = library / "星露谷物语" / title
     mod.mkdir(parents=True)
     archive = mod / zip_name
     with zipfile.ZipFile(archive, "w") as zf:
         for name, data in zip_members.items():
             zf.writestr(name, data)
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mid}",\n'
-        f'  "title": "{title}",\n'
-        f'  "app_id": {SV_APP},\n'
-        '  "game_name": "星露谷物语"\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mid, title=title, app_id=SV_APP, game_name="星露谷物语"
     )
-    return mod
+    pk = prove_managed_folder(
+        db,
+        mod,
+        handle=created.mod_id,
+        title=title,
+        app_id=SV_APP,
+        game_name="星露谷物语",
+    )
+    return mod, pk, frozen_deploy_id(created)
 
 
 def test_resolve_stardew_deploy_type() -> None:
@@ -98,12 +102,20 @@ def test_find_smapi_mod_roots_nested(tmp_path: Path) -> None:
 def test_stardew_flat_archive_uses_zip_stem(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
-    """Case 1: zip root has manifest.json → Mods/<zip_stem>/."""
+    """Case 1: zip root has manifest.json → Mods/<library folder>/."""
     library = tmp_path / "library"
-    mods_dir = tmp_path / "StardewMods"  # intentionally missing until deploy
+    mods_dir = tmp_path / "StardewMods"
+    mods_dir.mkdir()
 
     mid = "41315001"
-    mod = _seed_managed_with_zip(
+    db.update_game_deploy_config(
+        SV_APP,
+        name="星露谷物语",
+        mod_path=str(mods_dir),
+        deploy_type="folder_copy",
+    )
+    mod, _pk, iid = _seed_managed_with_zip(
+        db,
         library,
         mid=mid,
         title="FlatMod",
@@ -115,21 +127,11 @@ def test_stardew_flat_archive_uses_zip_stem(
         },
     )
 
-    db.update_game_deploy_config(
-        SV_APP,
-        name="星露谷物语",
-        mod_path=str(mods_dir),
-        deploy_type="folder_copy",
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="FlatMod", app_id=SV_APP)
-    )
-
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert result["deploy_type"] == DEPLOY_TYPE_STARDEW_VALLEY
     assert mods_dir.is_dir()
-    dest = mods_dir / "CoolFlatMod"
+    dest = mods_dir / "FlatMod"
     assert (dest / "manifest.json").is_file()
     assert (dest / "config.json").is_file()
     assert (dest / "assets" / "icon.png").is_file()
@@ -150,7 +152,11 @@ def test_stardew_single_folder_archive(
     mods_dir.mkdir()
 
     mid = "41315002"
-    _seed_managed_with_zip(
+    db.update_game_deploy_config(
+        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
+    )
+    _mod, _pk, iid = _seed_managed_with_zip(
+        db,
         library,
         mid=mid,
         title="WrappedMod",
@@ -162,14 +168,7 @@ def test_stardew_single_folder_archive(
         },
     )
 
-    db.update_game_deploy_config(
-        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="WrappedMod", app_id=SV_APP)
-    )
-
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     dest = mods_dir / "ContentPatcher"
     assert (dest / "manifest.json").is_file()
@@ -185,7 +184,11 @@ def test_stardew_multi_mod_pack(tmp_path: Path, db: DatabaseManager) -> None:
     mods_dir.mkdir()
 
     mid = "41315003"
-    _seed_managed_with_zip(
+    db.update_game_deploy_config(
+        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
+    )
+    _mod, _pk, iid = _seed_managed_with_zip(
+        db,
         library,
         mid=mid,
         title="MultiPack",
@@ -198,14 +201,7 @@ def test_stardew_multi_mod_pack(tmp_path: Path, db: DatabaseManager) -> None:
         },
     )
 
-    db.update_game_deploy_config(
-        SV_APP, name="星露谷物语", mod_path=str(mods_dir)
-    )
-    db.upsert_mod(
-        ModMetadata(published_file_id=mid, title="MultiPack", app_id=SV_APP)
-    )
-
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mid)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
     assert result["success"] is True, result
     assert (mods_dir / "bbb" / "manifest.json").is_file()
     assert (mods_dir / "bbb" / "ModB.dll").is_file()

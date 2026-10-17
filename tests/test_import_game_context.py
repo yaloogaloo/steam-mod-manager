@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from core.db_manager import PLATFORM_GITHUB, PLATFORM_NEXUS, DatabaseManager
 from core.game_info import GameInfo
@@ -172,5 +172,5 @@ def test_library_context_and_dialog_label(
     assert ctx["game_name"] == "Palworld"
     assert int(ctx["game_id"]) == 1623730
 
-    dialog = ModImportDialog(lib, game_context=ctx)
+    dialog = ModImportDialog(lib, parent=view, game_context=ctx)
     assert "Palworld" in dialog.game_context_label.text()

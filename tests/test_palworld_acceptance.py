@@ -9,16 +9,20 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    create_steam_test_mod,
+    frozen_deploy_id,
+    prove_managed_folder,
+)
 
 from core.db_manager import (
     DEPLOY_STATUS_DEPLOYED,
     DEPLOY_STATUS_NOT_DEPLOYED,
     DatabaseManager,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer
 from services.deploy_rules import MANIFEST_FILENAME, load_manifest
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from services.file_ops import INFO_DIR_NAME
 
 APP_ID = 1623730
 MOD_ID = "992001"
@@ -60,18 +64,6 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     logic.mkdir()
     (logic / "test_logic.pak").write_bytes(b"LOGIC-PAK")
 
-    info = mod / INFO_DIR_NAME
-    info.mkdir()
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{MOD_ID}",\n'
-        '  "title": "Palworld_Test_Mod",\n'
-        f'  "app_id": {APP_ID},\n'
-        '  "game_name": "Palworld"\n'
-        "}\n",
-        encoding="utf-8",
-    )
-
     db.update_game_deploy_config(
         APP_ID,
         name="Palworld",
@@ -79,13 +71,18 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
         # No mod_path: non-pak leftovers (readme) are not folder_copied
         deploy_type="palworld_pak",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=MOD_ID,
-            title="Palworld_Test_Mod",
-            app_id=APP_ID,
-        )
+    created = create_steam_test_mod(
+        db, external_id=MOD_ID, title="Palworld_Test_Mod", app_id=APP_ID, game_name="Palworld"
     )
+    pk = prove_managed_folder(
+        db,
+        mod,
+        handle=created.mod_id,
+        title="Palworld_Test_Mod",
+        app_id=APP_ID,
+        game_name="Palworld",
+    )
+    iid = frozen_deploy_id(created)
 
     # Foreign file that must survive undeploy
     foreign_dir = install / "Pal" / "Content" / "Paks" / "~mods"
@@ -95,8 +92,8 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
 
     deployer = ModDeployer(library_root=library, db=db)
 
-    # --- deploy_mod() ---
-    result = deployer.deploy_mod(MOD_ID)
+    # --- deploy_mod() — public token is Frozen internal_id ---
+    result = deployer.deploy_mod(iid)
     assert result["success"] is True, result
 
     normal_target = install / "Pal" / "Content" / "Paks" / "~mods" / "test_normal.pak"
@@ -128,12 +125,12 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     assert logic_target.resolve() in targets
     assert len(man.files) == 2
 
-    info_row = db.get_mod_deploy_info(MOD_ID)
+    info_row = db.get_mod_deploy_info(pk)
     assert info_row is not None
     assert info_row.deploy_status == DEPLOY_STATUS_DEPLOYED
 
-    # --- undeploy_mod() ---
-    und = deployer.undeploy_mod(MOD_ID)
+    # --- undeploy_mod() — public token is Frozen internal_id ---
+    und = deployer.undeploy_mod(iid)
     assert und["success"] is True, und
 
     # 5. Both paks removed
@@ -145,6 +142,6 @@ def test_palworld_real_acceptance_deploy_and_undeploy(
     assert foreign.is_file()
     assert foreign.read_bytes() == b"FOREIGN-KEEP"
 
-    cleared = db.get_mod_deploy_info(MOD_ID)
+    cleared = db.get_mod_deploy_info(pk)
     assert cleared is not None
     assert cleared.deploy_status == DEPLOY_STATUS_NOT_DEPLOYED

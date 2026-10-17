@@ -36,6 +36,7 @@ class LibraryIntegrityReport:
     mod_reports: list[ModIdentityReport] = field(default_factory=list)
     global_findings: list[IdentityFinding] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    critical: int = 0
 
 
 def _text(value: Any) -> str:
@@ -272,5 +273,7 @@ def audit_mod_library_integrity(
     report.corrupted = severity_counts[IdentitySeverity.CORRUPTED]
     report.duplicate = severity_counts[IdentitySeverity.DUPLICATE]
     report.orphan = severity_counts[IdentitySeverity.ORPHAN]
-
+    report.critical = (
+        report.corrupted + report.conflict + report.duplicate
+    )
     return report

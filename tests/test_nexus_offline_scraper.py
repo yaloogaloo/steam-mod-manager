@@ -32,6 +32,10 @@ from services.importers.importer_base import ImportContext
 from services.importers.nexus import NexusImporter
 from services.offline.manager import attach_nexus_offline_page
 from services.offline.nexus_html_parser import (
+    NO_LOCAL_COVER_REFERENCE,
+    REMOTE_RESOURCE_SKIPPED,
+    RESOLVED_LOCAL_COVER,
+    UNRESOLVED_LOCAL_RESOURCE,
     NexusOfflineCandidates,
     apply_nexus_offline_candidates,
     parse_nexus_offline_html,
@@ -212,12 +216,14 @@ class TestParseNexusOfflineHtml:
         assert result.cover_asset_path is not None
         assert result.cover_asset_path.is_file()
         assert result.confidence["cover"] in ("high", "medium")
+        assert result.cover_resolution == RESOLVED_LOCAL_COVER
 
     def test_gallery_remote_url_skipped(self, tmp_path: Path) -> None:
         items = '<li><img src="https://cdn.nexusmods.com/images/10455.jpg"/></li>'
         index = _write_offline_html(tmp_path, gallery_items=items, create_asset=False)
         result = parse_nexus_offline_html(index)
         assert result.cover_asset_path is None
+        assert result.cover_resolution == REMOTE_RESOURCE_SKIPPED
 
     def test_extracts_description(self, tmp_path: Path) -> None:
         index = _write_offline_html(tmp_path, description="A cool mod.")
@@ -264,6 +270,7 @@ class TestParseNexusOfflineHtml:
         result = parse_nexus_offline_html(index)
         assert result.title == "Bare Mod"
         assert result.cover_asset_path is None
+        assert result.cover_resolution == NO_LOCAL_COVER_REFERENCE
 
     def test_metadata_json_fallback_for_url(self, tmp_path: Path) -> None:
         offline_dir = tmp_path / INFO_DIR_NAME / "offline"
@@ -343,6 +350,7 @@ class TestGalleryImageSelection:
         index.write_text(html, encoding="utf-8")
         result = parse_nexus_offline_html(index)
         assert result.cover_asset_path is None
+        assert result.cover_resolution == UNRESOLVED_LOCAL_RESOURCE
 
 
 # ===========================================================================
@@ -356,7 +364,15 @@ class TestApplyNexusOfflineCandidates:
 
     def test_fills_all_missing(self, tmp_path: Path, db: DatabaseManager) -> None:
         mid, dest = _register_nexus_mod(tmp_path, db, nexus_id="501")
-        db.update_mod_identity_fields(mid, source_url="", external_id="")
+        # update_mod_identity_fields refuses empty external_id clear (sticky).
+        # Force-empty official fields so fill_missing can apply HTML candidates.
+        with db._lock:
+            db._conn.execute(
+                "UPDATE mods SET source_url = '', external_id = '', workspace_id = '' "
+                "WHERE mod_id = ?",
+                (int(mid),),
+            )
+            db._conn.commit()
 
         assets_dir = dest / INFO_DIR_NAME / "offline" / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
@@ -720,13 +736,20 @@ REAL_OFFLINE_HTML = Path("data/mod_backup/9000000000000406/offline/index.html")
 
 
 def _find_real_user_html() -> Path | None:
-    for path in Path("mod").rglob("Empty Mod f20722b2/.info/offline/index.html"):
+    """Lazy probe — never run at import/collection time against production ``mod/``."""
+    root = Path("mod")
+    if not root.is_dir():
+        return None
+    for path in root.rglob("Empty Mod f20722b2/.info/offline/index.html"):
         if path.is_file():
             return path
     return None
 
 
-REAL_USER_HTML = _find_real_user_html()
+def _real_user_html() -> Path | None:
+    return _find_real_user_html()
+
+
 REAL_USER_EXPECTED_URL = "https://www.nexusmods.com/stardewvalley/mods/10062"
 REAL_USER_EXPECTED_ID = "10062"
 REAL_USER_EXPECTED_TITLE = "Hugs and Kisses"
@@ -761,11 +784,15 @@ class TestImportDefaultMerge:
     def test_folder_title_and_wrong_url_updated_from_html(
         self, tmp_path: Path, db: DatabaseManager
     ) -> None:
-        """Import folder name + auto-generated wrong-game URL → HTML canonical wins."""
+        """Folder title + incomplete Nexus URL → same-game HTML canonical wins.
+
+        Production refuses cross-game offline pages (Palworld entity vs
+        Stardew HTML). Cover same-game correction only.
+        """
         src = tmp_path / "ZoomMod"
         src.mkdir()
         (src / "mod.pak").write_bytes(b"x")
-        lib = tmp_path / "lib"
+        lib = tmp_path / "_smm_isolate_mod"
         result = NexusImporter(db=db).import_mod(
             source_folder=src,
             title="ZoomMod",
@@ -777,32 +804,31 @@ class TestImportDefaultMerge:
         assert result.success
         mid, dest = str(result.mod_id), Path(result.managed_path)
 
-        if REAL_OFFLINE_HTML.is_file():
-            html_source = tmp_path / "real.html"
-            html_source.write_text(
-                REAL_OFFLINE_HTML.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-        else:
-            html_source = tmp_path / "fallback.html"
-            html_source.write_text(
-                _HTML_TEMPLATE.format(
-                    og_title="Stardrop",
-                    og_url="https://www.nexusmods.com/stardewvalley/mods/10455",
-                    page_title="Stardrop at Stardew Valley Nexus",
-                    description="desc",
-                    mod_id="10455",
-                    gallery_items="",
-                ),
-                encoding="utf-8",
-            )
+        # Same game slug as the imported Entity (Palworld), not Stardew.
+        html_source = tmp_path / "page.html"
+        html_source.write_text(
+            _HTML_TEMPLATE.format(
+                og_title="Stardrop",
+                og_url="https://www.nexusmods.com/palworld/mods/10455",
+                page_title="Stardrop at Palworld Nexus",
+                description="desc",
+                mod_id="10455",
+                gallery_items="",
+            ),
+            encoding="utf-8",
+        )
 
         attach_nexus_offline_page(
-            mid, html_source, managed_path=dest, library_root=lib
+            mid,
+            html_source,
+            managed_path=dest,
+            library_root=lib,
+            merge_mode="import_overwrite",
         )
         row = db.get_mod_display_info(mid)
         assert row.steam_name == "Stardrop"
         assert row.display_name == "Stardrop"
-        assert row.source_url == "https://www.nexusmods.com/stardewvalley/mods/10455"
+        assert row.source_url == "https://www.nexusmods.com/palworld/mods/10455"
 
     def test_placeholder_title_synced_to_db(
         self, tmp_path: Path, db: DatabaseManager
@@ -829,13 +855,14 @@ class TestImportDefaultMerge:
         assert row.source_url == "https://www.nexusmods.com/stardewvalley/mods/10455"
 
 
-@pytest.mark.skipif(
-    REAL_USER_HTML is None or not REAL_USER_HTML.is_file(),
-    reason="real user offline HTML missing",
-)
 class TestRealUserOfflineHtml:
+    """Uses production ``mod/`` sample when present; skips otherwise (no import-time rglob)."""
+
     def test_real_user_html_parser(self) -> None:
-        result = parse_nexus_offline_html(REAL_USER_HTML)
+        html = _real_user_html()
+        if html is None:
+            pytest.skip("real user offline HTML missing")
+        result = parse_nexus_offline_html(html)
         assert result.title == REAL_USER_EXPECTED_TITLE
         assert result.source_url == REAL_USER_EXPECTED_URL
         assert result.external_id == REAL_USER_EXPECTED_ID
@@ -844,6 +871,9 @@ class TestRealUserOfflineHtml:
         self, tmp_path: Path, db: DatabaseManager
     ) -> None:
         """Folder-name external_id + fake URL must be corrected by real HTML merge."""
+        html = _real_user_html()
+        if html is None:
+            pytest.skip("real user offline HTML missing")
         from services.offline.nexus_html_parser import (
             _patch_mod_db_identity,
             apply_nexus_offline_candidates,
@@ -873,7 +903,7 @@ class TestRealUserOfflineHtml:
             external_id="Empty Mod f20722b2",
         )
 
-        candidates = parse_nexus_offline_html(REAL_USER_HTML)
+        candidates = parse_nexus_offline_html(html)
         apply_nexus_offline_candidates(mid, dest, candidates, db=db)
 
         row = db.get_mod_display_info(mid)
@@ -886,6 +916,9 @@ class TestRealUserOfflineHtml:
         self, tmp_path: Path, db: DatabaseManager
     ) -> None:
         """Case B: existing mod with fake URL → attach real offline HTML."""
+        html = _real_user_html()
+        if html is None:
+            pytest.skip("real user offline HTML missing")
         from services.offline.nexus_html_parser import _patch_mod_db_identity
 
         folder = tmp_path / "Empty Mod f20722b2"
@@ -913,7 +946,7 @@ class TestRealUserOfflineHtml:
         )
 
         html_copy = tmp_path / "real_user.html"
-        html_copy.write_text(REAL_USER_HTML.read_text(encoding="utf-8"), encoding="utf-8")
+        html_copy.write_text(html.read_text(encoding="utf-8"), encoding="utf-8")
         attach_nexus_offline_page(
             mid,
             html_copy,
@@ -930,10 +963,13 @@ class TestRealUserOfflineHtml:
 
 class TestNexusImporterNoFakeUrl:
     def test_no_fake_url_without_nexus_id(self, tmp_path: Path, db: DatabaseManager) -> None:
+        """Folder name alone is not a Nexus official identity — import must refuse."""
+        from services.importers.identity_resolve import MISSING_OFFICIAL_IDENTITY
+
         folder = tmp_path / "Empty Mod f20722b2"
         folder.mkdir()
         (folder / "mod.pak").write_bytes(b"x")
-        lib = tmp_path / "lib"
+        lib = tmp_path / "_smm_isolate_mod"
         result = NexusImporter(db=db).import_mod(
             source_folder=folder,
             title="Empty Mod f20722b2",
@@ -942,18 +978,15 @@ class TestNexusImporterNoFakeUrl:
             library_root=lib,
             context=PALWORLD,
         )
-        assert result.success
-        assert result.source_url == ""
-        assert result.external_id == "Empty Mod f20722b2"
+        assert result.success is False
+        assert result.error == MISSING_OFFICIAL_IDENTITY
+        assert result.mod_id == ""
         assert "nexusmods.com" not in (result.source_url or "")
-        info = db.get_mod_display_info(result.mod_id)
-        assert info is not None
-        assert (info.source_url or "") == ""
-        assert info.external_id == "Empty Mod f20722b2"
 
     def test_import_plus_real_html_e2e(self, tmp_path: Path, db: DatabaseManager) -> None:
         """Case A: import mod without Nexus ID, then attach real offline HTML."""
-        if REAL_USER_HTML is None or not REAL_USER_HTML.is_file():
+        html = _real_user_html()
+        if html is None or not html.is_file():
             pytest.skip("real user offline HTML missing")
         folder = tmp_path / "Empty Mod f20722b2"
         folder.mkdir()
@@ -973,7 +1006,7 @@ class TestNexusImporterNoFakeUrl:
         assert (result.source_url or "") == ""
 
         html_copy = tmp_path / "real_user.html"
-        html_copy.write_text(REAL_USER_HTML.read_text(encoding="utf-8"), encoding="utf-8")
+        html_copy.write_text(html.read_text(encoding="utf-8"), encoding="utf-8")
         attach_nexus_offline_page(mid, html_copy, managed_path=dest, library_root=lib)
 
         row = db.get_mod_display_info(mid)

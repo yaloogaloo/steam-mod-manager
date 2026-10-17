@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +36,7 @@ def prune_protection(protected: Iterable[Path] | None) -> Iterator[None]:
 
 @dataclass
 class ManifestBackupInfo:
-    """Pre-overwrite original file saved under ``.info/backups/``."""
+    """Pre-overwrite original game file (``data/deploy_backup/<internal_id>/``)."""
 
     path: str
     hash: str = ""
@@ -72,6 +73,10 @@ class ManifestFileEntry:
     backup: ManifestBackupInfo | None = None
     # Optional audit field (backward compatible — omitted when empty)
     source_hash: str = ""
+    # Canonical target: root_kind + relative. Absolute target is a projection.
+    root_kind: str = ""
+    relative: str = ""
+    source_relative: str = ""
 
 
 @dataclass
@@ -84,6 +89,8 @@ class DeployManifest:
     content_fingerprint: str = ""
     source_path: str = ""
     internal_id: str = ""
+    # 0/1 = legacy absolute-only; 2 = root_kind + relative
+    schema_version: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         files_out: list[dict[str, Any]] = []
@@ -93,6 +100,12 @@ class DeployManifest:
                 item["type"] = f.type
             if f.source_hash:
                 item["source_hash"] = f.source_hash
+            if f.root_kind:
+                item["root_kind"] = f.root_kind
+            if f.relative:
+                item["relative"] = f.relative
+            if f.source_relative:
+                item["source_relative"] = f.source_relative
             # Explicit null when no pre-existing file (new schema); omit for empty legacy
             if f.backup is not None:
                 item["backup"] = f.backup.to_dict()
@@ -105,6 +118,8 @@ class DeployManifest:
             "deploy_type": self.deploy_type,
             "files": files_out,
         }
+        if self.schema_version:
+            out["schema_version"] = int(self.schema_version)
         if self.content_fingerprint:
             out["content_fingerprint"] = self.content_fingerprint
         if self.source_path:
@@ -132,8 +147,15 @@ class DeployManifest:
                         type=entry_type,
                         backup=backup,
                         source_hash=str(item.get("source_hash") or ""),
+                        root_kind=str(item.get("root_kind") or ""),
+                        relative=str(item.get("relative") or ""),
+                        source_relative=str(item.get("source_relative") or ""),
                     )
                 )
+        try:
+            schema_version = int(data.get("schema_version") or 0)
+        except (TypeError, ValueError):
+            schema_version = 0
         return cls(
             mod_id=str(data.get("mod_id") or ""),
             deploy_time=str(data.get("deploy_time") or ""),
@@ -142,6 +164,7 @@ class DeployManifest:
             content_fingerprint=str(data.get("content_fingerprint") or ""),
             source_path=str(data.get("source_path") or ""),
             internal_id=str(data.get("internal_id") or ""),
+            schema_version=schema_version,
         )
 
 
@@ -160,15 +183,18 @@ def manifest_path_for(managed_path: Path) -> Path:
 def load_manifest(
     managed_path: Path,
     *,
+    expected_internal_id: str | None = None,
     expected_mod_id: str | None = None,
 ) -> DeployManifest | None:
     """
     Load ``deploy_manifest.json`` for a managed Mod folder.
 
-    When *expected_mod_id* is set, refuse manifests that claim a different
-    ``mod_id`` (returns ``None`` after logging — caller must not undeploy).
+    When *expected_internal_id* (or legacy *expected_mod_id*) is set, refuse
+    manifests that claim a different ``mod_id`` (returns ``None`` after
+    logging — caller must not undeploy).
     """
     path = manifest_path_for(managed_path)
+    t0 = time.perf_counter()
     if not path.is_file():
         return None
     try:
@@ -176,11 +202,23 @@ def load_manifest(
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to read deploy manifest %s: %s", path, exc)
         return None
+    from services.deploy_op_profile import record_op
+
+    record_op(
+        "manifest_enumeration",
+        (time.perf_counter() - t0) * 1000.0,
+        path=str(path),
+    )
     if not isinstance(data, dict):
         return None
     manifest = DeployManifest.from_dict(data)
-    if expected_mod_id is not None:
-        mid = str(expected_mod_id or "").strip()
+    expected = (
+        expected_internal_id
+        if expected_internal_id is not None
+        else expected_mod_id
+    )
+    if expected is not None:
+        mid = str(expected or "").strip()
         claimed = str(manifest.mod_id or "").strip()
         if mid and claimed and claimed != mid:
             logger.error(
@@ -194,11 +232,22 @@ def load_manifest(
 
 
 def save_manifest(managed_path: Path, manifest: DeployManifest) -> Path:
+    from services.deploy_op_profile import note_tree, timed_op
+
     path = manifest_path_for(managed_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    with timed_op("mkdir", path=str(path.parent)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    nfiles = len(manifest.files or [])
+    with timed_op("manifest_write", path=str(path)):
+        path.write_text(
+            json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    note_tree(
+        stage="manifest",
+        kind="managed",
+        root=str(managed_path),
+        file_count=nfiles,
     )
     return path
 

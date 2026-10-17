@@ -6,7 +6,6 @@ Reuses ``safe_directory_rename`` and existing cover install helpers.
 
 from __future__ import annotations
 
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -17,8 +16,8 @@ from core.models import ModMetadata
 from core.mod_platform import PLATFORM_MODIO, coerce_modio_api_mod_id
 from core.sanitize import sanitize_folder_name
 from services.file_ops import (
-    INFO_DIR_NAME,
     ModFileManager,
+    persist_unified_metadata_dict,
     read_info_metadata_dict,
 )
 from services.metadata_refresh import (
@@ -244,6 +243,8 @@ def _patch_metadata_json(
     if name_id:
         data["modio_name_id"] = name_id
     data.pop("fetch_error", None)
+    # Witcher 3 ONLY: Mod.io ``version`` is NOT ``game_version``. Leave any
+    # existing sidecar game_version untouched (never copy API version here).
 
     final = Path(managed_path)
     data["managed_path"] = str(final)
@@ -257,11 +258,8 @@ def _patch_metadata_json(
                 if raw.startswith(old_prefix):
                     data[key] = new_prefix + raw[len(old_prefix) :]
 
-    info = final / INFO_DIR_NAME
-    info.mkdir(parents=True, exist_ok=True)
-    (info / "metadata.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    persist_unified_metadata_dict(
+        final, data, sync_backup=False, sync_reason="refresh"
     )
 
 
@@ -331,7 +329,13 @@ def _download_cover(
 
     prepare_managed_folder_for_rename(managed_path)
     suffix = _logo_suffix(logo_url)
-    with tempfile.TemporaryDirectory(prefix="modio_cover_") as tmp:
+    from services.business_resources import current_resources
+    resources = current_resources()
+    temporary_root = resources.path('cache/modio_cover') if resources else None
+    if temporary_root is not None:
+        resources.validate_write(temporary_root)
+        temporary_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="modio_cover_", dir=temporary_root) as tmp:
         tmp_file = Path(tmp) / f"logo{suffix}"
         client.download_file(logo_url, tmp_file)
         rel = apply_cover_to_mod(
@@ -556,6 +560,12 @@ def refresh_modio_mod_metadata(
         cover_err = ""
         cover_rel = ""
 
+        from services.file_ops import read_info_metadata_dict
+        from services.metadata_backup_sync import metadata_fingerprint
+
+        # Capture before any provider write — compare after to gate backup dirty.
+        pre_refresh_fp = metadata_fingerprint(read_info_metadata_dict(folder) or {})
+
         # Rename first (atomic or content-move fallback). Identity fields are
         # written on the *final* path so every rename method shares one success path.
         prepare_managed_folder_for_rename(folder)
@@ -703,9 +713,11 @@ def refresh_modio_mod_metadata(
                             official_preview_url=details.logo_url,
                             cover_rel=cover_rel,
                         )
-                        (new_path / INFO_DIR_NAME / "metadata.json").write_text(
-                            json.dumps(merged, ensure_ascii=False, indent=2),
-                            encoding="utf-8",
+                        persist_unified_metadata_dict(
+                            new_path,
+                            merged,
+                            sync_backup=False,
+                            sync_reason="refresh",
                         )
                         try:
                             database.update_mod_cover_path(mid, cover_rel)
@@ -731,9 +743,17 @@ def refresh_modio_mod_metadata(
             new_path,
         )
         try:
-            from services.metadata_backup_sync import sync_after_metadata_change
+            from services.file_ops import read_info_metadata_dict
+            from services.metadata_backup_sync import (
+                metadata_fingerprint,
+                sync_after_metadata_change,
+            )
 
-            sync_after_metadata_change(mid, new_path, "refresh")
+            # ARCHITECTURE RULE: Refresh dirties backup only when metadata
+            # actually changed. Identical provider payload → no enqueue.
+            new_fp = metadata_fingerprint(read_info_metadata_dict(new_path) or {})
+            if new_fp != pre_refresh_fp:
+                sync_after_metadata_change(mid, new_path, "refresh")
         except Exception:  # noqa: BLE001
             pass
         return MetadataRefreshResult(

@@ -6,6 +6,12 @@ import inspect
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    patch_library_get_db,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
@@ -57,27 +63,22 @@ def test_refresh_does_not_invoke_apply_sidecar_to_db(
     DatabaseManager.reset_instance()
     db = DatabaseManager.instance(tmp_path / "refresh_sidecar.db")
     lib = tmp_path / "library"
+    created = create_steam_test_mod(
+        db, external_id="91001", title="ModA", game_name="Game"
+    )
+    internal_id = str(created.mod_id)
     folder = lib / "Game" / "ModA"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / METADATA_FILENAME).write_text(
-        json.dumps(
-            {
-                "published_file_id": "91001",
-                "title": "ModA",
-                "game_name": "Game",
-            }
-        ),
-        encoding="utf-8",
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=internal_id,
+        title="ModA",
+        external_id="91001",
+        workspace_id="91001",
+        game_name="Game",
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="91001",
-            title="ModA",
-            managed_path=str(folder),
-            game_name="Game",
-        )
-    )
+    bind_managed_path(db, internal_id, folder, title="ModA")
+    patch_library_get_db(monkeypatch, db)
 
     calls: list[str] = []
 
@@ -139,11 +140,27 @@ def test_refresh_does_not_invoke_backfill_or_migrate(
 def test_mod_card_shows_offline_missing_when_index_absent(
     qapp: QApplication, tmp_path: Path
 ) -> None:
+    from services.mod_library_cache import ModCardData
+
     mod = tmp_path / "SomeGame" / "SomeMod"
     mod.mkdir(parents=True)
     (mod / INFO_DIR_NAME).mkdir()
 
-    card = ModCardWidget(mod, metadata=None)
+    data = ModCardData(
+        id="91099",
+        title="SomeMod",
+        platform="steam",
+        cover="",
+        description="",
+        tags="",
+        size=None,
+        updated_time=0.0,
+        managed_path=str(mod),
+        game_folder="SomeGame",
+        has_offline=False,
+        offline_status="none",
+    )
+    card = ModCardWidget(mod, metadata=None, card_data=data)
     assert not card.offline_badge.isHidden()
     assert card.offline_badge.text() == OFFLINE_MISSING_LABEL
 
@@ -151,10 +168,26 @@ def test_mod_card_shows_offline_missing_when_index_absent(
 def test_mod_card_hides_offline_badge_when_index_present(
     qapp: QApplication, tmp_path: Path
 ) -> None:
+    from services.mod_library_cache import ModCardData
+
     mod = tmp_path / "SomeGame" / "SomeMod"
     info = mod / INFO_DIR_NAME
     info.mkdir(parents=True)
     (info / "index.html").write_text("<html></html>", encoding="utf-8")
 
-    card = ModCardWidget(mod, metadata=None)
+    data = ModCardData(
+        id="91098",
+        title="SomeMod",
+        platform="steam",
+        cover="",
+        description="",
+        tags="",
+        size=None,
+        updated_time=0.0,
+        managed_path=str(mod),
+        game_folder="SomeGame",
+        has_offline=True,
+        offline_status="generated",
+    )
+    card = ModCardWidget(mod, metadata=None, card_data=data)
     assert card.offline_badge.isHidden()

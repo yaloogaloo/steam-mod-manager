@@ -15,7 +15,19 @@ from services.modio_metadata_refresh import refresh_modio_mod_metadata
 from services.mod_refresh import refresh_mod
 from services.path_lifecycle import PathLifecycleStage
 from ui.metadata_refresh_thread import ModRefreshWorker
+from tests.helpers.identity import prove_managed_folder
 
+
+
+
+@pytest.fixture(autouse=True)
+def _modio_library_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    lib = tmp_path / "mod"
+    lib.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("core.paths.default_mod_library", lambda: lib)
+    monkeypatch.setattr("services.mod_path_validation.default_mod_library", lambda: lib)
+    monkeypatch.setattr("services.path_lifecycle.default_mod_library", lambda: lib, raising=False)
+    return lib
 
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
@@ -70,7 +82,7 @@ def _register_modio_mod(
     *,
     folder_name: str = "better-inventory-ui1",
 ) -> tuple[str, Path]:
-    """Register mod.io mod and return (mod_id, folder path)."""
+    """Register mod.io mod and return (mods.mod_id PK, folder path)."""
     folder = _modio_folder(lib, folder_name, url=url, mid="")
     info = db.register_external_mod(
         platform=PLATFORM_MODIO,
@@ -80,12 +92,22 @@ def _register_modio_mod(
         app_id=1086940,
         game_name="Baldur's Gate 3",
     )
-    mid = info.mod_id
-    sidecar = folder / ".info" / "metadata.json"
-    data = json.loads(sidecar.read_text(encoding="utf-8"))
-    data["published_file_id"] = mid
-    sidecar.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    db.update_mod_identity_fields(mid, last_known_path=str(folder.resolve()))
+    mid = str(info.mod_id)
+    prove_managed_folder(
+        db,
+        folder,
+        handle=mid,
+        title=folder_name,
+        app_id=1086940,
+        game_name="Baldur's Gate 3",
+        platform=PLATFORM_MODIO,
+        extra={
+            "published_file_id": mid,
+            "url": url,
+            "source_type": "modio",
+            "workspace_id": str(getattr(info, "workspace_id", "") or ""),
+        },
+    )
     return mid, folder
 
 

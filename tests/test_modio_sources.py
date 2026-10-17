@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from core.mod_platform import (
     MODIO_ANNO_1800_URL,
@@ -161,8 +161,10 @@ def test_default_modio_url_for_anno_and_bg3() -> None:
 def test_import_dialog_hides_modio_for_palworld(
     qapp: QApplication, tmp_path
 ) -> None:
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     assert PLATFORM_MODIO not in dlg._platform_radios
@@ -179,8 +181,10 @@ def test_import_dialog_shows_modio_for_anno(
         "ui.mod_import_dialog.QMessageBox.warning",
         lambda *args, **kwargs: None,
     )
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": 916440, "game_name": "纪元1800"},
     )
     assert PLATFORM_MODIO in dlg._platform_radios
@@ -207,8 +211,10 @@ def test_import_dialog_shows_modio_for_anno(
 def test_import_dialog_steam_visible_for_non_anno(
     qapp: QApplication, tmp_path: Path
 ) -> None:
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     assert dlg.radio_steam is not None
@@ -219,8 +225,10 @@ def test_import_dialog_steam_visible_for_non_anno(
 def test_import_dialog_omits_steam_for_stardew(
     qapp: QApplication, tmp_path: Path
 ) -> None:
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": 413150, "game_name": "星露谷物语"},
     )
     assert PLATFORM_STEAM not in dlg._platform_radios
@@ -241,8 +249,10 @@ def test_import_dialog_shows_modio_for_bg3(
     game_id: int,
     game_name: str,
 ) -> None:
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": game_id, "game_name": game_name},
     )
     assert PLATFORM_STEAM not in dlg._platform_radios
@@ -267,8 +277,10 @@ def test_import_dialog_omits_steam_and_modio_for_cyberpunk(
     game_id: int,
     game_name: str,
 ) -> None:
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": game_id, "game_name": game_name},
     )
     assert PLATFORM_STEAM not in dlg._platform_radios
@@ -336,8 +348,10 @@ def test_edit_dialog_source_options_by_game(qapp: QApplication) -> None:
 
 
 def test_import_dialog_other_allows_empty_url(qapp: QApplication, tmp_path) -> None:
+    host = QWidget()
     dlg = ModImportDialog(
         tmp_path,
+        parent=host,
         game_context={"game_id": 1623730, "game_name": "Palworld"},
     )
     assert PLATFORM_OTHER in dlg._platform_radios

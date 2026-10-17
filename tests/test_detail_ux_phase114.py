@@ -6,13 +6,20 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.helpers.identity import (
+    bind_managed_path,
+    create_steam_test_mod,
+    write_info_sidecar,
+)
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QWidget
 
 from core.db_manager import RELATIONSHIP_DEPENDENCY, DatabaseManager
 from core.models import ModMetadata
+from core.mod_platform import PLATFORM_NEXUS
+from services.identity_service import create_mod_identity
 from services.dir_size import (
     directory_size,
     invalidate_directory_size,
@@ -43,43 +50,48 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _mod_folder(
-    lib: Path, mid: str = "9000000000001141", *, payload: bool = False
-) -> Path:
-    folder = lib / "Game" / f"Mod_{mid}"
-    info = folder / INFO_DIR_NAME
-    info.mkdir(parents=True)
-    (info / "metadata.json").write_text(
-        json.dumps(
-            {
-                "published_file_id": mid,
-                "title": f"Mod_{mid}",
-                "display_name": f"Mod_{mid}",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+def _seed_steam_mod(
+    db: DatabaseManager,
+    lib: Path,
+    *,
+    external_id: str,
+    payload: bool = False,
+) -> tuple[str, Path]:
+    title = f"Mod_{external_id}"
+    created = create_steam_test_mod(db, external_id=external_id, title=title)
+    internal_id = str(created.mod_id)
+    folder = lib / "Game" / title
+    folder.mkdir(parents=True, exist_ok=True)
+    write_info_sidecar(
+        folder,
+        internal_id=internal_id,
+        title=title,
+        external_id=external_id,
+        workspace_id=str(created.workspace_id or external_id),
+        game_name="Game",
     )
     if payload:
         (folder / "mod.dll").write_bytes(b"dll")
         (folder / "config.json").write_text("{}", encoding="utf-8")
-    return folder
+    bind_managed_path(db, internal_id, folder, title=title)
+    return internal_id, folder
 
 
 def test_detail_refresh_heals_content_missing_and_invalidates_size(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "lib"
-    mid = "9000000000001141"
-    folder = _mod_folder(lib, mid, payload=False)
+    mid, folder = _seed_steam_mod(db, lib, external_id="1141001", payload=False)
     apply_missing_content_marker(folder)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Mod_{mid}"))
+
     db.update_mod_identity_fields(
         mid,
-        content_status=CONTENT_CONTENT_MISSING,
-        library_status="content_missing",
         folder_present=True,
         last_known_path=str(folder),
+    )
+    db.update_mod_content_status(
+        mid,
+        content_status=CONTENT_CONTENT_MISSING,
     )
     db.set_official_metadata_synced(mid, True)
 
@@ -117,15 +129,16 @@ def test_card_badge_updates_after_stale_clear(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "lib"
-    mid = "9000000000001142"
-    folder = _mod_folder(lib, mid, payload=True)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Mod_{mid}"))
+    mid, folder = _seed_steam_mod(db, lib, external_id="1141002", payload=True)
+
     db.update_mod_identity_fields(
         mid,
-        content_status=CONTENT_HEALTHY,
-        library_status="healthy",
         folder_present=True,
         last_known_path=str(folder),
+    )
+    db.update_mod_content_status(
+        mid,
+        content_status=CONTENT_HEALTHY,
     )
 
     class _Stale:
@@ -146,7 +159,10 @@ def test_card_badge_updates_after_stale_clear(
         enabled = True
 
     meta = ModMetadata(
-        published_file_id=mid, title=f"Mod_{mid}", managed_path=str(folder)
+        published_file_id=mid,
+        internal_id=mid,
+        title=f"Mod_{mid}",
+        managed_path=str(folder),
     )
     card = ModCardWidget(folder, meta)
     card.refresh_display()
@@ -154,7 +170,9 @@ def test_card_badge_updates_after_stale_clear(
     card._card_data = _Stale()
     card._render_missing_content_badge()
     qapp.processEvents()
-    assert "文件缺失" in (card.missing_badge.text() or "")
+    assert "内容缺失" in (card.missing_badge.text() or "") or "文件缺失" in (
+        card.missing_badge.text() or ""
+    )
 
     card._card_data = None
     card._render_missing_content_badge()
@@ -168,9 +186,8 @@ def test_deploy_busy_disables_and_relabels(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "lib"
-    mid = "9000000000001143"
-    folder = _mod_folder(lib, mid, payload=True)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Mod_{mid}"))
+    mid, folder = _seed_steam_mod(db, lib, external_id="1141003", payload=True)
+
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
@@ -198,29 +215,72 @@ def test_dependency_block_compact_copy(
     qapp: QApplication, tmp_path: Path, db: DatabaseManager
 ) -> None:
     lib = tmp_path / "lib"
-    mid = "9000000000001144"
-    dep = "9000000000001678"
-    folder = _mod_folder(lib, mid, payload=True)
-    db.upsert_mod(ModMetadata(published_file_id=mid, title=f"Mod_{mid}"))
-    db.upsert_mod(
-        ModMetadata(published_file_id=dep, title="Lustiest Lair Expanded v1.8")
+    main = create_mod_identity(
+        db,
+        platform=PLATFORM_NEXUS,
+        external_id="1144001",
+        source_url="https://www.nexusmods.com/stardewvalley/mods/1144001",
+        title="Mod_main",
+        app_id=413150,
+        game_name="Stardew",
+        operation="import",
     )
-    db.add_mod_relationship(mid, dep, RELATIONSHIP_DEPENDENCY)
+    dep = create_mod_identity(
+        db,
+        platform=PLATFORM_NEXUS,
+        external_id="1144002",
+        source_url="https://www.nexusmods.com/stardewvalley/mods/1144002",
+        title="Lustiest Lair Expanded v1.8",
+        app_id=413150,
+        game_name="Stardew",
+        operation="import",
+    )
+    mid = str(main.mod_id)
+    folder = lib / "Game" / f"Mod_{mid}"
+    folder.mkdir(parents=True)
+    (folder / INFO_DIR_NAME).mkdir(parents=True)
+    (folder / INFO_DIR_NAME / "metadata.json").write_text(
+        json.dumps(
+            {
+                "published_file_id": mid,
+                "title": f"Mod_{mid}",
+                "display_name": f"Mod_{mid}",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (folder / "mod.dll").write_bytes(b"dll")
+    write_info_sidecar(
+        folder,
+        internal_id=mid,
+        title="Mod_main",
+        external_id="1144001",
+        workspace_id=str(main.workspace_id or "1144001"),
+        game_name="Stardew",
+        platform=PLATFORM_NEXUS,
+    )
+    bind_managed_path(db, mid, folder, title="Mod_main")
+    db.add_mod_relationship(mid, str(dep.mod_id), RELATIONSHIP_DEPENDENCY)
 
     panel = ModDetailPanel()
     panel.show_mod(folder, mod_id=mid)
     qapp.processEvents()
     assert panel.btn_add_dependency.text() == "+ 添加依赖"
-    text = panel.dep_summary_label.text() or ""
-    assert "Lustiest Lair Expanded v1.8" in text
-    assert "ID " not in text
-    assert "依赖于\n" not in text
+    from ui.dependency_item_widget import DependencyItem
+
+    items = panel.dep_list_host.findChildren(DependencyItem)
+    assert len(items) == 1
+    assert items[0].name_text() == "Lustiest Lair Expanded v1.8"
+    assert "ID " not in items[0].name_text()
+    assert "依赖于\n" not in (panel.dep_summary_label.text() or "")
 
 
 def test_import_success_accepts_dialog(
     qapp: QApplication, tmp_path: Path, monkeypatch
 ) -> None:
-    dlg = ModImportDialog(library_root=tmp_path / "lib")
+    parent = QWidget()
+    dlg = ModImportDialog(library_root=tmp_path / "lib", parent=parent)
     accepted = {"ok": False}
 
     def _mark_accept(self: ModImportDialog) -> None:

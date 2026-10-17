@@ -21,6 +21,19 @@ from services.modio_api import (
 from services.modio_metadata_refresh import refresh_modio_mod_metadata
 
 
+@pytest.fixture(autouse=True)
+def _modio_library_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Align Path Lifecycle library root with folders under tmp_path/mod."""
+    lib = tmp_path / "mod"
+    lib.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("core.paths.default_mod_library", lambda: lib)
+    monkeypatch.setattr("services.mod_path_validation.default_mod_library", lambda: lib)
+    monkeypatch.setattr(
+        "services.path_lifecycle.default_mod_library", lambda: lib, raising=False
+    )
+    return lib
+
+
 @pytest.fixture()
 def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()

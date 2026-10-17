@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Callable
 
@@ -20,21 +21,49 @@ CANCEL_WAIT_MS_DEFAULT = 2500
 # Profiling counters (tests / diagnostics).
 COVER_LOAD_REQUESTS = 0
 COVER_LOAD_COMPLETED = 0
+COVER_LOAD_CANCELLED = 0
+COVER_LOAD_CACHE_HITS = 0
 COVER_LOAD_MS_TOTAL = 0.0
+
+ReadyCallback = Callable[[str, object], None]
 
 
 def reset_cover_loader_stats() -> None:
-    global COVER_LOAD_REQUESTS, COVER_LOAD_COMPLETED, COVER_LOAD_MS_TOTAL
+    global COVER_LOAD_REQUESTS, COVER_LOAD_COMPLETED, COVER_LOAD_CANCELLED
+    global COVER_LOAD_CACHE_HITS, COVER_LOAD_MS_TOTAL
     COVER_LOAD_REQUESTS = 0
     COVER_LOAD_COMPLETED = 0
+    COVER_LOAD_CANCELLED = 0
+    COVER_LOAD_CACHE_HITS = 0
     COVER_LOAD_MS_TOTAL = 0.0
+    try:
+        from services.startup_io_trace import reset_cover_wave
+
+        reset_cover_wave()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def note_cover_cache_hit() -> None:
+    global COVER_LOAD_CACHE_HITS
+    COVER_LOAD_CACHE_HITS += 1
+
+
+def note_cover_cancelled() -> None:
+    global COVER_LOAD_CANCELLED
+    COVER_LOAD_CANCELLED += 1
 
 
 def resolve_cover_path(
     managed_path: str | Path,
     cover_ref: str = "",
 ) -> Path | None:
-    """Resolve a cover file path via Metadata Resolver (safe off the GUI thread)."""
+    """Resolve a cover file path (resource locator — never invents Mod identity).
+
+    Chain: managed folder → cover_ref / ``.info/cover.*`` → optional metadata
+    resolver when ``mod_id`` can be read from ``.info/entity_key`` (DB bind only).
+    """
+    root = Path(managed_path) if managed_path is not None else Path()
     ref = str(cover_ref or "").strip()
     if ref:
         direct = Path(ref)
@@ -43,14 +72,61 @@ def resolve_cover_path(
                 return direct.resolve()
         except OSError:
             pass
-    try:
-        from services.mod_metadata_resolver import resolve_cover_path as resolve_meta
+        if root.is_dir():
+            try:
+                nested = (root / ref).resolve()
+                if nested.is_file():
+                    return nested
+            except OSError:
+                pass
+    if root.is_dir():
+        try:
+            from services.file_ops import INFO_DIR_NAME
+            from services.mod_metadata_resolver import _find_info_cover
 
-        found = resolve_meta(None, managed_path)
-        if found is not None:
-            return found
-    except Exception:  # noqa: BLE001
-        logger.debug("metadata resolver cover failed for %s", managed_path, exc_info=True)
+            found = _find_info_cover(root / INFO_DIR_NAME)
+            if found is not None:
+                return found
+        except Exception:  # noqa: BLE001
+            logger.debug("info cover scan failed for %s", root, exc_info=True)
+        try:
+            from services.file_ops import read_info_metadata_dict
+
+            info = read_info_metadata_dict(root) or {}
+            cref = str(info.get("cover_path") or "").strip()
+            if cref:
+                nested = root / cref
+                if nested.is_file():
+                    return nested.resolve()
+                if Path(cref).is_file():
+                    return Path(cref).resolve()
+        except Exception:  # noqa: BLE001
+            pass
+        # Entity-backed cover (backup / DB) — bind via .info/entity_key only.
+        try:
+            from services.file_ops import read_info_metadata_dict
+            from services.mod_identity import read_internal_id
+            from services.mod_metadata_resolver import resolve_cover_path as resolve_meta
+
+            raw = read_info_metadata_dict(root) or {}
+            proof = read_internal_id(raw)
+            mid = ""
+            if proof:
+                from core.db_manager import get_db
+
+                found_pk = get_db().find_mod_by_internal_id(proof)
+                if found_pk is not None:
+                    mid = str(found_pk)
+                elif proof.isdigit():
+                    mid = proof
+            if mid.isdigit():
+                found = resolve_meta(mid, root)
+                if found is not None:
+                    return found
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "metadata resolver cover failed for %s", managed_path, exc_info=True
+            )
     return None
 
 
@@ -144,6 +220,12 @@ class CoverLoadTask(QRunnable):
         finally:
             COVER_LOAD_COMPLETED += 1
             COVER_LOAD_MS_TOTAL += (time.perf_counter() - t0) * 1000.0
+            try:
+                from services.startup_io_trace import cover_wave_on_task_done
+
+                cover_wave_on_task_done(failed=image is None)
+            except Exception:  # noqa: BLE001
+                pass
             # Release path lock tracking on the pool thread (before GUI emit).
             cb = self._on_finished_path
             if cb is not None:
@@ -177,6 +259,9 @@ class CoverLoaderManager(QObject):
         # Paths whose in-flight loads must stop reading (folder about to rename).
         self._cancelled_paths: set[str] = set()
         self._token_paths: dict[str, str] = {}
+        # Token → WeakMethod/callback. Cards must NOT connect to ``image_ready``
+        # (broadcast fan-out freezes the UI when thousands of cards are cached).
+        self._token_ready: dict[str, object] = {}
         self._lock = threading.Lock()
         # In-flight QImage readers per managed path (pool-thread updated).
         self._inflight_by_path: dict[str, int] = {}
@@ -199,8 +284,34 @@ class CoverLoaderManager(QObject):
 
     @classmethod
     def reset_instance(cls) -> None:
-        """Test helper — drop singleton (does not wait for in-flight tasks)."""
+        """
+        Test helper — clear singleton after draining the cover thread pool.
+
+        Must wait for in-flight tasks before dropping the QObject; otherwise
+        queued ``image_ready`` / pool teardown can corrupt the Qt heap
+        (Windows ``0xc0000374``) during pytest fixture teardown.
+        """
+        mgr = cls._instance
         cls._instance = None
+        if mgr is None:
+            return
+        try:
+            mgr._active_tokens.clear()
+            mgr._token_paths.clear()
+            mgr._token_ready.clear()
+            mgr._cancelled_paths.clear()
+            with mgr._lock:
+                mgr._inflight_by_path.clear()
+            pool = getattr(mgr, "_pool", None)
+            if pool is not None:
+                pool.clear()
+                pool.waitForDone(2000)
+        except Exception:  # noqa: BLE001
+            logger.exception("CoverLoaderManager.reset_instance cleanup failed")
+        try:
+            mgr.deleteLater()
+        except Exception:  # noqa: BLE001
+            pass
 
     def is_path_cancelled(self, managed_path: str | Path) -> bool:
         return _path_key(managed_path) in self._cancelled_paths
@@ -281,6 +392,7 @@ class CoverLoaderManager(QObject):
         cover_ref: str = "",
         width: int,
         height: int,
+        on_ready: ReadyCallback | None = None,
     ) -> None:
         global COVER_LOAD_REQUESTS
         tok = str(token)
@@ -290,8 +402,21 @@ class CoverLoaderManager(QObject):
         # New request for this path clears a prior rename-cancel mark.
         self._cancelled_paths.discard(path_key)
         COVER_LOAD_REQUESTS += 1
+        try:
+            from services.startup_io_trace import cover_wave_on_request
+
+            cover_wave_on_request()
+        except Exception:  # noqa: BLE001
+            pass
         self._active_tokens.add(tok)
         self._token_paths[tok] = path_key
+        if on_ready is not None:
+            try:
+                self._token_ready[tok] = weakref.WeakMethod(on_ready)  # type: ignore[arg-type]
+            except TypeError:
+                self._token_ready[tok] = on_ready
+        else:
+            self._token_ready.pop(tok, None)
         self._inc_inflight(path_key)
         task = CoverLoadTask(
             tok,
@@ -311,8 +436,11 @@ class CoverLoaderManager(QObject):
     def cancel(self, token: str) -> None:
         """Mark token inactive so late results are ignored by cards."""
         tok = str(token)
+        if tok in self._active_tokens or tok in self._token_paths:
+            note_cover_cancelled()
         self._active_tokens.discard(tok)
         self._token_paths.pop(tok, None)
+        self._token_ready.pop(tok, None)
 
     def cancel_for_managed_path(
         self,
@@ -333,6 +461,7 @@ class CoverLoaderManager(QObject):
         for tok in stale:
             self._active_tokens.discard(tok)
             self._token_paths.pop(tok, None)
+            self._token_ready.pop(tok, None)
 
         timeout = max(0, int(wait_ms))
         if timeout <= 0:
@@ -348,13 +477,34 @@ class CoverLoaderManager(QObject):
                 key,
             )
 
+    def _deliver_ready(self, token: str, image: object) -> None:
+        """Invoke the optional per-token card callback (O(1), not broadcast)."""
+        ref = self._token_ready.pop(token, None)
+        if ref is None:
+            return
+        try:
+            cb = ref() if isinstance(ref, weakref.WeakMethod) else ref
+        except Exception:  # noqa: BLE001
+            return
+        if cb is None:
+            return
+        try:
+            cb(token, image)
+        except Exception:  # noqa: BLE001
+            logger.debug("cover ready callback failed token=%s", token, exc_info=True)
+
     def _on_task_finished(self, token: str, image: object) -> None:
         tok = str(token)
         path_key = self._token_paths.pop(tok, "")
         if tok not in self._active_tokens:
+            self._token_ready.pop(tok, None)
             return
         if path_key and path_key in self._cancelled_paths:
             self._active_tokens.discard(tok)
+            self._token_ready.pop(tok, None)
             return
         self._active_tokens.discard(tok)
+        # Prefer O(1) token delivery for Library cards; keep ``image_ready`` for
+        # Detail / dialog listeners (few connections — never per-card).
+        self._deliver_ready(tok, image)
         self.image_ready.emit(tok, image)

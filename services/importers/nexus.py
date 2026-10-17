@@ -1,4 +1,9 @@
-"""Nexus Mods manual folder importer (multi-file → one Mod)."""
+"""Nexus Mods manual folder importer (multi-file → one Mod).
+
+Identity flow (do not invert):
+    Nexus Mod ID → external_id → workspace_id
+Internal PK is allocated separately and must never become Workspace ID.
+"""
 
 from __future__ import annotations
 
@@ -102,51 +107,34 @@ class NexusImporter(ModImporter):
         if url.isdigit() and not nexus_id:
             ext = url
             url = f"https://www.nexusmods.com/mods/{ext}"
+        # Nexus external_id / workshop_id only from official URL digits.
+        if not url:
+            ext = ext if is_valid_nexus_mod_id(ext) else ""
+        elif not ext:
+            ext = parse_nexus_id(url, "")
+        if not is_valid_nexus_mod_id(ext):
+            from services.importers.identity_resolve import MISSING_OFFICIAL_IDENTITY
+
+            return ImportResult(
+                success=False,
+                error=MISSING_OFFICIAL_IDENTITY,
+                platform=self.platform,
+                source_url=url,
+            )
         if is_batch:
-            # Local/batch: folder name is the temporary identity; never invent URLs.
-            if not ext:
-                ext = folder.name
-            url = ""
-        else:
-            if not ext and url:
-                ext = parse_nexus_id(url, "")
-            if not url and not is_valid_nexus_mod_id(ext):
-                # Directory import: same external_id as batch (folder.name).
-                # Do not wrap folder.name in local/ — that breaks duplicate match.
-                if not ext:
-                    ext = folder.name
-                elif ext != folder.name and not str(ext).startswith("local/"):
-                    # Legacy non-folder placeholder only.
-                    ext = local_nexus_external_id(ext)
-                if not str(ext or "").strip():
-                    from services.importers.identity_resolve import (
-                        MISSING_OFFICIAL_IDENTITY,
-                    )
-
-                    return ImportResult(
-                        success=False,
-                        error=MISSING_OFFICIAL_IDENTITY,
-                        platform=self.platform,
-                    )
-                url = ""
-            elif not is_valid_nexus_mod_id(ext) and url:
-                # URL present but id not numeric — refuse local/ invention.
-                from services.importers.identity_resolve import MISSING_OFFICIAL_IDENTITY
-
-                return ImportResult(
-                    success=False,
-                    error=MISSING_OFFICIAL_IDENTITY,
-                    platform=self.platform,
-                    source_url=url,
-                )
-            elif not url and is_valid_nexus_mod_id(ext):
-                slug = parse_nexus_game(nexus_url) or ctx.game_name.replace(" ", "").lower()
-                if slug and slug.lower() != "mods":
-                    url = f"https://www.nexusmods.com/{slug}/mods/{ext}"
-                else:
-                    url = f"https://www.nexusmods.com/mods/{ext}"
+            # Batch: keep official id; never invent URLs.
+            url = url if "nexusmods.com" in url.lower() else ""
+        elif not url and is_valid_nexus_mod_id(ext):
+            slug = parse_nexus_game(nexus_url) or ctx.game_name.replace(" ", "").lower()
+            if slug and slug.lower() != "mods":
+                url = f"https://www.nexusmods.com/{slug}/mods/{ext}"
+            else:
+                url = f"https://www.nexusmods.com/mods/{ext}"
 
         name = (title or "").strip() or folder.name
+        # Canonical directory name is *name* (passed to materialize). For
+        # Nexus Offline HTML, callers must supply the parsed Mod title here.
+        # Empty Mod <random> stub folders are payload placeholders only.
 
         db = self._database()
         from services.importers.duplicate_check import check_import_duplicate
@@ -157,6 +145,7 @@ class NexusImporter(ModImporter):
             external_id=ext,
             source_url=url,
             app_id=int(app_id or ctx.game_id or 0),
+            title=name,
         )
         if dup is not None:
             return dup
@@ -165,15 +154,32 @@ class NexusImporter(ModImporter):
             folder,
             file_entries=_kwargs.get("file_entries"),
         )
-        info = db.register_external_mod(
-            platform=PLATFORM_NEXUS,
-            external_id=ext,
-            source_url=url,
-            title=name,
-            app_id=ctx.game_id,
-            game_name=ctx.game_name,
-            mod_files=bundle,
-        )
+        from services.identity_service import create_mod_identity
+
+        try:
+            created = create_mod_identity(
+                db,
+                platform=PLATFORM_NEXUS,
+                external_id=ext,
+                source_url=url,
+                title=name,
+                app_id=ctx.game_id,
+                game_name=ctx.game_name,
+                mod_files=bundle,
+            )
+        except ValueError as exc:
+            return ImportResult(
+                success=False,
+                error=str(exc) or "Nexus identity conflict",
+                platform=PLATFORM_NEXUS,
+                external_id=ext,
+                source_url=url,
+            )
+        info = db.get_mod_display_info(created.mod_id)
+        if info is None:
+            return ImportResult(
+                success=False, error="Nexus identity create failed", platform=PLATFORM_NEXUS
+            )
 
         managed = ""
         if library_root:

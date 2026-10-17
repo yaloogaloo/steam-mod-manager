@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtWidgets import QLayout, QLayoutItem, QSizePolicy, QWidget
+from PySide6.QtWidgets import QLayout, QLayoutItem, QSizePolicy, QWidget, QWidgetItem
 
 
 class FlowLayout(QLayout):
@@ -31,6 +31,14 @@ class FlowLayout(QLayout):
 
     def addItem(self, item: QLayoutItem) -> None:
         self._items.append(item)
+        self._invalidate_hfw()
+        self.invalidate()
+
+    def insertWidget(self, index: int, widget: QWidget) -> None:
+        """Insert ``widget`` at ``index`` without rebuilding the item list."""
+        self.addChildWidget(widget)
+        idx = max(0, min(int(index), len(self._items)))
+        self._items.insert(idx, QWidgetItem(widget))
         self._invalidate_hfw()
         self.invalidate()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -9,6 +10,9 @@ from PySide6.QtCore import QThread, Signal
 
 from core.paths import default_mod_library
 from services.deploy import ModDeployer
+from services.deploy_result import DeployResult, DeployStatus, normalize_deploy_dict
+
+logger = logging.getLogger(__name__)
 
 DeployAction = Literal["deploy", "undeploy", "redeploy"]
 
@@ -19,39 +23,139 @@ class DeployWorker(QThread):
 
     Signal names use a ``deploy_`` prefix because ``QThread`` already owns
     ``started`` / ``finished``.
+
+    Terminal routing (exactly one terminal signal per run):
+      SUCCESS / CANCELLED / TIMEOUT → ``deploy_finished``
+      FAILED                        → ``deploy_failed`` only
     """
 
     deploy_started = Signal()
     deploy_finished = Signal(object)
-    deploy_failed = Signal(str)
+    # Full normalized result dict (not a bare error string) so UI can paint once.
+    deploy_failed = Signal(object)
 
     def __init__(
         self,
-        mod_id: int | str,
+        internal_id: str,
         library_root: str | Path | None = None,
         parent=None,
         *,
         action: DeployAction = "deploy",
         deployer: ModDeployer | None = None,
+        resources=None,
+        preflight=None,
     ) -> None:
         super().__init__(parent)
-        self.mod_id = str(mod_id).strip()
+        self.internal_id = str(internal_id).strip()
         self.library_root = Path(library_root) if library_root else default_mod_library()
         self.action: DeployAction = action
         self._deployer = deployer
+        self.resources = resources
+        self.preflight = preflight
+        self._terminal_emitted = False
+
+    def _emit_terminal(self, payload: dict[str, Any]) -> None:
+        if self._terminal_emitted:
+            return
+        self._terminal_emitted = True
+        normalized = normalize_deploy_dict(payload)
+        status = str(normalized.get("status") or "").upper()
+        logger.info(
+            "[DEPLOY] internal_id=%s mod_pk=%s action=%s status=%s",
+            normalized.get("internal_id") or self.internal_id,
+            normalized.get("mod_pk") or "",
+            self.action,
+            status or normalized.get("status"),
+        )
+        if status == DeployStatus.SUCCESS.value:
+            self.deploy_finished.emit(normalized)
+            return
+        if status == DeployStatus.CANCELLED.value:
+            self.deploy_finished.emit(normalized)
+            return
+        if status == DeployStatus.TIMEOUT.value:
+            self.deploy_finished.emit(normalized)
+            return
+        # FAILED (and legacy non-success): single terminal via deploy_failed only.
+        # Do NOT also emit deploy_finished — that caused dual projection refresh.
+        self.deploy_failed.emit(normalized)
 
     def run(self) -> None:
+        try:
+            if self.resources is not None:
+                with self.resources.bind():
+                    if self.preflight is not None:
+                        self.preflight()
+                    payload = self._run_operation()
+            else:
+                payload = self._run_operation()
+        except Exception as exc:
+            payload = DeployResult(status=DeployStatus.FAILED,
+                internal_id=self.internal_id, error=str(exc),
+                error_code='resource_boundary_refused').to_dict()
+        self._emit_terminal(payload)
+
+    def _run_operation(self):
+        from services.deploy_e2e import bind_job, e2e_count, e2e_event, e2e_mark, e2e_span
+
+        bind_job(str(getattr(self, "_e2e_job_id", "") or ""))
+        e2e_event("worker started")
+        e2e_mark("worker_started")
         self.deploy_started.emit()
+        result: dict[str, Any] | None = None
         try:
             deployer = self._deployer or ModDeployer(library_root=self.library_root)
-            if self.action == "undeploy":
-                result: dict[str, Any] = deployer.undeploy_mod(self.mod_id)
-            elif self.action == "redeploy":
-                result = deployer.redeploy_mod(self.mod_id)
-            else:
-                result = deployer.deploy_mod(self.mod_id)
+            e2e_event("worker deploy entered")
+            e2e_mark("worker_deploy_entered")
+            with e2e_span("worker_deploy"):
+                if self.action == "undeploy":
+                    result = deployer.undeploy_mod(self.internal_id)
+                elif self.action == "redeploy":
+                    result = deployer.redeploy_mod(self.internal_id)
+                else:
+                    result = deployer.deploy_mod(self.internal_id)
+            e2e_event("worker deploy returned")
+            if result and result.get('projection_errors'):
+                # The original service records canonical membership before its
+                # external projection. Report the partial outcome; do not invent
+                # an atomic rollback or overwrite that authoritative DB state.
+                result={**result,'success':False,'status':DeployStatus.FAILED.value,
+                    'partial_state_saved':True,'error_code':'projection_failed',
+                    'error':'部署成员状态已保存，但游戏投影失败：'+'；'.join(result['projection_errors'])}
+            e2e_mark("worker_deploy_returned")
             if self.isInterruptionRequested():
-                return
-            self.deploy_finished.emit(result)
+                result = DeployResult(
+                    status=DeployStatus.CANCELLED,
+                    internal_id=self.internal_id,
+                    error="部署已取消",
+                ).to_dict()
         except Exception as exc:  # noqa: BLE001 — surface to UI
-            self.deploy_failed.emit(str(exc))
+            logger.exception(
+                "[DEPLOY_FAILED] internal_id=%s action=%s unhandled error_code=worker_exception",
+                self.internal_id,
+                self.action,
+            )
+            result = DeployResult(
+                status=DeployStatus.FAILED,
+                internal_id=self.internal_id,
+                error=str(exc),
+                error_code="worker_exception",
+            ).to_dict()
+        finally:
+            if self.isInterruptionRequested() and result is None:
+                result = DeployResult(
+                    status=DeployStatus.CANCELLED,
+                    internal_id=self.internal_id,
+                    error="部署已取消",
+                ).to_dict()
+            if result is None:
+                result = DeployResult(
+                    status=DeployStatus.FAILED,
+                    internal_id=self.internal_id,
+                    error="部署失败：未知错误（无结果）",
+                    error_code="empty_result",
+                ).to_dict()
+            e2e_count("finish_signal_count")
+            e2e_event("worker finished emitted")
+            e2e_mark("worker_finished_emitted")
+            return result

@@ -13,9 +13,8 @@ from core.db_manager import (
     DEPLOY_STATUS_FAILED,
     DatabaseManager,
 )
-from core.models import ModMetadata
 from services.deploy import ModDeployer
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME
+from tests.helpers.identity import create_steam_test_mod, frozen_deploy_id, prove_managed_folder
 from services.runtime_identity import (
     get_archive_module_identity,
     log_archive_runtime_identity,
@@ -51,21 +50,24 @@ def db(tmp_path: Path) -> DatabaseManager:
     DatabaseManager.reset_instance()
 
 
-def _make_managed_mod(library: Path, *, mod_id: str, app_id: int) -> Path:
+def _make_managed_mod(
+    db: DatabaseManager, library: Path, *, mod_id: str, app_id: int
+) -> tuple[Path, str, str]:
     mod_dir = library / "Game" / "RuntimeMod"
-    info = mod_dir / INFO_DIR_NAME
-    info.mkdir(parents=True)
+    mod_dir.mkdir(parents=True)
     (mod_dir / "mod.txt").write_text("payload", encoding="utf-8")
-    (info / METADATA_FILENAME).write_text(
-        "{\n"
-        f'  "published_file_id": "{mod_id}",\n'
-        f'  "title": "RuntimeMod",\n'
-        f'  "app_id": {app_id},\n'
-        '  "game_name": "Game"\n'
-        "}\n",
-        encoding="utf-8",
+    created = create_steam_test_mod(
+        db, external_id=mod_id, title="RuntimeMod", app_id=app_id, game_name="Game"
     )
-    return mod_dir
+    pk = prove_managed_folder(
+        db,
+        mod_dir,
+        handle=created.mod_id,
+        title="RuntimeMod",
+        app_id=app_id,
+        game_name="Game",
+    )
+    return mod_dir, pk, frozen_deploy_id(created)
 
 
 def test_deploy_success_clears_deploy_error(
@@ -75,26 +77,18 @@ def test_deploy_success_clears_deploy_error(
     library = tmp_path / "mod"
     game_mods = tmp_path / "GameMods"
     game_mods.mkdir(parents=True)
-    mod_id = "99001"
+    workshop = "99001"
     app_id = 424242
 
-    _make_managed_mod(library, mod_id=mod_id, app_id=app_id)
     db.update_game_deploy_config(
         app_id,
         name="Game",
         install_path=str(tmp_path / "GameInstall"),
         mod_path=str(game_mods),
     )
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=mod_id,
-            title="RuntimeMod",
-            app_id=app_id,
-            game_name="Game",
-        )
-    )
+    _mod_dir, pk, iid = _make_managed_mod(db, library, mod_id=workshop, app_id=app_id)
     db.update_mod_deploy_status(
-        mod_id,
+        pk,
         deploy_status=DEPLOY_STATUS_FAILED,
         deploy_error="部署失败: 缺少 RAR 解压组件 (unrar)",
         deploy_path="",
@@ -102,10 +96,10 @@ def test_deploy_success_clears_deploy_error(
     )
 
     caplog.set_level(logging.INFO)
-    result = ModDeployer(library_root=library, db=db).deploy_mod(mod_id)
+    result = ModDeployer(library_root=library, db=db).deploy_mod(iid)
 
     assert result["success"] is True
-    info = db.get_mod_deploy_info(mod_id)
+    info = db.get_mod_deploy_info(pk)
     assert info is not None
     assert info.deploy_status == DEPLOY_STATUS_DEPLOYED
     assert info.deploy_error == ""

@@ -136,9 +136,11 @@ def test_stub_cooldown_skips_archive_within_10_minutes(
     monkeypatch.setattr(OfflinePageArchiver, "archive", boom)
 
     with OfflinePageArchiver(session=MagicMock()) as archiver:
-        path = archiver.ensure_offline_page(info, "3761838546")
+        result = archiver.ensure_offline_page(info, "3761838546")
 
-    assert path == stub
+    assert result.path == stub
+    assert result.outcome == "skipped"
+    assert result.skip_reason == "cooldown"
     assert called["archive"] == 0
 
 
@@ -191,10 +193,11 @@ def test_archive_failure_path_does_not_block_ui_logic(
 
     t0 = time.perf_counter()
     with OfflinePageArchiver(session=session) as archiver:
-        path = archiver.ensure_offline_page(info, "3761838546")
+        result = archiver.ensure_offline_page(info, "3761838546")
     elapsed = time.perf_counter() - t0
 
-    assert path == stub
+    assert result.path == stub
+    assert result.outcome == "skipped"
     assert http_calls["n"] == 0
     assert elapsed < 0.5
     assert ensure_offline_page_nonblocking_probe(info) is True

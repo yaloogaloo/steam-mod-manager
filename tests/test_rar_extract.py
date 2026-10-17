@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pytest
 
 from services.importers.archive import (
     RAR_TOOL_UNAVAILABLE_MSG,
-    TOOL_UNAVAILABLE_MSG,
     _extract_rar_with_rarfile,
     _format_rar_failure,
     extract_archive,
@@ -20,13 +18,19 @@ def _fake_rar(path: Path) -> None:
     path.write_bytes(b"Rar!\x1a\x07\x00not-a-real-rar")
 
 
+def _fake_usable_unrar(path: Path) -> Path:
+    """Satisfy ``_unrar_executable_usable`` (MZ + >=50KB) for unit tests."""
+    path.write_bytes(b"MZ" + b"\0" * 50_000)
+    return path
+
+
 def test_bundled_unrar_preferred_over_7z(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Bundled UnRAR wins even when system 7-Zip is installed."""
     rar = tmp_path / "mod.rar"
     _fake_rar(rar)
-    bundled = Path(r"C:\fake\bin\tools\UnRAR.exe")
+    bundled = _fake_usable_unrar(tmp_path / "UnRAR.exe")
     calls: list[str] = []
 
     monkeypatch.setattr(
@@ -38,20 +42,21 @@ def test_bundled_unrar_preferred_over_7z(
         lambda: r"C:\Program Files\7-Zip\7z.exe",
     )
 
-    def _rarfile(src: Path, dest: Path, *, unrar_tool: Path | str | None = None) -> None:
-        calls.append(f"rarfile:{unrar_tool}")
+    def _unrar_sub(tool: Path | str, src: Path, dest: Path, **_k) -> None:
+        calls.append(f"unrar:{tool}")
 
     def _seven(*_a, **_k) -> None:
         calls.append("7z")
         raise AssertionError("7z must not run when bundled UnRAR exists")
 
     monkeypatch.setattr(
-        "services.importers.archive._extract_rar_with_rarfile", _rarfile
+        "services.importers.archive._extract_rar_with_unrar_subprocess",
+        _unrar_sub,
     )
     monkeypatch.setattr("services.importers.archive._extract_with_7z", _seven)
 
     extract_archive(rar, dest_dir=tmp_path / "out")
-    assert calls == [f"rarfile:{bundled}"]
+    assert calls == [f"unrar:{bundled}"]
 
 
 def test_system_unrar_used_when_no_bundled(
@@ -59,7 +64,7 @@ def test_system_unrar_used_when_no_bundled(
 ) -> None:
     rar = tmp_path / "mod.rar"
     _fake_rar(rar)
-    system = r"C:\Windows\unrar.exe"
+    system = _fake_usable_unrar(tmp_path / "system-unrar.exe")
     seen: list[str | Path | None] = []
 
     monkeypatch.setattr(
@@ -67,18 +72,19 @@ def test_system_unrar_used_when_no_bundled(
     )
     monkeypatch.setattr(
         "services.importers.archive.find_system_unrar_executable",
-        lambda: system,
+        lambda: str(system),
     )
     monkeypatch.setattr(
         "services.importers.archive.find_7z_executable",
         lambda: r"C:\Program Files\7-Zip\7z.exe",
     )
 
-    def _rarfile(src: Path, dest: Path, *, unrar_tool: Path | str | None = None) -> None:
-        seen.append(unrar_tool)
+    def _unrar_sub(tool: Path | str, src: Path, dest: Path, **_k) -> None:
+        seen.append(tool)
 
     monkeypatch.setattr(
-        "services.importers.archive._extract_rar_with_rarfile", _rarfile
+        "services.importers.archive._extract_rar_with_unrar_subprocess",
+        _unrar_sub,
     )
     monkeypatch.setattr(
         "services.importers.archive._extract_with_7z",
@@ -138,30 +144,22 @@ def test_no_tools_reports_component_missing(
 def test_corrupt_rar_reports_real_error_not_tool_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    rarfile = pytest.importorskip("rarfile")
     rar = tmp_path / "bad.rar"
     _fake_rar(rar)
-    bundled = tmp_path / "UnRAR.exe"
-    bundled.write_bytes(b"MZ")
-
-    class _FakeRarFile:
-        def __init__(self, *_a, **_k) -> None:
-            pass
-
-        def __enter__(self) -> _FakeRarFile:
-            return self
-
-        def __exit__(self, *_a) -> None:
-            return None
-
-        def extractall(self, **_k) -> None:
-            raise rarfile.BadRarFile("Corrupt file data")
+    bundled = _fake_usable_unrar(tmp_path / "UnRAR.exe")
 
     monkeypatch.setattr(
         "services.importers.archive.resolve_bundled_unrar_tool",
         lambda: bundled,
     )
-    monkeypatch.setattr(rarfile, "RarFile", _FakeRarFile)
+
+    def _unrar_sub(*_a, **_k) -> None:
+        raise RuntimeError("RAR 部署失败: Corrupt file data")
+
+    monkeypatch.setattr(
+        "services.importers.archive._extract_rar_with_unrar_subprocess",
+        _unrar_sub,
+    )
 
     with pytest.raises(RuntimeError) as exc:
         extract_archive(rar, dest_dir=tmp_path / "out")
@@ -211,8 +209,7 @@ def test_bad_rarfile_raises_bad_rar_message(
     rarfile = pytest.importorskip("rarfile")
     rar = tmp_path / "bad.rar"
     _fake_rar(rar)
-    tool = tmp_path / "UnRAR.exe"
-    tool.write_bytes(b"MZ")
+    tool = _fake_usable_unrar(tmp_path / "UnRAR.exe")
 
     class _FakeRarFile:
         def __init__(self, *_a, **_k) -> None:

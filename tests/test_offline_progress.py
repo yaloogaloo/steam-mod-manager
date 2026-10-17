@@ -156,6 +156,8 @@ def test_one_mod_progress_leaves_zero_immediately(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         if on_status:
             on_status("start")
@@ -226,6 +228,8 @@ def test_ten_mods_first_download_has_ui_state(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         hits["n"] += 1
         if on_status:
@@ -279,6 +283,8 @@ def test_offline_queue_runs_mods_concurrently(
         *,
         metadata: Any = None,
         on_status: Any = None,
+        force_refresh: bool = False,
+        **_kwargs: Any,
     ) -> Path:
         nonlocal current, peak
         with lock:

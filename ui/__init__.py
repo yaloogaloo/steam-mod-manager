@@ -1,5 +1,5 @@
-"""PySide6 GUI package for Steam Workshop Mod Manager."""
+"""Legacy business Workers and shared helpers; the application UI is frontend.web_window.
 
-from .main_window import MainWindow
-
-__all__ = ["MainWindow"]
+Do not import Widgets pages here: importing a Worker must not construct or load
+an alternative frontend. main.py owns the single WebEngine application entry.
+"""

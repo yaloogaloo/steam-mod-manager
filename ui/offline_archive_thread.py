@@ -8,6 +8,12 @@ from PySide6.QtCore import QThread, Signal
 
 from core.mod_platform import PLATFORM_STEAM, normalize_platform
 from core.models import ModMetadata
+from services.offline.base import (
+    OFFLINE_OUTCOME_FAILED,
+    OFFLINE_OUTCOME_RATE_LIMITED,
+    OFFLINE_OUTCOME_SKIPPED,
+    OFFLINE_OUTCOME_SUCCESS,
+)
 from services.offline.manager import OfflineManager, attach_nexus_offline_page
 
 
@@ -17,10 +23,14 @@ class OfflineArchiveWorker(QThread):
 
     UI must not call platform providers directly.
     Nexus uses :class:`OfflineHtmlImportWorker` instead (manual HTML import).
+
+    Manual "保存离线页面" always uses ``force_refresh=True`` so existing
+    ``index.html`` cannot be reported as a fresh save success.
     """
 
     archive_started = Signal()
-    archive_finished = Signal(str)  # index.html path
+    archive_finished = Signal(str)  # index.html path — SUCCESS only
+    archive_skipped = Signal(str)  # skip_reason — not a success save
     archive_failed = Signal(str)
 
     def __init__(
@@ -28,39 +38,67 @@ class OfflineArchiveWorker(QThread):
         managed_path: str | Path,
         *,
         platform: str = PLATFORM_STEAM,
-        published_file_id: str | int = "",
+        internal_id: str | int = "",
+        published_file_id: str | int = "",  # deprecated alias of internal_id
         metadata: ModMetadata | None = None,
         library_root: str | Path | None = None,
+        force_refresh: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.managed_path = Path(managed_path)
         self.platform = normalize_platform(platform)
-        self.published_file_id = str(published_file_id or "").strip()
+        # Frozen Entity UUID — never Steam Workshop published_file_id.
+        self.internal_id = str(internal_id or published_file_id or "").strip()
+        self.published_file_id = self.internal_id  # back-compat attribute name
         self.metadata = metadata
         self.library_root = Path(library_root) if library_root else self.managed_path.parents[1]
+        self.force_refresh = bool(force_refresh)
 
     def run(self) -> None:
         self.archive_started.emit()
         try:
-            mid = self.published_file_id or (
-                self.metadata.published_file_id if self.metadata else ""
+            mid = self.internal_id or (
+                self.metadata.entity_internal_id() if self.metadata else ""
             )
             if not mid:
                 mid = self.managed_path.name
+            from services.mod_library_cache import dal_mod_pk
+
+            pk = dal_mod_pk(mid) or (mid if str(mid).isdigit() else "")
             manager = OfflineManager(library_root=self.library_root)
             result = manager.update_mod_offline(
-                mid,
+                pk or mid,
                 managed_path=self.managed_path,
                 metadata=self.metadata,
                 platform=self.platform,
+                force_refresh=self.force_refresh,
             )
             if self.isInterruptionRequested():
                 return
+            outcome = getattr(result, "outcome", None) or ""
+            if outcome == OFFLINE_OUTCOME_SKIPPED:
+                self.archive_skipped.emit(
+                    getattr(result, "skip_reason", "") or "cache_hit"
+                )
+                return
+            if outcome in (OFFLINE_OUTCOME_FAILED, OFFLINE_OUTCOME_RATE_LIMITED):
+                err = (result.error or "").strip() or (
+                    "Steam 限流，请稍后重试"
+                    if outcome == OFFLINE_OUTCOME_RATE_LIMITED
+                    else "离线页面保存失败"
+                )
+                self.archive_failed.emit(err)
+                return
             if result.status == "failed" and result.error:
-                if not result.index_path.is_file() or result.index_path.stat().st_size <= 0:
-                    self.archive_failed.emit(result.error)
-                    return
+                # Never treat FAILED + existing old file as success.
+                self.archive_failed.emit(result.error)
+                return
+            if outcome and outcome != OFFLINE_OUTCOME_SUCCESS:
+                self.archive_failed.emit(
+                    (result.error or "").strip() or f"unexpected outcome={outcome}"
+                )
+                return
             self.archive_finished.emit(str(result.index_path))
         except Exception as exc:  # noqa: BLE001
             self.archive_failed.emit(str(exc))
@@ -71,6 +109,7 @@ class OfflineHtmlImportWorker(QThread):
 
     archive_started = Signal()
     archive_finished = Signal(str)
+    archive_skipped = Signal(str)
     archive_failed = Signal(str)
 
     def __init__(
@@ -79,7 +118,8 @@ class OfflineHtmlImportWorker(QThread):
         html_path: str | Path,
         *,
         platform: str,
-        published_file_id: str | int = "",
+        internal_id: str | int = "",
+        published_file_id: str | int = "",  # deprecated alias of internal_id
         library_root: str | Path | None = None,
         clean: bool = True,
         parent=None,
@@ -88,14 +128,15 @@ class OfflineHtmlImportWorker(QThread):
         self.managed_path = Path(managed_path)
         self.html_path = Path(html_path)
         self.platform = normalize_platform(platform)
-        self.published_file_id = str(published_file_id or "").strip()
+        self.internal_id = str(internal_id or published_file_id or "").strip()
+        self.published_file_id = self.internal_id  # back-compat attribute name
         self.library_root = Path(library_root) if library_root else self.managed_path.parents[1]
         self.clean = bool(clean)
 
     def run(self) -> None:
         self.archive_started.emit()
         try:
-            mid = self.published_file_id or self.managed_path.name
+            mid = self.internal_id or self.managed_path.name
             result = attach_nexus_offline_page(
                 mid,
                 self.html_path,
@@ -104,6 +145,11 @@ class OfflineHtmlImportWorker(QThread):
                 clean=self.clean,
             )
             if self.isInterruptionRequested():
+                return
+            if result.status == "failed":
+                self.archive_failed.emit(
+                    (result.error or "").strip() or "导入离线页面失败"
+                )
                 return
             self.archive_finished.emit(str(result.index_path))
         except Exception as exc:  # noqa: BLE001

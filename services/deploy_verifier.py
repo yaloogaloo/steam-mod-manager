@@ -1,9 +1,20 @@
-"""Deploy-time source / result verification (runtime only; not manifest format)."""
+"""Deploy-time source / result verification (runtime only; not manifest format).
+
+DEPLOYMENT SUCCESS AUTHORITY (permanent)
+
+``verify_file_plan`` consumes DeployFilePlan and decides whether required
+planned targets exist. Apply executes; Verify owns Core deploy success.
+
+Do NOT infer success from newly created files, snapshot diffs, target-tree
+scans, or Strategy-reported deployed lists. Pre-existing targets still count.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,27 +44,24 @@ def _is_archive_name(name: str) -> bool:
 
 def iter_loose_deploy_files(root: Path, *, skip_archives: bool = True) -> list[Path]:
     """Non-metadata files under *root* (optionally excluding archives)."""
+    from services.deploy_fs import safe_iter_files
+
     base = Path(root)
     if not base.is_dir():
         return []
     files: list[Path] = []
-    try:
-        for path in base.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                parts = path.relative_to(base).parts
-            except ValueError:
-                continue
-            if any(part in _SKIP_DIR_NAMES or part.startswith(".") for part in parts[:-1]):
-                continue
-            if parts and parts[0] in _SKIP_DIR_NAMES:
-                continue
-            if skip_archives and _is_archive_name(path.name):
-                continue
-            files.append(path)
-    except OSError:
-        return []
+    for path in safe_iter_files(base):
+        try:
+            parts = path.relative_to(base).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIR_NAMES or part.startswith(".") for part in parts[:-1]):
+            continue
+        if parts and parts[0] in _SKIP_DIR_NAMES:
+            continue
+        if skip_archives and _is_archive_name(path.name):
+            continue
+        files.append(path)
     return files
 
 
@@ -105,6 +113,29 @@ def verify_deploy_source(
     )
 
 
+def _source_size_check_applies(source: Path | None, entry: Any = None) -> bool:
+    """
+    Size compare only when *source* is a regular non-archive file.
+
+    IMPORTANT:
+    Archive source size and extracted file size are unrelated.
+    Never use archive size to verify an extracted target file.
+    """
+    entry_type = str(getattr(entry, "type", "") or "").strip().lower()
+    if entry_type in {"archive", "generated", "virtual"}:
+        return False
+    if source is None:
+        return False
+    try:
+        if not source.is_file():
+            return False
+    except OSError:
+        return False
+    if _is_archive_name(source.name):
+        return False
+    return True
+
+
 def verify_deploy_result(
     result: Any,
     *,
@@ -112,10 +143,11 @@ def verify_deploy_result(
     check_hash: bool = False,
 ) -> int:
     """
-    Post-deploy gate: every manifest target must exist and match source size.
+    Post-deploy gate: every manifest target must exist as a file or directory.
 
-    Optional sha256 when ``check_hash=True``. Raises ``DeployValidationError``.
-    Returns validated entry count.
+    Empty files (size 0) are valid deploy targets — marker/flag files must not
+    fail validation. Size/hash checks apply only when the source is a regular
+    non-archive file. Raises ``DeployValidationError``. Returns validated count.
     """
     manifest = getattr(result, "manifest", None)
     if manifest is None:
@@ -147,13 +179,18 @@ def verify_deploy_result(
             missing.append(str(target))
             continue
 
+        try:
+            dst_size = int(target.stat().st_size)
+        except OSError:
+            missing.append(f"{target} (unreadable)")
+            continue
+
         raw_source = str(getattr(entry, "source", "") or "").strip()
         source = Path(raw_source) if raw_source else None
 
-        if check_size and source is not None and source.is_file():
+        if check_size and _source_size_check_applies(source, entry):
             try:
                 src_size = int(source.stat().st_size)
-                dst_size = int(target.stat().st_size)
             except OSError:
                 size_mismatches.append(str(target))
             else:
@@ -162,7 +199,7 @@ def verify_deploy_result(
                         f"{target} (source={src_size} target={dst_size})"
                     )
 
-        if check_hash and source is not None and source.is_file():
+        if check_hash and _source_size_check_applies(source, entry):
             try:
                 if _sha256_file(source) != _sha256_file(target):
                     hash_mismatches.append(str(target))
@@ -185,3 +222,77 @@ def verify_deploy_result(
             missing_targets=hash_mismatches,
         )
     return len(entries)
+
+
+@dataclass
+class FilePlanVerifyResult:
+    success: bool
+    verified: int = 0
+    failed: int = 0
+    error: str = ""
+    missing_targets: list[str] = field(default_factory=list)
+
+
+def verify_file_plan(plan: Any) -> FilePlanVerifyResult:
+    """
+    DEPLOYMENT SUCCESS AUTHORITY — verify required FilePlan targets exist.
+
+    Consumes FilePlan only. Existing identical targets count as success.
+    Never rescans a directory to invent files or uses after−before accounting.
+    """
+    entries = list(getattr(plan, "files", None) or [])
+    if not entries:
+        diag = getattr(plan, "diagnostics", None)
+        if diag is not None:
+            diag.stage = "verify"
+            diag.verified_files = 0
+            diag.failed_files = 0
+        return FilePlanVerifyResult(
+            success=False,
+            error="FilePlan 为空：无法校验",
+            missing_targets=[],
+        )
+
+    missing: list[str] = []
+    verified = 0
+    for entry in entries:
+        if not bool(getattr(entry, "required", True)):
+            continue
+        raw = str(getattr(entry, "target_absolute", "") or "").strip()
+        if not raw:
+            missing.append("(empty target_absolute)")
+            continue
+        target = Path(raw)
+        from services.deploy_op_profile import record_op
+
+        t0 = time.perf_counter()
+        is_file = target.is_file()
+        record_op("is_file", (time.perf_counter() - t0) * 1000.0, path=raw)
+        if is_file:
+            verified += 1
+            continue
+        t1 = time.perf_counter()
+        is_dir = target.is_dir()
+        record_op("is_dir", (time.perf_counter() - t1) * 1000.0, path=raw)
+        if is_dir:
+            # Rare directory targets — treat as present.
+            verified += 1
+            continue
+        missing.append(raw)
+
+    diag = getattr(plan, "diagnostics", None)
+    if diag is not None:
+        diag.stage = "verify"
+        diag.verified_files = verified
+        diag.failed_files = len(missing)
+        diag.failed_details = list(missing)
+
+    if missing:
+        return FilePlanVerifyResult(
+            success=False,
+            verified=verified,
+            failed=len(missing),
+            error=f"校验失败：缺少 {len(missing)} 个目标文件",
+            missing_targets=missing,
+        )
+    return FilePlanVerifyResult(success=True, verified=verified)

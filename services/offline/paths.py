@@ -113,22 +113,6 @@ def iter_offline_sidecar_candidates(
             continue
 
 
-def iter_offline_page_candidates(
-    managed_path: str | Path,
-    *,
-    offline_page_path: str | None = None,
-) -> Iterator[Path]:
-    """Yield candidates in the same preference order as resolution."""
-    root = Path(managed_path)
-    for info_name in _info_dir_names():
-        yield root / info_name / OFFLINE_SNAPSHOT_DIR / OFFLINE_INDEX_NAME
-    for info_name in _info_dir_names():
-        yield root / info_name / OFFLINE_INDEX_NAME
-    yield from iter_offline_sidecar_candidates(
-        root, offline_page_path=offline_page_path
-    )
-
-
 def resolve_offline_page_path(
     managed_path: str | Path,
     *,

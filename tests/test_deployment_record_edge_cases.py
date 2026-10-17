@@ -12,8 +12,9 @@ from core.db_manager import (
     DatabaseManager,
 )
 from core.game_info import GameInfo
-from core.models import ModMetadata
+from core.mod_platform import PLATFORM_STEAM
 from services import deployment_record as dr
+from services.identity_service import create_mod_identity, identity_create_scope
 from ui.library_query import (
     FILTER_ALL,
     FILTER_ANOMALY,
@@ -64,19 +65,25 @@ def _mod(
     app_id: int,
     deployed: bool = False,
 ) -> None:
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id=str(mod_id),
+    game = db.get_game(app_id)
+    game_name = game.name if game is not None else ""
+    with identity_create_scope():
+        created = create_mod_identity(
+            db,
+            platform=PLATFORM_STEAM,
+            external_id=str(mod_id),
+            workshop_id=str(mod_id),
             title=f"Mod {mod_id}",
             app_id=app_id,
+            game_name=game_name,
         )
-    )
+    entity_id = int(created.mod_id)
     db.update_mod_deploy_status(
-        mod_id,
+        entity_id,
         deploy_status=(
             DEPLOY_STATUS_DEPLOYED if deployed else DEPLOY_STATUS_NOT_DEPLOYED
         ),
-        deploy_path="" if not deployed else f"/fake/{mod_id}",
+        deploy_path="" if not deployed else f"/fake/{entity_id}",
     )
 
 
@@ -127,6 +134,7 @@ def test_case1_delete_active_record_returns_to_all(
         record_id=int(record.id),
         record_name=record.name,
     )
+    view._card_entries = [(_index("9", deployed=True), card)]
     view._cached_record_mod_ids = frozenset({"1", "2"})
     view._sync_record_overlays()
     assert view._status_filter == FILTER_DEPLOYMENT_RECORD
@@ -193,7 +201,7 @@ def test_case4_ghost_record_mod_ignored_in_visibility() -> None:
         filter_key=FILTER_DEPLOYMENT_RECORD,
         record_mod_ids=recorded,
     )
-    assert visible == ["A", "B"]
+    assert visible == ["B", "A"]
     assert matches_record_visibility(entries[0][0], recorded)
     assert matches_record_visibility(entries[1][0], recorded)
     assert "999999" not in [str(p) for p in visible]
@@ -224,6 +232,8 @@ def test_case5_ordinary_filters_clear_record_badge(qapp, tmp_path: Path) -> None
         view._set_library_status_filter(
             FILTER_DEPLOYMENT_RECORD, record_id=1, record_name="x"
         )
+        view._card_entries = [(_index("4", deployed=True), card)]
+        view._card_cache = {"4": card}
         view._cached_record_mod_ids = frozenset({"1"})
         view._sync_record_overlays()
         assert not card.record_badge.isHidden()
@@ -232,6 +242,9 @@ def test_case5_ordinary_filters_clear_record_badge(qapp, tmp_path: Path) -> None
         assert view._status_filter == key
         assert getattr(card, "_record_relative", None) is None
         assert card.record_badge.isHidden()
+        # Re-attach for next iteration (empty filter path clears entries).
+        view._card_entries = [(_index("4", deployed=True), card)]
+        view._card_cache = {"4": card}
 
 
 def test_no_active_record_apis_in_production(qapp) -> None:

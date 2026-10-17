@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from core.models import ModMetadata
 from core.sanitize import sanitize_folder_name
-from services.file_ops import INFO_DIR_NAME, METADATA_FILENAME, ModFileManager
+from services.file_ops import ModFileManager
 from services.importers.image_picker import apply_cover_to_mod
 from services.importers.importer_base import (
     MISSING_GAME_CONTEXT,
@@ -19,23 +18,19 @@ from services.importers.importer_base import (
 
 
 def find_managed_mod_path(library_root: str | Path, mod_id: str | int) -> Path | None:
-    """Locate ``…/<mod>/.info/mod.json`` whose published_file_id matches *mod_id*."""
+    """Locate managed folder by Internal ID (``.info/internal_id`` proof only)."""
     mid = str(mod_id).strip()
     root = Path(library_root)
     if not mid or not root.is_dir():
         return None
-    for info_dir in root.rglob(INFO_DIR_NAME):
-        if not info_dir.is_dir():
-            continue
-        meta_path = info_dir / METADATA_FILENAME
-        if not meta_path.is_file():
-            continue
-        try:
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
-            continue
-        if str(data.get("published_file_id") or "").strip() == mid:
-            return info_dir.parent
+    try:
+        from services.path_lifecycle import resolve_managed_folder
+
+        resolved = resolve_managed_folder(mid, library_root=root, db=None)
+        if resolved.path is not None and resolved.path.is_dir():
+            return resolved.path
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
@@ -70,8 +65,9 @@ def resolve_materialize_game_name(
 def materialize_imported_mod(
     *,
     library_root: str | Path,
-    mod_id: str | int,
     title: str,
+    internal_id: str | int | None = None,
+    mod_id: str | int | None = None,  # deprecated alias of internal_id
     game_name: str = "",
     source_folder: str | Path | None = None,
     cover_source: str | Path | None = None,
@@ -85,6 +81,8 @@ def materialize_imported_mod(
     """
     Ensure a filesystem folder exists under the managed library.
 
+    *internal_id* is ``mods.mod_id`` (entity PK). Never pass Steam Workshop ID.
+
     - If *source_folder* is a directory → copy into ``<game>/<title>/``
     - Else → create an empty stub folder with ``.info/mod.json`` only
     - Cover images / ``.mhtml`` discovered under the source (or passed via
@@ -94,8 +92,19 @@ def materialize_imported_mod(
     Does not change ``.info`` schema — writes the existing ``mod.json`` shape.
     """
     del cover_flat_roots, cover_search_roots
-    mid = str(mod_id).strip()
-    name = (title or "").strip() or f"Unknown_Mod_{mid}"
+    mid = str(internal_id if internal_id is not None else mod_id or "").strip()
+    if not mid:
+        raise ValueError("internal_id is required")
+    from core.models import is_unknown_mod_title, library_mod_folder_fallback
+    from services.identity_service import sidecar_published_file_id
+
+    raw_title = (title or "").strip()
+    # Persist a display title when provided; never invent ``Unknown_Mod_*`` for
+    # the library leaf — ``mod_folder_name`` / allocate use ``Mod_<id>``.
+    if raw_title and not is_unknown_mod_title(raw_title, published_file_id=mid):
+        name = raw_title
+    else:
+        name = library_mod_folder_fallback(mid)
     game = sanitize_folder_name(
         resolve_materialize_game_name(
             game_name,
@@ -107,15 +116,37 @@ def materialize_imported_mod(
     if is_invalid_game_name(game) and not allow_invalid_game_name:
         raise ValueError(MISSING_GAME_CONTEXT)
 
+    plat = ""
+    ext = ""
+    if context is not None:
+        plat = str(getattr(context, "platform", None) or "")
+        if not plat and isinstance(context, dict):
+            plat = str(context.get("platform") or "")
+        ext = str(getattr(context, "external_id", None) or "")
+        if not ext and isinstance(context, dict):
+            ext = str(context.get("external_id") or "")
+    pub = sidecar_published_file_id(mod_id=mid, platform=plat, external_id=ext)
+
     mgr = ModFileManager(library_root)
     meta = ModMetadata(
-        published_file_id=mid,
+        published_file_id=pub,
+        internal_id=mid,
         title=name,
         game_name=game,
         source_path=str(source_folder) if source_folder else None,
         cover_path="",
     )
     src = Path(str(source_folder)).expanduser() if source_folder else None
+    if src is not None and src.is_dir():
+        from services.mod_path_validation import (
+            InvalidModRootError,
+            validate_import_source_root,
+        )
+
+        try:
+            validate_import_source_root(src, library_root=library_root)
+        except InvalidModRootError as exc:
+            raise ValueError(str(exc)) from exc
     ignore_files: list[Path] = list(copy_ignore or ())
     cover_raw = str(cover_source or "").strip()
     effective_cover: Path | None = Path(cover_raw).expanduser() if cover_raw else None
@@ -134,16 +165,37 @@ def materialize_imported_mod(
                 effective_cover = sidecars.cover
         except Exception:  # noqa: BLE001
             pass
+        planned = mgr.allocate_destination(meta)
+        created_live = not planned.exists()
         dest = mgr.copy_mod(
             meta,
             overwrite_existing=False,
+            destination=planned,
             ignore_files=ignore_files or None,
         )
     else:
         dest = mgr.allocate_destination(meta)
+        created_live = not dest.exists()
         dest.mkdir(parents=True, exist_ok=True)
     meta.managed_path = str(dest)
     mgr.save_metadata(meta, dest, sync_backup=False)
+
+    try:
+        from services.sidecar_hydration import hydrate_managed_sidecar
+
+        hydrated = hydrate_managed_sidecar(
+            dest,
+            owner_mod_id=mid,
+            source="import",
+            backup_wins=created_live,
+            commit_backup=False,
+        )
+        if not hydrated.ok:
+            raise ValueError("sidecar hydration failed after import materialize")
+    except ValueError:
+        raise
+    except Exception:  # noqa: BLE001
+        hydrated = None
 
     if effective_cover is not None:
         rel = apply_cover_to_mod(
@@ -160,23 +212,42 @@ def materialize_imported_mod(
         try:
             from core.db_manager import get_db
 
-            get_db().update_mod_cover_path(mid, "")
+            live_cover = mgr.find_local_cover(dest)
+            if live_cover is not None:
+                get_db().update_mod_cover_path(
+                    mid, f"{live_cover.parent.name}/{live_cover.name}"
+                )
+            else:
+                get_db().update_mod_cover_path(mid, "")
         except Exception:  # noqa: BLE001
             pass
 
-    # Portable snapshot for folder-copy reimport.
+    # Portable snapshot for folder-copy reimport — must include internal_id proof.
     try:
-        from services.info_sidecar import write_sidecar_for_mod
+        from services.info_sidecar import ensure_registration_info_proof
 
-        write_sidecar_for_mod(dest, mid, sync_backup=False)
+        ensure_registration_info_proof(dest, mid)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(str(exc) or "registration .info proof failed") from exc
+
+    # Content Validator: Import materializes entity+files, then authority
+    # evaluates payload → content_status. Do not call apply_missing_content_marker.
+    try:
+        from services.content_status_eval import persist_evaluated_content_status
+
+        persist_evaluated_content_status(
+            mid,
+            dest,
+            folder_present=True,
+            sync_sticky_marker=True,
+        )
     except Exception:  # noqa: BLE001
         pass
 
-    # Empty dir / empty archive payloads are allowed — mark missing content.
     try:
-        from services.file_ops import apply_missing_content_marker
+        from services.size_observation import note_mod_size_ready
 
-        apply_missing_content_marker(dest, sync_backup=False)
+        note_mod_size_ready(mid, dest)
     except Exception:  # noqa: BLE001
         pass
 

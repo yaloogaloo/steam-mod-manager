@@ -8,6 +8,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from pathlib import Path
 
 from core.models import ModMetadata
@@ -25,6 +26,15 @@ from .archive import (
     read_archive_status,
 )
 from .file_ops import COVER_BASENAME, ModFileManager
+from .source_timestamp import (
+    SourceTimestampDecision,
+    compare_source_timestamps,
+    normalize_source_timestamp,
+)
+from .steam_sync_junction import (
+    evaluate_steam_sync_update_copy,
+    log_steam_sync_junction_decision,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +107,19 @@ class SyncResult:
     """Outcome of a full or partial library sync."""
 
     success: list[ModMetadata] = field(default_factory=list)
+    updated: list[ModMetadata] = field(default_factory=list)
     skipped: list[ModMetadata] = field(default_factory=list)
+    baselined: list[ModMetadata] = field(default_factory=list)
     failed: list[tuple[ModMetadata | None, str]] = field(default_factory=list)
     rate_limited: list[tuple[ModMetadata | None, str]] = field(default_factory=list)
+    # Lifecycle counters — sync success requires files AND entities.
+    source_count: int = 0
+    materialized_count: int = 0
+    identity_success_count: int = 0
+    entity_created_count: int = 0
+    entity_bound_count: int = 0
+    library_count: int = 0
+    registration_failed: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def total_processed(self) -> int:
@@ -122,10 +142,15 @@ class SyncOptions:
     # Concurrency knobs
     io_workers: int | None = None  # default: 2..4 based on CPU
     net_workers: int | None = None  # default: 12
-    # Optional HTTP(S) proxy, e.g. "http://127.0.0.1:7890"
+    # Optional HTTP(S)/SOCKS proxy URL. Empty = system auto-detect.
     proxy_url: str = ""
     # Optional Steam browser Cookie string (steamLoginSecure / sessionid / …)
     steam_cookie: str = ""
+
+    # Explicit subset/game admission for the WebEngine isolated workflow.
+    full_sync: bool = False
+    selected_ids: list[str] | None = None
+    app_id: int = 0
 
     def proxies_dict(self) -> dict[str, str] | None:
         """Convert ``proxy_url`` into a ``requests``-compatible proxies dict."""
@@ -145,6 +170,31 @@ class ModSyncService:
       3. Batch-fetch metadata only for mods that still need work
       4. Resolve unique game names (parallel, cache-first)
       5. Concurrent copy (small IO pool) + cover/archive (larger net pool)
+      6. Entity registration — every materialized workshop folder must bind
+         or create a Steam Mod entity (files alone are not a successful sync)
+
+    ARCHITECTURE RULE
+    -----------------
+    Sync success means filesystem materialization **and** Mod entity
+    registration. Do not rely on later reconcile / UI scans to invent
+    missing entities. Do not skip registration for ``skip_existing`` folders.
+
+    FS-first is intentional (not an Import clone):
+      * Source of work is already-on-disk Steam Workshop folders.
+      * Destination may already exist from a prior incomplete run
+        (``skip_existing``); discovery of that folder is required before bind.
+      * Do not mint a Library entity until a managed folder is present.
+      * Copy / enrich may write Steam platform facts into ``.info``
+        (workspace / external / published_file_id). That is not an Internal
+        entity. ``internal_id`` is written only after Identity Service bind
+        (``ensure_registration_info_proof``).
+      * Identity create/bind still goes only through Identity Service.
+        Sync never copies Workshop ID or folder names into ``mods.mod_id``.
+      * Copy/identity failure does not delete the managed folder. The next
+        Sync run re-discovers it and registers (idempotent rematch).
+      * Reconcile must not create entities for leftover folders.
+      * UI refuses a second Sync while one is running; SQLite uniqueness is
+        the last line of defence for two processes.
     """
 
     def __init__(
@@ -155,17 +205,30 @@ class ModSyncService:
         client: SteamWorkshopClient | None = None,
         file_manager: ModFileManager | None = None,
         archiver: OfflinePageArchiver | None = None,
+        resources=None,
     ) -> None:
+        self.resources = resources
+        self._active_app_id = 0
         self.workshop_dir = Path(workshop_dir)
         self.target_dir = Path(target_dir)
         self._owns_client = client is None
+        if resources and client is None:
+            with resources.bind():
+                client=SteamWorkshopClient(db=resources.db,proxy_url='',enable_scrape_fallback=False)
         self.client = client or SteamWorkshopClient()
         self.files = file_manager or ModFileManager(self.target_dir)
-        self._owns_archiver = archiver is None
-        self.archiver = archiver or OfflinePageArchiver()
+        self._owns_archiver = archiver is None and resources is None
+        self.archiver = archiver if resources else archiver or OfflinePageArchiver()
         self._archive_ctx: SteamArchiveSyncContext | None = None
         # Protect destination path allocation across IO workers
         self._alloc_lock = threading.Lock()
+        # Mod IDs that need copytree overwrite due to Steam source update detection.
+        self._force_overwrite_ids: set[str] = set()
+
+    def _run_scoped(self,function,*args):
+        with self.resources.source_network('sync') if getattr(self.resources,'production',False) else nullcontext():
+            with self.resources.bind() if self.resources else nullcontext():
+                return function(*args)
 
     def close(self) -> None:
         self._end_archive_batch()
@@ -182,6 +245,7 @@ class ModSyncService:
 
     def _begin_archive_batch(self, opts: SyncOptions) -> None:
         """One shared curl_cffi Session for all archive work in this sync run."""
+        if self.resources and not opts.archive_pages:return
         proxies = opts.proxies_dict()
         timeout = self.client.timeout
         cookie = (opts.steam_cookie or "").strip() or None
@@ -214,6 +278,21 @@ class ModSyncService:
         *,
         on_progress: ProgressCallback | None = None,
     ) -> SyncResult:
+        with self.resources.bind() if self.resources else nullcontext():
+            if self.resources:
+                if self.target_dir != self.resources.path('mod'):
+                    raise PermissionError('同步归档根不匹配')
+                self.resources.validate(self.workshop_dir)
+                if not options or options.app_id <= 0 or (not options.selected_ids and not (getattr(self.resources,'production',False) and options.full_sync)):
+                    raise PermissionError('隔离同步必须明确当前游戏及已确认成员')
+                if options.archive_pages or options.overwrite_files or (options.download_covers and not getattr(self.resources,'production',False)):
+                    raise PermissionError('未准入封面/离线下载或无条件覆盖')
+                if self.workshop_dir.name!=str(options.app_id) or self.workshop_dir.parent.name!='content':
+                    raise PermissionError('Workshop 目录与当前 AppID 不匹配')
+                self._active_app_id = options.app_id
+            return self._sync_scoped(options,on_progress=on_progress)
+
+    def _sync_scoped(self,options=None,*,on_progress=None):
         opts = options or SyncOptions()
         result = SyncResult()
         self.files.ensure_target_root()
@@ -239,7 +318,7 @@ class ModSyncService:
         # --- Phase 0: fix legacy numeric Mod folder names ---
         progress("scan", 0, 1, "Migrating numeric mod folders to real titles…")
         try:
-            renames = self.files.migrate_numeric_mod_folders()
+            renames = [] if self.resources else self.files.migrate_numeric_mod_folders()
             if renames:
                 progress(
                     "scan",
@@ -254,44 +333,114 @@ class ModSyncService:
         progress("scan", 0, 1, "Scanning workshop directory…")
         scanner = WorkshopScanner(self.workshop_dir)
         scanned = scanner.scan(recursive=opts.recursive_scan)
+        if opts.selected_ids is not None:
+            selected=set(opts.selected_ids)
+            scanned=[item for item in scanned if item.published_file_id in selected]
+            missing=selected-{item.published_file_id for item in scanned}
+            for wid in sorted(missing):
+                result.failed.append((ModMetadata(published_file_id=wid),'所选 Workshop 本体目录已缺失'))
         progress("scan", 1, 1, f"Found {len(scanned)} mod folder(s)")
 
         if not scanned:
             return result
 
-        # --- Phase 1b: index library + granular delta (NO network) ---
+        # --- Phase 1b: index library + timestamp-aware delta (minimal network) ---
         progress("scan", 1, 1, "Indexing local library for delta sync…")
         existing_index = self._build_existing_index()
+        self._force_overwrite_ids = set()
+        self._timestamp_failures = {}
 
-        to_skip: list[tuple[str, Path]] = []  # fully synced — nothing to do
-        to_fetch: list = []  # need copy and/or missing-component fill
+        to_skip: list[tuple[str, Path]] = []
+        to_fetch: list = []
+        skip_candidates: list[tuple] = []
+        baselined_ids: set[str] = set()
 
         for item in scanned:
             existing = existing_index.get(item.published_file_id)
             if opts.overwrite_files:
-                # Force overwrite: never early-skip
                 to_fetch.append(item)
                 continue
-            if (
-                existing
-                and opts.skip_existing
-                and self._is_fully_synced_mod(existing)
-            ):
-                to_skip.append((item.published_file_id, existing))
-            else:
-                # Missing / empty index.html, numeric folder name, or no folder
+            if self.resources and existing:
+                from services.local_file_index import has_local_mod_payload
+                if not has_local_mod_payload(existing,db=self.resources.db):
+                    self._force_overwrite_ids.add(item.published_file_id)
+                    to_fetch.append(item)
+                    continue
+            if not existing or not self._is_fully_synced_mod(existing):
                 to_fetch.append(item)
+                continue
+            skip_candidates.append((item, existing))
+
+        source_ts_by_id = self._fetch_source_timestamps_for_candidates(
+            skip_candidates,
+            progress,
+        )
+
+        for item, existing in skip_candidates:
+            pub_id = item.published_file_id
+            if self.resources and pub_id in self._timestamp_failures:
+                result.failed.append((ModMetadata(published_file_id=pub_id),self._timestamp_failures[pub_id]))
+                continue
+            local_meta = self.files.load_metadata(existing)
+            local_ts = (
+                normalize_source_timestamp(local_meta.time_updated)
+                if local_meta
+                else None
+            )
+            source_ts = source_ts_by_id.get(pub_id)
+            if pub_id not in source_ts_by_id:
+                # API returned no row; use scanner stat (one stat/mod at scan time).
+                # Never used when API explicitly returned zero/missing time_updated.
+                source_ts = normalize_source_timestamp(item.source_dir_mtime)
+
+            decision = compare_source_timestamps(
+                source_ts,
+                local_ts,
+                local_sync_complete=True,
+            )
+            logger.debug(
+                "[SYNC] mod_id=%s source_timestamp=%s local_timestamp=%s decision=%s",
+                pub_id,
+                source_ts,
+                local_ts,
+                decision.value,
+            )
+
+            if decision == SourceTimestampDecision.UPDATED:
+                to_fetch.append(item)
+                self._force_overwrite_ids.add(pub_id)
+                continue
+
+            if decision == SourceTimestampDecision.BASELINE:
+                if source_ts and self._apply_source_timestamp_baseline(
+                    existing, pub_id, source_ts
+                ):
+                    stub = self._stub_metadata_for_skip(pub_id, existing, item, scanned)
+                    loaded = self.files.load_metadata(existing)
+                    if loaded:
+                        stub.title = loaded.title
+                        stub.game_name = loaded.game_name
+                        stub.app_id = loaded.app_id
+                        stub.time_updated = source_ts
+                    result.baselined.append(stub)
+                    baselined_ids.add(pub_id)
+                to_skip.append((pub_id, existing))
+                continue
+
+            to_skip.append((pub_id, existing))
 
         for pub_id, managed in to_skip:
-            stub = ModMetadata(
-                published_file_id=pub_id,
-                managed_path=str(managed),
-                source_path=str(
-                    next(
-                        (s.path for s in scanned if s.published_file_id == pub_id),
-                        managed,
-                    )
-                ),
+            if pub_id in baselined_ids:
+                continue
+            item = next(
+                (s for s in scanned if s.published_file_id == pub_id),
+                None,
+            )
+            stub = self._stub_metadata_for_skip(
+                pub_id,
+                managed,
+                item,
+                scanned,
             )
             loaded = self.files.load_metadata(managed)
             if loaded:
@@ -300,21 +449,45 @@ class ModSyncService:
                 stub.app_id = loaded.app_id
                 stub.cover_path = loaded.cover_path
                 stub.offline_page_path = loaded.offline_page_path
+                stub.time_updated = loaded.time_updated
             self.files.enrich_title_from_db(stub)
             result.skipped.append(stub)
 
-        if to_skip:
+        updated_count = len(self._force_overwrite_ids)
+        if to_skip or to_fetch:
             progress(
                 "metadata",
                 0,
                 max(len(to_fetch), 1),
-                f"Delta sync: {len(to_skip)} fully synced, "
-                f"{len(to_fetch)} need work (copy / rename / offline page)",
+                f"Delta sync: {len(to_skip)} up to date, "
+                f"{len(to_fetch)} need work"
+                + (f" ({updated_count} Steam-updated)" if updated_count else "")
+                + f" ({len(result.baselined)} baseline)",
             )
 
         if not to_fetch:
             total = len(to_skip)
-            progress("done", total, max(total, 1), "Sync complete (nothing new)")
+            progress(
+                "sync",
+                total,
+                max(total, 1),
+                "Files up to date — registering Mod entities…",
+            )
+            self._register_synced_entities(
+                scanned,
+                existing_index,
+                result,
+                progress,
+            )
+            progress(
+                "done",
+                result.library_count,
+                max(result.source_count, 1),
+                "Sync complete "
+                f"(source={result.source_count} "
+                f"materialized={result.materialized_count} "
+                f"entities={result.library_count})",
+            )
             return result
 
         # --- Phase 2: batch metadata ONLY for mods that need work ---
@@ -324,13 +497,25 @@ class ModSyncService:
         def meta_progress(done: int, total: int) -> None:
             progress("metadata", done, total, f"Batch fetching metadata {done}/{total}")
 
-        metas = self.client.get_details_batch(ids, on_progress=meta_progress)
+        fetch = self.client.refresh_details if self.resources else self.client.get_details_batch
+        metas = fetch(ids, on_progress=meta_progress)
+        if self.resources:
+            accepted=[]
+            for meta in metas:
+                if meta.fetch_error or int(meta.app_id or 0)!=opts.app_id or meta.published_file_id not in path_map:
+                    result.failed.append((meta,meta.fetch_error or 'Steam 来源 AppID / Workshop ID 不匹配'))
+                else:accepted.append(meta)
+            metas=accepted
         for meta in metas:
             meta.source_path = str(path_map.get(meta.published_file_id, ""))
             self.files.enrich_title_from_db(meta)
-            # Guarantee a non-numeric title before path allocation
+            # Guarantee a non-numeric title before path allocation.
+            # Use clean ``Mod_<id>`` for folders — never ``Unknown_Mod_*`` on disk.
             if not (meta.title or "").strip() or meta.title.strip().isdigit():
-                meta.title = f"Unknown_Mod_{meta.published_file_id}"
+                from core.models import library_mod_folder_fallback
+
+                meta.title = library_mod_folder_fallback(meta.published_file_id)
+            self._stamp_steam_identity_fields(meta)
 
         def game_progress(done: int, total: int) -> None:
             progress(
@@ -372,7 +557,7 @@ class ModSyncService:
             max_workers=net_workers
         ) as net_pool:
             copy_futures = {
-                io_pool.submit(self._copy_only, meta, opts, existing_index): meta
+                io_pool.submit(self._run_scoped, self._copy_only, meta, opts, existing_index): meta
                 for meta in metas
             }
 
@@ -429,6 +614,7 @@ class ModSyncService:
                     return _status
 
                 nf = net_pool.submit(
+                    self._run_scoped,
                     self._network_enrich_and_save,
                     meta,
                     managed,
@@ -444,6 +630,8 @@ class ModSyncService:
                     with progress_lock:
                         if outcome_hint == "skipped_incomplete":
                             result.skipped.append(meta)
+                        elif meta.published_file_id in self._force_overwrite_ids:
+                            result.updated.append(meta)
                         else:
                             result.success.append(meta)
                         archives_done += 1
@@ -469,24 +657,498 @@ class ModSyncService:
                         archives_done += 1
                     report(f"网络增强失败: {meta.display_name}", increment=1)
 
+        # --- Phase 4: entity registration (all materialized workshop folders) ---
+        self._register_synced_entities(
+            scanned,
+            existing_index,
+            result,
+            progress,
+        )
         grand_total = len(result.success) + len(result.skipped) + len(result.failed)
-        progress("done", grand_total, max(grand_total, 1), "Sync complete")
+        progress(
+            "done",
+            max(grand_total, result.library_count),
+            max(result.source_count, grand_total, 1),
+            "Sync complete "
+            f"(source={result.source_count} "
+            f"materialized={result.materialized_count} "
+            f"identity_ok={result.identity_success_count} "
+            f"created={result.entity_created_count} "
+            f"library={result.library_count})",
+        )
         return result
 
     # ------------------------------------------------------------------
     # Early-exit helpers
     # ------------------------------------------------------------------
 
+    def _register_synced_entities(
+        self,
+        scanned: list,
+        existing_index: dict[str, Path],
+        result: SyncResult,
+        progress: ProgressCallback,
+    ) -> None:
+        """
+        Bind/create a Steam Mod entity for every materialized workshop folder.
+
+        ARCHITECTURE RULE: This is part of Sync, not a post-hoc UI/reconcile
+        repair. ``skip_existing`` must not leave files without entities.
+        """
+        from core.db_manager import get_db
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+        from services.identity_service import LIFECYCLE_SYNC, lifecycle_scope
+        from services.mod_identity import resolve_existing_mod_id
+
+        if self.resources:
+            failed={str(meta.published_file_id) for meta,error in result.failed if meta is not None}
+            scanned=[item for item in scanned if item.published_file_id not in failed]
+        result.source_count = len(scanned)
+        if not scanned:
+            result.materialized_count = 0
+            result.library_count = 0
+            return
+
+        # Refresh index so newly copied title folders are visible.
+        existing_index.update(self._build_existing_index())
+        db = get_db()
+        total = len(scanned)
+        progress(
+            "sync",
+            0,
+            max(total, 1),
+            f"Registering Mod entities 0/{total}…",
+        )
+
+        with lifecycle_scope(LIFECYCLE_SYNC):
+            for index, item in enumerate(scanned, start=1):
+                wid = str(item.published_file_id or "").strip()
+                managed = existing_index.get(wid)
+                if managed is None or not Path(managed).is_dir():
+                    logger.error(
+                        "[SYNC_LIFECYCLE] count drop: managed folder missing "
+                        "workspace_id=%s (cannot register entity)",
+                        wid,
+                    )
+                    result.registration_failed.append(
+                        (wid, "managed folder missing after sync")
+                    )
+                    progress(
+                        "sync",
+                        index,
+                        total,
+                        f"Registering Mod entities {index}/{total} (missing folder)",
+                    )
+                    continue
+
+                result.materialized_count += 1
+                try:
+                    mid, created = self._ensure_steam_entity_for_folder(
+                        db,
+                        workshop_id=wid,
+                        managed=Path(managed),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "[SYNC_LIFECYCLE] identity registration failed "
+                        "workspace_id=%s folder=%s",
+                        wid,
+                        managed,
+                    )
+                    result.registration_failed.append((wid, str(exc)))
+                    stub = ModMetadata(
+                        published_file_id=wid, managed_path=str(managed)
+                    )
+                    result.failed.append((stub, f"entity registration: {exc}"))
+                    progress(
+                        "sync",
+                        index,
+                        total,
+                        f"Registering Mod entities {index}/{total} (failed)",
+                    )
+                    continue
+
+                if mid:
+                    result.identity_success_count += 1
+                    if created:
+                        result.entity_created_count += 1
+                    else:
+                        result.entity_bound_count += 1
+                else:
+                    logger.error(
+                        "[SYNC_LIFECYCLE] count drop: empty Internal ID after "
+                        "identity bind workspace_id=%s folder=%s",
+                        wid,
+                        managed,
+                    )
+                    result.registration_failed.append(
+                        (wid, "identity returned empty Internal ID")
+                    )
+                progress(
+                    "sync",
+                    index,
+                    total,
+                    f"Registering Mod entities {index}/{total}",
+                )
+
+        library_ok = 0
+        from services.file_ops import read_info_metadata_dict
+        from services.mod_identity import extract_workspace_id, read_internal_id
+
+        for item in scanned:
+            wid = str(item.published_file_id or "").strip()
+            managed = existing_index.get(wid)
+            if managed is None or not Path(managed).is_dir():
+                continue
+            # Visibility = sidecar entity_key that exists in DB as mods.internal_id.
+            # resolve_existing_mod_id is internal_id-only; do not pass
+            # workspace / folder name as if they were entity keys.
+            payload = dict(read_info_metadata_dict(managed) or {})
+            iid = read_internal_id(payload)
+            visible = bool(iid) and bool(resolve_existing_mod_id(payload, db=db))
+            if not visible:
+                loaded = self.files.load_metadata(managed)
+                app_id = int(getattr(loaded, "app_id", 0) or 0) if loaded else 0
+                ws = extract_workspace_id(
+                    workspace_id=str(getattr(loaded, "workspace_id", "") or "")
+                    if loaded
+                    else "",
+                    title=str(getattr(loaded, "title", "") or "") if loaded else "",
+                    source_url=steam_workshop_url(wid),
+                    legacy_token=wid,
+                )
+                hit = (
+                    db.find_mod_for_registration(PLATFORM_STEAM, app_id, ws or wid)
+                    if app_id > 0
+                    else None
+                )
+                visible = hit is not None
+            if visible:
+                library_ok += 1
+            else:
+                logger.error(
+                    "[SYNC_LIFECYCLE] library visibility miss workspace_id=%s folder=%s",
+                    wid,
+                    managed,
+                )
+                result.registration_failed.append(
+                    (wid, "library visibility miss after identity persist")
+                )
+        result.library_count = library_ok
+        logger.info(
+            "[SYNC_LIFECYCLE] source_count=%s materialized_count=%s "
+            "identity_success_count=%s entity_created_count=%s "
+            "entity_bound_count=%s library_count=%s reg_failed=%s",
+            result.source_count,
+            result.materialized_count,
+            result.identity_success_count,
+            result.entity_created_count,
+            result.entity_bound_count,
+            result.library_count,
+            len(result.registration_failed),
+        )
+        if result.library_count < result.source_count:
+            logger.error(
+                "[SYNC_LIFECYCLE] COUNT DROP source_count=%s "
+                "materialized_count=%s identity_success_count=%s "
+                "library_count=%s delta=%s failures=%s",
+                result.source_count,
+                result.materialized_count,
+                result.identity_success_count,
+                result.library_count,
+                result.source_count - result.library_count,
+                result.registration_failed[:20],
+            )
+        if result.registration_failed:
+            logger.warning(
+                "[SYNC_LIFECYCLE] registration failures sample=%s",
+                result.registration_failed[:12],
+            )
+
+    def _ensure_steam_entity_for_folder(
+        self,
+        db,
+        *,
+        workshop_id: str,
+        managed: Path,
+    ) -> tuple[str, bool]:
+        """
+        Workspace ID → Identity Service → Internal Mod entity.
+
+        *workshop_id* is the Steam Workshop / Workspace ID from the source
+        scan (external identity). Internal ID is allocated/bound only via
+        Identity Service — never by copying Workspace ID in Sync itself.
+        """
+        from core.game_info import GameInfo
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+        from services.identity_service import (
+            LIFECYCLE_SYNC,
+            create_mod_identity,
+            persist_identity,
+        )
+        from services.mod_identity import extract_workspace_id, read_internal_id
+
+        # Prefer Workshop ID from Steam content scan — never invent from
+        # managed library folder names.
+        loaded = self.files.load_metadata(managed)
+        meta = loaded or ModMetadata(published_file_id=str(workshop_id or "").strip())
+        workspace_id = extract_workspace_id(
+            workspace_id=str(getattr(meta, "workspace_id", "") or ""),
+            external_id="",
+            title=str(meta.title or ""),
+            source_url=str(meta.url or ""),
+            legacy_token=str(workshop_id or meta.published_file_id or "").strip(),
+        )
+        if not workspace_id:
+            raise ValueError(
+                f"cannot resolve Workshop ID for Steam sync folder {managed}"
+            )
+
+        meta.published_file_id = workspace_id
+        meta.managed_path = str(managed)
+        self._stamp_steam_identity_fields(meta)
+        if not (meta.title or "").strip() or str(meta.title).strip().isdigit():
+            from core.models import library_mod_folder_fallback
+
+            meta.title = library_mod_folder_fallback(workspace_id)
+        # Sidecar first without backup DB write — entity may not exist yet.
+        self.files.save_metadata(meta, managed, sync_backup=False, sync_reason="sync")
+        self._persist_steam_sidecar_identity(managed, meta)
+
+        app_id = int(meta.app_id or 0)
+        game_name = str(meta.game_name or managed.parent.name or "").strip()
+        if app_id > 0 and game_name and not (self.resources and db.get_game(app_id)):
+            try:
+                db.upsert_game(
+                    GameInfo(app_id=app_id, name=game_name, folder_name=game_name)
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("sync upsert_game failed app_id=%s", app_id, exc_info=True)
+
+        # Registration rematch only: (platform, app_id, workspace_id).
+        # Entity bind (.info) uses internal_id when already present.
+        existing = ""
+        sidecar_iid = ""
+        try:
+            from services.file_ops import read_info_metadata_dict
+
+            sidecar_iid = read_internal_id(read_info_metadata_dict(managed) or {})
+        except Exception:  # noqa: BLE001
+            sidecar_iid = ""
+        if sidecar_iid:
+            try:
+                found = db.find_mod_by_internal_id(sidecar_iid)
+                if found is not None:
+                    existing = str(found)
+            except Exception:  # noqa: BLE001
+                existing = ""
+        if not existing and app_id > 0:
+            hit = db.find_mod_for_registration(PLATFORM_STEAM, app_id, workspace_id)
+            if hit is not None:
+                existing = str(hit.mod_id)
+        created = False
+        if existing and str(existing).isdigit():
+            mid = str(existing)
+        else:
+            from core.models import library_mod_folder_fallback
+
+            out = create_mod_identity(
+                db,
+                platform=PLATFORM_STEAM,
+                workshop_id=workspace_id,
+                external_id=workspace_id,
+                source_url=str(meta.url or steam_workshop_url(workspace_id)),
+                title=str(meta.title or library_mod_folder_fallback(workspace_id)),
+                app_id=app_id,
+                game_name=game_name,
+                operation=LIFECYCLE_SYNC,
+            )
+            mid = str(out.mod_id)
+            created = True
+
+        persist_identity(
+            db,
+            mid,
+            source="sync",
+            reason="materialize_bind",
+            platform=PLATFORM_STEAM,
+            external_id=workspace_id,
+            workspace_id=workspace_id,
+            source_url=str(meta.url or steam_workshop_url(workspace_id)),
+            source_type="steam",
+            last_known_path=str(managed.resolve()),
+            folder_present=True,
+            app_id=app_id or None,
+            title=str(meta.title or "") or None,
+            sticky_source=True,
+        )
+        try:
+            from services.content_status_eval import persist_evaluated_content_status
+
+            persist_evaluated_content_status(
+                mid,
+                managed,
+                db=db,
+                folder_present=True,
+                sync_sticky_marker=True,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "sync content status validate failed mid=%s", mid, exc_info=True
+            )
+        try:
+            from services.size_observation import note_mod_size_ready
+
+            note_mod_size_ready(mid, managed)
+        except Exception:  # noqa: BLE001
+            logger.debug("sync size enqueue failed mid=%s", mid, exc_info=True)
+        try:
+            from services.metadata_backup_sync import sync_after_metadata_change
+
+            sync_after_metadata_change(mid, managed, "sync")
+        except Exception:  # noqa: BLE001
+            logger.debug("sync backup after entity register failed", exc_info=True)
+        try:
+            from services.info_sidecar import ensure_registration_info_proof
+
+            ensure_registration_info_proof(managed, mid, db=db)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "sync registration .info proof failed mid=%s: %s", mid, exc
+            )
+            raise
+        return mid, created
+
     def _build_existing_index(self) -> dict[str, Path]:
-        """Map published_file_id → managed folder (one library walk)."""
+        """Map Steam Workshop ID → managed folder (sidecar only; never folder name)."""
+        from services.mod_identity import extract_workspace_id
+
         index: dict[str, Path] = {}
         for folder in self.files.list_managed_mods():
+            if self.resources:
+                from services.file_ops import read_info_metadata_dict
+                from core.mod_platform import normalize_platform
+                raw=read_info_metadata_dict(folder) or {}
+                # Skip unrelated game sidecars before runtime path hydration.
+                # Missing legacy AppID still takes the original metadata path.
+                raw_app=raw.get('app_id')
+                if raw_app and str(raw_app)!=str(self._active_app_id):continue
+                if normalize_platform(raw.get('platform') or raw.get('source_type') or 'steam')!='steam':continue
             meta = self.files.load_metadata(folder)
-            if meta and meta.published_file_id:
-                index[meta.published_file_id] = folder
-            elif folder.name.isdigit():
-                index[folder.name] = folder
+            if meta is None:
+                continue
+            if self.resources and int(meta.app_id or 0)!=self._active_app_id:
+                continue
+            pub = str(meta.published_file_id or "").strip()
+            if pub.isdigit():
+                index[pub] = folder
+                continue
+            ws = extract_workspace_id(
+                workspace_id=str(getattr(meta, "workspace_id", "") or ""),
+                title=str(meta.title or ""),
+                source_url=str(meta.url or ""),
+                legacy_token=pub,
+            )
+            if ws:
+                index[ws] = folder
         return index
+
+    @staticmethod
+    def _stub_metadata_for_skip(
+        pub_id: str,
+        managed: Path,
+        item,
+        scanned,
+    ) -> ModMetadata:
+        stub = ModMetadata(
+            published_file_id=pub_id,
+            managed_path=str(managed),
+            source_path=str(
+                item.path
+                if item is not None
+                else next(
+                    (s.path for s in scanned if s.published_file_id == pub_id),
+                    managed,
+                )
+            ),
+        )
+        return stub
+
+    def _fetch_source_timestamps_for_candidates(
+        self,
+        skip_candidates: list[tuple],
+        progress: ProgressCallback,
+    ) -> dict[str, int | None]:
+        """Network fetch of Steam ``time_updated`` for mods that would otherwise skip."""
+        if not skip_candidates:
+            return {}
+        ids = [item.published_file_id for item, _ in skip_candidates]
+        progress(
+            "metadata",
+            0,
+            max(len(ids), 1),
+            f"Checking Steam update timestamps for {len(ids)} mod(s)…",
+        )
+
+        def _on_progress(done: int, total: int) -> None:
+            progress(
+                "metadata",
+                done,
+                total,
+                f"Fetching Steam timestamps {done}/{total}",
+            )
+
+        refreshed = self.client.refresh_details(ids, on_progress=_on_progress)
+        out: dict[str, int | None] = {}
+        for meta in refreshed:
+            if self.resources and (meta.fetch_error or int(meta.app_id or 0)!=self._active_app_id):
+                self._timestamp_failures[meta.published_file_id]=meta.fetch_error or 'Steam 来源 AppID 不匹配'
+                continue
+            ts = normalize_source_timestamp(meta.time_updated)
+            # Explicit API response with missing/zero time_updated → no mtime fallback.
+            out[meta.published_file_id] = ts
+        return out
+
+    def _apply_source_timestamp_baseline(
+        self,
+        managed: Path,
+        pub_id: str,
+        source_ts: int,
+    ) -> bool:
+        """
+        Establish ``time_updated`` baseline without re-copying mod content.
+
+        Contract: local ``time_updated=0`` here means “no sync baseline yet”, not
+        “must re-download”. Only metadata is updated; mod files are untouched.
+
+        Returns True when metadata was updated.
+        """
+        meta = self.files.load_metadata(managed)
+        if meta is None:
+            meta = ModMetadata(published_file_id=pub_id, managed_path=str(managed))
+        old = normalize_source_timestamp(meta.time_updated)
+        source = normalize_source_timestamp(source_ts)
+        if source is None:
+            return False
+        if old is not None and source < old:
+            logger.warning(
+                "[SYNC] mod_id=%s source_timestamp_regression old=%s new=%s",
+                pub_id,
+                old,
+                source,
+            )
+            return False
+        if old == source:
+            return False
+        meta.time_updated = source
+        self.files.save_metadata(meta, managed, sync_reason="source_timestamp_baseline")
+        logger.info(
+            "[SYNC] mod_id=%s decision=BASELINE timestamp updated old=%s new=%s",
+            pub_id,
+            old,
+            source,
+        )
+        return True
 
     def _is_fully_synced_mod(self, managed: Path) -> bool:
         """
@@ -505,11 +1167,13 @@ class ModSyncService:
 
     def _has_valid_offline_page(self, managed: Path) -> bool:
         """
-        True when a real (non-stub) offline page exists.
+        True when a real (non-stub, non-error) offline page exists.
 
-        Requires ``index.html`` present, non-empty, and not a failure stub
-        produced by ``OfflinePageArchiver.write_fallback_page``.
+        Requires ``index.html`` present, non-empty, and a valid Steam Workshop
+        mirror (not a failure stub / Steam error / login page).
         """
+        from services.archive import is_valid_steam_workshop_page
+
         candidates = (
             self.files.info_dir_for_write(managed) / "index.html",
             self.files.info_dir(managed) / "index.html",
@@ -524,11 +1188,8 @@ class ModSyncService:
                 continue
             seen.add(key)
             try:
-                if not path.is_file() or path.stat().st_size <= 0:
-                    continue
-                if is_stub_offline_page(path):
-                    continue
-                return True
+                if is_valid_steam_workshop_page(path):
+                    return True
             except OSError:
                 continue
         return False
@@ -555,7 +1216,34 @@ class ModSyncService:
           - skipped_incomplete: reuse folder, still may need net fill
           - success: freshly copied (or overwritten)
         """
+        if self.resources:
+            hit = self.resources.db.find_mod_for_registration('steam', self._active_app_id, meta.published_file_id)
+            if hit:
+                raw = self.resources.db._conn.execute('SELECT deploy_status FROM mods WHERE mod_id=?', (hit.mod_id,)).fetchone()
+                if not raw or raw[0] != 'not_deployed':
+                    raise PermissionError('已部署或未知状态的 Mod 禁止同步改写归档')
+            destination = existing_index.get(meta.published_file_id)
+            if destination:
+                destination = self.resources.validate(destination)
+                if hit and self.resources.db.get_user_override_fields(hit.mod_id).get('cover'):
+                    info=self.resources.db.get_mod_display_info(hit.mod_id)
+                    cover=Path(info.cover_path) if info and info.cover_path else None
+                    cover=(destination/cover).resolve() if cover is not None else None
+                    roots=[destination/'.info',destination/'smm_info']
+                    if cover is None or cover.stem.lower() not in ('cover','preview') or not any(cover.is_relative_to(p.resolve()) for p in roots):
+                        raise PermissionError('自定义封面路径未满足同步恢复合同，未改写归档；请先用更换封面保存为托管封面')
+                for resource in destination.rglob('*'):
+                    self.resources.validate(resource)
+                    if resource.name == 'deploy_manifest.json':
+                        raise PermissionError('已有部署 manifest，拒绝同步归档')
         existing = existing_index.get(meta.published_file_id)
+        force_overwrite = (
+            opts.overwrite_files
+            or meta.published_file_id in self._force_overwrite_ids
+        )
+        outcome_hint = "success"
+        backup_wins = True
+        managed: Path
 
         with self._alloc_lock:
             # Detection A — numeric ID folder → real Mod title
@@ -564,25 +1252,90 @@ class ModSyncService:
                 existing_index[meta.published_file_id] = existing
 
             # Force overwrite: re-copy into (possibly renamed) destination
-            if existing and opts.overwrite_files:
-                managed = self.files.copy_mod(
-                    meta,
-                    overwrite_existing=True,
+            if existing and force_overwrite:
+                # Correct Workshop→SMM Junction: source and dest are the same
+                # physical tree. copy_mod would rmtree the only real files.
+                junction = evaluate_steam_sync_update_copy(
+                    source=Path(str(meta.source_path or "")),
                     destination=existing,
+                    workspace_id=str(meta.published_file_id or ""),
                 )
+                log_steam_sync_junction_decision(
+                    junction,
+                    workspace_id=str(meta.published_file_id or ""),
+                )
+                if junction.skip_physical_copy:
+                    meta.managed_path = str(existing)
+                    existing_index[meta.published_file_id] = existing
+                    managed = existing
+                    backup_wins = False
+                else:
+                    from services.sidecar_hydration import (
+                        protect_live_sidecar_before_overwrite,
+                    )
+
+                    if not protect_live_sidecar_before_overwrite(
+                        existing,
+                        workspace_id=str(meta.published_file_id or ""),
+                        app_id=int(meta.app_id or 0),
+                    ):
+                        raise RuntimeError(
+                            "sidecar backup protect failed; refusing overwrite "
+                            f"workspace_id={meta.published_file_id}"
+                        )
+                    managed = self.files.copy_mod(
+                        meta,
+                        overwrite_existing=True,
+                        destination=existing,
+                    )
+                    managed = self._rename_numeric_if_needed(Path(managed), meta)
+                    existing_index[meta.published_file_id] = managed
+                    backup_wins = True
+            elif existing and existing.exists() and opts.skip_existing:
+                # Detection B — folder exists: skip large copytree
+                meta.managed_path = str(existing)
+                managed = existing
+                outcome_hint = "skipped_incomplete"
+                backup_wins = False
+            else:
+                managed = self.files.copy_mod(meta, overwrite_existing=False)
                 managed = self._rename_numeric_if_needed(Path(managed), meta)
                 existing_index[meta.published_file_id] = managed
-                return "success", managed
+                backup_wins = True
 
-            # Detection B — folder exists: skip large copytree
-            if existing and existing.exists() and opts.skip_existing:
-                meta.managed_path = str(existing)
-                return "skipped_incomplete", existing
+        if self.resources:
+            # Re-copy may remove the live sidecar. Restore proof only for an already
+            # registered Steam entity; never mint identity before new FS materialization.
+            hit=self.resources.db.find_mod_for_registration('steam',self._active_app_id,meta.published_file_id)
+            if hit is not None:
+                from services.info_sidecar import ensure_registration_info_proof
+                ensure_registration_info_proof(managed,hit.mod_id,db=self.resources.db)
+        self._hydrate_managed_sidecar(meta, managed, backup_wins=backup_wins)
+        return outcome_hint, managed
 
-            managed = self.files.copy_mod(meta, overwrite_existing=False)
-            managed = self._rename_numeric_if_needed(Path(managed), meta)
-            existing_index[meta.published_file_id] = managed
-            return "success", managed
+    def _hydrate_managed_sidecar(
+        self,
+        meta: ModMetadata,
+        managed: Path,
+        *,
+        backup_wins: bool,
+    ) -> None:
+        """Workshop ``.info`` is a candidate only. Backup user assets win."""
+        from services.sidecar_hydration import hydrate_managed_sidecar
+
+        result = hydrate_managed_sidecar(
+            managed,
+            workspace_id=str(meta.published_file_id or ""),
+            app_id=int(meta.app_id or 0),
+            source="workshop",
+            backup_wins=backup_wins,
+            commit_backup=True,
+        )
+        if not result.ok:
+            raise RuntimeError(
+                "sidecar hydration failed "
+                f"workspace_id={meta.published_file_id} path={managed}"
+            )
 
     def _rename_numeric_if_needed(self, folder: Path, meta: ModMetadata) -> Path:
         """If *folder* is named with digits only, rename it to the Mod title."""
@@ -624,8 +1377,49 @@ class ModSyncService:
         opts: SyncOptions,
         on_status: Callable[[str], None] | None = None,
     ) -> None:
+        # time_updated (and other metadata) is committed only after copy + enrich
+        # succeed; a failed sync must leave the prior baseline for retry detection.
+        self._stamp_steam_identity_fields(meta)
         self._network_enrich(meta, managed, opts, on_status=on_status)
         self.files.save_metadata(meta, managed)
+
+    @staticmethod
+    def _stamp_steam_identity_fields(meta: ModMetadata) -> None:
+        """Ensure sidecar carries official Steam identity facts for entity bind."""
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+
+        wid = str(meta.published_file_id or "").strip()
+        if not wid.isdigit():
+            return
+        if not str(meta.source_type or "").strip():
+            meta.source_type = PLATFORM_STEAM
+        if not str(meta.url or "").strip():
+            meta.url = steam_workshop_url(wid)
+
+    def _persist_steam_sidecar_identity(self, managed: Path, meta: ModMetadata) -> None:
+        """Write Steam external_id / workspace_id into ``.info`` (ModMetadata lacks them)."""
+        from core.mod_platform import PLATFORM_STEAM, steam_workshop_url
+        from services.file_ops import persist_unified_metadata_dict, read_info_metadata_dict
+
+        wid = str(meta.published_file_id or "").strip()
+        if not wid.isdigit():
+            return
+        data = dict(read_info_metadata_dict(managed) or {})
+        data["published_file_id"] = wid
+        data["source_type"] = PLATFORM_STEAM
+        data["platform"] = PLATFORM_STEAM
+        data["external_id"] = wid
+        data["workspace_id"] = wid
+        data["url"] = str(meta.url or steam_workshop_url(wid))
+        if meta.title:
+            data["title"] = meta.title
+        if meta.app_id:
+            data["app_id"] = int(meta.app_id)
+        if meta.game_name:
+            data["game_name"] = meta.game_name
+        persist_unified_metadata_dict(
+            managed, data, sync_backup=False, sync_reason="sync"
+        )
 
     def _network_enrich(
         self,
@@ -689,20 +1483,31 @@ class ModSyncService:
         # Archive is opt-in only (dedicated offline queue). Never run via net_workers
         # concurrency when archive_pages is False.
         if need_archive:
-            path = self.archiver.archive(
+            archived = self.archiver.archive(
                 meta.published_file_id,
                 info_dir,
                 overwrite=True,
                 metadata=meta,
                 on_status=on_status,
             )
+            path = (
+                archived.path
+                if hasattr(archived, "path")
+                else Path(archived)
+            )
             meta.offline_page_path = str(path)
             if not self._has_valid_offline_page(managed):
-                path = self.archiver.ensure_offline_page(
+                ensured = self.archiver.ensure_offline_page(
                     info_dir,
                     meta.published_file_id,
                     metadata=meta,
                     on_status=None,
+                    force_refresh=False,
+                )
+                path = (
+                    ensured.path
+                    if hasattr(ensured, "path")
+                    else Path(ensured)
                 )
                 meta.offline_page_path = str(path)
         elif not meta.offline_page_path:
@@ -838,13 +1643,7 @@ class ModSyncService:
             for folder in self.files.list_managed_mods():
                 meta = self.files.load_metadata(folder)
                 if meta is None:
-                    meta = ModMetadata(
-                        published_file_id=(
-                            folder.name if folder.name.isdigit() else ""
-                        ),
-                        title=folder.name,
-                        managed_path=str(folder),
-                    )
+                    continue
                 pub = str(meta.published_file_id or "")
                 if id_filter is not None and pub not in id_filter:
                     continue
@@ -914,6 +1713,7 @@ class ModSyncService:
                         detail_map = {
                             "start": "正在下载页面资源…",
                             "ok": "离线页面完成",
+                            "skipped": "跳过（已有离线页）",
                             "rate_limited": RATE_LIMIT_USER_MESSAGE,
                             "fail": "离线页面失败",
                         }
@@ -931,11 +1731,17 @@ class ModSyncService:
                         in_progress=True,
                     )
 
-                    path = self.archiver.ensure_offline_page(
+                    ensured = self.archiver.ensure_offline_page(
                         info_dir,
                         meta.published_file_id,
                         metadata=meta,
                         on_status=_status,
+                        force_refresh=False,
+                    )
+                    path = (
+                        ensured.path
+                        if hasattr(ensured, "path")
+                        else Path(ensured)
                     )
 
                     meta.offline_page_path = str(path)
@@ -946,9 +1752,16 @@ class ModSyncService:
                             "save_metadata failed for %s: %s", folder, exc
                         )
 
+                    outcome = getattr(ensured, "outcome", None)
                     status = read_archive_status(info_dir)
-                    if status and status.get("archive_failed_reason") == (
-                        _RATE_LIMITED_REASON
+                    if outcome == "skipped":
+                        with result_lock:
+                            result.skipped.append(meta)
+                        phase_detail = "跳过（已有离线页）"
+                    elif outcome == "rate_limited" or (
+                        status
+                        and status.get("archive_failed_reason")
+                        == _RATE_LIMITED_REASON
                     ):
                         # Only freeze the queue when the global HTML fuse is armed.
                         # A single Mod stub / transient 429 must not mark the rest.
@@ -966,7 +1779,19 @@ class ModSyncService:
                                     (meta, "HTML 429 after retries (no global block)")
                                 )
                             phase_detail = "离线页面失败"
-                    elif self._has_valid_offline_page(folder):
+                    elif outcome == "failed":
+                        with result_lock:
+                            result.failed.append(
+                                (
+                                    meta,
+                                    getattr(ensured, "error", None)
+                                    or "archive failed",
+                                )
+                            )
+                        phase_detail = "离线页面失败"
+                    elif outcome == "success" or self._has_valid_offline_page(
+                        folder
+                    ):
                         with result_lock:
                             result.success.append(meta)
                         phase_detail = "离线页面完成"

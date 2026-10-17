@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.db_manager import DatabaseManager
+from tests.helpers.identity import bind_managed_path, create_steam_test_mod
 from core.mod_platform import (
     OFFLINE_STATUS_ARCHIVED,
     PLATFORM_MODIO,
@@ -177,14 +178,9 @@ def test_manager_routes_modio_without_affecting_steam(
         encoding="utf-8",
     )
 
-    db.upsert_mod(
-        ModMetadata(
-            published_file_id="111",
-            title="SteamMod",
-            managed_path=str(steam_folder),
-        )
-    )
-    db.update_mod_platform_info("111", platform=PLATFORM_STEAM, external_id="111")
+    steam = create_steam_test_mod(db, external_id="111", title="SteamMod")
+    steam_pk = str(steam.mod_id)
+    bind_managed_path(db, steam_pk, steam_folder, title="SteamMod")
 
     modio = db.register_external_mod(
         platform=PLATFORM_MODIO,
@@ -230,7 +226,7 @@ def test_manager_routes_modio_without_affecting_steam(
     assert isinstance(mgr.get_provider_for_platform(PLATFORM_STEAM), SteamOfflineProvider)
     assert isinstance(mgr.get_provider_for_platform(PLATFORM_MODIO), ModioOfflineProvider)
 
-    steam_result = mgr.update_mod_offline("111", managed_path=steam_folder)
+    steam_result = mgr.update_mod_offline(steam_pk, managed_path=steam_folder)
     assert steam_calls == ["111"]
     assert steam_result.provider == PROVIDER_STEAM_ARCHIVE
 
