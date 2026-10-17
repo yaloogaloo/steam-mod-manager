@@ -26,6 +26,11 @@ data/browser_profile/
 # # legacy JSON caches (no longer used)
 # data/app_names.json
 # data/game_info.json
+data/asset_store/
+data/identity_repair_quarantine/
+data/collection_covers/
+data/deploy_backup/
+data/app_instance.lock
 
 # OS / IDE
 .DS_Store
