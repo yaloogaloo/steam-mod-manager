@@ -281,6 +281,7 @@ async function inspect(a) {
   const epoch = ++S.detailEpoch;
   S.current = a;
   S.details = null;
+  a.size = null;
   const anchor = browseAnchor();
   $('inspector').hidden = false;
   drawInspector(a, null);
@@ -292,6 +293,7 @@ async function inspect(a) {
     });
     if (epoch !== S.detailEpoch || S.current?.token !== a.token) return;
     S.details = detail;
+    a.size = detail.size;
     drawInspector(a, detail);
   } catch (error) {
     if (epoch === S.detailEpoch) $('inspector-description').textContent = '详情读取失败：' + error.message;

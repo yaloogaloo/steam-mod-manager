@@ -1,19 +1,16 @@
-"""Directory size with skip rules + mtime cache (detail size badge)."""
+"""Current local payload bytes; management metadata and caches are excluded."""
 
 from __future__ import annotations
 
 import os
+import stat
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 # Skip these directory names anywhere in the walk.
-_SKIP_DIR_NAMES = frozenset({".cache", "cache"})
-# Skip these names only when the parent directory is ``.info`` / ``info``.
-_SKIP_UNDER_INFO = frozenset({"offline", "assets"})
-_INFO_DIRS = frozenset({".info", "info"})
-
+_SKIP_DIR_NAMES = frozenset({".cache", "cache", ".info", "info", "backups", "import_cache", "历史版本"})
 _LOCK = threading.Lock()
 # resolved root -> (root_mtime, total_bytes)
 _CACHE: dict[str, tuple[float, int]] = {}
@@ -30,12 +27,13 @@ def _root_key(path: Path) -> str:
         return str(path)
 
 
-def _should_skip_dir(name: str, parent_name: str) -> bool:
-    if name in _SKIP_DIR_NAMES:
-        return True
-    if name in _SKIP_UNDER_INFO and parent_name in _INFO_DIRS:
-        return True
-    return False
+def _is_link(path: str) -> bool:
+    observed = os.lstat(path)
+    return stat.S_ISLNK(observed.st_mode) or bool(getattr(observed, "st_file_attributes", 0) & 0x400)
+
+
+def _walk_error(error: OSError) -> None:
+    raise error
 
 
 def directory_size(
@@ -45,8 +43,9 @@ def directory_size(
     use_cache: bool = True,
 ) -> int:
     """
-    Sum file sizes under *path*, skipping ``.info/offline``, ``.info/assets``,
-    and ``.cache`` trees. Cached until the root folder mtime changes.
+    Sum stored payload bytes under *path*. Exclude SMM metadata, backups and
+    caches. Retained archives count as stored bytes, not unpacked download size.
+    Root-mtime caching is a hint; content mutations must explicitly invalidate it.
 
     A missing directory returns 0 here (legacy). Observation callers must
     distinguish missing vs empty **before** using this value as ``ok`` bytes.
@@ -78,27 +77,23 @@ def directory_size(
     except Exception:  # noqa: BLE001
         e2e_op = None  # type: ignore[assignment]
     try:
-        for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True, onerror=_walk_error):
             if cancel_check is not None and cancel_check():
                 raise DirectorySizeCancelled()
-            parent_name = os.path.basename(dirpath)
             dirnames[:] = [
                 name
                 for name in dirnames
-                if not _should_skip_dir(name, parent_name)
+                if name.casefold() not in _SKIP_DIR_NAMES and not _is_link(os.path.join(dirpath,name))
             ]
             dirs += 1
             for name in filenames:
                 files += 1
                 file_path = os.path.join(dirpath, name)
-                try:
-                    total += os.path.getsize(file_path)
-                except OSError:
+                if name.casefold() in {".is_missing_content", "deploy_manifest.json"} or _is_link(file_path):
                     continue
+                total += os.path.getsize(file_path)
     except DirectorySizeCancelled:
         raise
-    except OSError:
-        pass
     if e2e_op is not None:
         try:
             e2e_op(

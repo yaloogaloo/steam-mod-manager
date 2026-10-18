@@ -26,8 +26,8 @@ def test_directory_size_skips_offline_assets_and_cache(tmp_path: Path) -> None:
     (root / ".cache" / "tmp").write_bytes(b"z" * 2000)
 
     total = directory_size(root)
-    assert total == 120
-    assert directory_size(root) == 120
+    assert total == 100
+    assert directory_size(root) == 100
 
 
 def test_directory_size_nested_files_and_empty(tmp_path: Path) -> None:
@@ -43,7 +43,7 @@ def test_directory_size_nested_files_and_empty(tmp_path: Path) -> None:
     assert directory_size(nested) == 25
 
 
-def test_directory_size_includes_info_cover_and_hidden(tmp_path: Path) -> None:
+def test_directory_size_excludes_info_cover_and_includes_payload_hidden(tmp_path: Path) -> None:
     reset_directory_size_cache()
     root = tmp_path / "Covered"
     info = root / ".info"
@@ -55,7 +55,7 @@ def test_directory_size_includes_info_cover_and_hidden(tmp_path: Path) -> None:
         import ctypes
 
         ctypes.windll.kernel32.SetFileAttributesW(str(hidden), 0x2)
-    assert directory_size(root) == 48
+    assert directory_size(root) == 8
 
 
 def test_directory_size_skips_directory_symlink(tmp_path: Path) -> None:
@@ -90,4 +90,5 @@ def test_directory_size_skips_individual_getsize_oserror(tmp_path: Path) -> None
         return real(path)
 
     with patch("os.path.getsize", side_effect=_getsize):
-        assert directory_size(root) == 11
+        with pytest.raises(OSError, match='denied'):
+            directory_size(root)

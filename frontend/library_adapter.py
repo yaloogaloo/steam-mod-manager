@@ -86,6 +86,20 @@ class LibraryAdapter:
         from .readonly_metadata import resolve_detail
         return resolve_detail(self.db, asset, info)
 
+    def local_size(self, asset: Asset):
+        """Observe only the selected, UUID-proven folder; never persist on reads.
+
+        Web detail requests already run in the bounded read pool. Bypass the
+        root-mtime hint so nested external changes and historical cache survive
+        neither a detail reopen nor an explicit content rescan.
+        """
+        from services.dir_size import directory_size
+        try:
+            root = self.folder(asset)
+            return directory_size(root, use_cache=False)
+        except (OSError, RuntimeError, ValueError):
+            return None
+
     def _write(self):
         if not self.writable:
             raise PermissionError('当前为只读模式')

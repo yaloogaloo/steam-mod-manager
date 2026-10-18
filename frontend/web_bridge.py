@@ -775,7 +775,7 @@ class LibraryBridge(QObject):
             info = self.adapter.detail(asset)
             from services.deployment_inspection import inspect_deployment
             evidence=inspect_deployment(self.adapter.db,asset.mod_pk)
-            return {'deployment_evidence':evidence,'html': render_description(info.description), 'description': info.description,
+            return {'size':self.adapter.local_size(asset),'deployment_evidence':evidence,'html': render_description(info.description), 'description': info.description,
                     'source': info.description_source, 'internal_id': asset.internal_id,
                     'workspace_id': asset.workspace_id, 'mod_pk': asset.mod_pk,
                     'source_url': info.source_url, 'path': asset.managed_path,

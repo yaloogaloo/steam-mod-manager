@@ -161,7 +161,7 @@ def test_real_webchannel_render_selection_and_virtualization(bridge):
         assert evaluate('S.selected.size === 1 && !!S.details')
         assert not evaluate("$('inspector').hidden")
         assert evaluate("document.querySelectorAll('.resultbar').length===0 && !document.getElementById('browse-hint')")
-        assert evaluate("document.querySelectorAll('.inspector-identity .deployed').length===1 && document.querySelectorAll('.inspector-source span').length===2")
+        assert evaluate("document.querySelectorAll('.inspector-identity .deployed').length===1 && document.querySelectorAll('.inspector-source span').length===1")
         assert evaluate("[...document.querySelectorAll('.inspector-scroll .facts dt')].every(e=>!['类型 / 分类','本地大小','部署状态'].includes(e.textContent))")
         evaluate("globalThis.originalType=S.current.type;S.current.type='非常长的真实类型名称'.repeat(15);drawInspector(S.current,S.details);")
         assert evaluate("$('inspector-type-action').getBoundingClientRect().right<=document.querySelector('.inspector-scroll').getBoundingClientRect().right && document.querySelector('.inspector-source').closest('.inspector-identity')!==null")

@@ -171,6 +171,8 @@ def rescan(bridge,asset,path):
     status=persist_evaluated_content_status(asset.mod_pk,path,db=bridge.adapter.db,notify_projection=False)
     actual=bridge.adapter.db._conn.execute('SELECT content_status FROM mods WHERE mod_id=?',(asset.mod_pk,)).fetchone()[0]
     if actual!=status:raise RuntimeError('内容识别结果未成功持久化')
+    from services.size_observation import note_mod_size_ready
+    note_mod_size_ready(asset.mod_pk,path,force=True)
     return status
 
 
@@ -370,6 +372,8 @@ def complete_content(bridge,args):
                     db._conn.rollback();db.set_mod_files(asset.mod_pk,old)
                     from services.content_status_eval import persist_evaluated_content_status
                     persist_evaluated_content_status(asset.mod_pk,path,db=db,notify_projection=False)
+                    from services.size_observation import note_mod_size_ready
+                    note_mod_size_ready(asset.mod_pk,path,force=True)
                     raise
         return {'success':True,'internal_id':asset.internal_id,'mod_pk':str(asset.mod_pk),'managed_path':str(path),
                 'content_status':status,'files':len(copied),'message':'已一次性补齐同一 Mod；身份、类型、标签和部署状态保持不变'}

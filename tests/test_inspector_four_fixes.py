@@ -64,7 +64,7 @@ def verify(window, resources, ids):
     assert js("!document.querySelector('.inspector-identity .deployed') && !document.querySelector('.inspector-properties')")
     assert js("$('inspector-type-action').textContent==='未设置' && !$('inspector-type-action').querySelector('path[d=\"'+paths.pencil+'\"]')")
     assert js("document.querySelector('.inspector-source').closest('.inspector-identity')!==null && document.querySelector('.inspector-user-tags>svg path').getAttribute('d')===paths.tags")
-    assert js("S.current.size==null && !document.querySelector('.inspector-size')")
+    assert js("S.current.size===8 && document.querySelector('.inspector-size').textContent==='8 B'")
     assert js("!document.querySelector('.inspector-scroll').innerText.includes('描述来源') && !document.querySelector('.deployment-notice')")
     tags = db.get_category_tags(ids[1].mod_id)
     assert len(tags) == 3

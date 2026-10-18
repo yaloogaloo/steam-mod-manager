@@ -294,11 +294,11 @@ def test_layer1_reads_persisted_size(db: DatabaseManager, tmp_path: Path) -> Non
     observe_mod_size(mid, folder, force=True)
     reset_library_cache()
     snap = build_library_snapshot(library)
-    item = next(i for i in snap.list_items if i.internal_id == mid)
+    item = next(i for i in snap.list_items if i.internal_id == db.get_mod_backup_row(mid)["internal_id"])
     assert_mod_list_item_layer1(item)
     assert item.local_size_bytes == 50
     assert item.local_size_status == SIZE_STATUS_OK
-    card = next(c for c in snap.cards if c.id == mid)
+    card = next(c for c in snap.cards if c.internal_id == db.get_mod_backup_row(mid)["internal_id"])
     assert card.size == 50
     src = inspect.getsource(build_library_snapshot)
     body = src.split('"""', 2)[-1] if '"""' in src else src
@@ -329,7 +329,7 @@ def test_observe_patches_warm_projection_without_notify_mod_changed(
     assert card.size_status == SIZE_STATUS_OK
     item = None
     for candidate in cache._snapshot.list_items:
-        if str(candidate.internal_id) == mid:
+        if candidate.internal_id == db.get_mod_backup_row(mid)["internal_id"]:
             item = candidate
             break
     assert item is not None
