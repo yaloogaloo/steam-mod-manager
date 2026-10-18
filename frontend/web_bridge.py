@@ -706,14 +706,9 @@ class LibraryBridge(QObject):
             from .library_query_adapter import query_projection
             query_data=query_projection(rows,self.adapter.db.get_mods_search_fields(rows),
                                         self.adapter.db.get_mods_tag_flags(rows))
-            types = {}
-            catalog = Path(self.adapter.db.db_path).parent / 'mod_types.json'
-            if catalog.is_file():
-                try:
-                    raw = json.loads(catalog.read_text('utf-8'))
-                    types = {t['id']: t['name'] for t in raw.get('games', {}).get(str(game), {}).get('types', [])}
-                except (OSError, ValueError, KeyError, TypeError):
-                    pass
+            from .type_management import catalog
+            definitions = catalog(self).list_types(game)
+            types = {t.type_id: t.name for t in definitions}
             result, bindings = [], {}
             for asset in assets:
                 token = token_urlsafe(18)
@@ -742,7 +737,8 @@ class LibraryBridge(QObject):
                 if len(self._assets) > max(10000, len(bindings) * 2):
                     self._assets = bindings
                     self._snapshots = {token: generation for token in bindings}
-            return {'assets': result, 'collections': collections, 'snapshot': generation}
+            return {'assets': result, 'collections': collections, 'snapshot': generation,
+                    'types': [asdict(t) for t in definitions]}
         with self._lock:
             asset = self._assets.get(args.get('token'))
         if asset is None:

@@ -47,3 +47,40 @@ $('inspector-type-select').onchange=()=>{if(inspectorTypeContext)saveModType(ins
 document.addEventListener('click',event=>{
  if(event.target.closest('[data-type-action="type-set"]')&&typeContext&&typeData)saveModType(typeContext,typeData,$('edit-type').value,false);
 });
+
+// Game catalog management reuses the original Type ID service.
+let catalogContext=null,catalogData=null,catalogBusy=false;
+function drawTypeCatalog(){
+ const readOnly=S.readOnly||catalogBusy;
+ $('type-catalog-list').innerHTML=catalogData.types.map(t=>`<div class="org-input-row" style="margin:10px 0"><input data-catalog-name="${t.type_id}" value="${escape(t.name)}" maxlength="100" ${readOnly?'disabled':''}><button type="button" data-catalog-rename="${t.type_id}" ${readOnly?'disabled':''}>重命名</button><button type="button" data-catalog-delete="${t.type_id}" ${readOnly?'disabled':''}>删除</button></div>`).join('');
+ $('type-catalog-add').disabled=$('type-catalog-name').disabled=readOnly;
+}
+$('manage-types').onclick=async()=>{
+ if(S.busy)return;
+ const context={game:$('game').value,snapshot:S.snapshot,epoch:S.epoch};
+ try{
+  const data=await rpc('mod-types',context);
+  if(context.epoch!==S.epoch)return;
+  catalogContext=context;catalogData=data;$('type-catalog-name').value='';$('type-catalog-status').textContent='';drawTypeCatalog();$('type-catalog-dialog').showModal();
+ }catch(e){$('results').hidden=false;$('results').textContent=e.message;}
+};
+$('type-catalog-close').onclick=()=>{if(!catalogBusy)$('type-catalog-dialog').close();};
+$('type-catalog-dialog').addEventListener('cancel',e=>{if(catalogBusy)e.preventDefault();});
+async function mutateTypeCatalog(action,fields){
+ if(catalogBusy||S.busy||S.readOnly||!catalogContext)return;
+ if(catalogContext.epoch!==S.epoch||catalogContext.game!==$('game').value){$('type-catalog-status').textContent='游戏已变化，请重新打开类型目录';return;}
+ catalogBusy=true;S.busy=true;drawTypeCatalog();
+ try{
+  catalogData=await rpc(action,{...catalogContext,version:catalogData.version,...fields},true);
+  if(!await refreshCommandView())return;
+  catalogContext={game:$('game').value,snapshot:S.snapshot,epoch:S.epoch};
+  $('type-catalog-status').textContent='目录已保存；用户标签未改变';$('type-catalog-name').value='';
+ }catch(e){$('type-catalog-status').textContent='保存失败：'+e.message;}
+ finally{catalogBusy=false;S.busy=false;drawTypeCatalog();syncFavoriteControls();if(S.current&&S.details)drawInspector(S.current,S.details);}
+}
+$('type-catalog-add').onclick=()=>mutateTypeCatalog('type-create',{name:$('type-catalog-name').value});
+$('type-catalog-list').onclick=e=>{
+ const rename=e.target.closest('[data-catalog-rename]'),remove=e.target.closest('[data-catalog-delete]');
+ if(rename){const id=Number(rename.dataset.catalogRename);mutateTypeCatalog('type-rename',{type_id:id,name:document.querySelector(`[data-catalog-name="${id}"]`).value});}
+ if(remove&&confirm('删除此类型并解除当前游戏的对应绑定？用户标签不受影响。'))mutateTypeCatalog('type-delete',{type_id:Number(remove.dataset.catalogDelete),confirm:true});
+};

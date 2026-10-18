@@ -62,6 +62,8 @@ def _write_legacy_migrated_marker(catalog_path: Path) -> None:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    from services.mutation_context import assert_mutation_allowed
+    assert_mutation_allowed(path, path.with_name(path.name + '.tmp'))
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -88,7 +90,7 @@ class ModTypeCatalog:
         self._error: str = ""
         self._legacy_migrated = False
 
-    def reload(self, *, db: Any | None = None, reconcile: bool = False) -> None:
+    def reload(self, *, db: Any | None = None, reconcile: bool = False, read_only: bool = False) -> None:
         """Load the persistence file. Invalid files are refused, not repaired."""
         if not self.path.is_file():
             self._games = {}
@@ -126,7 +128,7 @@ class ModTypeCatalog:
         self._valid = True
         self._error = ""
         self._legacy_migrated = bool(migrated) or _marker_is_set(self.path)
-        if dirty:
+        if dirty and not read_only:
             try:
                 self._save()
             except Exception:  # noqa: BLE001
@@ -351,6 +353,23 @@ class ModTypeCatalog:
                     db.set_mod_type_id(mid, tid, touch_updated_at=False)
             raise
         return True
+
+    def rename_type(self, app_id: int | str, type_id: int | str, name: str) -> ModTypeDef:
+        """Rename display data without rebinding IDs, extension stamps or user tags."""
+        aid, tid = int(app_id), coerce_type_id(type_id)
+        label = str(name or '').strip()
+        current = self.get(aid, tid)
+        if current is None or not label:
+            raise ModTypeCatalogError('类型不存在或名称为空')
+        if any(t.type_id != tid and t.name.casefold() == label.casefold() for t in self.list_types(aid)):
+            raise ModTypeCatalogError(f'「{label}」已存在。')
+        self._games[aid][tid] = label
+        try:
+            self._save()
+        except Exception:
+            self._games[aid][tid] = current.name
+            raise
+        return ModTypeDef(aid, tid, label)
 
     def _save(self) -> None:
         if not self._valid:
