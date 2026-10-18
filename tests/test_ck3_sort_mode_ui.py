@@ -122,9 +122,11 @@ def _write_ugc(user_dir: Path, workshop_id: str, *, name: str) -> Path:
     mod_dir = user_dir / "mod"
     mod_dir.mkdir(parents=True, exist_ok=True)
     path = mod_dir / f"ugc_{workshop_id}.mod"
+    payload=user_dir/'workshop-payload'/workshop_id
+    payload.mkdir(parents=True,exist_ok=True)
     path.write_text(
         f'version="1.0"\nname="{name}"\n'
-        f'path="C:/workshop/{workshop_id}"\n'
+        f'path="{payload.as_posix()}"\n'
         f'remote_file_id="{workshop_id}"\n',
         encoding="utf-8",
     )
@@ -448,7 +450,9 @@ def test_ck3_fresh_deploy_without_ugc_appears_in_both_views(
     assert entity not in _filtered_internal_ids(view)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(entity)
-    assert result.get("success") is True, result
+    assert result.get("success") is False, result
+    assert result["error_code"] == "projection_failed"
+    assert result["projection_unresolved"] == [entity]
     assert not (user_dir / "mod" / "ugc_99001.mod").exists()
 
     view.refresh()

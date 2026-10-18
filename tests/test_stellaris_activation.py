@@ -125,8 +125,10 @@ def _write_ugc_descriptor(user_dir: Path, workshop_id: str, *, name: str = "Mod"
     mod_dir = user_dir / "mod"
     mod_dir.mkdir(parents=True, exist_ok=True)
     path = mod_dir / f"ugc_{workshop_id}.mod"
+    payload=user_dir/'workshop-payload'/workshop_id
+    payload.mkdir(parents=True,exist_ok=True)
     path.write_text(
-        f'name="{name}"\npath="C:/workshop/{workshop_id}"\nremote_file_id="{workshop_id}"\n',
+        f'name="{name}"\npath="{payload.as_posix()}"\nremote_file_id="{workshop_id}"\n',
         encoding="utf-8",
     )
     return path
@@ -942,7 +944,10 @@ def test_stellaris_fresh_deploy_without_descriptor_is_in_both_views(
     assert pk not in _filtered_mod_ids(view)
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(_tok(db, pk))
-    assert result.get('success') is True, result
+    # Canonical membership survives, but missing projection is a partial failure.
+    assert result.get('success') is False, result
+    assert result['error_code']=='projection_failed'
+    assert result['projection_unresolved']==[_tok(db,pk)]
     assert not (user_dir / 'mod' / 'ugc_8699.mod').exists()
 
     view.refresh()
@@ -1247,3 +1252,16 @@ def test_simulated_sync_against_real_dlc_load_format_does_not_write_production()
     assert UNKNOWN_MOD in after
     if before_text is not None:
         assert prod.read_text(encoding="utf-8") == before_text
+
+def test_existing_descriptor_with_missing_target_is_partial_failure(tmp_path,db):
+    user_dir,_workshop=_configure_stellaris(db,tmp_path)
+    library=tmp_path/'mod'
+    pk=_seed_stellaris_mod(library,db,folder='Broken descriptor',workshop_id='99331')
+    descriptor=_write_ugc_descriptor(user_dir,'99331')
+    descriptor.write_text('name="Broken"\npath="missing-payload"\n',encoding='utf8')
+    ref=next(ref for ref in list_installed_stellaris_mods(db) if ref.token==_tok(db,pk))
+    assert map_to_launcher_id(ref,user_dir=user_dir).reason=='missing_descriptor_target'
+    result=ModDeployer(library_root=library,db=db).deploy_mod(_tok(db,pk))
+    assert result['success'] is False and result['error_code']=='projection_failed'
+    assert _deploy_status_of(db,pk)==DEPLOY_STATUS_DEPLOYED
+    assert descriptor.read_text()=='name="Broken"\npath="missing-payload"\n'

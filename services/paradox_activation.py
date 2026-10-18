@@ -759,6 +759,15 @@ def map_to_launcher_id(
             available=False,
             reason="missing_launcher_descriptor",
         )
+    try:
+        descriptor=parse_mod_descriptor((user_dir/launcher_id).read_text(encoding="utf-8"))
+        raw_path=str(descriptor.get("path") or descriptor.get("archive") or "").strip()
+        target=Path(raw_path) if Path(raw_path).is_absolute() else user_dir/raw_path
+        exists=target.is_dir() if descriptor.get("path") else target.is_file()
+        if not raw_path or not exists:
+            return ParadoxMapping(ref.token,launcher_id,False,"missing_descriptor_target")
+    except (OSError,UnicodeError):
+        return ParadoxMapping(ref.token,launcher_id,False,"unreadable_launcher_descriptor")
     return ParadoxMapping(
         token=ref.token,
         launcher_id=launcher_id,

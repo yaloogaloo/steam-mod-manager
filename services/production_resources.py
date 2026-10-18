@@ -329,21 +329,35 @@ class ProductionResources(BusinessResources):
         if scan and managed.is_dir():
             for path in managed.rglob('*'):self.validate(path)
         manifest=load_manifest(managed)
+        from services.deploy_rules.manifest import manifest_path_for
+        if manifest is None and manifest_path_for(managed).is_file():
+            raise PermissionError('历史 Manifest 无法解析；部署状态无法确认，拒绝写入')
         if manifest and manifest.files:
-            if manifest.schema_version<2 or manifest.internal_id!=internal_id:
-                raise PermissionError('历史复制 manifest 尚未准入；拒绝覆盖或撤出，原资源保持不动')
+            from services.deploy_security import validate_manifest_mod_id
+            validate_manifest_mod_id(manifest,str(entity.mod_pk))
+            legacy_identity=manifest.internal_id!=internal_id
+            if manifest.schema_version<2:
+                raise PermissionError('历史 Manifest 缺少完整所有权/备份信息；保留记录，拒绝覆盖或撤出')
             from services.deploy_security import collect_allowed_target_roots,validate_manifest_targets
             from services.deploy_rules.base import DeployContext
             ctx=DeployContext(internal_id=internal_id,source=managed,app_id=info.app_id,config=config,deploy_type=strategy,mod_pk=entity.mod_pk,custom_deploy_path=custom)
             roots=collect_allowed_target_roots(ctx)
+            if legacy_identity:
+                from services.deploy_manifest_compat import validate_legacy_v2
+                validate_legacy_v2(manifest,ctx,self,verify_files=scan)
             validate_manifest_targets(manifest,allowed_roots=roots)
             for entry in manifest.files:
-                self.validate(entry.source)
+                if entry.source_relative:
+                    checked_resource_path(managed,managed/entry.source_relative)
+                else:self.validate(entry.source)
                 for root in roots:
                     if Path(entry.target).resolve().is_relative_to(root):
                         checked_resource_path(root,entry.target);break
                 if entry.backup:
                     from services.backup_manager import BackupManager
                     backup=BackupManager(managed,internal_id=internal_id,mod_pk=entity.mod_pk).resolve_backup_file(entry.backup)
-                    checked_resource_path(self.path('data/deploy_backup')/internal_id,backup)
+                    self.validate(backup)
+                    manager=BackupManager(managed,internal_id=internal_id,mod_pk=entity.mod_pk)
+                    for backup_root in manager._allowed_backup_roots():
+                        if backup.is_relative_to(backup_root):checked_resource_path(backup_root,backup);break
         return entity

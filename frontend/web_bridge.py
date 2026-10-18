@@ -734,6 +734,7 @@ class LibraryBridge(QObject):
                     'type_id': row.get('type_id'),
                     'type': types.get(row.get('type_id'), '类型未知'),
                     'size': row.get('local_size_bytes') if row.get('local_size_status') == 'ok' else None,
+                    'deploy_state':row['deploy_status'],
                     'deployed': asset.deployed, 'favorite': asset.favorite, 'status': asset.status,
                     **query_data[asset.mod_pk]})
             collections = []
@@ -761,7 +762,9 @@ class LibraryBridge(QObject):
             return self.tag_state(asset)
         if operation == 'detail':
             info = self.adapter.detail(asset)
-            return {'html': render_description(info.description), 'description': info.description,
+            from services.deployment_inspection import inspect_deployment
+            evidence=inspect_deployment(self.adapter.db,asset.mod_pk)
+            return {'deployment_evidence':evidence,'html': render_description(info.description), 'description': info.description,
                     'source': info.description_source, 'internal_id': asset.internal_id,
                     'workspace_id': asset.workspace_id, 'mod_pk': asset.mod_pk,
                     'source_url': info.source_url, 'path': asset.managed_path,

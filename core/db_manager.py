@@ -3370,7 +3370,7 @@ class DatabaseManager:
                     "external_id": str(row["external_id"] or "").strip(),
                     "source_url": str(row["source_url"] or "").strip(),
                     "source_type": str(row["source_type"] or "").strip(),
-                    "deploy_status": deploy_status,
+                    "deploy_status": str(row["deploy_status"] or ""),
                     "offline_status": offline_status,
                     "library_status": str(row["library_status"] or "").strip(),
                     "steam_name": steam,

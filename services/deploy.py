@@ -3573,8 +3573,19 @@ class ModDeployer:
         app_id: int,
         report: object,
     ) -> None:
-        """Attach projection vs effective fields. Does not change success."""
+        """Report incomplete projection without erasing canonical membership."""
         out['projection_errors']=list(getattr(report,'errors',[]) or []) if report is not None else ['游戏投影未完成；部署成员状态可能已经保存']
+        unresolved=list(getattr(report,'unresolved',[]) or []) if report is not None else []
+        out['projection_unresolved']=unresolved
+        out['game_load_verified']=False
+        if unresolved:out['projection_errors'].append('描述符或来源映射无法解析：'+', '.join(unresolved))
+        if report is not None and not getattr(report,'direct_dlc_load_written',False):
+            out['projection_errors'].append('直接启动加载列表未写入')
+        if out.get('warning')=='database_update_failed':out['projection_errors'].append('部署成员状态保存失败')
+        if out['projection_errors']:
+            out.update(success=False,partial_state_saved=out.get('warning')!='database_update_failed',error_code='projection_failed',
+                       error='部署或撤出只完成部分步骤：'+'；'.join(out['projection_errors']))
+
         if report is not None:
             direct_written = bool(getattr(report, "direct_dlc_load_written", False))
             out["direct_dlc_load_written"] = direct_written
