@@ -568,16 +568,11 @@ p {
     color: var(--text)
 }
 
-.card-line {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    font-size: 11px;
-    color: var(--muted);
-    min-width: 0;
-    margin-top: 7px
-}
+.card-meta {display:flex;align-items:center;gap:4px;height:20px;min-width:0;overflow:hidden;white-space:nowrap;}
+.card-meta > span {display:inline-flex;align-items:center;height:20px;max-width:100%;padding:0 5px;border:1px solid var(--edge);border-radius:4px;background:var(--raised);color:var(--secondary);font-size:10px;line-height:16px;}
+.card-meta .platform,.card-meta .deployed {flex:none;}
+.card-meta .type-label {display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;}
+.card-meta .deployed {background:var(--selected);border-color:#70c9b240;color:var(--accent);}
 
 .platform {
     color: var(--secondary);
@@ -1114,20 +1109,6 @@ h1 {
     font-size: 12px;
     line-height: 18px;
     margin-bottom: 5px
-}
-
-.card-line {
-    margin-top: 4px;
-    font-size: 10px
-}
-
-.card-line .badge {
-    font-size: 9px;
-    padding: 2px 4px
-}
-
-.card-line .favorite {
-    font-size: 13px
 }
 
 .inspector-footer {

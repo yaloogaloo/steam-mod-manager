@@ -220,7 +220,7 @@ function reflow() {
   S.columns = Math.max(1, Math.floor((width + gap) / (min + gap)));
   S.width = Math.floor((width - (S.columns - 1) * gap) / S.columns);
   S.coverHeight = Math.round(S.width / 1.78);
-  S.cell = S.coverHeight + 98 + gap;
+  S.cell = S.coverHeight + 61 + gap;
   $('grid').style.height = Math.ceil(S.rows.length / S.columns) * S.cell + 'px';
   renderGrid();
 }
@@ -260,7 +260,7 @@ function renderGrid() {
     el.tabIndex = 0;
     el.setAttribute('aria-label', a.name + '，' + a.platform + '，' + deploymentLabel(a));
     el.style.cssText = `left:${i%S.columns*(S.width+12)}px;top:${Math.floor(i/S.columns)*S.cell}px;width:${S.width}px;height:${S.cell-12}px;--cover-height:${S.coverHeight}px`;
-    el.innerHTML = `<div class="cover"><div data-cover="${a.token}" style="width:100%;height:100%;display:grid;place-items:center">${coverMarkup(a)}</div><button class="cover-star ${a.favorite?'is-favorite':''}" data-favorite="${a.token}" title="${a.favorite?'取消收藏':'收藏'}" aria-label="${a.favorite?'取消收藏':'收藏'}" aria-pressed="${a.favorite}" ${S.readOnly||S.busy?'disabled':''}>${icon('star')}</button><input class="check" type="checkbox" ${S.selected.has(a.token)?'checked':''} aria-label="勾选 ${escape(a.name)}"></div><div class="card-body"><h3 class="card-title" title="${escape(a.name)}">${escape(a.name)}</h3><div class="card-line"><span class="platform">${escape(a.platform)}</span></div><div class="card-line"><span class="type-label" title="${escape(a.type)}">${escape(a.type)}</span><span>${size(a.size)}</span></div><div class="card-line">${stateBadge(a)}${a.status?`<span class="badge warning" title="${escape(a.status)}">${escape(a.status)}</span>`:'<span>本地资产</span>'}</div></div>`;
+    el.innerHTML = `<div class="cover"><div data-cover="${a.token}" style="width:100%;height:100%;display:grid;place-items:center">${coverMarkup(a)}</div><button class="cover-star ${a.favorite?'is-favorite':''}" data-favorite="${a.token}" title="${a.favorite?'取消收藏':'收藏'}" aria-label="${a.favorite?'取消收藏':'收藏'}" aria-pressed="${a.favorite}" ${S.readOnly||S.busy?'disabled':''}>${icon('star')}</button><input class="check" type="checkbox" ${S.selected.has(a.token)?'checked':''} aria-label="勾选 ${escape(a.name)}"></div><div class="card-body"><h3 class="card-title" title="${escape(a.name)}">${escape(a.name)}</h3><div class="card-meta"><span class="platform">${escape(a.platform)}</span>${a.type_id!=null&&a.type&&a.type!=='类型未知'?`<span class="type-label" title="${escape(a.type)}">${escape(a.type)}</span>`:''}${a.deployed?'<span class="badge deployed">已部署</span>':''}</div></div>`;
     fragment.append(el);
     queueCover(a);
   }
