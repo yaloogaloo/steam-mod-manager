@@ -1,6 +1,7 @@
 """Actual WebEngine Inspector integration; all writes use a temporary root."""
 import hashlib
 import json
+import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
@@ -17,6 +18,9 @@ def prepare(root):
         resources.db.set_mod_type_id(ids[0].mod_id, 3)
         for label in ('内容', '自建标签'):
             resources.db.add_mod_tag(ids[1].mod_id, 'category', label)
+        resources.db.update_mod_user_metadata(ids[1].mod_id, {'custom_description':
+            '[quote][b]未闭合 BBCode 回归[list][*]正文\n' * 5
+            + '<table><tr><td>' + 'long-token-' * 80 + '<td>第二列'})
     return resources, ids
 
 
@@ -28,6 +32,7 @@ def verify(window, resources, ids):
             if result:
                 return result[0]
             QTest.qWait(10)
+            time.sleep(.002)
         raise AssertionError('JavaScript callback timed out')
 
     def wait(code):
@@ -35,6 +40,7 @@ def verify(window, resources, ids):
             if js('Boolean(' + code + ')'):
                 return
             QTest.qWait(10)
+            time.sleep(.002)
         raise AssertionError(code)
 
     db = resources.db
@@ -55,8 +61,11 @@ def verify(window, resources, ids):
     wait('S.details&&S.details.internal_id===' + json.dumps(ids[1].internal_id))
     assert js("!$('manage-types') && !$('editor').open")
     assert js("!document.querySelector('.inspector-scroll').innerText.includes('资产状态')")
-    assert js("[...document.querySelectorAll('.inspector-properties .badge')].every(e=>e.textContent!=='未部署')")
-    assert js("$('inspector-type-action').textContent==='设置类型' && !$('inspector-type-action').querySelector('path[d=\"'+paths.pencil+'\"]')")
+    assert js("!document.querySelector('.inspector-identity .deployed') && !document.querySelector('.inspector-properties')")
+    assert js("$('inspector-type-action').textContent==='未设置' && !$('inspector-type-action').querySelector('path[d=\"'+paths.pencil+'\"]')")
+    assert js("document.querySelector('.inspector-source').closest('.inspector-identity')!==null && document.querySelector('.inspector-user-tags>svg path').getAttribute('d')===paths.tags")
+    assert js("S.current.size==null && !document.querySelector('.inspector-size')")
+    assert js("!document.querySelector('.inspector-scroll').innerText.includes('描述来源') && !document.querySelector('.deployment-notice')")
     tags = db.get_category_tags(ids[1].mod_id)
     assert len(tags) == 3
     assert json.loads(js("JSON.stringify([...document.querySelectorAll('.inspector-tag')].map(e=>e.textContent))")) == tags
@@ -64,6 +73,7 @@ def verify(window, resources, ids):
     footer = js("JSON.stringify(document.querySelector('.inspector-footer').getBoundingClientRect().toJSON())")
     js("document.querySelector('.inspector-scroll').scrollTop=100000")
     assert js("JSON.stringify(document.querySelector('.inspector-footer').getBoundingClientRect().toJSON())") == footer
+    assert js("document.querySelector('.inspector-footer').parentElement===$('inspector') && !document.querySelector('.inspector-summary .inspector-footer') && document.querySelector('.inspector-scroll').scrollWidth<=document.querySelector('.inspector-scroll').clientWidth+1")
     js("document.querySelector('.inspector-scroll').scrollTop=0;$('inspector-type-action').focus()")
     before = db._conn.total_changes
     catalog = resources.path('data/mod_types.json').read_bytes()
@@ -78,6 +88,7 @@ def verify(window, resources, ids):
     assert cancel_focus == 'inspector-type-action'
     js("$('inspector-type-action').click()")
     wait("$('inspector-type-menu').matches(':popover-open')")
+    QTest.qWait(150)
     window.grab().save(str(resources.path('multi-tags-type-picker.png')))
     js("$('inspector-type-select').value='3';$('inspector-type-select').dispatchEvent(new Event('change',{bubbles:true}))")
     wait("!S.busy && S.details.type_id===3 && $('inspector-type-action').textContent==='内容'")
@@ -87,6 +98,7 @@ def verify(window, resources, ids):
     assert commands == ['type-set']
     assert js("document.activeElement.id==='inspector-type-action'")
     assert js("!$('editor').open && document.querySelectorAll('#inspector-type-action').length===1")
+    QTest.qWait(150)
     window.grab().save(str(resources.path('multi-tags-assigned.png')))
     js("$('inspector-type-action').click()")
     wait("$('inspector-type-menu').matches(':popover-open')")
@@ -95,9 +107,33 @@ def verify(window, resources, ids):
     assert db.get_mod_type_id(ids[1].mod_id) is None
     assert db.get_category_tags(ids[1].mod_id) == tags
     assert commands == ['type-set', 'type-set']
+    js("$('open-detail').click()")
+    wait("$('detail').open")
+    js("$('detail-return').click();document.querySelector('[data-command=edit]').click()")
+    wait("$('editor').open")
+    js("$('edit-cancel').click();$('inspector-more').click();document.querySelector('[data-action=tags]').click()")
+    wait("$('organization').open&&!!$('tag-query')")
+    label = '超长用户标签_' * 8
+    js("$('tag-query').value=" + json.dumps(label) + ";$('tag-add').click()")
+    wait('!S.busy&&O.tags.tags.includes(' + json.dumps(label) + ')')
+    assert db.get_mod_type_id(ids[1].mod_id) is None
+    assert set(db.get_category_tags(ids[1].mod_id)) == set(tags + [label])
+    js("$('organization-close').click()")
+    wait("!$('organization').open&&S.details&&S.details.tags.includes(" + json.dumps(label) + ')')
+    QTest.qWait(150)
+    window.grab().save(str(resources.path('long-user-tag.png')))
+    assert js("document.querySelector('.inspector-scroll').scrollWidth<=document.querySelector('.inspector-scroll').clientWidth+1")
+    js("$('inspector-more').click();document.querySelector('[data-action=tags]').click()")
+    wait("$('organization').open&&!!$('tag-query')")
+    js("[...document.querySelectorAll('[data-remove-tag]')].find(e=>e.dataset.removeTag===" + json.dumps(label) + ').click()')
+    wait('!S.busy&&!O.tags.tags.includes(' + json.dumps(label) + ')')
+    js("$('organization-close').click()")
+    assert db.get_category_tags(ids[1].mod_id) == tags
+    assert db.get_mod_type_id(ids[1].mod_id) is None
+    assert commands == ['type-set', 'type-set', 'tag-add', 'tag-remove']
     js('inspect(S.assets.find(a=>a.internal_id===' + json.dumps(ids[0].internal_id) + '))')
     wait('S.details&&S.details.internal_id===' + json.dumps(ids[0].internal_id))
-    assert js("document.querySelector('.inspector-properties .deployed').textContent==='已部署' && !document.querySelector('.inspector-user-tags')")
+    assert js("document.querySelector('.inspector-identity .deployed').textContent==='已部署' && !document.querySelector('.inspector-user-tags')")
     assert js("!document.querySelector('.inspector-scroll').innerText.includes('无标签')")
     assert not console
     return {'passed': True, 'commands': commands, 'cancel_writes': 0, 'cancel_focus': cancel_focus,

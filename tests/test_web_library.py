@@ -161,10 +161,10 @@ def test_real_webchannel_render_selection_and_virtualization(bridge):
         assert evaluate('S.selected.size === 1 && !!S.details')
         assert not evaluate("$('inspector').hidden")
         assert evaluate("document.querySelectorAll('.resultbar').length===0 && !document.getElementById('browse-hint')")
-        assert evaluate("document.querySelectorAll('.inspector-properties .badge').length===3")
+        assert evaluate("document.querySelectorAll('.inspector-identity .deployed').length===1 && document.querySelectorAll('.inspector-source span').length===2")
         assert evaluate("[...document.querySelectorAll('.inspector-scroll .facts dt')].every(e=>!['类型 / 分类','本地大小','部署状态'].includes(e.textContent))")
         evaluate("globalThis.originalType=S.current.type;S.current.type='非常长的真实类型名称'.repeat(15);drawInspector(S.current,S.details);")
-        assert evaluate("document.querySelector('.inspector-properties').getBoundingClientRect().height<=53 && [...document.querySelectorAll('.inspector-properties .badge')].every(e=>e.getBoundingClientRect().height===24 && e.getBoundingClientRect().right<=document.querySelector('.inspector-scroll').getBoundingClientRect().right)")
+        assert evaluate("$('inspector-type-action').getBoundingClientRect().right<=document.querySelector('.inspector-scroll').getBoundingClientRect().right && document.querySelector('.inspector-source').closest('.inspector-identity')!==null")
         evaluate('S.current.type=originalType;drawInspector(S.current,S.details);')
         assert evaluate("JSON.stringify([...document.querySelectorAll('[data-command]')].map(e=>e.dataset.command))") == '["redeploy","undeploy","edit"]'
         assert evaluate("[...document.querySelectorAll('[data-command]')].every(e=>e.disabled && e.title.includes('只读'))")
