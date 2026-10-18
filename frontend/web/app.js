@@ -28,6 +28,7 @@ const paths = {
   tags: 'M3 3h7l11 11-7 7L3 10z M7 7h.01',
   'circle-alert': 'M12 8v5 M12 17h.01 M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
   'chevron-down': 'M6 9l6 6 6-6',
+  star: 'M12 3.25l2.7 5.47 6.04.88-4.37 4.26 1.03 6.02L12 17.04l-5.4 2.84 1.03-6.02L3.26 9.6l6.04-.88z',
   check: 'M5 12l4 4 10-10'
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name]||paths.image}"/></svg>`;
@@ -259,7 +260,7 @@ function renderGrid() {
     el.tabIndex = 0;
     el.setAttribute('aria-label', a.name + '，' + a.platform + '，' + deploymentLabel(a));
     el.style.cssText = `left:${i%S.columns*(S.width+12)}px;top:${Math.floor(i/S.columns)*S.cell}px;width:${S.width}px;height:${S.cell-12}px;--cover-height:${S.coverHeight}px`;
-    el.innerHTML = `<div class="cover"><div data-cover="${a.token}" style="width:100%;height:100%;display:grid;place-items:center">${coverMarkup(a)}</div><button class="cover-star ${a.favorite?'is-favorite':''}" data-favorite="${a.token}" title="${a.favorite?'取消收藏':'收藏'}" aria-label="${a.favorite?'取消收藏':'收藏'}" aria-pressed="${a.favorite}" ${S.readOnly||S.busy?'disabled':''}>${a.favorite?'★':'☆'}</button><input class="check" type="checkbox" ${S.selected.has(a.token)?'checked':''} aria-label="勾选 ${escape(a.name)}"></div><div class="card-body"><h3 class="card-title" title="${escape(a.name)}">${escape(a.name)}</h3><div class="card-line"><span class="platform">${escape(a.platform)}</span></div><div class="card-line"><span class="type-label" title="${escape(a.type)}">${escape(a.type)}</span><span>${size(a.size)}</span></div><div class="card-line">${stateBadge(a)}${a.status?`<span class="badge warning" title="${escape(a.status)}">${escape(a.status)}</span>`:'<span>本地资产</span>'}</div></div>`;
+    el.innerHTML = `<div class="cover"><div data-cover="${a.token}" style="width:100%;height:100%;display:grid;place-items:center">${coverMarkup(a)}</div><button class="cover-star ${a.favorite?'is-favorite':''}" data-favorite="${a.token}" title="${a.favorite?'取消收藏':'收藏'}" aria-label="${a.favorite?'取消收藏':'收藏'}" aria-pressed="${a.favorite}" ${S.readOnly||S.busy?'disabled':''}>${icon('star')}</button><input class="check" type="checkbox" ${S.selected.has(a.token)?'checked':''} aria-label="勾选 ${escape(a.name)}"></div><div class="card-body"><h3 class="card-title" title="${escape(a.name)}">${escape(a.name)}</h3><div class="card-line"><span class="platform">${escape(a.platform)}</span></div><div class="card-line"><span class="type-label" title="${escape(a.type)}">${escape(a.type)}</span><span>${size(a.size)}</span></div><div class="card-line">${stateBadge(a)}${a.status?`<span class="badge warning" title="${escape(a.status)}">${escape(a.status)}</span>`:'<span>本地资产</span>'}</div></div>`;
     fragment.append(el);
     queueCover(a);
   }

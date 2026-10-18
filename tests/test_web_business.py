@@ -142,7 +142,7 @@ def test_real_ui_favorite_editor_refresh_and_cancel(business, tmp_path):
         assert info.custom_description == '用户描述'
         assert info.user_notes == '用户备注' and info.favorite
         assert info.steam_description == '这是来源描述，用户编辑不能覆盖此字段。'
-        js("closeInspector();document.querySelector('[data-favorite]').click()")
+        js("closeInspector();document.querySelector('[data-favorite] svg path').dispatchEvent(new MouseEvent('click',{bubbles:true}))")
         wait('!S.busy && !S.current && !S.assets[0].favorite')
         assert js("$('inspector').hidden && S.selected.size===0")
         js("document.querySelector('[data-favorite]').click()")
