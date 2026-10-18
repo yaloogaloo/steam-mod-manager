@@ -14,8 +14,9 @@ def digest(stream):
 def validate_legacy_v2(manifest, ctx, db, *, verify_files):
     """A v2 PK stamp is accepted only for its proven current entity and files.
 
-    v0/v1 omitted backup ownership, so they remain read-only evidence. No
-    workspace-id guessing or absolute target drive is admitted as authority.
+    v0/v1 require separate historical identity/ownership reconstruction and
+    remain read-only, even when individual entries recorded backup ownership.
+    No workspace-id guessing or absolute target drive is admitted as authority.
     """
     from services.path_lifecycle import _folder_proves_mod_entity
     from services.deploy_paths import remap_manifest_targets
