@@ -68,6 +68,8 @@ def verify(window, resources, ids):
     assert js("!document.querySelector('.inspector-scroll').innerText.includes('描述来源') && !document.querySelector('.deployment-notice')")
     tags = db.get_category_tags(ids[1].mod_id)
     assert len(tags) == 3
+    # Preserve reading space below the short-title identity and three-tag property group.
+    assert js("document.querySelector('.inspector-summary').getBoundingClientRect().top-document.querySelector('.inspector-top').getBoundingClientRect().bottom<=210")
     assert json.loads(js("JSON.stringify([...document.querySelectorAll('.inspector-tag')].map(e=>e.textContent))")) == tags
     assert js("document.querySelector('.inspector-type-property').nextElementSibling.matches('.inspector-user-tags') && document.querySelector('.inspector-user-tags').nextElementSibling.matches('.facts') && document.querySelector('.facts').nextElementSibling.textContent==='描述摘要'")
     footer = js("JSON.stringify(document.querySelector('.inspector-footer').getBoundingClientRect().toJSON())")
