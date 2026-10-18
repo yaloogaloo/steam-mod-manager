@@ -11,7 +11,7 @@ def digest(stream):
     return value.hexdigest()
 
 
-def validate_legacy_v2(manifest, ctx, resources, *, verify_files):
+def validate_legacy_v2(manifest, ctx, db, *, verify_files):
     """A v2 PK stamp is accepted only for its proven current entity and files.
 
     v0/v1 omitted backup ownership, so they remain read-only evidence. No
@@ -25,7 +25,9 @@ def validate_legacy_v2(manifest, ctx, resources, *, verify_files):
     managed=ctx.library_folder();pk=str(ctx.mod_pk)
     from services.deploy_rules.manifest import manifest_path_for
     raw=json.loads(manifest_path_for(managed).read_text(encoding='utf8'))
-    if not isinstance(raw,dict) or any(not isinstance(item,dict) or 'backup' not in item for item in raw.get('files',[])):
+    if (not isinstance(raw,dict) or not isinstance(raw.get('files'),list) or not manifest.files
+        or len(raw['files'])!=len(manifest.files)
+        or any(not isinstance(item,dict) or 'backup' not in item for item in raw['files'])):
         raise PermissionError('历史 Manifest 未明确记录覆盖前备份；拒绝撤出')
     for item in raw['files']:
         backup=item['backup']
@@ -33,12 +35,14 @@ def validate_legacy_v2(manifest, ctx, resources, *, verify_files):
             raise PermissionError('历史备份信息不完整；拒绝撤出')
     if manifest.schema_version!=2 or str(manifest.mod_id)!=pk:
         raise PermissionError('历史 Manifest 身份或版本未能验证；保留记录，拒绝写入')
-    if manifest.internal_id not in (ctx.internal_id,pk):
+    if manifest.internal_id not in ('',ctx.internal_id,pk):
         raise PermissionError('Manifest 声明了其他实体身份')
-    if not _folder_proves_mod_entity(managed,mod_id=pk,db=resources.db):
+    if not _folder_proves_mod_entity(managed,mod_id=pk,db=db):
         raise PermissionError('归档目录未证明当前实体身份')
     remap_manifest_targets(manifest,ctx)
-    validate_manifest_targets(manifest,allowed_roots=collect_allowed_target_roots(ctx))
+    roots=collect_allowed_target_roots(ctx)
+    validate_manifest_targets(manifest,allowed_roots=roots)
+    if verify_files:refuse_shared_history(manifest,ctx,db)
     manager=BackupManager(managed,internal_id=ctx.internal_id,mod_pk=pk)
     archives={}
     for entry in manifest.files:
@@ -46,10 +50,13 @@ def validate_legacy_v2(manifest, ctx, resources, *, verify_files):
             source=checked_resource_path(managed,managed/entry.source_relative)
         else:
             source=checked_resource_path(managed,entry.source)
-        target=resources.validate(entry.target)
+        target=Path(entry.target)
+        for root in roots:
+            if target.resolve().is_relative_to(root.resolve()):
+                target=checked_resource_path(root,entry.target);break
+        else:raise PermissionError('历史目标不属于原部署规则的允许路径')
         if entry.backup:
             backup=manager.resolve_backup_file(entry.backup)
-            resources.validate(backup)
             for root in manager._allowed_backup_roots():
                 if backup.is_relative_to(root):checked_resource_path(root,backup);break
             if verify_files:manager.verify_backup_hash(entry.backup)
@@ -72,3 +79,27 @@ def validate_legacy_v2(manifest, ctx, resources, *, verify_files):
         with target.open('rb') as stream:actual=digest(stream)
         if expected!=actual:raise PermissionError('历史部署目标内容已变化；拒绝覆盖或撤出')
     return manifest
+
+
+def refuse_shared_history(manifest,ctx,db):
+    """A history claim must not authorize removal of another Mod's target."""
+    from services.deploy_rules.base import DeployContext
+    from services.deploy_rules.manifest import load_manifest,manifest_path_for
+    from services.deploy_paths import remap_entry_target
+    targets={str(Path(entry.target).resolve()).casefold() for entry in manifest.files}
+    for row in db.list_mod_list_items(game_id=ctx.app_id):
+        if int(row['mod_pk'])==int(ctx.mod_pk) or not row['managed_path']:continue
+        folder=Path(row['managed_path'])
+        if not manifest_path_for(folder).is_file():continue
+        other=load_manifest(folder)
+        if other is None:raise PermissionError('同游戏历史清单无法解析，无法排除目标共享')
+        display=db.get_mod_display_info(row['mod_pk'])
+        peer=DeployContext(internal_id=row['internal_id'],source=folder,app_id=ctx.app_id,
+            config=ctx.config,deploy_type=other.deploy_type,mod_pk=row['mod_pk'],
+            custom_deploy_path=display.custom_deploy_path if display else '')
+        for entry in other.files:
+            candidates={str(Path(entry.target).resolve()).casefold()}
+            try:candidates.add(str(Path(remap_entry_target(entry,peer).target).resolve()).casefold())
+            except ValueError:pass
+            if targets & candidates:
+                raise PermissionError('历史目标被多个 Mod 声明；拒绝覆盖或撤出：'+entry.target)

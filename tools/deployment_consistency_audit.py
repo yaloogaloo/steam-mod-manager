@@ -18,6 +18,11 @@ def main():
         for game in db.list_games():
             config=db.get_game_deploy_config(game.app_id)
             protected.update(Path(value).resolve() for value in (config.install_path,config.mod_path,config.workshop_path) if value)
+        from services.paradox_activation import resolve_paradox_user_dir
+        from services.bg3_activation import bg3_modsettings_path
+        from services.deploy_rules.anno import resolve_anno_stamps_dir
+        protected.update(resolve_paradox_user_dir(db,app_id=aid).resolve() for aid in (281990,1158310) if db.get_game(aid))
+        protected.add(bg3_modsettings_path().parent.resolve());protected.add(resolve_anno_stamps_dir().resolve())
         for row in db._conn.execute('SELECT DISTINCT last_known_path,custom_deploy_path FROM mods'):
             if row[0]:protected.add(Path(row[0]).parent.resolve())
             if row[1]:protected.add(Path(row[1]).resolve())

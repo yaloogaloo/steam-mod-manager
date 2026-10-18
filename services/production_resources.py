@@ -332,6 +332,8 @@ class ProductionResources(BusinessResources):
         from services.deploy_rules.manifest import manifest_path_for
         if manifest is None and manifest_path_for(managed).is_file():
             raise PermissionError('历史 Manifest 无法解析；部署状态无法确认，拒绝写入')
+        if manifest is not None and not manifest.files:
+            raise PermissionError('Manifest 缺少可核对文件记录；状态无法确认，拒绝写入')
         if manifest and manifest.files:
             from services.deploy_security import validate_manifest_mod_id
             validate_manifest_mod_id(manifest,str(entity.mod_pk))
@@ -344,7 +346,7 @@ class ProductionResources(BusinessResources):
             roots=collect_allowed_target_roots(ctx)
             if legacy_identity:
                 from services.deploy_manifest_compat import validate_legacy_v2
-                validate_legacy_v2(manifest,ctx,self,verify_files=scan)
+                validate_legacy_v2(manifest,ctx,self.db,verify_files=scan)
             validate_manifest_targets(manifest,allowed_roots=roots)
             for entry in manifest.files:
                 if entry.source_relative:

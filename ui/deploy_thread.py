@@ -119,9 +119,10 @@ class DeployWorker(QThread):
                 # The original service records canonical membership before its
                 # external projection. Report the partial outcome; do not invent
                 # an atomic rollback or overwrite that authoritative DB state.
+                saved=bool(result.get('partial_state_saved',True))
                 result={**result,'success':False,'status':DeployStatus.FAILED.value,
-                    'partial_state_saved':True,'error_code':'projection_failed',
-                    'error':'部署成员状态已保存，但游戏投影失败：'+'；'.join(result['projection_errors'])}
+                    'partial_state_saved':saved,'error_code':'projection_failed',
+                    'error':('部署成员状态已保存，但游戏投影失败：' if saved else '部署状态或游戏投影失败：')+'；'.join(result['projection_errors'])}
             e2e_mark("worker_deploy_returned")
             if self.isInterruptionRequested():
                 result = DeployResult(
