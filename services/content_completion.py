@@ -137,7 +137,12 @@ def prepare(resources, sources, *, platform, cancel_check=lambda:None):
             for index,source in enumerate(sources):
                 cancel_check()
                 frozen=workspace/('input-'+str(index)+source.suffix.lower())
-                shutil.copyfile(source,frozen)
+                with source.open('rb') as src,frozen.open('xb') as dst:
+                    copied=0
+                    while block:=src.read(1024*1024):
+                        cancel_check();copied+=len(block)
+                        if copied>MAX_BYTES:raise ValueError('输入包体积超过限额')
+                        dst.write(block)
                 if digest(frozen,cancel_check)!=fingerprints[source]:raise ValueError('输入包已变化，请重新选择')
                 dest=workspace/str(index)
                 extract_archive(frozen,dest_dir=dest,max_output_bytes=MAX_BYTES,cancel_check=cancel_check)
