@@ -211,14 +211,16 @@ def test_qt_card_controls_keep_selection_favorite_and_virtual_state_separate(reg
         initial=js('S.rows[0].favorite')
         js("document.querySelector('.check').click()")
         assert js('S.selected.size===1&&S.current===null')
+        js("document.querySelectorAll('.check')[1].click()")
+        assert js('S.selected.size===2&&S.current===null')
         js("document.querySelector('.cover-star path').dispatchEvent(new MouseEvent('click',{bubbles:true}))")
         wait('!S.busy&&S.rows[0].favorite!=='+json.dumps(initial))
-        assert js('S.selected.size===1&&S.current===null')
+        assert js('S.selected.size===2&&S.current===null')
         token=js("document.querySelector('.card').dataset.token")
         assert js("document.querySelector('.cover-star').classList.contains('is-favorite')")==(not initial)
         js("document.querySelector('.card-body').click()")
         wait('!!S.details')
-        assert js('S.selected.size===1')
+        assert js('S.selected.size===2')
         assert js("document.querySelectorAll('#inspector .cover-star').length")==0
         text=js("$('inspector').textContent")
         assert 'Manifest' not in text and 'Workshop 包' not in text and '原生' not in text
