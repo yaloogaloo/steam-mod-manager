@@ -77,6 +77,7 @@ def test_bridge_preserves_failed_and_unknown_raw_state(legacy):
             assets=b.execute('library',{'game':42})['assets']
             row=next(a for a in assets if a['internal_id']==identity.internal_id)
             assert row['deploy_state']==status and row['deployed'] is False
+            assert inspect_deployment(r.db,identity.mod_id)['state']=='unknown'
     finally:b.shutdown()
 
 def test_legacy_backup_replay_uses_original_undeploy_and_restores_user_file(legacy):

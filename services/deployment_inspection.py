@@ -11,8 +11,11 @@ def inspect_deployment(db, mod_pk):
     row=db.get_mod_backup_row(mod_pk)
     if row is None:return {'state':'unknown','message':'状态无法确认：记录不存在'}
     config=db.get_game_deploy_config(row['app_id'])
-    info=db.get_mod_deploy_info(mod_pk)
-    recorded=info.deploy_status
+    with db._lock:
+        status=db._conn.execute('SELECT deploy_status FROM mods WHERE mod_id=?',(mod_pk,)).fetchone()
+    recorded=str(status[0] or '') if status else ''
+    if recorded not in ('deployed','not_deployed'):
+        return {'recorded':recorded,'state':'unknown','message':'部署登记失败或未知；磁盘状态尚未确认'}
     if config is None:return {'state':'unknown','recorded':recorded,'message':'状态无法确认：缺少游戏配置'}
     strategy=resolve_deploy_type(row['app_id'],config.deploy_type)
     display=db.get_mod_display_info(mod_pk)
@@ -40,6 +43,7 @@ def inspect_deployment(db, mod_pk):
         raw=json.loads(path.read_text(encoding='utf8'))
         if not isinstance(raw,dict) or not isinstance(raw.get('files'),list):raise ValueError('Manifest Schema 无效')
         manifest=DeployManifest.from_dict(raw)
+        if not manifest.files:raise ValueError('Manifest 未包含可核对文件')
         aliases={str(mod_pk),str(row['internal_id']),str(row.get('workspace_id') or '')}
         if str(manifest.mod_id) not in aliases or (manifest.internal_id and manifest.internal_id not in aliases):
             raise ValueError('Manifest 声明了其他实体身份')
