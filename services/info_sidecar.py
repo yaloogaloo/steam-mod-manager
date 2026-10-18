@@ -321,8 +321,8 @@ def build_sidecar_from_db(
             external_id=str(info.external_id or ""),
         )
         bundle = info.mod_files
-        cat_tags = database.get_category_tags(str(mod_id))
-        category = cat_tags[0] if cat_tags else ""
+        # User tags are SQLite-only annotations, never a portable type/category.
+        category = str(info.category or '')
         try:
             grouped = database.get_mod_relationships(str(mod_id))
             for item in grouped.get("dependencies") or []:

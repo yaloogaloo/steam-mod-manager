@@ -73,3 +73,12 @@ def test_labels_are_scoped_by_authoritative_game_without_schema_migration(databa
     for pk, original in zip(ids, before):
         assert {k:v for k,v in original.items() if k!='updated_at'} == {
             k:v for k,v in record(db, pk).items() if k!='updated_at'}
+
+def test_sidecar_does_not_export_user_tag_as_type(database,tmp_path):
+    from services.info_sidecar import build_sidecar_from_db
+    db,ids=database;pk=ids[0]
+    before=build_sidecar_from_db(pk,tmp_path,db=db)
+    db.add_category_tag(pk,'Only a user tag')
+    after=build_sidecar_from_db(pk,tmp_path,db=db)
+    assert after.category==before.category
+    assert after.category!='Only a user tag'
