@@ -4144,172 +4144,48 @@ class DatabaseManager:
         mod_id: int | str,
         data: Mapping[str, Any],
     ) -> ModDisplayInfo:
-        """
-        Persist user-editable fields only.
-
-        Creates a stub row when the Mod is not yet in SQLite so edits survive
-        before the next Steam sync.
-        """
+        """Patch only explicitly supplied user fields; identity and type are separate."""
         mid = int(mod_id)
-        display_name = str(data.get("display_name", "") or "").strip()
-        custom_description = str(data.get("custom_description", "") or "")
-        user_notes = str(data.get("user_notes", "") or "")
-        favorite_raw = data.get("favorite", 0)
-        favorite = 1 if favorite_raw in (True, 1, "1", "true", "True") else 0
-        # Optional — only update when the key is present (edit dialog).
-        touch_source = "source_url" in data
-        source_url = str(data.get("source_url", "") or "").strip() if touch_source else None
-        touch_platform = "platform" in data
-        platform = (
-            normalize_platform(str(data.get("platform") or ""))
-            if touch_platform
-            else None
-        )
-        touch_custom_deploy = "custom_deploy_path" in data
-        custom_deploy_path = (
-            str(data.get("custom_deploy_path", "") or "").strip()
-            if touch_custom_deploy
-            else None
-        )
-        now = _mods_updated_at_now(reason="user_edit")
-
-        with self._lock:
+        text_fields = {
+            "display_name": True, "custom_description": False, "user_notes": False,
+            "source_url": True, "custom_deploy_path": True, "category": True,
+        }
+        values: dict[str, Any] = {}
+        for key, strip in text_fields.items():
+            if key in data:
+                value = str(data[key] or "")
+                value = value.strip() if strip else value
+                values[key] = (value or None) if key == "category" else value
+        if "favorite" in data:
+            values["favorite"] = int(data["favorite"] in (True, 1, "1", "true", "True"))
+        if "platform" in data:
+            values["platform"] = normalize_platform(str(data["platform"] or ""))
+        with self._lock, self._conn:
             existing = self._conn.execute(
-                "SELECT mod_id FROM mods WHERE mod_id = ?",
-                (mid,),
+                f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?", (mid,)
             ).fetchone()
             if existing is None:
                 from services.identity_service import refuse_unauthorized_mod_insert
-
-                logger.warning(
-                    "update_mod_user_metadata refused create for missing mod_id=%s",
-                    mid,
-                )
                 refuse_unauthorized_mod_insert(mid)
                 raise RuntimeError(f"metadata edit refused: no mods row for {mid}")
-            else:
-                if touch_source or touch_platform:
-                    if touch_source and touch_platform:
-                        self._conn.execute(
-                            """
-                            UPDATE mods SET
-                                display_name = ?,
-                                custom_description = ?,
-                                user_notes = ?,
-                                favorite = ?,
-                                platform = ?,
-                                source_url = ?,
-                                updated_at = ?
-                            WHERE mod_id = ?
-                            """,
-                            (
-                                display_name,
-                                custom_description,
-                                user_notes,
-                                favorite,
-                                platform or PLATFORM_STEAM,
-                                source_url or "",
-                                now,
-                                mid,
-                            ),
-                        )
-                    elif touch_source:
-                        self._conn.execute(
-                            """
-                            UPDATE mods SET
-                                display_name = ?,
-                                custom_description = ?,
-                                user_notes = ?,
-                                favorite = ?,
-                                source_url = ?,
-                                updated_at = ?
-                            WHERE mod_id = ?
-                            """,
-                            (
-                                display_name,
-                                custom_description,
-                                user_notes,
-                                favorite,
-                                source_url or "",
-                                now,
-                                mid,
-                            ),
-                        )
-                    else:
-                        self._conn.execute(
-                            """
-                            UPDATE mods SET
-                                display_name = ?,
-                                custom_description = ?,
-                                user_notes = ?,
-                                favorite = ?,
-                                platform = ?,
-                                updated_at = ?
-                            WHERE mod_id = ?
-                            """,
-                            (
-                                display_name,
-                                custom_description,
-                                user_notes,
-                                favorite,
-                                platform or PLATFORM_STEAM,
-                                now,
-                                mid,
-                            ),
-                        )
-                else:
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET
-                            display_name = ?,
-                            custom_description = ?,
-                            user_notes = ?,
-                            favorite = ?,
-                            updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (
-                            display_name,
-                            custom_description,
-                            user_notes,
-                            favorite,
-                            now,
-                            mid,
-                        ),
-                    )
-                if touch_custom_deploy:
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET custom_deploy_path = ?, updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (custom_deploy_path or "", now, mid),
-                    )
-                if "game_version" in data:
-                    self._apply_mod_game_version_locked(
-                        mid, data.get("game_version")
-                    )
-                if "category" in data:
-                    text = str(data.get("category") or "").strip()
-                    self._conn.execute(
-                        """
-                        UPDATE mods SET category = ?, updated_at = ?
-                        WHERE mod_id = ?
-                        """,
-                        (text or None, now, mid),
-                    )
-                self._ensure_mod_workspace_id_locked(mid)
-            self._apply_user_override_flags_from_save(
-                mid,
-                display_name=display_name,
-                custom_description=custom_description,
-            )
-            self._conn.commit()
+            if values or "game_version" in data:
+                sets = [f"{key} = ?" for key in values]
+                sets.append("updated_at = ?")
+                self._conn.execute(
+                    f"UPDATE mods SET {', '.join(sets)} WHERE mod_id = ?",
+                    (*values.values(), _mods_updated_at_now(reason="user_edit"), mid),
+                )
+            if "game_version" in data:
+                self._apply_mod_game_version_locked(mid, data["game_version"])
+            if "display_name" in data or "custom_description" in data:
+                self._apply_user_override_flags_from_save(
+                    mid,
+                    display_name=values.get("display_name", existing["display_name"] or ""),
+                    custom_description=values.get("custom_description", existing["custom_description"] or ""),
+                )
             row = self._conn.execute(
-                f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?",
-                (mid,),
+                f"SELECT {_MOD_SELECT_COLS} FROM mods WHERE mod_id = ?", (mid,)
             ).fetchone()
-        assert row is not None
         return _display_info_from_row(row)
 
     def set_mod_game_version(
@@ -4805,16 +4681,25 @@ class DatabaseManager:
             if t.tag_type == TAG_TYPE_CATEGORY and (t.tag_value or "").strip()
         ]
 
-    def list_all_category_tags(self) -> list[str]:
-        """Distinct category labels across the library (sorted)."""
+    def list_all_category_tags(self, *, app_id: int | str | None = None) -> list[str]:
+        """Labels in one authoritative Mod game, including the app_id=0 sentinel.
+
+        Associations already carry scope through mods.app_id; no tag-copy
+        migration or parallel definition table is needed. None is legacy global
+        enumeration for diagnostics, never the game-scoped selector.
+        """
+        scope = "" if app_id is None else " AND m.app_id = ?"
+        params = [TAG_TYPE_CATEGORY]
+        if app_id is not None:
+            params.append(int(app_id))
         with self._lock:
             rows = self._conn.execute(
-                """
-                SELECT DISTINCT tag_value FROM mod_tags
-                WHERE tag_type = ? AND TRIM(tag_value) != ''
-                ORDER BY tag_value COLLATE NOCASE
-                """,
-                (TAG_TYPE_CATEGORY,),
+                f"""
+                SELECT DISTINCT t.tag_value FROM mod_tags AS t
+                JOIN mods AS m ON m.mod_id = t.mod_id
+                WHERE t.tag_type = ? AND TRIM(t.tag_value) != '' {scope}
+                ORDER BY t.tag_value COLLATE NOCASE
+                """, params,
             ).fetchall()
         return [str(r["tag_value"]) for r in rows]
 

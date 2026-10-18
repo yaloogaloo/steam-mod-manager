@@ -415,8 +415,9 @@ class LibraryBridge(QObject):
         return self._version([asdict(record), sorted(self.adapter.db.list_collection_member_ids(record.collection_id))])
 
     def tag_state(self, asset):
+        info = self.adapter.verify(asset)
         tags = self.adapter.db.get_category_tags(asset.mod_pk)
-        return {'tags': tags, 'available': self.adapter.db.list_all_category_tags(),
+        return {'tags': tags, 'available': self.adapter.db.list_all_category_tags(app_id=info.app_id),
                 'version': self._version(sorted(tags)), 'internal_id': asset.internal_id}
 
     def execute_organize(self, action, args):
