@@ -3581,6 +3581,11 @@ class ModDeployer:
         if unresolved:out['projection_errors'].append('描述符或来源映射无法解析：'+', '.join(unresolved))
         if report is not None and not getattr(report,'direct_dlc_load_written',False):
             out['projection_errors'].append('直接启动加载列表未写入')
+        if (report is not None and getattr(report, 'enabled_launcher_ids', [])
+                and not getattr(report, 'is_effective', False)):
+            reason = ('Launcher 当前没有激活的 Playset' if not getattr(report, 'active_playset_id', None)
+                      else 'Launcher 当前 Playset 未包含全部预期启用的 Mod')
+            out['projection_errors'].append(reason)
         if out.get('warning')=='database_update_failed':out['projection_errors'].append('部署成员状态保存失败')
         if out['projection_errors']:
             out.update(success=False,partial_state_saved=out.get('warning')!='database_update_failed',error_code='projection_failed',

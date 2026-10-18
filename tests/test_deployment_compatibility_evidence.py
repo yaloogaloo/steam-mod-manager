@@ -159,3 +159,18 @@ def test_empty_manifest_is_not_write_admission(legacy):
     resources=ProductionResources(r.root,r.db,r.path('mod'))
     with pytest.raises(PermissionError,match='可核对文件'):resources.validate_deploy(identity.internal_id,scan=False)
     with pytest.raises(PermissionError):validate_legacy_v2(manifest,ctx,r.db,verify_files=False)
+
+
+@pytest.mark.parametrize('schema', [0, 1])
+def test_full_content_proof_does_not_grant_old_schema_write_admission(legacy, schema):
+    from services.production_resources import ProductionResources
+    r, source, target, identity, ctx, manifest = legacy
+    manifest.schema_version = schema
+    with r.bind():
+        save_manifest(source, manifest)
+    before = (source / '.info/deploy_manifest.json').read_bytes(), target.read_bytes()
+    resources = ProductionResources(r.root, r.db, r.path('mod'))
+    with pytest.raises(PermissionError):
+        resources.validate_deploy(identity.internal_id, scan=False)
+    assert ((source / '.info/deploy_manifest.json').read_bytes(), target.read_bytes()) == before
+    assert r.db.get_mod_deploy_info(identity.mod_id).deploy_status == 'not_deployed'

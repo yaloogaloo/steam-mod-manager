@@ -131,6 +131,8 @@ def _write_ugc_descriptor(user_dir: Path, workshop_id: str, *, name: str = "Mod"
         f'name="{name}"\npath="{payload.as_posix()}"\nremote_file_id="{workshop_id}"\n',
         encoding="utf-8",
     )
+    from tests.helpers.paradox import register_descriptor
+    register_descriptor(user_dir, workshop_id)
     return path
 
 

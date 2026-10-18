@@ -132,6 +132,9 @@ def _configure_ck3(
         workshop_path=str(workshop),
     )
     _seed_empty_active_playset(user_dir)
+    if write_ugc:
+        from tests.helpers.paradox import register_descriptor
+        register_descriptor(user_dir, SYNTHETIC_WORKSHOP_ID)
     return user_dir, workshop, library
 
 
@@ -245,7 +248,8 @@ def test_t2_missing_ugc_stays_unresolved(tmp_path: Path, db: DatabaseManager) ->
     assert not ugc.exists()
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(entity)
-    assert result.get("success") is True, result
+    assert result.get("success") is False, result
+    assert result['error_code'] == 'projection_failed'
     report = sync_paradox_launcher(db, app_id=CK3, user_dir=user_dir)
     assert report.unresolved
     assert not ugc.exists()
@@ -533,12 +537,16 @@ def _playset_members(user_dir: Path) -> list[tuple[str, int, int, int]]:
 def _write_extra_ugc(user_dir: Path, workshop_id: str) -> None:
     mod_dir = user_dir / "mod"
     mod_dir.mkdir(parents=True, exist_ok=True)
+    payload = user_dir / 'workshop-payload' / workshop_id
+    payload.mkdir(parents=True)
     (mod_dir / f"ugc_{workshop_id}.mod").write_text(
         f'version="1.0"\nname="Mod {workshop_id}"\n'
-        f'path="C:/workshop/{workshop_id}"\n'
+        f'path="{payload.as_posix()}"\n'
         f'remote_file_id="{workshop_id}"\n',
         encoding="utf-8",
     )
+    from tests.helpers.paradox import register_descriptor
+    register_descriptor(user_dir, workshop_id)
 
 
 def _launcher_content_load_export(con: sqlite3.Connection) -> list[str]:
@@ -740,7 +748,8 @@ def test_paradox_deploy_does_not_mutate_playset_activation(
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(entity)
 
-    assert result.get("success") is True, result
+    assert result.get("success") is False, result
+    assert result['partial_state_saved'] is True
     assert _deploy_status(db, pk) == DEPLOY_STATUS_DEPLOYED
     assert _playset_activation(user_dir) == [("playset-initial", 0)]
 
@@ -966,7 +975,7 @@ def test_sync_follows_whichever_playset_is_active(
     ]
 
 
-def test_paradox_deploy_inactive_keeps_success_and_is_not_effective(
+def test_paradox_deploy_inactive_reports_partial_and_is_not_effective(
     tmp_path: Path, db: DatabaseManager
 ) -> None:
     user_dir, _workshop, library = _configure_ck3(db, tmp_path)
@@ -983,7 +992,9 @@ def test_paradox_deploy_inactive_keeps_success_and_is_not_effective(
 
     result = ModDeployer(library_root=library, db=db).deploy_mod(entity)
 
-    assert result.get("success") is True, result
+    assert result.get("success") is False, result
+    assert result['error_code'] == 'projection_failed'
+    assert result['partial_state_saved'] is True
     assert result.get("deployment_status") == "deployed"
     assert result.get("launcher_effective") is False
     assert result.get("playset_written") is False
@@ -1087,7 +1098,7 @@ def test_paradox_inactive_notice_is_deduped(
     deployer = ModDeployer(library_root=library, db=db)
 
     first = deployer.deploy_mod(entity)
-    assert first.get("success") is True
+    assert first.get("success") is False
     assert first.get("playset_notice") == PARADOX_INACTIVE_PLAYSET_MESSAGE
     assert "部署失败" not in first["playset_notice"]
     assert json.loads(notice_path.read_text(encoding="utf-8"))[marker] is True
@@ -1104,7 +1115,7 @@ def test_paradox_inactive_notice_is_deduped(
     )
     assert startup.should_prompt is False
     second = deployer.deploy_mod(entity)
-    assert second.get("success") is True
+    assert second.get("success") is False
     assert "playset_notice" not in second
 
     _launcher_set_active(user_dir, "playset-initial")
@@ -1116,7 +1127,7 @@ def test_paradox_inactive_notice_is_deduped(
 
     _launcher_set_active(user_dir, None)
     again = deployer.deploy_mod(entity)
-    assert again.get("success") is True
+    assert again.get("success") is False
     assert again.get("playset_notice") == PARADOX_INACTIVE_PLAYSET_MESSAGE
     assert _playset_activation(user_dir) == [("playset-initial", 0)]
 
