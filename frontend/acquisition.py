@@ -116,7 +116,7 @@ def start(bridge, request_id, action, args):
         if action in ('pick-import-cover','pick-import-offline'):
             selected,_=QFileDialog.getOpenFileName(QApplication.activeWindow(),'选择导入附加资源',start_directory,'Images (*.png *.jpg *.jpeg *.webp)' if action=='pick-import-cover' else 'HTML / MHTML (*.html *.htm *.mhtml *.mht)')
         elif action=='pick-import-zip':
-            filter='Archives (*.zip *.7z *.rar)' if args.get('platform','Steam')!='Steam' else 'ZIP (*.zip)'
+            filter='Archives (*.zip *.7z)' if args.get('completion') else 'Archives (*.zip *.7z *.rar)' if args.get('platform','Steam')!='Steam' else 'ZIP (*.zip)'
             if args.get('multiple'):
                 selections,_=QFileDialog.getOpenFileNames(QApplication.activeWindow(),'选择同一 Mod 的压缩包',start_directory,filter)
                 for choice in selections:resources.select_input(choice)

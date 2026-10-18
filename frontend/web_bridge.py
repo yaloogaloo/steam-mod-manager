@@ -95,6 +95,7 @@ class LibraryBridge(QObject):
         self._directory_choices = {}
         self._custom_paths = {}
         self._jobs = {}
+        self._content_cancellations = {}
         self._acquisition = {}
         self._registration = {}
         self._workshop_scans = {}
@@ -189,6 +190,18 @@ class LibraryBridge(QObject):
             args = json.loads(arguments)
             if not isinstance(args, dict):
                 raise ValueError('Object arguments required')
+            if action=='content-cancel':
+                # Cancellation only signals the existing job. It never gets a
+                # second writer or waits for the long-running staging lock.
+                asset=self._assets.get(args.get('token'))
+                if (asset is None or args.get('snapshot')!=self._generation
+                    or str(args.get('game'))!=self._game or args.get('internal_id')!=asset.internal_id):
+                    raise RuntimeError('资产或游戏上下文已变化')
+                cancel=self._content_cancellations.get(asset.internal_id)
+                if cancel is None:raise RuntimeError('没有可取消的补齐任务')
+                cancel.set()
+                self.response.emit(json.dumps({'request':request_id,'result':{'success':True,'message':'已请求取消；当前解包结束后安全撤回'}}))
+                return
             with self._lock:
                 if action in BATCH_ACTIONS | (TYPE_ACTIONS-{'type-set'}) | GAME_ACTIONS | {'settings-save'} | ORGANIZE_ACTIONS | ACQUISITION_ACTIONS | ORDER_ACTIONS | SNAPSHOT_ACTIONS | WORKSHOP_ACTIONS | OFFLINE_ACTIONS | {'registration-save'}:
                     self._command_game(args)

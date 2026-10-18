@@ -495,6 +495,8 @@ def extract_archive(
     archive_path: str | Path,
     *,
     dest_dir: str | Path | None = None,
+    max_output_bytes: int | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> Path:
     """
     Extract *archive_path* into ``cache/import_cache/{uuid}/`` (or *dest_dir*).
@@ -512,6 +514,23 @@ def extract_archive(
 
     out = Path(dest_dir) if dest_dir else (import_cache_root() / str(uuid.uuid4()))
     out.mkdir(parents=True, exist_ok=True)
+
+    if max_output_bytes is not None:
+        if cancel_check: cancel_check()
+        if suffix == '.zip':
+            _extract_zip(src, out, max_output_bytes=max_output_bytes, cancel_check=cancel_check)
+        elif suffix == '.7z':
+            # Bounded completion never falls back to an unbounded subprocess.
+            import inspect
+            import py7zr
+            if 'max_extract_size' not in inspect.signature(py7zr.SevenZipFile).parameters:
+                raise RuntimeError('当前 py7zr 缺少受限解包能力，不能补齐 7z')
+            with py7zr.SevenZipFile(src, mode='r', max_extract_size=max_output_bytes) as archive:
+                archive.extractall(path=out)
+        else:
+            raise RuntimeError('RAR 补齐尚缺受控、限额的解压组件；当前不支持')
+        if cancel_check: cancel_check()
+        return out
 
     if suffix == ".zip":
         _extract_zip(src, out)
@@ -590,7 +609,9 @@ def _extract_7z_with_provider_fallback(src: Path, dest: Path) -> Path:
     ) from py7zr_exc
 
 
-def _extract_zip(src: Path, dest: Path) -> None:
+def _extract_zip(src: Path, dest: Path, *, max_output_bytes: int | None = None,
+                 cancel_check: Callable[[], None] | None = None) -> None:
+    written = 0
     with zipfile.ZipFile(src, "r") as zf:
         for info in zf.infolist():
             name = info.filename.replace("\\", "/")
@@ -605,7 +626,12 @@ def _extract_zip(src: Path, dest: Path) -> None:
                 raise RuntimeError(f"不安全的压缩包路径：{info.filename}")
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as src_fh, target.open("wb") as out_fh:
-                shutil.copyfileobj(src_fh, out_fh)
+                while block := src_fh.read(1024 * 1024):
+                    if cancel_check: cancel_check()
+                    written += len(block)
+                    if max_output_bytes is not None and written > max_output_bytes:
+                        raise ValueError('解包内容超过限额')
+                    out_fh.write(block)
 
 
 def _extract_with_7z(seven: str, src: Path, dest: Path) -> None:

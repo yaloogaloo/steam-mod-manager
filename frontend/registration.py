@@ -7,7 +7,7 @@ from pathlib import Path
 from secrets import token_urlsafe
 from urllib.parse import urlsplit
 
-ACTIONS={'registration-save','content-add','content-rescan','content-open'}
+ACTIONS={'registration-save','content-add','content-rescan','content-open','content-cancel'}
 
 
 def incoming(resources,value):
@@ -160,6 +160,8 @@ def _execute(bridge,action,args):
     bridge.adapter._write()
     if bridge.resources is None:raise PermissionError('缺少隔离业务资源')
     r=bridge.resources;db=bridge.adapter.db
+    if action=='content-add':
+        return complete_content(bridge,args)
     with bridge._lock,db._lock,r.bind():
         bridge._command_game(args)
         if action=='registration-save':
@@ -237,46 +239,7 @@ def _execute(bridge,action,args):
         if action=='content-rescan':
             status=rescan(bridge,asset,path)
             return {'success':True,'internal_id':asset.internal_id,'content_status':status,'message':'内容已识别；部署仍按原策略检查' if status=='healthy' else '待补齐内容；未找到有效本体'}
-        if action!='content-add':raise PermissionError('不支持的内容操作')
-        from services.local_file_index import has_local_mod_payload
-        state=db.get_mod_deploy_info(asset.mod_pk).deploy_status
-        if state!='not_deployed' or has_local_mod_payload(path,mod_id=asset.mod_pk,db=db):raise ValueError('仅允许为确定未部署且没有本体的 Mod 补齐；已有内容或已部署对象不能覆盖')
-        source=incoming(r,args.get('source',''));files=[]
-        if source.is_file():
-            from .acquisition import validate_zip
-            validate_zip(source);files=[(source,Path(source.name))]
-        else:
-            for item in source.rglob('*'):
-                if not item.is_file():continue
-                relative=item.relative_to(source)
-                if item.suffix.lower() in ('.7z','.rar'):raise ValueError('7z/RAR 尚未准入，不能通过目录补齐绕过')
-                if item.suffix.lower()=='.zip':
-                    from .acquisition import validate_zip
-                    validate_zip(item)
-                if any(p.casefold() in ('.info','smm_info') for p in relative.parts) or item.suffix.lower() in ('.html','.htm','.mhtml','.mht'):
-                    raise ValueError('本体输入不能包含身份侧车或离线页面')
-                files.append((item,relative))
-        fingerprint(source)
-        if not files:raise ValueError('没有可补齐的内容')
-        for item,relative in files:
-            target=r.validate(path/relative)
-            if target.exists():raise ValueError('目标资源重名，未覆盖：'+str(relative))
-        copied=[];old_bundle=db.get_mod_files(asset.mod_pk)
-        try:
-            for item,relative in files:
-                target=r.validate(path/relative);target.parent.mkdir(parents=True,exist_ok=True)
-                # Exclusive creation prevents overwriting files copied concurrently by the user.
-                with item.open('rb') as src,target.open('xb') as dest:
-                    copied.append(target);shutil.copyfileobj(src,dest)
-            status=rescan(bridge,asset,path)
-            if status!='healthy':raise ValueError('输入仅含元数据或封面，没有可识别本体')
-        except Exception:
-            for item in reversed(copied):item.unlink()
-            db._conn.rollback();db.set_mod_files(asset.mod_pk,old_bundle)
-            from services.content_status_eval import persist_evaluated_content_status
-            persist_evaluated_content_status(asset.mod_pk,path,db=db,notify_projection=False)
-            raise
-        return {'success':True,'internal_id':asset.internal_id,'mod_pk':str(asset.mod_pk),'managed_path':str(path),'content_status':status,'files':len(copied),'message':'已补齐并识别同一 Mod；身份、用户字段与封面保持不变；未部署'}
+        raise PermissionError('不支持的内容操作')
 
 
 def source_options(bridge):
@@ -328,3 +291,57 @@ def execute(bridge,action,args):
     except Exception as exc:
         if job:job.update(state='failed',message=str(exc))
         raise
+
+
+def complete_content(bridge,args):
+    """One entity, one bounded stage, then exclusive publish through the old index."""
+    from threading import Event
+    from services.content_completion import prepare
+    from services.local_file_index import has_local_mod_payload
+    r=bridge.resources;db=bridge.adapter.db
+    def admitted(asset,path):
+        status=db.get_mod_deploy_info(asset.mod_pk).deploy_status
+        if status!='not_deployed' or has_local_mod_payload(path,mod_id=asset.mod_pk,db=db):
+            raise ValueError('仅允许为未部署且没有本体的 Mod 补齐；已有内容不能覆盖')
+    with bridge._lock,db._lock,r.bind():
+        bridge._command_game(args);asset,path=managed(bridge,args);admitted(asset,path)
+        raw=args.get('archive_paths') or [args.get('source','')]
+        if not isinstance(raw,list) or not all(isinstance(p,str) for p in raw):raise ValueError('输入包列表无效')
+        sources=[incoming(r,p) for p in raw]
+        cancel=Event();bridge._content_cancellations[asset.internal_id]=cancel
+    def check_cancel():
+        if cancel.is_set():raise RuntimeError('补齐任务已取消，未提交内容')
+    try:
+        with r.bind(),prepare(r,sources,platform=asset.platform,cancel_check=check_cancel) as files:
+            with bridge._lock,db._lock:
+                bridge._command_game(args);bridge._command_asset(args);admitted(asset,path);check_cancel()
+                old=db.get_mod_files(asset.mod_pk)
+                copied=[];created_dirs=[]
+                try:
+                    for item,relative in files:
+                        target=r.validate(path/relative)
+                        if target.exists():raise ValueError('目标资源重名，未覆盖：'+str(relative))
+                    for item,relative in files:
+                        check_cancel();target=r.validate(path/relative)
+                        missing=[];parent=target.parent
+                        while not parent.exists():missing.append(parent);parent=parent.parent
+                        for parent in reversed(missing):parent.mkdir();created_dirs.append(parent)
+                        with item.open('rb') as src,target.open('xb') as dest:
+                            copied.append(target)
+                            while block:=src.read(1024*1024):check_cancel();dest.write(block)
+                    check_cancel()
+                    status=rescan(bridge,asset,path)
+                    check_cancel()
+                    if status!='healthy':raise ValueError('没有可识别本体，补齐未提交')
+                except Exception:
+                    for target in reversed(copied):target.unlink(missing_ok=True)
+                    for parent in reversed(created_dirs):
+                        if parent.exists() and not any(parent.iterdir()):parent.rmdir()
+                    db._conn.rollback();db.set_mod_files(asset.mod_pk,old)
+                    from services.content_status_eval import persist_evaluated_content_status
+                    persist_evaluated_content_status(asset.mod_pk,path,db=db,notify_projection=False)
+                    raise
+        return {'success':True,'internal_id':asset.internal_id,'mod_pk':str(asset.mod_pk),'managed_path':str(path),
+                'content_status':status,'files':len(copied),'message':'已一次性补齐同一 Mod；身份、类型、标签和部署状态保持不变'}
+    finally:
+        with bridge._lock:bridge._content_cancellations.pop(asset.internal_id,None)
