@@ -41,9 +41,19 @@ async function saveModType(context,data,raw,fromInspector){
   }
   message.textContent='类型已保存；用户标签未改变。';
  }catch(e){message.textContent='保存失败：'+e.message;}
- finally{S.busy=false;$('inspector-type-select').disabled=$('edit-type').disabled=false;syncFavoriteControls();if(S.current&&S.details)drawInspector(S.current,S.details);}
+ finally{S.busy=false;$('inspector-type-select').disabled=$('edit-type').disabled=false;syncFavoriteControls();if(S.current&&S.details)drawInspector(S.current,S.details);
+  if(fromInspector&&S.current?.internal_id===context.internal_id&&!$('inspector-type-menu').matches(':popover-open'))$('inspector-type-action')?.focus({preventScroll:true});}
 }
 $('inspector-type-select').onchange=()=>{if(inspectorTypeContext)saveModType(inspectorTypeContext.context,inspectorTypeContext.data,$('inspector-type-select').value,true);};
+$('inspector-type-menu').addEventListener('toggle',event=>{
+ $('inspector-type-action')?.setAttribute('aria-expanded',String(event.newState==='open'));
+});
+document.addEventListener('keydown',event=>{
+ if(event.key==='Escape'&&$('inspector-type-menu').matches(':popover-open')){
+  event.preventDefault();event.stopImmediatePropagation();$('inspector-type-menu').hidePopover();
+  $('inspector-type-action')?.focus({preventScroll:true});
+ }
+},true);
 document.addEventListener('click',event=>{
  if(event.target.closest('[data-type-action="type-set"]')&&typeContext&&typeData)saveModType(typeContext,typeData,$('edit-type').value,false);
 });
@@ -55,15 +65,6 @@ function drawTypeCatalog(){
  $('type-catalog-list').innerHTML=catalogData.types.map(t=>`<div class="org-input-row" style="margin:10px 0"><input data-catalog-name="${t.type_id}" value="${escape(t.name)}" maxlength="100" ${readOnly?'disabled':''}><button type="button" data-catalog-rename="${t.type_id}" ${readOnly?'disabled':''}>重命名</button><button type="button" data-catalog-delete="${t.type_id}" ${readOnly?'disabled':''}>删除</button></div>`).join('');
  $('type-catalog-add').disabled=$('type-catalog-name').disabled=readOnly;
 }
-$('manage-types').onclick=async()=>{
- if(S.busy)return;
- const context={game:$('game').value,snapshot:S.snapshot,epoch:S.epoch};
- try{
-  const data=await rpc('mod-types',context);
-  if(context.epoch!==S.epoch)return;
-  catalogContext=context;catalogData=data;$('type-catalog-name').value='';$('type-catalog-status').textContent='';drawTypeCatalog();$('type-catalog-dialog').showModal();
- }catch(e){$('results').hidden=false;$('results').textContent=e.message;}
-};
 $('type-catalog-close').onclick=()=>{if(!catalogBusy)$('type-catalog-dialog').close();};
 $('type-catalog-dialog').addEventListener('cancel',e=>{if(catalogBusy)e.preventDefault();});
 async function mutateTypeCatalog(action,fields){

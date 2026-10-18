@@ -1323,10 +1323,11 @@ h1 {
 
 /* Context hierarchy stays inside the existing fixed-width scrolling panel. */
 .inspector-overview { padding-bottom: 4px; }
-.inspector-scroll > .facts { color: var(--muted); padding: 10px 0; border-block: 1px solid var(--edge); }
+.inspector-scroll > .facts { color: var(--muted); padding: 10px 0 0; border-top: 1px solid var(--edge); }
 .inspector-scroll > .facts dd { color: #97aeaf; font-variant-numeric: tabular-nums; }
 .inspector-scroll > .section-line { border-top: 0; color: #d2e0de; letter-spacing: .3px; }
-.inspector-user-tags { font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
+.inspector-user-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 12px; }
+.inspector-tag { max-width: 100%; padding: 2px 7px; border-radius: 999px; background: var(--raised); color: var(--secondary); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
 .inspector-summary > :first-child { margin-top: 0; }
 
 /* State feedback does not move or resize virtualized gallery cells. */
@@ -1468,7 +1469,6 @@ button[aria-busy="true"], [aria-busy="true"] button { cursor: progress; }
 .inspector-properties { gap: 5px; margin: 8px 0; max-height: 53px; overflow: hidden; }
 .inspector-properties .badge { height: 24px; box-sizing: border-box; display: inline-block; padding: 0 7px; border-radius: 5px; font-size: 10px; line-height: 22px; max-width: calc(50% - 3px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .inspector-properties .source { color: #9fbcd8; background: #23313e; border-color: #344453; }
-.inspector-properties .type { color: #c0b6d7; background: #302c3d; border-color: #454052; }
 .inspector-properties .local-size { color: #b2c4bd; background: #283832; border-color: #3c4b44; }
 .filter-count { margin-left: auto; color: var(--muted); font-size: 11px; }
 #selection-tools { margin-left: auto; font-size: 11px; white-space: nowrap; }
@@ -1513,7 +1513,6 @@ button[aria-busy="true"], [aria-busy="true"] button { cursor: progress; }
 .collection-tile strong { overflow-wrap: anywhere; }
 .collection-tile span, .collection-tile small { color: var(--muted); font-size: 12px; }
 .collection-empty { padding: 36px 8px; }
-.inspector-user-tags { color: var(--secondary); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media(max-width:1050px) { .collection-tools { margin-left: 18px; margin-right: 18px; } }
 #acquisition-space { flex: 1; min-height: 0; overflow: auto; margin: 12px 26px; }
 .nav-item:not(.active) { background: transparent; color: var(--secondary); box-shadow: none; }
@@ -1612,9 +1611,11 @@ button[aria-busy="true"], [aria-busy="true"] button { cursor: progress; }
 .offline-game-confirm {margin:0 0 8px 28px;font-size:12px;color:var(--muted);}
 .offline-game-confirm input[type=url] {flex:1;min-width:0;font-size:12px;}
 .inspector-overview #inspector-image {position:relative;overflow:visible;}
-.inspector-type-prompt {display:flex;align-items:center;gap:12px;margin:10px 0;color:var(--muted);font-size:12px;}
-.inspector-type-prompt button {display:flex;align-items:center;gap:8px;padding:3px 7px;font-size:12px;min-width:0;}
-.inspector-type-prompt button svg {width:12px;height:12px;}
+.inspector-type-property {display:flex;align-items:center;gap:12px;margin:10px 0;color:var(--muted);font-size:12px;}
+.inspector-type-property > span {flex-shrink:0;}
+.inspector-type-value {display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%;padding:3px 9px;border:1px solid transparent;border-radius:999px;background:var(--raised);color:var(--secondary);font-size:11px;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.inspector-type-value:hover:not(:disabled) {border-color:var(--hover-edge);color:var(--text);}
+.inspector-type-value svg {flex-shrink:0;width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:1.5;}
 .sync-source {font-size:12px;overflow-wrap:anywhere;padding:10px;background:#142025;border-radius:8px;color:#9fb9b5;}
 #app-settings-dialog label {display:grid;gap:6px;margin:14px 0;}
 #app-settings-dialog footer {display:flex;justify-content:flex-end;margin-top:16px;}
