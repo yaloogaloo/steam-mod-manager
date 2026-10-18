@@ -13,6 +13,7 @@ class _Sanitizer(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts = []
         self.blocked = 0
+        self.stack = []
 
     def handle_starttag(self, tag, attrs):
         if tag in ('script', 'style', 'iframe', 'object'):
@@ -20,17 +21,29 @@ class _Sanitizer(HTMLParser):
         elif not self.blocked:
             if tag in self.allowed:
                 self.parts.append('<' + tag + '>')
+                if tag != 'br':
+                    self.stack.append(tag)
             elif tag == 'img':
                 self.parts.append('[图片未加载]')
             elif tag == 'a':
                 href = dict(attrs).get('href', '')
                 self.parts.append('<a href="' + escape(href, quote=True) + '">' if href.startswith(('https://', 'http://')) else '<a>')
+                self.stack.append('a')
 
     def handle_endtag(self, tag):
         if tag in ('script', 'style', 'iframe', 'object'):
             self.blocked = max(0, self.blocked - 1)
-        elif not self.blocked and tag in self.allowed | {'a'}:
-            self.parts.append('</' + tag + '>')
+        elif not self.blocked and tag in self.stack:
+            while self.stack:
+                opened = self.stack.pop()
+                self.parts.append('</' + opened + '>')
+                if opened == tag:
+                    break
+
+    def close(self):
+        super().close()
+        while self.stack:
+            self.parts.append('</' + self.stack.pop() + '>')
 
     def handle_data(self, data):
         if not self.blocked:
@@ -49,6 +62,7 @@ def render_description(raw):
     text = re.sub(r'\[/url\]', '</a>', text, flags=re.I)
     parser = _Sanitizer()
     parser.feed(text)
+    parser.close()
     return ''.join(parser.parts)
 
 
