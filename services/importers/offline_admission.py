@@ -7,10 +7,9 @@ from urllib.parse import urlsplit, unquote
 
 from bs4 import BeautifulSoup
 
-# Explicit admission, not a guessed conversion from translated game names.
-NEXUS_GAMES = {413150:'stardewvalley', 1623730:'palworld', 1086940:'baldursgate3',
-               1091500:'cyberpunk2077', 489830:'skyrimspecialedition'}
 
+class MissingNexusURL(ValueError):
+    """A page has a Mod identity but needs the user's full source link."""
 
 def input_files(resources, value):
     source=resources.validate(value)
@@ -33,7 +32,18 @@ def input_files(resources, value):
     return source,companion,digest.hexdigest()
 
 
-def inspect_page(resources,value,game):
+def page_candidates(resources,source):
+    from services.offline.nexus_html_parser import parse_nexus_offline_html
+    if source.suffix.lower() not in ('.mhtml','.mht'):return parse_nexus_offline_html(source)
+    from services.offline.mhtml import extract_mhtml
+    html,_,_=extract_mhtml(source)
+    temp=resources.path('cache/temp');temp.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='nexus_metadata_',dir=temp) as root:
+        index=Path(root)/'index.html';index.write_text(html,encoding='utf8')
+        return parse_nexus_offline_html(index)
+
+
+def inspect_page(resources,value,game,*,source_url=''):
     source,companion,digest=input_files(resources,value)
     from services.offline.nexus_html_parser import parse_nexus_offline_html
     from services.offline.mhtml import extract_mhtml
@@ -69,17 +79,27 @@ def inspect_page(resources,value,game):
             index=Path(root)/'index.html';index.write_text(html,encoding='utf8')
             candidates=parse_nexus_offline_html(index)
     else:candidates=parse_nexus_offline_html(source)
-    url=urlsplit(candidates.source_url or '')
+    resolved_url=candidates.source_url or ''
+    if not resolved_url and candidates.external_id and candidates.title:
+        from services.importers.nexus_registration_identity import nexus_identity
+        if 'nexus' not in soup.get_text(' ',strip=True).lower() and 'nexusmods.com' not in html.lower():
+            raise ValueError('页面无法识别为有效 Nexus 页面')
+        if not source_url:raise MissingNexusURL('页面包含 Mod ID，但缺少完整 Nexus 来源链接；请补充后重新解析')
+        slug,identity=nexus_identity(source_url)
+        if not slug or identity!=candidates.external_id:raise ValueError('补充链接与页面中的 Mod ID 不一致')
+        resolved_url=source_url
+    elif source_url and source_url!=resolved_url:
+        raise ValueError('页面已有来源链接；不能用补充链接替换其身份')
+    url=urlsplit(resolved_url)
     parts=url.path.strip('/').split('/')
     if (url.scheme!='https' or url.hostname not in ('www.nexusmods.com','nexusmods.com') or url.port or url.username
         or len(parts)!=3 or parts[1]!='mods' or not parts[2].isascii() or not parts[2].isdigit() or int(parts[2])<=0
         or candidates.external_id!=parts[2]):raise ValueError('不能确认可信 Nexus 游戏及 Mod 身份')
-    expected=NEXUS_GAMES.get(int(game))
-    if not expected:raise ValueError('当前游戏的 Nexus 离线来源对应关系尚未准入')
-    if parts[0]!=expected:raise ValueError('网页 Nexus 游戏与当前游戏不匹配')
+    from services.importers.nexus_registration_identity import check_game
+    confirmation=check_game(resources.db,game,resolved_url)
     if not candidates.title or len(candidates.title)>200:raise ValueError('页面缺少可用的 Mod 名称')
     return {'source':str(source),'fingerprint':digest,'name':candidates.title,'url':f'https://www.nexusmods.com/{parts[0]}/mods/{parts[2]}',
-            'external_id':parts[2],'format':'MHTML' if source.suffix.lower() in ('.mhtml','.mht') else 'HTML',
+            'external_id':parts[2],'supplied_url':source_url,'identity_confirmation':confirmation,'format':'MHTML' if source.suffix.lower() in ('.mhtml','.mht') else 'HTML',
             'description':bool(candidates.description),'resources':len(assets) if assets else sum(1 for p in companion.rglob('*') if p.is_file()) if companion else 0,
             'cover':bool(candidates.cover_asset_path) or any(Path(k).suffix.lower() in ('.png','.jpg','.jpeg','.webp') for k in assets)}
 
@@ -113,16 +133,20 @@ def import_scoped_batch(worker, paths):
         worker._offline_created_pk=None
         before={row[0] for row in db._conn.execute('SELECT mod_id FROM mods')};page=None
         try:
-            page=inspect_page(r,path,game)
+            page=inspect_page(r,path,game,source_url=expected.get(str(path),{}).get('supplied_url',''))
             if not expected.get(str(path)) or page['fingerprint']!=expected[str(path)]['fingerprint'] or page['url']!=expected[str(path)]['url']:
                 raise ValueError('页面或来源身份已变化，请重新预览此项')
+            from services.importers.nexus_registration_identity import require_confirmation
+            require_confirmation(page['identity_confirmation'],expected[str(path)].get('confirmed_identity'))
             duplicate=find_duplicate_mod(db,platform='Nexus',external_id=page['external_id'],source_url=page['url'],app_id=game)
             if duplicate:
                 item.update(state='skipped',message='已存在；未覆盖资源或用户字段',internal_id=db.get_mod_backup_row(duplicate.mod_id)['internal_id'])
             else:
                 stub=make_empty_mod_stub(ident=path.stem,temp_root=temp)
-                try:result=worker._import_one_folder(stub,title='',cover_source='',offline_html=str(path),batch=False)
+                previous_url=worker.params.get('nexus_url','');worker.params['nexus_url']=page['url']
+                try:result=worker._import_one_folder(stub,title=page['name'],cover_source='',offline_html=str(path),batch=False)
                 finally:
+                    worker.params['nexus_url']=previous_url
                     if stub.exists() and not any(stub.iterdir()):stub.rmdir();stub.parent.rmdir()
                 if result.is_duplicate:
                     row=db.get_mod_backup_row(result.mod_id)

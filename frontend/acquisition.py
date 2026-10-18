@@ -5,7 +5,7 @@ from uuid import UUID
 ACTIONS = {'import-folder', 'import-zip', 'source-sync', 'pick-import-folder', 'pick-import-zip','pick-import-cover','pick-import-offline'}
 
 
-def validate_import(bridge, args):
+def validate_import(bridge, args, *, preview=False):
     from core.mod_platform import normalize_platform,get_available_sources
     resources=bridge.resources
     platform=normalize_platform(args.get('platform','Steam'))
@@ -74,6 +74,16 @@ def validate_import(bridge, args):
             if args.get('url'):
                 from services.importers.nexus import parse_nexus_id
                 if page['external_id']!=parse_nexus_id(args['url']):raise ValueError('附加网页与填写的 Nexus 来源身份不一致')
+                if not str(args['url']).isdigit():
+                    from services.importers.nexus_registration_identity import nexus_identity
+                    if nexus_identity(args['url'])!=nexus_identity(page['url']):
+                        raise ValueError('附加网页与填写的 Nexus 游戏身份不一致')
+    if platform=='nexus' and not batch:
+        from services.importers.nexus_registration_identity import check_game,require_confirmation
+        url=page['url'] if args.get('offline_html_path') else identity.source_url
+        if not url:raise ValueError('请提供 Nexus Mod 链接或数字 ID，也可附加包含身份的离线网页')
+        check=check_game(bridge.adapter.db,int(args['game']),url)
+        if not preview:require_confirmation(check,args.get('confirm_nexus_identity'))
     return source
 
 

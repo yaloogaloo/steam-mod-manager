@@ -19,7 +19,7 @@ def setup(tmp_path):
 
 def register(b,a,platform='Nexus',url='https://www.nexusmods.com/totalwarwarhammer3/mods/91001',**extra):
     draft=b.execute('registration-preview',{**a,'kind':'url','platform':platform,'url':url,'title':'Registered without payload',**extra})
-    return b.execute_command('registration-save',{**a,'draft':draft['draft']})
+    return b.execute_command('registration-save',{**a,'draft':draft['draft'],'confirm_nexus_identity':True})
 
 def context(b,iid):
     result=b.execute('library',{'game':1142710});asset=next(a for a in result['assets'] if a['internal_id']==iid)
@@ -102,7 +102,7 @@ def test_offline_registration_duplicate_and_manual_recognition(setup):
     _,r,b,a=setup
     page=r.path('incoming/captured.html');page.write_text('<html><head><link rel="canonical" href="https://www.nexusmods.com/totalwarwarhammer3/mods/91002"><meta property="og:title" content="Offline Nexus Mod"><meta property="og:description" content="Saved description"></head><body><script>throw Error("must never execute")</script></body></html>',encoding='utf8')
     draft=b.execute('registration-preview',{**a,'kind':'offline','source':str(page)})
-    result=b.execute_command('registration-save',{**a,'draft':draft['draft']});args=context(b,result['internal_id'])
+    result=b.execute_command('registration-save',{**a,'draft':draft['draft'],'confirm_nexus_identity':True});args=context(b,result['internal_id'])
     path=Path(result['managed_path']);(path/'saved.html').write_text('<html>not payload</html>');(path/'cover.png').write_bytes(b'cover only')
     assert b.execute_command('content-rescan',args)['content_status']=='content_missing'
     (path/'manual.pack').write_bytes(b'MANUAL CONTENT')
@@ -119,7 +119,7 @@ def test_invalid_stale_and_failed_association(setup):
         with pytest.raises(ValueError):register(b,a,url=url)
     draft=b.execute('registration-preview',{**a,'kind':'url','platform':'Nexus','url':'https://www.nexusmods.com/totalwarwarhammer3/mods/91003','title':'Stale stub'})
     b.execute('library',{'game':43})
-    with pytest.raises(RuntimeError):b.execute_command('registration-save',{**a,'draft':draft['draft']})
+    with pytest.raises(RuntimeError):b.execute_command('registration-save',{**a,'draft':draft['draft'],'confirm_nexus_identity':True})
 
 
 def test_readonly_and_database_failure_compensation(setup):
@@ -127,7 +127,7 @@ def test_readonly_and_database_failure_compensation(setup):
     draft=b.execute('registration-preview',{**a,'kind':'url','platform':'Nexus','url':'https://www.nexusmods.com/totalwarwarhammer3/mods/91004','title':'Failure rollback'})
     count=r.db._conn.execute('SELECT COUNT(*) FROM mods').fetchone()[0]
     r.db._conn.execute("CREATE TEMP TRIGGER fail_registration BEFORE INSERT ON mods BEGIN SELECT RAISE(ABORT,'registration rejected'); END")
-    with pytest.raises(Exception):b.execute_command('registration-save',{**a,'draft':draft['draft']})
+    with pytest.raises(Exception):b.execute_command('registration-save',{**a,'draft':draft['draft'],'confirm_nexus_identity':True})
     assert r.db._conn.execute('SELECT COUNT(*) FROM mods').fetchone()[0]==count
     r.db._conn.execute('DROP TRIGGER fail_registration')
     result=register(b,a,url='https://www.nexusmods.com/totalwarwarhammer3/mods/91005')

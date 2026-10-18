@@ -94,7 +94,7 @@ def test_original_nonsteam_import_workers(acquisition,platform,url,zipped):
         snapshot=bridge.execute('library',{'game':916440})
         args.update(game='916440',snapshot=snapshot['snapshot'])
     preview=bridge.execute('registration-preview',args)
-    reply=command(app,bridge,'import-zip' if zipped else 'import-folder',{**args,'source':source.as_posix(),'registration_draft':preview['draft']})
+    reply=command(app,bridge,'import-zip' if zipped else 'import-folder',{**args,'source':source.as_posix(),'registration_draft':preview['draft'],'confirm_nexus_identity':True})
     assert 'error' not in reply,reply
     result=reply['result'];assert result['state']=='success'
     row=resources.db.get_mod_backup_row(result['mod_pk'])

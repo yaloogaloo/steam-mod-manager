@@ -49,7 +49,7 @@ def preview(bridge,args):
             from .acquisition import validate_import
             args=dict(args);args['_zip']=args.get('format')=='zip'
             args['batch_directory']=args.get('format')=='batch'
-            source=validate_import(bridge,{**args,'source':args.get('source'),'workshop_id':args.get('workshop_id')})
+            source=validate_import(bridge,{**args,'source':args.get('source'),'workshop_id':args.get('workshop_id')},preview=True)
             platform=args.get('platform') or 'Steam'
             if platform=='Steam':
                 ext=args['workshop_id'];url='https://steamcommunity.com/sharedfiles/filedetails/?id='+ext
@@ -57,7 +57,7 @@ def preview(bridge,args):
                 from services.importers.identity_resolve import resolve_import_identity,ImportIdentity
                 resolved=resolve_import_identity(platform,github_url=url if platform=='GitHub' else '',nexus_url=url if platform=='Nexus' else '',modio_url=url if platform=='mod.io' else '',source_url=url,allow_local_fallback=args.get('format')=='batch' or platform in ('Nexus','Other'))
                 if not isinstance(resolved,ImportIdentity):raise ValueError(getattr(resolved,'error','来源身份无法确认'))
-                ext=resolved.external_id
+                ext=resolved.external_id;url=resolved.source_url
                 if platform=='Nexus' and args.get('offline_html_path'):
                     from services.importers.offline_admission import inspect_page
                     page=inspect_page(r,incoming(r,args['offline_html_path']),int(args['game']))
@@ -65,14 +65,13 @@ def preview(bridge,args):
             source_hash=local_fingerprint(r,source,args.get('archive_paths'))
         elif kind=='offline':
             source=incoming(r,args.get('source',''))
-            if not source.is_file() or source.suffix.lower() not in ('.html','.htm') or source.stat().st_size>4*1024*1024:
-                raise ValueError('当前准入单项 HTML/HTM（最大 4 MiB）；MHTML 与批量页面尚未准入')
-            from services.offline.nexus_html_parser import parse_nexus_offline_html
-            candidates=parse_nexus_offline_html(source)
+            from services.importers.offline_admission import inspect_page,page_candidates
+            page=inspect_page(r,source,int(args['game']))
+            candidates=page_candidates(r,source)
             platform='Nexus';url=candidates.source_url;ext=candidates.external_id;title=title or candidates.title
             # Page parsing never installs arbitrary captured images or requests remote URLs.
             candidates.cover_asset_path=None
-            source_hash=fingerprint(source)
+            source_hash=page['fingerprint']
         elif kind!='url':raise ValueError('不支持的注册输入方式')
         from core.mod_platform import get_available_sources,normalize_platform
         game=bridge.adapter.db.get_game(int(args['game']))
@@ -84,25 +83,44 @@ def preview(bridge,args):
             from services.importers.identity_resolve import resolve_import_identity,ImportIdentity
             raw=url
             if platform=='Steam':
+                if not raw.isascii() or not raw.isdigit():
+                    parsed=urlsplit(raw)
+                    if parsed.scheme!='https' or parsed.hostname!='steamcommunity.com' or parsed.username or parsed.password or parsed.port:
+                        raise ValueError('请输入 Steam Workshop 数字 ID 或官方 HTTPS 链接')
                 from services.importers.steam import parse_workshop_id
                 ext=parse_workshop_id(raw)
+                if not ext.isascii() or not ext.isdigit() or int(ext)<=0:raise ValueError('请输入有效 Steam Workshop 数字 ID')
             resolved=resolve_import_identity(platform,workshop_id=ext if platform=='Steam' else '',nexus_url=raw if platform=='Nexus' else '',github_url=raw if platform=='GitHub' else '',modio_url=raw if platform=='mod.io' else '',source_url=raw,allow_local_fallback=platform=='Other')
             if not isinstance(resolved,ImportIdentity):raise ValueError(getattr(resolved,'error','来源身份无法确认'))
             ext=resolved.external_id;url=resolved.source_url
-            # The original mod.io importer also accepts a numeric API identity.
-            # It is stored as identity input, never treated as a fetchable URL.
-            if url and not (platform=='mod.io' and url.isascii() and url.isdigit()):
-                parsed=urlsplit(url)
-                if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or any(ord(c)<32 for c in url):raise ValueError('来源地址必须是合法 HTTP/HTTPS URL')
-                hosts={'Steam':('steamcommunity.com',),'Nexus':('www.nexusmods.com','nexusmods.com'),'mod.io':('mod.io',),'GitHub':('github.com','www.github.com')}
-                if platform in hosts and (parsed.scheme!='https' or parsed.hostname not in hosts[platform] or parsed.port):raise ValueError('来源地址与所选平台不匹配')
-                if platform in ('Nexus','mod.io'):
-                    from urllib.parse import parse_qs
-                    if set(parse_qs(parsed.query))-{'tab','file_id','nmm'}:raise ValueError('来源地址包含不支持的跳转参数')
+        # The original mod.io importer also accepts a numeric API identity.
+        # It is stored as identity input, never treated as a fetchable URL.
+        if url and not (platform=='mod.io' and url.isascii() and url.isdigit()):
+            parsed=urlsplit(url)
+            if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or any(ord(c)<32 for c in url):raise ValueError('来源地址必须是合法 HTTP/HTTPS URL')
+            hosts={'Steam':('steamcommunity.com',),'Nexus':('www.nexusmods.com','nexusmods.com'),'mod.io':('mod.io',),'GitHub':('github.com','www.github.com')}
+            if platform in hosts and (parsed.scheme!='https' or parsed.hostname not in hosts[platform] or parsed.port):raise ValueError('来源地址与所选平台不匹配')
+            if platform in ('Nexus','mod.io'):
+                from urllib.parse import parse_qs
+                if set(parse_qs(parsed.query))-{'tab','file_id','nmm'}:raise ValueError('来源地址包含不支持的跳转参数')
         if len(title)>200 or any(ord(c)<32 for c in title):raise ValueError('名称最多 200 字符，不得包含控制字符；留空时使用原来源命名规则')
         from services.importers.duplicate_check import find_duplicate_mod
         duplicate=find_duplicate_mod(bridge.adapter.db,platform=platform,external_id=ext,source_url=url,app_id=int(args['game']))
+        confirmation={}
+        if platform=='Nexus' and not (kind=='local' and args.get('format')=='batch'):
+            from services.importers.nexus_registration_identity import check_game
+            if not url:raise ValueError('请提供 Nexus Mod 链接或数字 ID，也可附加包含身份的离线网页')
+            confirmation=check_game(r.db,int(args['game']),url)
+        if platform=='mod.io' and url:
+            if url.isascii() and url.isdigit():
+                if int(url)<=0:raise ValueError('mod.io Mod ID 必须是有效的正整数')
+            else:
+                from re import fullmatch
+                parts=urlsplit(url).path.strip('/').split('/')
+                if len(parts)!=4 or parts[0]!='g' or parts[2]!='m' or not all(fullmatch(r'[a-zA-Z0-9_-]+',p) for p in (parts[1],parts[3])):
+                    raise ValueError('请输入完整的 mod.io Mod 链接或数字 ID')
         draft={'kind':kind,'platform':platform,'title':title,'url':url,'external_id':ext,'source':str(source or ''),'fingerprint':source_hash,
+               'identity_confirmation':confirmation,
                'game':str(args['game']),'snapshot':args['snapshot'],'created':time.monotonic(),'candidates':candidates,'format':args.get('format')}
         draft['archive_paths']=args.get('archive_paths') or []
         draft['input_url']=str(args.get('url') or '').strip()
@@ -115,7 +133,7 @@ def preview(bridge,args):
         token=token_urlsafe(24)
         if len(bridge._registration)>=20:bridge._registration.pop(next(iter(bridge._registration)))
         bridge._registration[token]=draft
-        return {'draft':token,'game':draft['game'],'platform':platform,'title':title or (f'{len(candidates_batch)} 个 Mod · 使用各目录名称' if candidates_batch else ''),'source_url':url,'external_id':ext,
+        return {'draft':token,'game':draft['game'],'platform':platform,'identity_confirmation':confirmation,'title':title or (f'{len(candidates_batch)} 个 Mod · 使用各目录名称' if candidates_batch else ''),'source_url':url,'external_id':ext,
             'batch_candidates':candidates_batch,
             'attachments':{field:Path(value['path']).name for field,value in draft['attachments'].items()},
             'description':candidates.description if candidates else '', 'has_content':kind=='local',
@@ -168,8 +186,14 @@ def _execute(bridge,action,args):
             draft=bridge._registration.get(args.get('draft'))
             if not draft or draft['game']!=str(args['game']) or draft['snapshot']!=args['snapshot'] or time.monotonic()-draft['created']>600:
                 raise ValueError('注册预览已过期，请重新预览')
+            from services.importers.nexus_registration_identity import require_confirmation
+            require_confirmation(draft.get('identity_confirmation',{}),args.get('confirm_nexus_identity'))
             if draft['kind']=='local':raise ValueError('本地内容确认须调用已准入 ImportWorker')
-            if draft['source'] and fingerprint(incoming(r,draft['source']))!=draft['fingerprint']:raise ValueError('输入页面已变化，请重新预览')
+            if draft['kind']=='offline':
+                from services.importers.offline_admission import inspect_page
+                current=inspect_page(r,incoming(r,draft['source']),int(args['game']))
+                if current['fingerprint']!=draft['fingerprint']:raise ValueError('输入页面或伴随资源已变化，请重新预览')
+                require_confirmation(current['identity_confirmation'],args.get('confirm_nexus_identity'))
             from services.importers.duplicate_check import find_duplicate_mod
             duplicate=find_duplicate_mod(db,platform=draft['platform'],external_id=draft['external_id'],source_url=draft['url'],app_id=int(args['game']))
             if duplicate:
@@ -208,6 +232,10 @@ def _execute(bridge,action,args):
                     from services.file_ops import read_info_metadata_dict
                     if draft['candidates'].description and (read_info_metadata_dict(path) or {}).get('description')!=draft['candidates'].description:
                         raise RuntimeError('离线来源描述未成功持久化')
+                    from services.offline.manager import attach_nexus_offline_page
+                    attached=attach_nexus_offline_page(result.mod_id,draft['source'],managed_path=path,
+                        library_root=r.path('mod'),clean=True,merge_mode='import_overwrite')
+                    if attached.status!='archived':raise RuntimeError(attached.error or '离线页面未完整归档')
                 from services.content_status_eval import persist_evaluated_content_status
                 status=persist_evaluated_content_status(result.mod_id,path,db=db,notify_projection=False)
                 if status!='content_missing':raise RuntimeError('无本体注册的内容状态不符合合同')
@@ -253,6 +281,8 @@ def confirm_local(bridge,args):
     draft=bridge._registration.get(token)
     if not draft or draft['kind']!='local' or draft['game']!=str(args['game']) or draft['snapshot']!=args['snapshot'] or time.monotonic()-draft['created']>600:
         raise ValueError('本地导入预览已过期')
+    from services.importers.nexus_registration_identity import require_confirmation
+    require_confirmation(draft.get('identity_confirmation',{}),args.get('confirm_nexus_identity'))
     for field in ('cover_source','offline_html_path'):
         attachment=draft.get('attachments',{}).get(field)
         value=args.get(field)

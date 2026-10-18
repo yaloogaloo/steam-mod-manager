@@ -517,31 +517,39 @@ p {
 }
 
 .cover .check {
-    position: absolute;
-    left: 10px;
-    top: 10px;
+    left: 9px;
     appearance: none;
-    width: 20px;
-    height: 20px;
-    background: #152427cf;
-    border: 1px solid #aac7c0;
-    border-radius: 4px;
     cursor: pointer;
     margin: 0
 }
 
+.cover .check:before {
+    content: '';
+    position: absolute;
+    inset: 8px;
+    border: 1px solid #aac7c0;
+    border-radius: 3px
+}
+
 .cover .check:checked {
+    border-color: var(--accent)
+}
+
+.cover .check:checked:before {
     background: var(--accent);
     border-color: var(--accent)
 }
 
 .cover .check:checked:after {
-    content: '✓';
-    display: block;
-    color: #163730;
-    font-size: 16px;
-    text-align: center;
-    line-height: 18px
+    content: '';
+    position: absolute;
+    left: 12px;
+    top: 9px;
+    width: 5px;
+    height: 9px;
+    border: solid #163730;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg)
 }
 
 .card-body {
@@ -1590,15 +1598,19 @@ button[aria-busy="true"], [aria-busy="true"] button { cursor: progress; }
 .game-options {overflow:auto;max-height:calc(100vh - 255px);padding:5px;}
 .game-menu-footer {display:flex;gap:4px;padding:8px;border-top:1px solid var(--border);background:var(--surface);}
 .game-menu-footer button {flex:1;justify-content:center;font-size:12px;}
-.cover-star {position:absolute;right:9px;top:9px;width:32px;height:32px;padding:6px;border:1px solid #ffffff24;border-radius:8px;background:#131c24eb;color:#d9c493;display:grid;place-items:center;z-index:2;transition:background 140ms,border-color 140ms,color 140ms;}
+.cover .cover-star, .cover .check {position:absolute;top:9px;width:32px;height:32px;box-sizing:border-box;padding:6px;border:1px solid #ffffff24;border-radius:8px;background:#131c24eb;z-index:2;transition:background 140ms,border-color 140ms,color 140ms;}
+.cover .cover-star {right:9px;color:#d9c493;display:grid;place-items:center;}
 .cover-star svg {width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linejoin:round;}
-.cover-star:hover:not(:disabled) {background:#302c22;color:#ffe1a0;border-color:#d9b86799;}
-.cover-star.is-favorite {color:#edc66f;}
+.cover .cover-star:hover:not(:disabled), .cover .check:hover {background:#2a353b;border-color:#ffffff60;}
+.cover .cover-star:hover:not(:disabled) {color:#ffe1a0;}
+.cover .cover-star.is-favorite {color:#edc66f;}
 .cover-star.is-favorite svg {fill:currentColor;stroke-width:1.3;}
-.cover-star:active:not(:disabled) {background:#413820;}
+.cover .cover-star:active:not(:disabled), .cover .check:active {background:#344148;}
 .cover-star:disabled {opacity:.72;}
-.cover-star:focus-visible {outline:2px solid #e7c675;outline-offset:2px;}
-@media (prefers-reduced-motion:reduce){.cover-star{transition:none;}}
+.cover .cover-star:focus-visible, .cover .check:focus-visible {outline:2px solid var(--accent);outline-offset:2px;}
+@media (prefers-reduced-motion:reduce){.cover .cover-star,.cover .check{transition:none;}}
+.offline-game-confirm {margin:0 0 8px 28px;font-size:12px;color:var(--muted);}
+.offline-game-confirm input[type=url] {flex:1;min-width:0;font-size:12px;}
 .inspector-overview #inspector-image {position:relative;overflow:visible;}
 .inspector-type-prompt {display:flex;align-items:center;gap:12px;margin:10px 0;color:var(--muted);font-size:12px;}
 .inspector-type-prompt button {display:flex;align-items:center;gap:8px;padding:3px 7px;font-size:12px;min-width:0;}

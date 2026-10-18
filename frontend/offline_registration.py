@@ -3,7 +3,7 @@ import json
 import time
 from secrets import token_urlsafe
 from PySide6.QtCore import QObject, Slot, Qt
-from services.importers.offline_admission import inspect_page
+from services.importers.offline_admission import inspect_page,MissingNexusURL
 
 ACTIONS={'offline-register','pick-offline-pages'}
 
@@ -15,16 +15,20 @@ def preview(bridge,args):
     paths=args.get('paths')
     if not isinstance(paths,list) or not paths or len(paths)>200 or any(not isinstance(p,str) for p in paths):
         raise ValueError('请选择 1–200 个 HTML/MHTML 文件')
+    supplied=args.get('source_urls',{})
+    if not isinstance(supplied,dict) or any(k not in paths or not isinstance(v,str) or len(v)>2048 for k,v in supplied.items()):
+        raise ValueError('补充来源链接必须对应本次选择的网页')
     rows=[];seen=set();expected={}
     from services.importers.duplicate_check import find_duplicate_mod
     with r.bind():
         for index,path in enumerate(dict.fromkeys(paths)):
             row={'id':str(index),'source':path,'file':path.replace('\\','/').split('/')[-1],'enabled':False,'state':'failed'}
             try:
-                page=inspect_page(r,path,int(args['game']));duplicate=find_duplicate_mod(r.db,platform='Nexus',external_id=page['external_id'],source_url=page['url'],app_id=int(args['game']))
+                page=inspect_page(r,path,int(args['game']),source_url=supplied.get(path,''));duplicate=find_duplicate_mod(r.db,platform='Nexus',external_id=page['external_id'],source_url=page['url'],app_id=int(args['game']))
                 repeated=page['url'] in seen;seen.add(page['url']);expected[str(index)]=page
-                row.update(page,state='repeated' if repeated else 'existing' if duplicate else 'new',enabled=True,
-                           message='同来源有多个网页，请确认保留一个' if repeated else '已存在，提交仅跳过' if duplicate else '可注册 · 本体未提供')
+                row.update(page,state='repeated' if repeated else 'existing' if duplicate else 'confirmation' if page['identity_confirmation']['required'] else 'new',enabled=True,
+                           message='同来源有多个网页，请确认保留一个' if repeated else '已存在，提交仅跳过' if duplicate else '待确认归属 · 本体未提供' if page['identity_confirmation']['required'] else '可注册 · 本体未提供')
+            except MissingNexusURL as exc:row.update(message=str(exc),can_supply_url=True)
             except Exception as exc:row['message']=str(exc)
             rows.append(row)
     token=token_urlsafe(24)
@@ -49,9 +53,13 @@ def start(bridge,request_id,action,args):
     if not isinstance(ids,list) or not ids or len(ids)>200 or len(set(ids))!=len(ids) or any(not isinstance(i,str) for i in ids):raise ValueError('需要明确且不重复的页面选择')
     rows={row['id']:row for row in draft['rows']}
     if any(i not in rows or not rows[i]['enabled'] for i in ids):raise PermissionError('选择包含不允许注册的页面')
+    confirmed=args.get('confirmed_ids',[])
+    if not isinstance(confirmed,list) or any(i not in ids for i in confirmed):raise ValueError('来源确认必须属于本次选择')
+    from services.importers.nexus_registration_identity import require_confirmation
+    for i in ids:require_confirmation(rows[i]['identity_confirmation'],i in confirmed)
     urls=[draft['expected'][i]['url'] for i in ids]
     if len(set(urls))!=len(urls):raise ValueError('同一 Nexus 身份只能选择一个网页，请确认保留项')
-    selected={draft['expected'][i]['source']:draft['expected'][i] for i in ids}
+    selected={draft['expected'][i]['source']:{**draft['expected'][i],'confirmed_identity':i in confirmed} for i in ids}
     def preflight():
         with bridge._lock:bridge._command_game(args)
     from ui.import_thread import ImportWorker

@@ -298,6 +298,10 @@ async function inspect(a) {
   }
 }
 
+function deploymentNotice(evidence) {
+  return ({unknown:'部署状态待确认',inconsistent:'部署文件不完整，请检查后再操作。',compatibility_required:'部署状态待确认，请检查后再操作。',configuration_warning:'游戏启用状态待确认。'})[evidence?.state] || '';
+}
+
 function drawInspector(a, d) {
   const policy = d?.actions;
   const primary = policy?.primary || {id: 'unconfirmed', label: '确认状态中', icon: 'circle-alert', reason: '正在读取权威部署状态；只读预览不可执行写入'};
@@ -306,7 +310,7 @@ function drawInspector(a, d) {
     ? `<span class="badge ${policy.state==='deployed'?'deployed':''}">${policy.state==='deployed'?'已部署':'未部署'}</span>`
     : `<span class="badge warning">${!policy?'正在核实部署':policy.state==='failed'?'部署失败':'部署状态未知'}</span>`;
   const command = (action, main = false) => `<button class="inspector-command ${main?'primary':''}" data-command="${action.id}" ${action.enabled && !S.busy ? "" : "disabled"} title="${escape(action.reason)}" aria-label="${escape(action.label+'，'+action.reason)}">${icon(action.icon)}<span>${escape(action.label)}</span></button>`;
-  $('inspector').innerHTML = `<div class="inspector-top"><span>资产详情</span><button id="open-detail" class="inspector-detail-link" ${d?'':'disabled'}>${icon('book-open')}完整详情</button><button id="close-inspector" class="icon-button" aria-label="关闭详情侧栏">${icon('close')}</button></div><div class="inspector-scroll"><div class="inspector-overview"><div class="inspector-cover-wrap"><div id="inspector-image">${coverMarkup(a,'inspector-cover')}</div></div><h2 class="inspector-name">${escape(a.name)}</h2></div><div class="badges inspector-properties">${deployBadge}<span class="badge source" title="来源：${escape(a.platform||'未知')}">${escape(a.platform||'来源未知')}</span>${a.type_id!=null?`<button id="inspector-type-action" class="badge type" title="更改 Mod 类型" aria-haspopup="menu" ${S.readOnly?'disabled':''}>${escape(a.type)}</button>`:''}<span class="badge local-size">${size(a.size)}</span></div>${d?.deployment_evidence?`<p class="quiet deployment-evidence" role="status">${escape(d.deployment_evidence.message)}</p>`:''}${a.type_id==null?`<div class="inspector-type-prompt"><span>Mod 类型</span><button id="inspector-type-action" ${S.readOnly||!d?'disabled':''}>设置类型${icon('pencil')}</button></div>`:''}<dl class="facts"><dt>Workspace ID</dt><dd>${escape(a.workspace_id||'未知')}</dd>${a.status?`<dt>资产状态</dt><dd>${escape(a.status)}</dd>`:''}</dl>${d?.tags?.length?`<p class="inspector-user-tags" title="${escape(d.tags.join(' · '))}">用户标签：${escape(d.tags.join(' · '))}</p>`:''}<h3 class="section-line">描述摘要</h3><div class="description inspector-summary" id="inspector-description">${d?d.html||'暂无描述。现有来源未提供内容。':'正在读取已验证的描述来源…'}</div>${d?`<p class="quiet">描述来源：${escape(d.source)}</p>`:''}</div><div class="inspector-footer"><div class="inspector-command-row">${command(primary,true)}${policy?.undeploy?command(policy.undeploy):''}${command(edit)}<button id="inspector-more" class="inspector-more" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-controls="more-menu" aria-expanded="false" ${policy?'':'disabled'}>${icon('more-horizontal')}</button></div></div>`;
+  $('inspector').innerHTML = `<div class="inspector-top"><span>资产详情</span><button id="open-detail" class="inspector-detail-link" ${d?'':'disabled'}>${icon('book-open')}完整详情</button><button id="close-inspector" class="icon-button" aria-label="关闭详情侧栏">${icon('close')}</button></div><div class="inspector-scroll"><div class="inspector-overview"><div class="inspector-cover-wrap"><div id="inspector-image">${coverMarkup(a,'inspector-cover')}</div></div><h2 class="inspector-name">${escape(a.name)}</h2></div><div class="badges inspector-properties">${deployBadge}<span class="badge source" title="来源：${escape(a.platform||'未知')}">${escape(a.platform||'来源未知')}</span>${a.type_id!=null?`<button id="inspector-type-action" class="badge type" title="更改 Mod 类型" aria-haspopup="menu" ${S.readOnly?'disabled':''}>${escape(a.type)}</button>`:''}<span class="badge local-size">${size(a.size)}</span></div>${deploymentNotice(d?.deployment_evidence)?`<p class="quiet deployment-notice" role="status">${deploymentNotice(d.deployment_evidence)}</p>`:''}${a.type_id==null?`<div class="inspector-type-prompt"><span>Mod 类型</span><button id="inspector-type-action" ${S.readOnly||!d?'disabled':''}>设置类型${icon('pencil')}</button></div>`:''}<dl class="facts"><dt>Workspace ID</dt><dd>${escape(a.workspace_id||'未知')}</dd>${a.status?`<dt>资产状态</dt><dd>${escape(a.status)}</dd>`:''}</dl>${d?.tags?.length?`<p class="inspector-user-tags" title="${escape(d.tags.join(' · '))}">用户标签：${escape(d.tags.join(' · '))}</p>`:''}<h3 class="section-line">描述摘要</h3><div class="description inspector-summary" id="inspector-description">${d?d.html||'暂无描述。现有来源未提供内容。':'正在读取已验证的描述来源…'}</div>${d?`<p class="quiet">描述来源：${escape(d.source)}</p>`:''}</div><div class="inspector-footer"><div class="inspector-command-row">${command(primary,true)}${policy?.undeploy?command(policy.undeploy):''}${command(edit)}<button id="inspector-more" class="inspector-more" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-controls="more-menu" aria-expanded="false" ${policy?'':'disabled'}>${icon('more-horizontal')}</button></div></div>`;
   $('close-inspector').onclick = closeInspector;
   $('open-detail').onclick = openDetail;
   $('inspector-more').onclick = openMoreMenu;
@@ -513,7 +517,7 @@ $('grid').addEventListener('keydown', e => {
   const card = e.target.closest('.card');
   if (!card) return;
   const index = S.rows.findIndex(a => a.token === card.dataset.token);
-  if(e.target.closest('[data-favorite]'))return;
+  if(e.target.closest('[data-favorite],.check'))return;
   if (e.key === ' ') {
     e.preventDefault();
     toggleSelection(card.dataset.token);
