@@ -4063,6 +4063,14 @@ class ModDeployer:
             )
         frozen = entity.internal_id
         pk = str(entity.mod_pk)
+        from services.paradox_activation import is_paradox_activation_app
+
+        info = self._database().get_mod_display_info(pk)
+        if (info is not None and is_paradox_activation_app(info.app_id)
+                and not str(info.custom_deploy_path or '').strip()):
+            # Activation has no copied files to remove. Retry the original
+            # projection without dropping membership on a partial undeploy.
+            return self.deploy_mod(frozen)
         und = self.undeploy_mod(frozen)
         if not und.get("success"):
             err = str(und.get("error") or "取消部署失败")

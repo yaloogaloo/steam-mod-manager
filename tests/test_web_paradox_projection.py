@@ -98,3 +98,46 @@ def test_real_paradox_deploy_worker_reports_partial_projection_failure(tmp_path,
         assert db.get_mod_deploy_info(pk).deploy_status=='deployed'
         assert '状态已保存' in failure['error']
     finally:db.close()
+
+
+@pytest.mark.parametrize('failure', ['inactive', 'descriptor', 'write'])
+def test_paradox_redeploy_retains_membership_on_partial_failure(tmp_path, monkeypatch, failure):
+    from services.deploy import ModDeployer
+    from services import paradox_activation
+    root=tmp_path/'application';(root/'data').mkdir(parents=True)
+    db=DatabaseManager(root/'data/mod_manager.db');library=tmp_path/'library';library.mkdir()
+    docs,workshop=_configure_stellaris(db,tmp_path)
+    ids=[]
+    for wid in ('880001','880002'):
+        pk=_seed_stellaris_mod(library,db,folder=wid,workshop_id=wid,deployed=True)
+        _write_ugc_descriptor(docs,wid);(workshop/wid).mkdir()
+        ids.append((pk,db.get_mod_backup_row(pk)['internal_id']))
+    resources=TemporaryProductionPaths(root,db,library)
+    original_write=paradox_activation._write_json_object
+    try:
+        if failure=='inactive':
+            with sqlite3.connect(docs/'launcher-v2.sqlite') as con:
+                con.execute('UPDATE playsets SET isActive=0')
+        elif failure=='descriptor':
+            (docs/'mod/ugc_880001.mod').unlink()
+        else:
+            monkeypatch.setattr(paradox_activation,'_write_json_object',
+                                lambda *a:(_ for _ in ()).throw(OSError('controlled write failure')))
+        deployer=ModDeployer(library_root=library,db=db,resources=resources)
+        for _ in range(2):
+            result=deployer.redeploy_mod(ids[0][1])
+            assert not result['success']
+            assert all(db.get_mod_deploy_info(pk).deploy_status=='deployed' for pk,iid in ids)
+            assert result['error_code']=='projection_failed' and result['partial_state_saved']
+        if failure=='inactive':
+            with sqlite3.connect(docs/'launcher-v2.sqlite') as con:
+                con.execute('UPDATE playsets SET isActive=1')
+        elif failure=='descriptor':
+            _write_ugc_descriptor(docs,'880001')
+        else:
+            monkeypatch.setattr(paradox_activation,'_write_json_object',original_write)
+        assert deployer.redeploy_mod(ids[0][1])['success']
+        assert deployer.undeploy_mod(ids[0][1])['success']
+        assert db.get_mod_deploy_info(ids[0][0]).deploy_status=='not_deployed'
+        assert db.get_mod_deploy_info(ids[1][0]).deploy_status=='deployed'
+    finally:db.close()
