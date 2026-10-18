@@ -1,6 +1,6 @@
 # Stellaris 根因与生产验收 — 2026-10-19
 
-根因归类 PASS；最小修复已实现。总体 NOT CLOSED：强制回归门禁还有两项旧 WH3 布局失败，且原 Launcher 原生刷新产生的额外配置变化尚待用户复核接受。
+根因归类 PASS；最小修复已实现。生产数据安全在用户接受的范围内 PASS。总体仍为 NOT CLOSED：强制回归门禁还有两项旧 WH3 布局失败，Mod 内容兼容错误未处理。
 
 ## 调用链和历史证据
 
@@ -36,13 +36,15 @@ L1 SQLite：18 已部署，PASS。L2 文件：18/18 外层描述符及目标存�
 
 L4：从 Launcher 开始游戏及直接 stellaris.exe 均实际进入主菜单，校验值同为 `102f`；UIOD 标记、字体、Azur Lane 菜单资源可见，新游戏日志记录 Mod 独有脚本解析。两次均正常从菜单退出，没有进入存档或创建/覆盖存档；5 个既有存档文件的路径、字节数、mtime 全部一致。证据 `launcher-game-main-menu.png` / `direct-exe-game-main-menu.png`、`after-launcher-game/logs` / `after-direct-game/logs`、`final-safety.json`（均位于 approved-production）。这证明引擎实际加载了 Mod，不能证明 18 项的每项游戏功能都兼容；新 error.log 仍有缺 trait 等内容错误，本轮不改 Mod 内容。
 
-## 未关闭的 Launcher 自动刷新边界
+## 已接受的 Launcher 自动刷新结果
 
-原 Launcher 的订阅发现不是单文件操作。批准前数据库 381 条注册，打开后 391 条：除目标 3818467946 外还发现 9 个已订阅对象；113 条既有注册的 displayName、requiredVersion、size、tags、thumbnailPath/Url、timeUpdated 或 version 被原生刷新。没有删除注册，也没有改变两个原 Playset 成员。
+原 Launcher 的订阅发现不是单文件操作。批准前数据库 381 条注册，打开后 391 条：除目标 3818467946 外还发现 9 个已订阅对象；113 条既有注册的 displayName、requiredVersion、size、tags、thumbnailPath/Url、timeUpdated 或 version 被原生刷新。此处 tags 是 Launcher 元数据，不是 SMM 用户标签。没有删除注册，也没有改变两个原 Playset 成员。
 
 精确文件清单是 **1 份缺失描述符恢复 + 7 份既有描述符更新**（早期口头“8 份已有”把恢复项包含在内）。既有项为 `2997295407, 3292390779, 3661244914, 937289339, 2735054420, 1623423360, 3243731913`。这些由原 Launcher 刷新，SMM 后端未写描述符。额外注册/元数据清单见 `launcher-mod-registration-diff.json`；描述符前后 SHA 见 `final-safety.json`。
 
-冻结计划只批准恢复缺失描述符；因此不能把这些额外变化报告成“生产完全无非预期变化”。现已停止生产修改，不自动回退或覆盖文件。旧描述符仅有基线 SHA，尚未找回匹配的原字节，不能承诺七份文件可字节级回滚；`descriptor-rollback-availability.json` 明确记录这一限制。保留当前 Launcher 刷新结果须用户复核；恢复则须先找到与基线 SHA 匹配的原始字节，另定具体对象和方法。不能用整库回滚覆盖后来变化。
+冻结计划原本只批准恢复缺失描述符，这些额外变化已如实报告。用户随后明确回复“接受保留原 Launcher 刷新结果”。2026-10-19 的只读复核确认 Launcher mods/playsets/playsets_mods、18 份描述符 SHA、SMM 全部表及 Schema、存档清单仍与供审查结果一致。本次只记录验收，没有新增生产业务写入。决定原文、冻结计划 SHA 和复核结果见 `approved-production/launcher-native-refresh-user-acceptance.json`；原计划及历史证据保留。
+
+旧描述符仅有基线 SHA，尚未找回匹配的原字节，仍不能承诺七份文件可字节级回滚；用户接受当前结果不改变这一限制。`descriptor-rollback-availability.json` 保留该事实。今后若要求恢复，须先找到与基线 SHA 匹配的原始字节，另定具体对象和方法；不能用整库回滚覆盖后来变化。
 
 ## 恢复证据与边界
 
