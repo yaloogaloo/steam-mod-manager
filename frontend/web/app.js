@@ -622,6 +622,7 @@ new QWebChannel(qt.webChannelTransport, async channel => {
     const result = await rpc('bootstrap');
     S.readOnly = result.readOnly;
     S.registrationSources=result.registrationSources;
+    S.registrationPreferences=result.registrationPreferences||{};
     S.deployCommands = result.deployCommands;
     S.organizeCommands = result.organizeCommands;
     if (!S.readOnly) { document.querySelector('.mode').textContent='正常模式';document.querySelector('.rail-note').textContent=S.organizeCommands?'已开放标签、合集、部署、收藏与用户信息编辑。':S.deployCommands?'已开放部署、收藏与用户信息编辑。':'收藏与用户信息编辑已接通。其他业务仍待迁移。'; if(S.deployCommands)document.querySelector('.readonly-note').textContent='本地资源 · 按业务权限执行';$('connection-status').textContent='本地数据库 · 已连接';document.querySelector('.statusbar span:last-child').textContent=S.deployCommands?'本地数据 · 部署与编辑可执行':'本地数据 · 收藏与用户信息编辑可执行'; }

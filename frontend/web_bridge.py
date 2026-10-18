@@ -176,6 +176,15 @@ class LibraryBridge(QObject):
         settings.setValue('ui/game_filter',info.name)
         settings.setValue('ui/page_index',{'acquire':0,'library':1,'deployment':2}[space])
 
+    @Slot(str,str)
+    def remember_registration(self,game,choices):
+        if self._closed or not getattr(self.resources,'production',False) or not self.adapter.writable:return
+        if game!=self._game or len(choices)>1024:return
+        try:
+            from .registration_preferences import write
+            write(game,json.loads(choices))
+        except (ValueError,TypeError):return
+
     @Slot(str, str, str)
     def command(self, request_id, action, arguments):
         accepted = False
@@ -699,10 +708,12 @@ class LibraryBridge(QObject):
                     'sync_allowed':bool(self.resources and (self.resources.steam_api_url or self.resources.steam_public) and self.adapter.writable)}
         if operation == 'bootstrap':
             from PySide6.QtCore import QSettings
+            from .registration_preferences import read as read_registration_preferences
             preferences=QSettings('SteamModManager','WorkshopLibrary')
             session={'game_name':preferences.value('ui/game_filter','',str),'page':preferences.value('ui/page_index',1,int)} if getattr(self.resources,'production',False) else {}
             return {'games': [asdict(g) for g in self.adapter.games()], 'readOnly': not self.adapter.writable,
                     'session':session,
+                    'registrationPreferences':{g.key:read_registration_preferences(g.key) for g in self.adapter.games()},
                     'registrationSources': registration_source_options(self), 'deployCommands': self.resources is not None, 'organizeCommands': self.resources is not None, 'production': bool(self.resources and type(self.resources).__name__=='ProductionResources')}
         if operation == 'library':
             game = int(args['game'])
