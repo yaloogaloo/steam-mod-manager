@@ -36,13 +36,22 @@ def wait_for_paint(window):
     wait_until(window, '__coverPaintReady')
     previous = None
     stable = 0
-    for _ in range(15):
+    bounds = None
+    for _ in range(30):
         QTest.qWait(50)
+        region = json.loads(evaluate(window, "JSON.stringify({rect:document.querySelector('.card.current .cover').getBoundingClientRect().toJSON(),dpr:devicePixelRatio})"))
+        r, d = region['rect'], region['dpr']
+        current_bounds = (math.floor(r['left'] * d), math.floor(r['top'] * d),
+                          math.ceil(r['right'] * d), math.ceil(r['bottom'] * d))
         frame = window.grab().toImage()
-        stable = stable + 1 if previous is not None and frame == previous else 0
+        l, t, rr, b = current_bounds
+        # Inspect the presented cover, not unrelated blinking carets/status areas.
+        frame = frame.copy(l + 3, t + 3, rr - l - 6, b - t - 6)
+        stable = stable + 1 if previous is not None and bounds == current_bounds and frame == previous else 0
         if stable >= 2:
             return
         previous = frame
+        bounds = current_bounds
     raise TimeoutError('Qt painted frame did not stabilize; do not accept this capture')
 
 
@@ -61,6 +70,8 @@ MEASURE = r"""JSON.stringify((()=>{
   gridRow:getComputedStyle(img.parentElement).gridTemplateRows,src:img.currentSrc};
  result.inspector=inspector?{rect:rect(inspector),natural:[inspector.naturalWidth,inspector.naturalHeight],
   fit:getComputedStyle(inspector).objectFit,position:getComputedStyle(inspector).objectPosition,
+  transform:getComputedStyle(inspector).transform,borderBottom:parseFloat(getComputedStyle(inspector).borderBottomWidth)||0,
+  container:rect(inspector.closest('.inspector-cover-wrap')||inspector.parentElement),
   src:inspector.currentSrc}:null;
  // Reference is the declared centered-cover policy in the CONTAINER, independent of IMG layout.
  const c=document.createElement('canvas'),x=Math.floor(cr.left*dpr),y=Math.floor(cr.top*dpr);
@@ -140,6 +151,7 @@ def measure(window):
         if data['inspector']:
             raw_inspector = _decode(data['inspector'].pop('src'))
             data['inspector']['resource_sha256'] = hashlib.sha256(raw_inspector).hexdigest()
+            data['inspector']['visible_source_fraction'] = source_window(data['inspector'], data['inspector']['container'])
         data['visible_source_fraction'] = source_window(data['image'], c)
         expected = QImage.fromData(_decode(data.pop('oracle')))
         masks = [(math.floor(m['left'] * dpr) - left - 3, math.floor(m['top'] * dpr) - top - 3,
@@ -164,6 +176,12 @@ def contract_failures(data, sample):
         failures.append('rendered resource differs from frozen input')
     if not data['inspector'] or image['resource_sha256'] != data['inspector']['resource_sha256']:
         failures.append('card and Inspector do not share the same preview')
+    elif (data['inspector']['natural'] != image['natural'] or
+          (data['inspector']['fit'], data['inspector']['position'], data['inspector']['transform']) !=
+          ('cover', '50% 50%', 'none') or
+          abs(data['inspector']['rect']['width'] - 92) > 1 or
+          abs(data['inspector']['rect']['height'] - 72) > 1):
+        failures.append('Inspector resource geometry or presentation policy changed')
     nw, nh = image['natural']
     ch = container['height'] - image['borderBottom']
     scale = max(container['width'] / nw, ch / nh)
