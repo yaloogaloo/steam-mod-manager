@@ -214,7 +214,7 @@ function selectionUI() {
   if (typeof renderCollectionTools==='function' && S.browse==='collections') renderCollectionTools();
 }
 
-function reflow() {
+function reflow(anchor = null) {
   const viewport = $('viewport');
   const width = viewport.clientWidth - 8;
   const min = S.compact ? 166 : 186;
@@ -224,7 +224,8 @@ function reflow() {
   S.coverHeight = Math.round(S.width / 1.78);
   S.cell = S.coverHeight + 61 + gap;
   $('grid').style.height = Math.ceil(S.rows.length / S.columns) * S.cell + 'px';
-  renderGrid();
+  if (anchor) restoreAnchor(anchor);
+  else renderGrid();
 }
 
 function browseAnchor() {
@@ -248,28 +249,41 @@ function renderGrid() {
     last = Math.min(S.rows.length, (Math.ceil((viewport.scrollTop + viewport.clientHeight) / S.cell) + 1) * S.columns);
   S.renderRange = [first, last];
   const visible = new Set(S.rows.slice(first, last).map(a => a.token));
+  const rendered = new Set(visible);
   if (S.current) visible.add(S.current.token);
   S.coverQueue = S.coverQueue.filter(a => {
     if (visible.has(a.token)) return true;
     S.coverPending.delete(a.token);
     return false;
   });
-  const fragment = document.createDocumentFragment();
+  const grid = $('grid');
+  const existing = new Map([...grid.children].map(el => [el.dataset.token, el]));
+  const focused = document.activeElement?.closest('.card');
+  for (const [token, el] of existing) if (!rendered.has(token)) el.remove();
+  let before = grid.firstElementChild;
   for (let i = first; i < last; i++) {
-    const a = S.rows[i],
+    const a = S.rows[i];
+    let el = existing.get(a.token);
+    if (!el) {
       el = document.createElement('article');
-    el.className = 'card' + (a.token === S.current?.token ? ' current' : '') + (S.selected.has(a.token) ? ' checked' : '');
-    el.dataset.token = a.token;
-    el.tabIndex = 0;
-    el.setAttribute('aria-label', a.name + '，' + a.platform + '，' + deploymentLabel(a));
-    el.style.cssText = `left:${i%S.columns*(S.width+12)}px;top:${Math.floor(i/S.columns)*S.cell}px;width:${S.width}px;height:${S.cell-12}px;--cover-height:${S.coverHeight}px`;
-    el.innerHTML = `<div class="cover"><div data-cover="${a.token}" style="width:100%;height:100%;display:grid;place-items:center">${coverMarkup(a)}</div><button class="cover-star ${a.favorite?'is-favorite':''}" data-favorite="${a.token}" title="${a.favorite?'取消收藏':'收藏'}" aria-label="${a.favorite?'取消收藏':'收藏'}" aria-pressed="${a.favorite}" ${S.readOnly||S.busy?'disabled':''}>${icon('star')}</button><input class="check" type="checkbox" ${S.selected.has(a.token)?'checked':''} aria-label="勾选 ${escape(a.name)}"></div><div class="card-body"><h3 class="card-title" title="${escape(a.name)}">${escape(a.name)}</h3><div class="card-meta"><span class="platform">${escape(a.platform)}</span>${a.type_id!=null&&a.type&&a.type!=='类型未知'?`<span class="type-label" title="${escape(a.type)}">${escape(a.type)}</span>`:''}${a.deployed?'<span class="badge deployed">已部署</span>':''}</div></div>`;
-    fragment.append(el);
+      el.dataset.token = a.token;
+      el.tabIndex = 0;
+      el.setAttribute('aria-label', a.name + '，' + a.platform + '，' + deploymentLabel(a));
+      el.innerHTML = `<div class="cover"><div data-cover="${a.token}" style="width:100%;height:100%;display:grid;place-items:center">${coverMarkup(a)}</div><button class="cover-star ${a.favorite?'is-favorite':''}" data-favorite="${a.token}" title="${a.favorite?'取消收藏':'收藏'}" aria-label="${a.favorite?'取消收藏':'收藏'}" aria-pressed="${a.favorite}" ${S.readOnly||S.busy?'disabled':''}>${icon('star')}</button><input class="check" type="checkbox" ${S.selected.has(a.token)?'checked':''} aria-label="勾选 ${escape(a.name)}"></div><div class="card-body"><h3 class="card-title" title="${escape(a.name)}">${escape(a.name)}</h3><div class="card-meta"><span class="platform">${escape(a.platform)}</span>${a.type_id!=null&&a.type&&a.type!=='类型未知'?`<span class="type-label" title="${escape(a.type)}">${escape(a.type)}</span>`:''}${a.deployed?'<span class="badge deployed">已部署</span>':''}</div></div>`;
+    }
+    if (el !== before) grid.insertBefore(el, before);
+    before = el.nextElementSibling;
+    const klass = 'card' + (a.token === S.current?.token ? ' current' : '') + (S.selected.has(a.token) ? ' checked' : '');
+    if (el.className !== klass) el.className = klass;
+    el.querySelector('.check').checked = S.selected.has(a.token);
+    const geometry = `${i}:${S.columns}:${S.width}:${S.cell}:${S.coverHeight}`;
+    if (el.dataset.geometry !== geometry) {
+      el.style.cssText = `left:${i%S.columns*(S.width+12)}px;top:${Math.floor(i/S.columns)*S.cell}px;width:${S.width}px;height:${S.cell-12}px;--cover-height:${S.coverHeight}px`;
+      el.dataset.geometry = geometry;
+    }
     queueCover(a);
   }
-  const focused = document.activeElement?.closest('.card')?.dataset.token;
-  $('grid').replaceChildren(fragment);
-  if (focused) $('grid').querySelector(`[data-token="${focused}"]`)?.focus({
+  if (focused && document.activeElement?.closest('.card') !== focused) grid.querySelector(`[data-token="${focused.dataset.token}"]`)?.focus({
     preventScroll: true
   });
 }
@@ -288,8 +302,7 @@ async function inspect(a) {
   const anchor = browseAnchor();
   $('inspector').hidden = false;
   drawInspector(a, null);
-  reflow();
-  restoreAnchor(anchor);
+  reflow(anchor);
   try {
     const detail = await rpc('detail', {
       token: a.token
@@ -442,8 +455,7 @@ function closeInspector() {
   S.details = null;
   const anchor = browseAnchor();
   $('inspector').hidden = true;
-  reflow();
-  restoreAnchor(anchor);
+  reflow(anchor);
 }
 
 function openDetail() {
@@ -609,8 +621,7 @@ for (const id of ['standard', 'compact']) $(id).onclick = () => {
   S.compact = id === 'compact';
   $('compact').classList.toggle('active', S.compact);
   $('standard').classList.toggle('active', !S.compact);
-  reflow();
-  restoreAnchor(anchor);
+  reflow(anchor);
 };
 $('refresh').onclick = load;
 $('game').onchange = () => {
