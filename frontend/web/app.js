@@ -114,6 +114,7 @@ function pumpCovers() {
         const el = $('inspector-image');
         if (el) el.innerHTML = coverMarkup(a, 'inspector-cover');
       }
+      if (typeof updateDeploymentCover === 'function') updateDeploymentCover(a);
       const detailImage = $('detail-image');
       if (detailImage?.dataset.token === a.token) detailImage.innerHTML = coverMarkup(a, 'detail-cover');
       S.coverActive--;
@@ -130,6 +131,7 @@ function options(id, values, label) {
   if (values.includes(previous)) el.value = previous;
 }
 async function load() {
+  if (typeof closeDeploymentInspector === 'function') closeDeploymentInspector(false);
   if($('inspector-type-menu').matches(':popover-open'))$('inspector-type-menu').hidePopover();
   closeMoreMenu(false);
   syncGamePicker();
@@ -301,15 +303,23 @@ async function inspect(a) {
   }
 }
 
+function inspectorContent(a, d, prefix = '', viewOnly = false) {
+  const deployBadge = d?.actions?.state === 'deployed' ? '<span class="badge deployed">已部署</span>' : '';
+  return `<div class="inspector-scroll"><div class="inspector-overview"><div class="inspector-cover-wrap"><div id="${prefix}inspector-image">${coverMarkup(a,'inspector-cover')}</div></div><div class="inspector-identity"><h2 class="inspector-name">${escape(a.name)}</h2><p class="inspector-source"><span>${escape(a.platform||'来源未知')}</span>${a.size==null?'':`<span class="inspector-size">${size(a.size)}</span>`}</p>${deployBadge}</div></div><div class="inspector-type-property"><span>Mod 类型</span><button id="${prefix}inspector-type-action" class="inspector-type-value" title="${a.type_id==null?'设置 Mod 类型':escape(a.type)}" aria-label="Mod 类型：${a.type_id==null?'未设置，设置类型':escape(a.type)}" aria-haspopup="listbox" aria-controls="inspector-type-menu" aria-expanded="false" ${viewOnly||S.readOnly||S.busy||!d?'disabled':''}><span class="inspector-type-name">${a.type_id==null?'未设置':escape(a.type)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>${d?.tags?.length?`<div class="inspector-user-tags" aria-label="用户标签">${icon('tags')}<div class="inspector-tag-values">${d.tags.map(tag=>`<span class="inspector-tag">${escape(tag)}</span>`).join('')}</div></div>`:''}<dl class="facts inspector-workspace"><dt>Workspace ID</dt><dd>${escape(a.workspace_id||'未知')}</dd></dl><h3 class="section-line">描述摘要</h3><div class="description inspector-summary" id="${prefix}inspector-description"></div></div>`;
+}
+
+function renderInspectorDescription(id, d) {
+  // Parse sanitized descriptions separately so unclosed markup cannot absorb surrounding controls.
+  $(id).innerHTML = d ? d.html||'暂无描述。现有来源未提供内容。' : '正在读取已验证的描述来源…';
+}
+
 function drawInspector(a, d) {
   const policy = d?.actions;
   const primary = policy?.primary || {id: 'unconfirmed', label: '确认状态中', icon: 'circle-alert', reason: '正在读取权威部署状态；只读预览不可执行写入'};
   const edit = policy?.edit || {id: 'edit', label: '编辑', icon: 'pencil', reason: '只读预览：编辑信息会写入 SQLite'};
-  const deployBadge = policy?.state === 'deployed' ? '<span class="badge deployed">已部署</span>' : '';
   const command = (action, main = false) => `<button class="inspector-command ${main?'primary':''}" data-command="${action.id}" ${action.enabled && !S.busy ? "" : "disabled"} title="${escape(action.reason)}" aria-label="${escape(action.label+'，'+action.reason)}">${icon(action.icon)}<span>${escape(action.label)}</span></button>`;
-  $('inspector').innerHTML = `<div class="inspector-top"><span>资产详情</span><button id="open-detail" class="inspector-detail-link" ${d?'':'disabled'}>${icon('book-open')}完整详情</button><button id="close-inspector" class="icon-button" aria-label="关闭详情侧栏">${icon('close')}</button></div><div class="inspector-scroll"><div class="inspector-overview"><div class="inspector-cover-wrap"><div id="inspector-image">${coverMarkup(a,'inspector-cover')}</div></div><div class="inspector-identity"><h2 class="inspector-name">${escape(a.name)}</h2><p class="inspector-source"><span>${escape(a.platform||'来源未知')}</span>${a.size==null?'':`<span class="inspector-size">${size(a.size)}</span>`}</p>${deployBadge}</div></div><div class="inspector-type-property"><span>Mod 类型</span><button id="inspector-type-action" class="inspector-type-value" title="${a.type_id==null?'设置 Mod 类型':escape(a.type)}" aria-label="Mod 类型：${a.type_id==null?'未设置，设置类型':escape(a.type)}" aria-haspopup="listbox" aria-controls="inspector-type-menu" aria-expanded="false" ${S.readOnly||S.busy||!d?'disabled':''}><span class="inspector-type-name">${a.type_id==null?'未设置':escape(a.type)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>${d?.tags?.length?`<div class="inspector-user-tags" aria-label="用户标签">${icon('tags')}<div class="inspector-tag-values">${d.tags.map(tag=>`<span class="inspector-tag">${escape(tag)}</span>`).join('')}</div></div>`:''}<dl class="facts inspector-workspace"><dt>Workspace ID</dt><dd>${escape(a.workspace_id||'未知')}</dd></dl><h3 class="section-line">描述摘要</h3><div class="description inspector-summary" id="inspector-description"></div></div><div class="inspector-footer"><div class="inspector-command-row">${command(primary,true)}${policy?.undeploy?command(policy.undeploy):''}${command(edit)}<button id="inspector-more" class="inspector-more" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-controls="more-menu" aria-expanded="false" ${policy?'':'disabled'}>${icon('more-horizontal')}</button></div></div>`;
-  // Parse sanitized descriptions separately so unclosed markup cannot absorb the footer.
-  $('inspector-description').innerHTML = d ? d.html||'暂无描述。现有来源未提供内容。' : '正在读取已验证的描述来源…';
+  $('inspector').innerHTML = `<div class="inspector-top"><span>资产详情</span><button id="open-detail" class="inspector-detail-link" ${d?'':'disabled'}>${icon('book-open')}完整详情</button><button id="close-inspector" class="icon-button" aria-label="关闭详情侧栏">${icon('close')}</button></div>${inspectorContent(a, d)}<div class="inspector-footer"><div class="inspector-command-row">${command(primary,true)}${policy?.undeploy?command(policy.undeploy):''}${command(edit)}<button id="inspector-more" class="inspector-more" title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-controls="more-menu" aria-expanded="false" ${policy?'':'disabled'}>${icon('more-horizontal')}</button></div></div>`;
+  renderInspectorDescription('inspector-description', d);
   $('close-inspector').onclick = closeInspector;
   $('open-detail').onclick = openDetail;
   $('inspector-more').onclick = openMoreMenu;

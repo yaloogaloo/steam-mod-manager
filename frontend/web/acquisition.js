@@ -1,6 +1,7 @@
 let acquisitionData=null, acquisitionSubmitting=false, acquisitionSignature=null,localArchivePaths=[];
 const acquisitionPages=new Map();
 function showSpace(space) {
+  if(space!=='deployment'&&typeof closeDeploymentInspector==='function')closeDeploymentInspector(false);
   if($('library-filter-menu').matches(':popover-open'))$('library-filter-menu').hidePopover();
   S.space=space;
   if(bridge?.remember_session&&S.snapshot)bridge.remember_session($('game').value,space);

@@ -1,5 +1,5 @@
 let workbenchView='current',snapshotData=null,snapshotSelected=null,snapshotRead=0,snapshotBusy=false,snapshotEdit=null;
-function selectWorkbench(view){workbenchView=view;$('current-deployment-view').hidden=view!=='current';$('snapshot-view').hidden=view!=='snapshots';$('current-deployment-tab').classList.toggle('active',view==='current');$('snapshot-tab').classList.toggle('active',view==='snapshots');refreshDeployment();}
+function selectWorkbench(view){closeDeploymentInspector(false);workbenchView=view;$('current-deployment-view').hidden=view!=='current';$('snapshot-view').hidden=view!=='snapshots';$('current-deployment-tab').classList.toggle('active',view==='current');$('snapshot-tab').classList.toggle('active',view==='snapshots');refreshDeployment();}
 $('current-deployment-tab').onclick=()=>selectWorkbench('current');
 $('snapshot-tab').onclick=()=>selectWorkbench('snapshots');
 async function refreshSnapshots(){
@@ -28,8 +28,8 @@ function openSnapshotEditor(action,id=null){
 $('snapshot-create').onclick=()=>openSnapshotEditor('snapshot-save');
 $('snapshot-cancel').onclick=()=>{if(!snapshotBusy)$('snapshot-dialog').close();};
 $('snapshot-dialog').addEventListener('cancel',event=>{if(snapshotBusy)event.preventDefault();});
-$('snapshot-list').onclick=event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.snapshotOpen){snapshotSelected=Number(b.dataset.snapshotOpen);refreshSnapshots();}if(b.dataset.snapshotRename)openSnapshotEditor('snapshot-rename',Number(b.dataset.snapshotRename));if(b.dataset.snapshotDelete)openSnapshotEditor('snapshot-delete',Number(b.dataset.snapshotDelete));};
-$('snapshot-comparison').onclick=event=>{const iid=event.target.closest('[data-snapshot-detail]')?.dataset.snapshotDetail;const asset=S.assets.find(a=>a.internal_id===iid);if(asset){showSpace('library');inspect(asset);}};
+$('snapshot-list').onclick=event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.snapshotOpen){closeDeploymentInspector(false);snapshotSelected=Number(b.dataset.snapshotOpen);refreshSnapshots();}if(b.dataset.snapshotRename)openSnapshotEditor('snapshot-rename',Number(b.dataset.snapshotRename));if(b.dataset.snapshotDelete)openSnapshotEditor('snapshot-delete',Number(b.dataset.snapshotDelete));};
+$('snapshot-comparison').onclick=event=>{const button=event.target.closest('[data-snapshot-detail]');if(button)openDeploymentInspector(button.dataset.snapshotDetail,button);};
 $('snapshot-form').onsubmit=async event=>{
  event.preventDefault();if(snapshotBusy||!snapshotEdit)return;
  const context={...snapshotEdit};snapshotBusy=true;$('snapshot-submit').disabled=true;$('snapshot-cancel').disabled=true;$('snapshot-error').textContent='正在保存…';
