@@ -1,4 +1,4 @@
-# Local / personal
+# Python environments, bytecode and tool caches
 .venv/
 venv/
 __pycache__/
@@ -7,112 +7,46 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 .tox/
 .cache/
+.VSCodeCounter/
 
-# App runtime
-*.log
+# Coverage reports
+.coverage
+htmlcov/
+
+# Machine-local settings, credentials and recovery receipt
 config.local.json
 settings.json
 config/modio.json
+/config/production_recovery.json
+
+# Runtime data, backups, CAS and regenerable caches
+data/
+cache/
 config/load_order/*.json
 !config/load_order/.gitkeep
+
+# Local Mod archive and logs; keep directory placeholders
 mod/*
 !mod/.gitkeep
-# Regenerable performance cache (safe to delete entirely)
-cache/
-# Runtime logs (crash traces). Keep the directory placeholder.
+*.log
 logs/*
 !logs/.gitkeep
-# data/mod_manager.db
-# data/mod_manager.db-*
-# Phase 10: headers / import_cache / asset_cache live under cache/
-data/import_cache
-data/mod_backup
-data/asset_cache/
-data/browser_profile/
-# # legacy JSON caches (no longer used)
-# data/app_names.json
-# data/game_info.json
-data/asset_store/
-data/collection_covers/
-data/deploy_backup/
-data/app_instance.lock
 
-data/identity_repair_production_backup/
-data/identity_repair_quarantine/
-data/
-
-# Accidental repo-root sidecar / scratch DB
+# Sidecars, scratch databases and temporary development artifacts
 .info/
-.tmp_ident.db
 .tmp_*
 _tmp_*
+_tmp/
 *.db-wal
 *.db-shm
 
-# Local temporary development artifacts (reports / audits / dumps / probes)
-# Prefer this tree over repo root, docs/, or data/ for one-shot outputs.
-_tmp/
-
-# Identity / deploy audit outputs (regenerable; never commit)
+# Generated audit and recovery outputs
 tools/_audit_out/
 tools/identity_recovery_rollback/
 tools/_tmp_*
-tools/_tmp_dup_*
-
-# One-off JSON / live snapshots must not live under docs/ (keep formal .md)
 docs/*.json
-docs/_p0_*_live_snapshot.json
-docs/_phase_*_live_snapshot.json
-docs/p0_data_hygiene_inventory.json
-
-# Accidental audit dumps at repo root (use _tmp/audits/ or tools/_audit_out/)
-/p0_*.json
-/_phase*.json
-/*_audit*.json
-/*_pollution*.json
-/*_forensic*.json
-/*_probe*.json
-/*_dump*.json
-
-# Qt / PySide caches
-*.qmlc
-*.jsc
-*_rc.py.bak
-=======
-# Production repair backups
-data/identity_repair_production_backup/
-data/identity_repair_quarantine/
-data/
-
-# Accidental repo-root sidecar / scratch DB
-.info/
-.tmp_ident.db
-.tmp_*
-_tmp_*
-*.db-wal
-*.db-shm
-
-# Local temporary development artifacts (reports / audits / dumps / probes)
-# Prefer this tree over repo root, docs/, or data/ for one-shot outputs.
-_tmp/
-
-# Identity / deploy audit outputs (regenerable; never commit)
-tools/_audit_out/
-tools/identity_recovery_rollback/
-tools/_tmp_*
-tools/_tmp_dup_*
-
-# One-off JSON / live snapshots must not live under docs/ (keep formal .md)
-docs/*.json
-docs/_p0_*_live_snapshot.json
-docs/_phase_*_live_snapshot.json
-docs/p0_data_hygiene_inventory.json
-
-# Accidental audit dumps at repo root (use _tmp/audits/ or tools/_audit_out/)
 /p0_*.json
 /_phase*.json
 /*_audit*.json
@@ -126,12 +60,9 @@ docs/p0_data_hygiene_inventory.json
 *.jsc
 *_rc.py.bak
 
-# OS / IDE
+# OS and editor files
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 *.swp
-
-# Machine-local production recovery receipt
-/config/production_recovery.json
