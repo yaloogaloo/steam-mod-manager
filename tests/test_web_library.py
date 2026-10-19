@@ -187,7 +187,7 @@ def test_real_webchannel_render_selection_and_virtualization(bridge):
         QTest.qWait(100)
         assert evaluate("!$('more-menu').matches(':popover-open') && !$('inspector').hidden")
         evaluate('openGameMenu();')
-        assert evaluate("$('game-menu').matches(':popover-open') && getComputedStyle($('game-menu')).backgroundColor==='rgb(40, 54, 61)'")
+        assert evaluate("$('game-menu').matches(':popover-open') && getComputedStyle($('game-menu')).backgroundColor===getComputedStyle($('more-menu')).backgroundColor && getComputedStyle($('game-menu')).boxShadow!=='none'")
         QTest.keyClick(window.view.focusProxy(), Qt.Key_Escape)
         QTest.qWait(100)
         assert evaluate("!$('game-menu').matches(':popover-open') && document.activeElement.id==='game-picker'")
@@ -199,6 +199,11 @@ def test_real_webchannel_render_selection_and_virtualization(bridge):
         evaluate("S.assets=Array.from({length:5000},(_,i)=>({...S.assets[0],token:'stress-'+i,name:'Stress '+i,search_fields:['Stress '+i]}));filter();")
         assert evaluate("S.rows.length === 5000 && document.querySelectorAll('.card').length < 100")
         assert evaluate("$('viewport').clientHeight >= 2*S.cell-12")
+        # Scrolling inside one rendered range must preserve the actual focused
+        # control, including its hover/pressed state and decoded cover image.
+        evaluate("$('viewport').scrollTop=1;renderGrid();globalThis.scrollCard=document.querySelector('.card');scrollCard.focus({preventScroll:true});$('viewport').scrollTop=2;")
+        QTest.qWait(100)
+        assert evaluate("document.querySelector('.card')===scrollCard && document.activeElement===scrollCard")
         evaluate("$('viewport').scrollTop=50000;renderGrid();")
         assert evaluate("document.querySelectorAll('.card').length < 100")
         # The same first-visible asset remains visible after changing column count.

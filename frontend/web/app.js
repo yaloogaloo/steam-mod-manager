@@ -244,6 +244,7 @@ function renderGrid() {
   const viewport = $('viewport'),
     first = Math.max(0, Math.floor(viewport.scrollTop / S.cell) - 1) * S.columns,
     last = Math.min(S.rows.length, (Math.ceil((viewport.scrollTop + viewport.clientHeight) / S.cell) + 1) * S.columns);
+  S.renderRange = [first, last];
   const visible = new Set(S.rows.slice(first, last).map(a => a.token));
   if (S.current) visible.add(S.current.token);
   S.coverQueue = S.coverQueue.filter(a => {
@@ -481,6 +482,10 @@ function scheduleGrid() {
   if (frame) return;
   frame = requestAnimationFrame(() => {
     frame = null;
+    const viewport = $('viewport');
+    const first = Math.max(0, Math.floor(viewport.scrollTop / S.cell) - 1) * S.columns;
+    const last = Math.min(S.rows.length, (Math.ceil((viewport.scrollTop + viewport.clientHeight) / S.cell) + 1) * S.columns);
+    if (S.renderRange?.[0] === first && S.renderRange?.[1] === last) return;
     renderGrid();
   });
 }

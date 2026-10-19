@@ -22,6 +22,26 @@ python -m pytest tests/test_success_path_ui_invariants.py tests/test_cover_owner
 
 Do not treat the task as done if that gate fails.
 
+## COVER PRESENTATION REGRESSION GATE
+
+If card cover markup/loading, `.cover` image sizing, or the Web cover preview
+changes, run:
+
+```
+python -m pytest tests/test_web_cover_visual.py tests/test_card_scheme_c.py tests/test_web_library.py
+```
+
+Also capture the canonical read-only Qt UI with `tools/cover_visual_probe.py`
+at two desktop viewports and record the actual DPI (include DPR 1.0 and the
+normal desktop DPR when they differ). The probe checks frozen real image
+hashes, image bounds, visible source regions, native painted pixels, Inspector
+resource identity, placeholders, and return after scrolling.
+
+Container height alone is not a cover-content acceptance criterion. Preserve
+the approved references in `tests/fixtures/cover_visual/manifest.json`; only
+explicit user visual approval may promote candidate screenshots. Missing
+approval remains `USER VISUAL REVIEW PENDING`, even when automated checks pass.
+
 ## CANONICAL MEMBERSHIP REGRESSION GATE
 
 Deployed Filter and Sorting Mode both call ``entry_is_deployed`` on the
