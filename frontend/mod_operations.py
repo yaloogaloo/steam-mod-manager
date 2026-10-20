@@ -44,13 +44,15 @@ def pick(bridge,request_id,action,args):
         bridge.response.emit(json.dumps({'request':request_id,'result':{'path':str(Path(chosen).resolve()) if chosen else '', 'cancelled':not bool(chosen)}}))
         return False
     title,filter=('更换封面','Images (*.png *.jpg *.jpeg *.jfif *.webp)') if action=='cover' else ('关联已有 Mod 的离线页面','HTML / MHTML (*.html *.htm *.mhtml *.mht)')
-    chosen,_=QFileDialog.getOpenFileName(QApplication.activeWindow(),title,'',filter)
+    from services.importers.import_settings import resource_picker_directory,remember_resource_directory
+    chosen,_=QFileDialog.getOpenFileName(QApplication.activeWindow(),title,resource_picker_directory(bridge.resources),filter)
     bridge._command_asset(args)
     if not chosen:
         bridge._busy.discard(args['_busy_key'])
         bridge.response.emit(json.dumps({'request':request_id,'result':{'cancelled':True,'success':False}}))
         return False
     args['_selected_source']=str(bridge.resources.select_input(chosen))
+    remember_resource_directory(bridge.resources,chosen)
     return True
 
 

@@ -41,10 +41,13 @@ def start(bridge,request_id,action,args):
     if not r:raise PermissionError('缺少隔离业务资源')
     if action=='pick-offline-pages':
         from PySide6.QtWidgets import QFileDialog,QApplication
-        paths,_=QFileDialog.getOpenFileNames(QApplication.activeWindow(),'选择 Nexus 离线网页',str(r.path('incoming')),'HTML / MHTML (*.html *.htm *.mhtml *.mht)')
+        from services.importers.import_settings import resource_picker_directory,remember_resource_directory
+        start=resource_picker_directory(r)
+        paths,_=QFileDialog.getOpenFileNames(QApplication.activeWindow(),'选择 Nexus 离线网页',start,'HTML / MHTML (*.html *.htm *.mhtml *.mht)')
         bridge._command_game(args)
         for path in paths:
             r.select_input(path)
+        if paths:remember_resource_directory(r,paths[0])
         bridge._busy.discard(args['_busy_key'])
         bridge.response.emit(json.dumps({'request':request_id,'result':{'paths':paths,'cancelled':not paths}},ensure_ascii=False));return
     draft=bridge._offline_previews.get(args.get('preview'));ids=args.get('ids')

@@ -121,8 +121,8 @@ def start(bridge, request_id, action, args):
     if resources is None:raise PermissionError('获取与同步需要明确的隔离业务上下文')
     if action.startswith('pick-import-'):
         from PySide6.QtWidgets import QApplication, QFileDialog
-        from services.importers.import_settings import get_last_import_directory,set_last_import_directory
-        start_directory=get_last_import_directory(fallback=resources.path('incoming')) if getattr(resources,'production',False) else str(resources.path('incoming'))
+        from services.importers.import_settings import resource_picker_directory,remember_resource_directory
+        start_directory=resource_picker_directory(resources)
         if action in ('pick-import-cover','pick-import-offline'):
             selected,_=QFileDialog.getOpenFileName(QApplication.activeWindow(),'选择导入附加资源',start_directory,'Images (*.png *.jpg *.jpeg *.webp)' if action=='pick-import-cover' else 'HTML / MHTML (*.html *.htm *.mhtml *.mht)')
         elif action=='pick-import-zip':
@@ -136,7 +136,7 @@ def start(bridge, request_id, action, args):
             selected=QFileDialog.getExistingDirectory(QApplication.activeWindow(),'选择 Mod 目录',start_directory)
         if selected:
             path=resources.select_input(selected)
-            if getattr(resources,'production',False):set_last_import_directory(selected)
+            remember_resource_directory(resources,selected)
         bridge._busy.discard(args['_busy_key'])
         bridge.response.emit(json.dumps({'request':request_id,'result':{'source':selected,'sources':selections if action=='pick-import-zip' and args.get('multiple') else [selected] if selected else [],'cancelled':not bool(selected),'game':str(args['game'])}}))
         return
