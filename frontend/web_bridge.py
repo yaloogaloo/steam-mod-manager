@@ -740,13 +740,14 @@ class LibraryBridge(QObject):
                 row = rows[asset.mod_pk]
                 result.append({'token': token, 'internal_id': asset.internal_id,
                     'workspace_id': asset.workspace_id, 'name': asset.name,
-                    'platform': {'steam': 'Steam', 'nexus': 'Nexus Mods', 'github': 'GitHub',
+                    'platform': {'steam': 'Steam', 'nexus': 'Nexus', 'github': 'GitHub',
                                  'modio': 'mod.io', 'other': 'Other'}.get(asset.platform.lower(), asset.platform) or '来源未知',
                     'type_id': row.get('type_id'),
                     'type': types.get(row.get('type_id'), '类型未知'),
                     'size': row.get('local_size_bytes') if row.get('local_size_status') == 'ok' else None,
                     'deploy_state':row['deploy_status'],
                     'deployed': asset.deployed, 'favorite': asset.favorite, 'status': asset.status,
+                    'content_status': row['content_status'],
                     **query_data[asset.mod_pk]})
             collections = []
             for collection in self.adapter.collections(game):

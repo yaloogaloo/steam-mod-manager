@@ -577,6 +577,11 @@ p {
 .card-meta .platform,.card-meta .deployed {flex:none;}
 .card-meta .type-label {display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;}
 .card-meta .deployed {background:var(--selected);border-color:#70c9b240;color:var(--accent);}
+.card-meta .content-missing {flex:none;background:#322e25;border-color:#75634766;color:#c4ad7d;}
+.card-meta:has(.content-missing) .platform {flex:0 1 auto;min-width:24px;}
+.card-meta:has(.content-missing) .type-label {flex:1 1 auto;}
+.card-meta:has(.content-missing):has(.deployed) {gap:2px;}
+.card-meta:has(.content-missing):has(.deployed) > span {padding-inline:3px;}
 
 .platform {
     color: var(--secondary);
