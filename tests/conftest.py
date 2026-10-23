@@ -62,6 +62,22 @@ def _playwright_chromium_available() -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # Agent test artifacts stay local; never change the production runtime temp policy.
+    import os
+    import tempfile
+
+    workspace = Path(__file__).resolve().parents[1] / "_tmp" / "tests"
+    from services.business_resources import checked_sandbox_root
+    base = Path(config.option.basetemp or workspace / f"pytest-{os.getpid()}").absolute()
+    if not base.resolve().is_relative_to(workspace.resolve()) or base.resolve() == workspace.resolve():
+        raise pytest.UsageError("--basetemp must be a child of project _tmp/tests")
+    checked_sandbox_root(base)
+    config.option.basetemp = str(base)
+    temporary = checked_sandbox_root(workspace / f"python-{os.getpid()}")
+    temporary.mkdir(parents=True, exist_ok=True)
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        os.environ[name] = str(temporary)
+    tempfile.tempdir = str(temporary)
     config.addinivalue_line(
         "markers", "network: requires outbound network and/or Playwright browser"
     )

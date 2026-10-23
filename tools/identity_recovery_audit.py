@@ -662,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=str,
         default="",
-        help="Output JSON (default: tools/_audit_out/identity_recovery_report.json)",
+        help="Output JSON (default: _tmp/audits/identity_recovery_report.json)",
     )
     args = parser.parse_args(argv)
 
@@ -677,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
     out = (
         Path(args.out)
         if args.out
-        else (ROOT / "tools" / "_audit_out" / "identity_recovery_report.json")
+        else (ROOT / "_tmp" / "audits" / "identity_recovery_report.json")
     )
 
     report = scan_identity_recovery(

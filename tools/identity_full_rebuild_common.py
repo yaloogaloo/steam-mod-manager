@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_LIBRARY = ROOT / "mod"
 DEFAULT_DB = ROOT / "data" / "mod_manager.db"
 

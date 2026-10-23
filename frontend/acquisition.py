@@ -21,22 +21,15 @@ def validate_import(bridge, args, *, preview=False):
         raise ValueError('请选择 incoming 内的具体 Mod 目录')
     files=[]
     if zipped:
-        if platform=='steam':validate_zip(source)
-        else:
-            from services.importers.archive import is_archive_path
-            if not is_archive_path(str(source)):raise ValueError('请选择旧版支持的 ZIP / 7z / RAR 压缩包')
+        from services.archive_admission import inspect_archive
         files.append(source)
-        paths=args.get('archive_paths')
-        if paths is not None:
-            if not isinstance(paths,list) or not paths or len(paths)>500 or not all(isinstance(p,str) for p in paths):raise ValueError('压缩包列表无效')
-            checked=[resources.validate(p) for p in paths]
-            if checked[0]!=source or len(set(checked))!=len(checked):raise ValueError('压缩包输入不一致或重复')
-            for path in checked[1:]:
-                if not path.is_file() or not resources.input_allowed(path):raise ValueError('压缩包未经选择器授权')
-                if platform=='steam':validate_zip(path)
-                else:
-                    from services.importers.archive import is_archive_path
-                    if not is_archive_path(str(path)):raise ValueError('不支持的压缩包格式')
+        paths=args.get('archive_paths') or [str(source)]
+        if not isinstance(paths,list) or not paths or len(paths)>32 or not all(isinstance(p,str) for p in paths):raise ValueError('请选择 1–32 个压缩包')
+        checked=[resources.validate(p) for p in paths]
+        if checked[0]!=source or len(set(checked))!=len(checked):raise ValueError('压缩包输入不一致或重复')
+        for path in checked:
+            if not path.is_file() or not resources.input_allowed(path):raise ValueError('压缩包未经选择器授权')
+            inspect_archive(path)
     for path in (() if zipped else source.rglob('*')):
         resources.validate(path)
         if not batch and (path.name.casefold() in ('.info','smm_info') or (platform=='steam' and path.suffix.lower() in ('.zip','.7z','.rar','.mhtml','.html','.mht','.htm'))):
@@ -126,7 +119,8 @@ def start(bridge, request_id, action, args):
         if action in ('pick-import-cover','pick-import-offline'):
             selected,_=QFileDialog.getOpenFileName(QApplication.activeWindow(),'选择导入附加资源',start_directory,'Images (*.png *.jpg *.jpeg *.webp)' if action=='pick-import-cover' else 'HTML / MHTML (*.html *.htm *.mhtml *.mht)')
         elif action=='pick-import-zip':
-            filter='Archives (*.zip *.7z)' if args.get('completion') else 'Archives (*.zip *.7z *.rar)' if args.get('platform','Steam')!='Steam' else 'ZIP (*.zip)'
+            from services.archive_admission import ARCHIVE_FILTER
+            filter=ARCHIVE_FILTER
             if args.get('multiple'):
                 selections,_=QFileDialog.getOpenFileNames(QApplication.activeWindow(),'选择同一 Mod 的压缩包',start_directory,filter)
                 for choice in selections:resources.select_input(choice)
@@ -158,7 +152,7 @@ def start(bridge, request_id, action, args):
         worker=ImportWorker(platform=platform,library_root=resources.path('mod'),parent=bridge,
             params={'source_path':str(source),'title':args['title'].strip(),'workshop_id':args.get('workshop_id',''),
                     'github_url':url,'nexus_url':url,'modio_url':url,'source_url':url,
-                    'archive_paths':args.get('archive_paths',[]),
+                    'archive_paths':args.get('archive_paths',[]),'use_archive':args['_zip'],'controlled_archives':True,
                     'is_batch_mode':bool(args.get('batch_directory')),
                     'cover_source':args.get('cover_source',''),'offline_html_path':args.get('offline_html_path',''),
                     'game_id':int(game),'app_id':int(game),'game_name':game_info.name},
@@ -220,7 +214,7 @@ def start(bridge, request_id, action, args):
                 job['managed_path']=str(resources.validate(row['last_known_path']))
                 duplicate=bool(getattr(result,'is_duplicate',False))
                 job['state']='duplicate' if duplicate else 'success'
-                job['message']='该 Mod 已存在，未覆盖归档' if duplicate else (('Steam ZIP 已按原规则解包归档' if str(platform).lower()=='steam' else '来源压缩包已原样归档，未解包') if action=='import-zip' else '目录与身份已持久化' if importing else '来源元数据已同步；保留用户覆盖，未下载内容或封面')
+                job['message']='该 Mod 已存在，未覆盖归档' if duplicate else (('Steam 压缩包已按原规则解包归档' if str(platform).lower()=='steam' else '来源压缩包已原样归档，未解包') if action=='import-zip' else '目录与身份已持久化' if importing else '来源元数据已同步；保留用户覆盖，未下载内容或封面')
                 if importing and args.get('batch_directory'):
                     job['state']='partial' if result.failed_count else 'success'
                     job['message']=f'新增 {result.imported_count} · 跳过 {result.skipped_count} · 失败 {result.failed_count}'+('；'+result.error if result.failed_count else '')

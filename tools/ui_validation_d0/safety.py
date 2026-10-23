@@ -70,8 +70,11 @@ class Boundary:
     def __init__(self, root: Path, repository: Path):
         self.root = local_absolute(root).resolve()
         self.repository = local_absolute(repository).resolve()
-        if self.root == Path(self.root.anchor) or under(self.root, self.repository) or under(self.repository, self.root):
-            raise IsolationError("Test root must be outside, and must not contain, repository")
+        workspace = self.repository / "_tmp"
+        if (self.root == Path(self.root.anchor) or under(self.repository, self.root)
+                or (under(self.root, self.repository) and not under(self.root, workspace))
+                or self.root == workspace or under(self.root, workspace / "protected_recovery")):
+            raise IsolationError("Test root must use a disposable _tmp child or an external isolated directory")
 
     def target(self, path: str | Path) -> Path:
         resolved = local_absolute(path).resolve()

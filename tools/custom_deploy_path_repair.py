@@ -167,8 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=Path,
         default=ROOT
-        / "tools"
-        / "_audit_out"
+        / "_tmp" / "audits"
         / "custom_deploy_path_repair_plan.json",
     )
 
@@ -188,8 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=Path,
         default=ROOT
-        / "tools"
-        / "_audit_out"
+        / "_tmp" / "audits"
         / "custom_deploy_path_repair_result.json",
     )
 

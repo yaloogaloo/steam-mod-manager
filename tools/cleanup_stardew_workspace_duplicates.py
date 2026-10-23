@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_REPORT = OUT_DIR / "stardew_workspace_duplicate_cleanup.json"
 
 STARDEW_APP_ID = 413150

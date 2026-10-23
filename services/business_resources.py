@@ -16,6 +16,31 @@ import sys
 
 _scope = ContextVar('smm_business_resources', default=None)
 _guard_installed = False
+_decoder_grant = ContextVar('smm_archive_decoder', default=None)
+
+
+@contextmanager
+def archive_decoder(command, source):
+    """Admit one exact read/list-to-pipe command, never a general subprocess."""
+    import subprocess
+    from services.importers.archive import find_7z_executable
+    executable = find_7z_executable()
+    if not executable or Path(command[0]).resolve()!=Path(executable).resolve():
+        raise PermissionError('未获准入的归档解码器')
+    tail=['-sccUTF-8','-mmt=2','-pSMM_NO_PASSWORD','--',str(source)]
+    prefix=command[1:-len(tail)]
+    if command[-len(tail):]!=tail or not (prefix==['l','-slt'] or
+        (len(prefix)==4 and prefix[:3]==['x','-so','-spd'] and prefix[3].startswith('-i!'))):
+        raise PermissionError('归档解码仅允许受控列表或单成员输出')
+    scope=_scope.get()
+    if scope:
+        path=scope.resources.validate(source)
+        if not scope.resources.input_allowed(path) and not path.is_relative_to(scope.resources.path('cache')):
+            raise PermissionError('归档输入不属于已授权资源或受控暂存')
+    expected=subprocess.list2cmdline(command) if os.name=='nt' else command
+    token=_decoder_grant.set((str(Path(executable).resolve()),expected))
+    try:yield
+    finally:_decoder_grant.reset(token)
 
 
 def current_resources():
@@ -45,8 +70,11 @@ def checked_sandbox_root(value):
     if not root.is_absolute() or '..' in root.parts or root.drive.startswith('\\\\'):
         raise PermissionError('隔离根必须是明确的绝对路径')
     resolved = root.resolve()
-    if resolved.is_relative_to(production) or production.is_relative_to(resolved):
-        raise PermissionError('隔离根不能包含生产项目')
+    workspace = production / '_tmp'
+    if resolved.is_relative_to(workspace / 'protected_recovery') or resolved == workspace:
+        raise PermissionError('隔离根不能使用恢复资料或整个临时工作区')
+    if production.is_relative_to(resolved) or (resolved.is_relative_to(production) and not resolved.is_relative_to(workspace)):
+        raise PermissionError('隔离根只能使用项目 _tmp 子目录或外部隔离目录')
     for candidate in (root, *root.parents):
         try:
             info = candidate.lstat()
@@ -87,6 +115,10 @@ def _audit(event, args):
     scope = _scope.get()
     if scope is None:
         return
+    decoder=_decoder_grant.get()
+    if decoder and event=='subprocess.Popen' and isinstance(args[0],(str,bytes,os.PathLike)) and str(Path(args[0]).resolve())==decoder[0] and args[1]==decoder[1] and args[2] is None and args[3] is None:
+        scope.network.append({'operation':'bounded-archive-decoder','event':event})
+        return
     if event in ('socket.connect','subprocess.Popen'):
         admit=getattr(scope.resources,'allow_source_external',None)
         if admit and admit(event,args):
@@ -96,6 +128,11 @@ def _audit(event, args):
     if event == 'open':
         path, mode, flags = args
         if isinstance(path, int):
+            if decoder and os.name=='nt':
+                import ctypes,msvcrt
+                kind=ctypes.windll.kernel32.GetFileType
+                kind.argtypes=[ctypes.c_void_p];kind.restype=ctypes.c_uint32
+                if kind(msvcrt.get_osfhandle(path))==3:return
             pipe=getattr(scope.resources,'allow_source_pipe',None)
             if pipe and pipe(path):return
             # CAS atomic publish wraps an already-open mkstemp descriptor. Resolve

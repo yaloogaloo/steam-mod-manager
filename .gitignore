@@ -38,7 +38,8 @@ logs/*
 .info/
 .tmp_*
 _tmp_*
-_tmp/
+# Canonical Agent workspace, including protected recovery (never commit credentials)
+/_tmp/
 *.db-wal
 *.db-shm
 

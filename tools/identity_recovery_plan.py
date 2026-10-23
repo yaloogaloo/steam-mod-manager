@@ -412,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
         "--report",
         type=str,
         default="",
-        help="Phase 1 report JSON (default: tools/_audit_out/identity_recovery_report.json)",
+        help="Phase 1 report JSON (default: _tmp/audits/identity_recovery_report.json)",
     )
     parser.add_argument(
         "--db",
@@ -430,14 +430,14 @@ def main(argv: list[str] | None = None) -> int:
         "--out",
         type=str,
         default="",
-        help="Output plan JSON (default: tools/_audit_out/identity_recovery_plan.json)",
+        help="Output plan JSON (default: _tmp/audits/identity_recovery_plan.json)",
     )
     args = parser.parse_args(argv)
 
     report_path = (
         Path(args.report)
         if args.report
-        else (ROOT / "tools" / "_audit_out" / "identity_recovery_report.json")
+        else (ROOT / "_tmp" / "audits" / "identity_recovery_report.json")
     )
     if not report_path.is_file():
         print(f"missing report: {report_path}", file=sys.stderr)
@@ -451,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     out = (
         Path(args.out)
         if args.out
-        else (ROOT / "tools" / "_audit_out" / "identity_recovery_plan.json")
+        else (ROOT / "_tmp" / "audits" / "identity_recovery_plan.json")
     )
 
     # Snapshot DB bytes before/after to prove no mutation.

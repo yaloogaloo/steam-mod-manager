@@ -64,7 +64,9 @@ class HarnessGuard(Boundary):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True, type=Path)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.agent_workspace import require_workspace
+    parser.add_argument("--root", required=True, type=require_workspace)
     parser.add_argument("--width", default=1600, type=int)
     parser.add_argument("--height", default=900, type=int)
     parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")

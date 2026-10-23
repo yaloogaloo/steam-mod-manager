@@ -7,6 +7,10 @@ from services.app_instance import acquire_instance_lock,release_instance_lock
 
 def create(destination):
  root=Path(__file__).resolve().parents[1];target=Path(destination).resolve()
+ protected=root/'_tmp/protected_recovery'
+ if not target.is_relative_to(protected):raise PermissionError('Agent recovery points must use project _tmp/protected_recovery')
+ for candidate in (Path(destination).absolute(), *Path(destination).absolute().parents):
+  if candidate.exists() and (candidate.is_symlink() or getattr(candidate.lstat(),'st_file_attributes',0)&0x400):raise PermissionError('Recovery path contains reparse point')
  if (target/'restore-point.json').exists():raise FileExistsError(target)
  if not acquire_instance_lock():raise RuntimeError('SMM is running; close it before backup')
  try:

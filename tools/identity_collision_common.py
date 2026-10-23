@@ -244,5 +244,5 @@ def load_json(path: Path) -> dict[str, Any]:
 def default_paths(root: Path) -> tuple[Path, Path, Path]:
     db = root / "data" / "mod_manager.db"
     library = root / "mod"
-    out_dir = root / "tools" / "_audit_out"
+    out_dir = root / "_tmp" / "audits"
     return db, library, out_dir

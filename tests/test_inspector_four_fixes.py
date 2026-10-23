@@ -2,6 +2,9 @@
 import hashlib
 import json
 import time
+from pathlib import Path
+
+import pytest
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
@@ -13,11 +16,15 @@ def prepare(root):
     resources, ids = initialize(root)
     with resources.bind():
         resources.path('data/mod_types.json').write_text(json.dumps({
-            'games': {'1142710': {'types': [{'id': 3, 'name': '内容'}, {'id': 4, 'name': '前置'}]}}
+            'games': {
+                '1142710': {'types': [{'id': 3, 'name': '内容'}, {'id': 4, 'name': '前置'}]},
+                '43': {'types': [{'id': 9, 'name': '另一游戏类型'}]},
+            }
         }, ensure_ascii=False), encoding='utf8')
         resources.db.set_mod_type_id(ids[0].mod_id, 3)
         for label in ('内容', '自建标签'):
             resources.db.add_mod_tag(ids[1].mod_id, 'category', label)
+        resources.db.add_mod_tag(ids[2].mod_id, 'category', '另一游戏标签')
         resources.db.update_mod_user_metadata(ids[1].mod_id, {'custom_description':
             '[quote][b]未闭合 BBCode 回归[list][*]正文\n' * 5
             + '<table><tr><td>' + 'long-token-' * 80 + '<td>第二列'})
@@ -81,7 +88,33 @@ def verify(window, resources, ids):
     catalog = resources.path('data/mod_types.json').read_bytes()
     QTest.keyClick(window.view.focusProxy(), Qt.Key_Return)
     wait("$('inspector-type-menu').matches(':popover-open')")
-    assert js("!$('editor').open && document.activeElement.id==='inspector-type-select'")
+    assert js("!$('editor').open && !$('inspector-type-select') && document.activeElement.getAttribute('role')==='option' && $('inspector-type-menu').querySelector('[aria-selected=true]').textContent==='未设置类型'")
+    assert js("['未设置类型','内容','前置'].join()===[...$('inspector-type-menu').querySelectorAll('[role=option] span:first-child')].map(e=>e.textContent).join()")
+    opened = json.loads(js("JSON.stringify($('inspector-type-menu').getBoundingClientRect().toJSON())"))
+    assert opened['left'] >= 0 and opened['top'] >= 0 and opened['bottom'] <= js('innerHeight') + 1 and opened['right'] <= js('innerWidth') + 1
+    assert opened['width'] <= 220 and opened['width'] < js("document.querySelector('#inspector').getBoundingClientRect().width")
+    assert js("!$('inspector-type-menu').closest('.inspector-scroll') && getComputedStyle($('inspector-type-menu')).backgroundColor==='rgb(36, 48, 51)' && getComputedStyle($('inspector-type-menu').querySelector('[aria-selected=true] svg')).color==='rgb(112, 201, 178)'")
+    evidence = Path(__file__).resolve().parents[1] / '_tmp' / 'agent_runs' / 'inspector-mod-type'
+    evidence.mkdir(parents=True, exist_ok=True)
+    window.grab().save(str(evidence / 'type-menu.png'))
+    js("document.querySelector('#inspector-type-menu [aria-selected=true]').click()")
+    wait("!$('inspector-type-menu').matches(':popover-open')")
+    assert db._conn.total_changes == before and not commands and db.get_mod_type_id(ids[1].mod_id) is None
+    window.resize(1728, 420)
+    QTest.qWait(200)
+    js("document.querySelector('.inspector-scroll').scrollTop=0;$('inspector-type-action').scrollIntoView({block:'end'});$('inspector-type-action').click()")
+    wait("$('inspector-type-menu').matches(':popover-open')")
+    edge = json.loads(js("JSON.stringify($('inspector-type-menu').getBoundingClientRect().toJSON())"))
+    assert edge['left'] >= 0 and edge['top'] >= 0 and edge['bottom'] <= js('innerHeight') + 1 and edge['right'] <= js('innerWidth') + 1
+    assert js("!$('inspector-type-menu').closest('.inspector-scroll')")
+    window.grab().save(str(evidence / 'type-menu-edge.png'))
+    js("document.querySelector('.inspector-name').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))")
+    wait("!$('inspector-type-menu').matches(':popover-open')")
+    window.resize(1728, 900)
+    QTest.qWait(200)
+    assert db._conn.total_changes == before and not commands
+    js("$('inspector-type-action').click()")
+    wait("$('inspector-type-menu').matches(':popover-open')")
     QTest.keyClick(window.view.focusProxy(), Qt.Key_Escape)
     wait("!$('inspector-type-menu').matches(':popover-open')")
     assert db._conn.total_changes == before and not commands
@@ -92,7 +125,7 @@ def verify(window, resources, ids):
     wait("$('inspector-type-menu').matches(':popover-open')")
     QTest.qWait(150)
     window.grab().save(str(resources.path('multi-tags-type-picker.png')))
-    js("$('inspector-type-select').value='3';$('inspector-type-select').dispatchEvent(new Event('change',{bubbles:true}))")
+    js("document.querySelector('#inspector-type-menu [data-value=\"3\"]').click()")
     wait("!S.busy && S.details.type_id===3 && $('inspector-type-action').textContent==='内容'")
     assert db.get_mod_type_id(ids[1].mod_id) == 3
     assert db.get_category_tags(ids[1].mod_id) == tags
@@ -100,15 +133,66 @@ def verify(window, resources, ids):
     assert commands == ['type-set']
     assert js("document.activeElement.id==='inspector-type-action'")
     assert js("!$('editor').open && document.querySelectorAll('#inspector-type-action').length===1")
+    from frontend.library_adapter import LibraryAdapter
+    from frontend.web_window import WebLibraryWindow
+    restart = WebLibraryWindow(LibraryAdapter(db, writable=True), resources=resources)
+    app = QApplication.instance()
+    restart.resize(1100, 720)
+    restart.show()
+    try:
+        def restart_js(code):
+            result = []
+            restart.page.runJavaScript(code, result.append)
+            for _ in range(300):
+                if result:
+                    return result[0]
+                QTest.qWait(10)
+                time.sleep(.002)
+            raise AssertionError('restart JavaScript callback timed out')
+        for _ in range(800):
+            if restart_js("Boolean(typeof S!=='undefined'&&S.snapshot)"):
+                break
+            QTest.qWait(10)
+        else:
+            raise AssertionError('restart window did not load')
+        restart_js("$('game').value='1142710';load()")
+        for _ in range(800):
+            if restart_js("Boolean(!$('refresh').disabled&&S.assets.length===2)"):
+                break
+            QTest.qWait(10)
+        else:
+            raise AssertionError('restart library did not load')
+        restart_js('inspect(S.assets.find(a=>a.internal_id===' + json.dumps(ids[1].internal_id) + '))')
+        for _ in range(800):
+            if restart_js('Boolean(S.details&&S.details.type_id===3)'):
+                break
+            QTest.qWait(10)
+        else:
+            raise AssertionError('restart did not restore type')
+        assert restart_js("document.querySelector('.inspector-type-name').textContent") == '内容'
+        assert db.get_category_tags(ids[1].mod_id) == tags
+    finally:
+        restart.bridge.shutdown()
+        restart.close()
+        app.processEvents()
     QTest.qWait(150)
     window.grab().save(str(resources.path('multi-tags-assigned.png')))
     js("$('inspector-type-action').click()")
     wait("$('inspector-type-menu').matches(':popover-open')")
-    js("$('inspector-type-select').value='';$('inspector-type-select').dispatchEvent(new Event('change',{bubbles:true}))")
+    assert js("$('inspector-type-menu').querySelector('[aria-selected=true] span').textContent==='内容'")
+    window.grab().save(str(evidence / 'type-menu-selected.png'))
+    js("inspectorTypeContext.data.version='stale';document.querySelector('#inspector-type-menu [data-value=\"4\"]').click()")
+    wait("!S.busy && S.details.type_id===3 && $('results').textContent.includes('保存失败') && $('results').textContent.includes('类型目录已变化')")
+    assert db.get_mod_type_id(ids[1].mod_id) == 3
+    assert db.get_category_tags(ids[1].mod_id) == tags
+    assert commands == ['type-set', 'type-set']
+    js("$('inspector-type-action').click()")
+    wait("$('inspector-type-menu').matches(':popover-open')")
+    js("document.querySelector('#inspector-type-menu [data-value=\"\"]').click()")
     wait("!S.busy && S.details.type_id===null")
     assert db.get_mod_type_id(ids[1].mod_id) is None
     assert db.get_category_tags(ids[1].mod_id) == tags
-    assert commands == ['type-set', 'type-set']
+    assert commands == ['type-set', 'type-set', 'type-set']
     js("$('open-detail').click()")
     wait("$('detail').open")
     js("$('detail-return').click();document.querySelector('[data-command=edit]').click()")
@@ -132,16 +216,35 @@ def verify(window, resources, ids):
     js("$('organization-close').click()")
     assert db.get_category_tags(ids[1].mod_id) == tags
     assert db.get_mod_type_id(ids[1].mod_id) is None
-    assert commands == ['type-set', 'type-set', 'tag-add', 'tag-remove']
+    assert commands == ['type-set', 'type-set', 'type-set', 'tag-add', 'tag-remove']
+    js("$('game').value='43';load()")
+    wait("!$('refresh').disabled&&S.assets.length===1")
+    assert js("[...$('type').options].map(o=>o.textContent).join('|')") == '全部类型|未设置类型|另一游戏类型'
+    js('inspect(S.assets.find(a=>a.internal_id===' + json.dumps(ids[2].internal_id) + '))')
+    wait('S.details&&S.details.internal_id===' + json.dumps(ids[2].internal_id))
+    assert db.get_category_tags(ids[2].mod_id) == ['另一游戏标签']
+    js("$('inspector-type-action').click()")
+    wait("$('inspector-type-menu').matches(':popover-open')")
+    assert js("['未设置类型','另一游戏类型'].join()===[...$('inspector-type-menu').querySelectorAll('[role=option] span:first-child')].map(e=>e.textContent).join()")
+    js("document.querySelector('.inspector-name').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))")
+    wait("!$('inspector-type-menu').matches(':popover-open')")
+    assert commands == ['type-set', 'type-set', 'type-set', 'tag-add', 'tag-remove']
+    assert db.get_mod_type_id(ids[1].mod_id) is None
+    assert db.get_category_tags(ids[1].mod_id) == tags
+    assert db.get_mod_type_id(ids[0].mod_id) == 3
+    assert db.get_mod_type_id(ids[2].mod_id) is None
+    js("$('game').value='1142710';load()")
+    wait("!$('refresh').disabled&&S.assets.length===2")
     js('inspect(S.assets.find(a=>a.internal_id===' + json.dumps(ids[0].internal_id) + '))')
     wait('S.details&&S.details.internal_id===' + json.dumps(ids[0].internal_id))
-    assert js("document.querySelector('.inspector-identity .deployed').textContent==='已部署' && !document.querySelector('.inspector-user-tags')")
+    assert js("document.querySelector('.inspector-identity .deployed').textContent==='已部署' && !document.querySelector('.inspector-user-tags') && document.querySelector('.inspector-type-name').textContent==='内容'")
     assert js("!document.querySelector('.inspector-scroll').innerText.includes('无标签')")
     assert not console
     return {'passed': True, 'commands': commands, 'cancel_writes': 0, 'cancel_focus': cancel_focus,
             'tags': tags, 'catalog_sha256': hashlib.sha256(catalog).hexdigest(), 'console': console}
 
 
+@pytest.mark.timeout(240)
 def test_inspector_type_picker_and_user_tag_layout(tmp_path):
     from frontend.library_adapter import LibraryAdapter
     from frontend.web_window import WebLibraryWindow

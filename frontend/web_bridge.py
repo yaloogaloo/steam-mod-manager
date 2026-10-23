@@ -635,7 +635,7 @@ class LibraryBridge(QObject):
                 'edit': action('edit', '编辑', 'pencil', '只读预览：编辑信息会写入 SQLite'),
                 'menu': [
                     action('open-source', '打开来源网页', 'external-link', opening if valid_url else '来源 URL 未通过校验；' + opening),
-                    action('open-folder', '打开托管归档目录', 'folder', '目录身份及路径未准入打开校验；' + opening),
+                    action('open-folder', '打开资产目录', 'folder', '目录身份及路径未准入打开校验；' + opening),
                     action('open-offline', '打开离线页面', 'file-text', '离线打开可能触发 CAS 资源物化；当前只读桥接未开放'),
                     *([action('import-offline' if source_platform=='nexus' else 'save-offline', '导入离线网页' if source_platform=='nexus' else '保存离线网页', 'upload' if source_platform=='nexus' else 'download', '只读预览：离线保存或导入会写入资源')] if source_platform in ('nexus','steam','github','mod.io','modio') else []),
                     action('content-add', '补齐本地内容', 'package', '只读模式：不允许归档写入'),

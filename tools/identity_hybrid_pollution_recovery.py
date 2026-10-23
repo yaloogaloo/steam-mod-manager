@@ -19,8 +19,8 @@ Hard rules
 Usage::
 
     python tools/identity_hybrid_pollution_recovery.py report
-    python tools/identity_hybrid_pollution_recovery.py plan --report tools/_audit_out/hybrid_report.json
-    python tools/identity_hybrid_pollution_recovery.py apply --plan tools/_audit_out/hybrid_plan.json --apply --confirm
+    python tools/identity_hybrid_pollution_recovery.py plan --report _tmp/audits/hybrid_report.json
+    python tools/identity_hybrid_pollution_recovery.py apply --plan _tmp/audits/hybrid_plan.json --apply --confirm
 """
 
 from __future__ import annotations
@@ -871,7 +871,7 @@ def apply_plan(
 def _default_paths() -> tuple[Path, Path, Path]:
     db = ROOT / "data" / "mod_manager.db"
     library = ROOT / "mod"
-    out = ROOT / "tools" / "_audit_out"
+    out = ROOT / "_tmp" / "audits"
     return db, library, out
 
 
@@ -904,7 +904,7 @@ def main(argv: list[str] | None = None) -> int:
     p_apply.add_argument(
         "--rollback-dir",
         type=Path,
-        default=ROOT / "tools" / "identity_recovery_rollback",
+        default=ROOT / "_tmp" / "protected_recovery" / "identity_recovery_rollback",
     )
 
     args = parser.parse_args(argv)

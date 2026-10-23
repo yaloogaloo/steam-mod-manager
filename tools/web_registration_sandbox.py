@@ -163,7 +163,8 @@ def verify(window,resources):
         (output/'result.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--root',required=True);parser.add_argument('--verify',action='store_true');args=parser.parse_args()
+    from tools.agent_workspace import require_workspace
+    parser=argparse.ArgumentParser();parser.add_argument('--root',type=require_workspace, required=True);parser.add_argument('--verify',action='store_true');args=parser.parse_args()
     from PySide6.QtWidgets import QApplication
     from PySide6.QtCore import QLockFile,QTimer
     from core.db_manager import DatabaseManager

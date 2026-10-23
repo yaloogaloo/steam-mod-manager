@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out",
         type=Path,
-        default=ROOT / "tools" / "_audit_out" / "custom_deploy_path_stale_report.json",
+        default=ROOT / "_tmp" / "audits" / "custom_deploy_path_stale_report.json",
     )
     args = parser.parse_args(argv)
 

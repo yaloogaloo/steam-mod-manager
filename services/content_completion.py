@@ -1,60 +1,27 @@
 """Bounded multi-package admission around the existing archive extractor.
 
-Steam contributes extracted paths from each archive root. Other sources retain
-one original archive per source unit, as ArchiveImporter already does. Paths
-are never flattened; duplicates (including case-insensitive ones) are refused.
-Nothing is published here; the caller commits once against the original entity.
+Steam publishes extracted paths from each archive into one directory tree, so
+those paths stay unique. Other sources keep one original archive per source
+unit; member names may repeat across archives and are not merged. Within one
+archive, admission still refuses traversal, illegal paths, links, and duplicate
+members. Publish targets are never overwritten. Nothing is published here; the
+caller commits once against the original entity.
 """
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 import hashlib
 import shutil
 import stat
-import zipfile
 from uuid import uuid4
 
-MAX_FILES = 4096
-MAX_BYTES = 256 * 1024 * 1024
-MAX_FILE_BYTES = 128 * 1024 * 1024
-
-
-def safe_member(name):
-    value = str(name).replace('\\', '/')
-    path = PurePosixPath(value)
-    reserved = {'CON','PRN','AUX','NUL',*(f'COM{i}' for i in range(1,10)),*(f'LPT{i}' for i in range(1,10))}
-    if (not path.parts or path.is_absolute() or PureWindowsPath(value).drive or '..' in path.parts
-        or any(p.rstrip(' .') != p or ':' in p or p.split('.')[0].upper() in reserved
-               or p.casefold() in ('.info','smm_info') or any(ord(c)<32 for c in p) for p in path.parts)
-        or path.name.casefold() in ('deploy_manifest.json','.is_missing_content')):
-        raise ValueError('不安全的归档路径：'+value)
-    return path
+from services.archive_admission import MAX_FILES, MAX_BYTES, MAX_FILE_BYTES, safe_member
 
 
 def members(source):
-    suffix = source.suffix.lower()
-    if suffix == '.zip':
-        with zipfile.ZipFile(source) as archive:
-            for item in archive.infolist():
-                if stat.S_ISLNK(item.external_attr >> 16) or item.flag_bits & 1:
-                    raise ValueError('不支持链接或加密归档')
-                if item.file_size > max(item.compress_size, 1) * 1000:
-                    raise ValueError('压缩比例超过限额')
-                yield item.filename, item.is_dir(), item.file_size
-    elif suffix == '.7z':
-        import inspect
-        import py7zr
-        if 'max_extract_size' not in inspect.signature(py7zr.SevenZipFile).parameters:
-            raise ValueError('当前 py7zr 缺少受限解包能力')
-        with py7zr.SevenZipFile(source) as archive:
-            if archive.needs_password():raise ValueError('不支持加密归档')
-            for item in archive.list():
-                if item.is_symlink or not (item.is_file or item.is_directory):
-                    raise ValueError('不支持链接或特殊归档成员')
-                yield item.filename, item.is_directory, item.uncompressed
-    elif suffix == '.rar':
-        raise ValueError('RAR 补齐尚缺受控、限额的解压组件；当前不支持')
-    else:
-        raise ValueError('不支持的补齐格式：'+suffix)
+    from services.archive_admission import inspect_archive
+    _, entries = inspect_archive(source)
+    for item in entries:
+        yield item.name, item.directory, item.size or 0
 
 
 def digest(path, cancel_check):
@@ -89,75 +56,65 @@ def prepare(resources, sources, *, platform, cancel_check=lambda:None):
     if any(not resources.input_allowed(p) for p in sources):raise PermissionError('输入未获选择器授权')
     directory = len(sources)==1 and sources[0].is_dir()
     if not directory and any(not p.is_file() for p in sources):raise ValueError('多个输入必须都是压缩包')
-    paths={}; count=total=0; archive_names=set(); fingerprints={}; paths_sizes={}
-    for source in sources:
-        cancel_check()
-        if source.is_file():
-            if source.stat().st_size>MAX_BYTES:raise ValueError('归档体积超过限额')
-            key=source.name.casefold()
-            if key in archive_names:raise ValueError('来源包文件名重名：'+source.name)
-            archive_names.add(key)
-            fingerprints[source]=digest(source,cancel_check)
-            entries=members(source)
-        else:
-            entries=directory_entries(resources,source)
-        for name,is_dir,size in entries:
-            cancel_check()
-            relative=safe_member(name);key=relative.as_posix().casefold()
-            if key in paths and not (is_dir and paths[key]):raise ValueError('多包路径重名，未覆盖：'+name)
-            if any(paths.get(parent.as_posix().casefold()) is False for parent in relative.parents if parent.parts):raise ValueError('归档文件与目录冲突：'+name)
-            if not is_dir and any(k.startswith(key+'/') for k in paths):raise ValueError('归档目录与文件冲突：'+name)
-            paths[key]=is_dir
-            paths_sizes[key]=size
-            if not is_dir:
-                count+=1;total+=size
-                if count>MAX_FILES or total>MAX_BYTES or size>MAX_FILE_BYTES:raise ValueError('内容体积或文件数超过限额')
-    if count==0:raise ValueError('没有可补齐的内容')
+    if not directory and len({p.name.casefold() for p in sources})!=len(sources):raise ValueError('来源包文件名重名，未覆盖')
+    if sum(p.stat().st_size for p in sources if p.is_file())>MAX_BYTES:raise ValueError('输入包总体积超过限额')
     workspace=resources.path('cache/content_completion')/uuid4().hex
     workspace.mkdir(parents=True)
     try:
-        files=[];actual_total=actual_count=0
+        files=[];actual_total=actual_count=0;paths=set();directories=set()
+        merge_members=platform.lower()=='steam'
         if directory:
             for name,is_dir,_ in directory_entries(resources,sources[0]):
+                safe_member(name)
                 if not is_dir:
                     item=sources[0]/name
-                    if item.suffix.lower() in ('.7z','.rar'):raise ValueError('目录中的 7z/RAR 请通过压缩包选择器单独选择')
+                    from services.importers.archive import ARCHIVE_SUFFIXES
+                    if item.suffix.lower() in ARCHIVE_SUFFIXES:raise ValueError('目录中的 ZIP / 7z/RAR 等压缩包请通过压缩包选择器单独选择')
                     frozen=workspace/'directory'/name
                     frozen.parent.mkdir(parents=True,exist_ok=True)
                     copied=0
                     with item.open('rb') as src,frozen.open('xb') as dst:
                         while block:=src.read(1024*1024):
                             cancel_check();copied+=len(block)
-                            if copied>MAX_FILE_BYTES:raise ValueError('输入文件超过限额')
+                            if copied>MAX_FILE_BYTES or actual_total+copied>MAX_BYTES:raise ValueError('输入文件超过限额')
                             dst.write(block)
-                    if copied!=paths_sizes[name.casefold()]:raise ValueError('输入文件已变化')
+                    actual_total+=copied;actual_count+=1
+                    if actual_total>MAX_BYTES or actual_count>MAX_FILES:raise ValueError('内容体积或文件数超过限额')
                     files.append((frozen,Path(name)))
         else:
-            from services.importers.archive import extract_archive
+            from services.archive_admission import extract_archive,storage_name
             for index,source in enumerate(sources):
                 cancel_check()
-                frozen=workspace/('input-'+str(index)+source.suffix.lower())
+                frozen=workspace/'inputs'/str(index)/source.name
+                frozen.parent.mkdir(parents=True)
+                fingerprint=digest(source,cancel_check)
                 with source.open('rb') as src,frozen.open('xb') as dst:
                     copied=0
                     while block:=src.read(1024*1024):
                         cancel_check();copied+=len(block)
                         if copied>MAX_BYTES:raise ValueError('输入包体积超过限额')
                         dst.write(block)
-                if digest(frozen,cancel_check)!=fingerprints[source]:raise ValueError('输入包已变化，请重新选择')
+                if digest(frozen,cancel_check)!=fingerprint:raise ValueError('输入包已变化，请重新选择')
                 dest=workspace/str(index)
-                extract_archive(frozen,dest_dir=dest,max_output_bytes=MAX_BYTES,cancel_check=cancel_check)
+                extract_archive(frozen,dest,max_bytes=MAX_BYTES-actual_total,max_file_bytes=MAX_FILE_BYTES,max_files=MAX_FILES-actual_count,cancel_check=cancel_check)
                 actual=0
                 for item in dest.rglob('*'):
                     resources.validate(item)
                     if item.is_file():
                         relative=safe_member(item.relative_to(dest).as_posix())
-                        if paths.get(relative.as_posix().casefold()) is not False:raise ValueError('解包路径与目录不一致')
+                        key=relative.as_posix().casefold()
+                        if merge_members:
+                            if key in paths:raise ValueError('多包路径重名，未覆盖：'+str(relative))
+                            parents={p.as_posix().casefold() for p in relative.parents if p.parts}
+                            if key in directories or parents & paths:raise ValueError('多包文件与目录冲突：'+str(relative))
+                            paths.add(key);directories.update(parents)
                         size=item.stat().st_size
                         actual+=size;actual_total+=size;actual_count+=1
                         if size>MAX_FILE_BYTES or actual_total>MAX_BYTES or actual_count>MAX_FILES:raise ValueError('实际内容超过限额')
                         if actual>MAX_BYTES:raise ValueError('实际解包内容超过限额')
                         if platform.lower()=='steam':files.append((item,Path(item.relative_to(dest))))
-                if platform.lower()!='steam':files.append((frozen,Path(source.name)))
+                if platform.lower()!='steam':files.append((frozen,Path(storage_name(frozen,cancel_check))))
+        if len({relative.as_posix().casefold() for item,relative in files})!=len(files):raise ValueError('来源包归档路径重名，未覆盖')
         cancel_check()
         yield files
     finally:

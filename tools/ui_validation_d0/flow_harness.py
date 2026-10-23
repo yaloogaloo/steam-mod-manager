@@ -50,7 +50,9 @@ class FlowGuard(HarnessGuard):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.agent_workspace import require_workspace
+    parser.add_argument("--root", type=require_workspace, required=True)
     parser.add_argument("--source-sha256", required=True)
     args = parser.parse_args(argv)
     if not sys.flags.isolated or not sys.flags.no_site or not sys.flags.dont_write_bytecode:

@@ -4,7 +4,7 @@
 One-shot tool (not production runtime).
 
 After Identity Full Rebuild, duplicate same-game workspace folders were moved
-into ``tools/_audit_out/rebuild_quarantine_*``. This script permanently deletes
+into ``_tmp/audits/rebuild_quarantine_*``. This script permanently deletes
 those pollution directories and verifies the live library remains clean.
 
 Hard rules
@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_LIBRARY = ROOT / "mod"
 DEFAULT_DB = ROOT / "data" / "mod_manager.db"
 DEFAULT_REPORT = OUT_DIR / "identity_duplicate_cleanup_report.json"

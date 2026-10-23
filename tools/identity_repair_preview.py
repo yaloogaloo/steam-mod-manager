@@ -386,7 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     plan_path = (
         Path(args.plan)
         if args.plan
-        else (ROOT / "tools" / "_audit_out" / "identity_recovery_plan.json")
+        else (ROOT / "_tmp" / "audits" / "identity_recovery_plan.json")
     )
     if not plan_path.is_file():
         print(f"missing plan: {plan_path}", file=sys.stderr)
@@ -400,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     out = (
         Path(args.out)
         if args.out
-        else (ROOT / "tools" / "_audit_out" / "identity_repair_preview.json")
+        else (ROOT / "_tmp" / "audits" / "identity_repair_preview.json")
     )
 
     before_db = db_path.read_bytes() if db_path.is_file() else b""

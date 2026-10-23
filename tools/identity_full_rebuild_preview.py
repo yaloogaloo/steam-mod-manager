@@ -13,7 +13,7 @@ Never mutates DB / .info (preview only).
 Usage::
 
     python tools/identity_full_rebuild_preview.py
-    python tools/identity_full_rebuild_preview.py --audit tools/_audit_out/rebuild_audit.json
+    python tools/identity_full_rebuild_preview.py --audit _tmp/audits/rebuild_audit.json
 """
 
 from __future__ import annotations

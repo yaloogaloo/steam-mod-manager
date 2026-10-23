@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT = ROOT / "tools" / "_audit_out" / "identity_cleanup_migration_report.json"
+OUT = ROOT / "_tmp" / "audits" / "identity_cleanup_migration_report.json"
 
 
 def _now() -> str:

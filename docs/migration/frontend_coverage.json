@@ -72,7 +72,7 @@
       "contract": "仅安装+Mod 目录",
       "new_entry_and_chain": "管理当前游戏 → 测试路径<br>原 validate_deploy_paths（迁至 services.game_path_validation；旧调用保留别名）",
       "remaining": "**本轮已整改；按证据限制结论**：python main.py 正式 UI 点击通过；群星实际空 Mod 路径返回原错误，未保存或移动资源；30-main-real-path-check.png",
-      "formal_result": "D:/smm-parity-evidence/30-main-real-path-check.png；实际 main.py → 原 validate_deploy_paths；不保存配置",
+      "formal_result": "D:/project/steam-mod-manager/_tmp/protected_recovery/smm-parity-evidence/formal-ui.json；实际 main.py → 原 validate_deploy_paths；不保存配置",
       "checks": [
         {
           "file": "frontend/web/game_configuration.js",
@@ -193,7 +193,7 @@
       "contract": "保持原入口所调用业务及副作用",
       "new_entry_and_chain": "工具栏 → 最近修改/名称/大小<br>library_query_adapter → 原 sort_key",
       "remaining": "名称、最近修改、大小使用原 sort_key；排序作用于整个查询结果，不局限于已渲染卡片。",
-      "formal_result": "D:/smm-equivalence-evidence/formal-sources-and-sort.json：正式 main.py，群星 390 项，三种排序完整序列一致；10-global-library-sort.png",
+      "formal_result": "D:/project/steam-mod-manager/_tmp/protected_recovery/smm-equivalence-evidence/formal-sources-and-sort.json：正式 main.py，群星 390 项，三种排序完整序列一致；历史截图已清理，保留上述结构化记录",
       "checks": [
         {
           "file": "frontend/web/app.js",
@@ -815,7 +815,7 @@
       "status": "PARTIAL",
       "legacy_entry_and_service": "打开目录<br>Detail / 卡片",
       "contract": "MISS 时禁用",
-      "new_entry_and_chain": "更多 → 打开托管归档目录<br>content-open → path_lifecycle → QDesktopServices",
+      "new_entry_and_chain": "更多 → 打开资产目录<br>content-open → path_lifecycle → QDesktopServices",
       "remaining": "**已接线；非全量正式 PASS**：已有正式或隔离证据，不能推导全部分支通过",
       "formal_result": "已有受控正式证据；非全分支",
       "checks": []
@@ -865,7 +865,7 @@
       "contract": "单 Mod",
       "new_entry_and_chain": "Inspector 主按钮部署<br>LibraryBridge._start_deploy → DeployWorker → ModDeployer.deploy_mod；策略受限",
       "remaining": "正式路径误套隔离目录、追踪日志越界、相对备份路径误拒已修；历史复制 manifest 和未逐项验收策略仍精确受限。",
-      "formal_result": "D:/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
+      "formal_result": "D:/project/steam-mod-manager/_tmp/protected_recovery/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
       "checks": [
         {
           "file": "frontend/web/app.js",
@@ -894,7 +894,7 @@
       "contract": "保持原入口所调用业务及副作用",
       "new_entry_and_chain": "Inspector 动态主按钮重新部署<br>DeployWorker → 原 redeploy_mod；策略受限",
       "remaining": "正式路径误套隔离目录、追踪日志越界、相对备份路径误拒已修；历史复制 manifest 和未逐项验收策略仍精确受限。",
-      "formal_result": "D:/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
+      "formal_result": "D:/project/steam-mod-manager/_tmp/protected_recovery/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
       "checks": [
         {
           "file": "frontend/web/app.js",
@@ -923,7 +923,7 @@
       "contract": "仅删 manifest 目标",
       "new_entry_and_chain": "Inspector 取消部署<br>DeployWorker → 原 undeploy_mod；历史 manifest 被拒绝",
       "remaining": "正式路径误套隔离目录、追踪日志越界、相对备份路径误拒已修；历史复制 manifest 和未逐项验收策略仍精确受限。",
-      "formal_result": "D:/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
+      "formal_result": "D:/project/steam-mod-manager/_tmp/protected_recovery/smm-equivalence-evidence/formal-workflow.json：正式 UI folder_copy 部署→重新部署→撤出；实际文件哈希、manifest 与原文件恢复。",
       "checks": [
         {
           "file": "frontend/web/app.js",

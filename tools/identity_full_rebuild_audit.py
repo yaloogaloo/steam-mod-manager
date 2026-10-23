@@ -8,7 +8,7 @@ Never mutates DB / .info / lifecycle contracts.
 Usage::
 
     python tools/identity_full_rebuild_audit.py
-    python tools/identity_full_rebuild_audit.py --out tools/_audit_out/rebuild_audit.json
+    python tools/identity_full_rebuild_audit.py --out _tmp/audits/rebuild_audit.json
 """
 
 from __future__ import annotations

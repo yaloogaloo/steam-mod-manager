@@ -26,7 +26,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['widgets', 'p23'], required=True)
     parser.add_argument('--game', default='916440')
-    parser.add_argument('--output', required=True)
+    from tools.agent_workspace import require_workspace
+    parser.add_argument('--output', type=require_workspace, required=True)
     args = parser.parse_args()
     output = Path(args.output).resolve()
     database = project_root() / DATA_DIR_NAME / DATABASE_FILENAME
@@ -65,7 +66,7 @@ def main():
     else:
         from frontend.web_window import WebLibraryWindow
         from frontend.web_bridge import LibraryBridge
-        root = Path('D:/smm-product-redesign-p23/prototype')
+        root = project_root() / '_tmp/protected_recovery/smm-product-redesign-p23/prototype'
         css = '\n'.join((root / name).read_text('utf-8') for name in ['tokens.css', 'styles.css', 'assets.css', 'responsive.css'])
         script = (root / 'app.js').read_text('utf-8')
         bridge = LibraryBridge(adapter)

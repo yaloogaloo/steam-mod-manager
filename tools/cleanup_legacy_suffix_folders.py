@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_REPORT = OUT_DIR / "legacy_suffix_cleanup_report.json"
 BEFORE_REPORT = OUT_DIR / "legacy_suffix_cleanup_before.json"
 AFTER_REPORT = OUT_DIR / "legacy_suffix_cleanup_after.json"

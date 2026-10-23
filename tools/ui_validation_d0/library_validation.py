@@ -9,7 +9,9 @@ from uuid import uuid4
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=Path, required=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.agent_workspace import require_workspace
+    parser.add_argument('--root', type=require_workspace, required=True)
     parser.add_argument('--platform', choices=['windows', 'offscreen'], default='windows')
     args = parser.parse_args()
     root = args.root.resolve()

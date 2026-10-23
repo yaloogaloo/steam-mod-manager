@@ -84,7 +84,7 @@ def default_paths(root: Path) -> tuple[Path, Path, Path, Path]:
         root / "data" / "mod_manager.db",
         root / "mod",
         root / "data",
-        root / "tools" / "_audit_out",
+        root / "_tmp" / "audits",
     )
 
 

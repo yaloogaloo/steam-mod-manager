@@ -5,7 +5,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]));sys.dont_write_bytec
 from PySide6.QtCore import QTimer,qInstallMessageHandler
 from PySide6.QtTest import QTest
 from frontend.web_window import WebLibraryWindow
-out=Path('D:/smm-production-entry-evidence');out.mkdir(exist_ok=True)
+out=Path(__file__).resolve().parents[1] / '_tmp/agent_runs/production-entry';out.mkdir(parents=True,exist_ok=True)
 stage=sys.argv[1];report={'stage':stage,'qt':[]};code=0
 qInstallMessageHandler(lambda kind,ctx,msg:report['qt'].append(str(kind)+': '+msg))
 original=WebLibraryWindow.__init__

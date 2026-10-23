@@ -634,6 +634,7 @@ class ImportWorker(QThread):
                 )
             result = ArchiveImporter(db=db).import_mod(
                 archive_path=archive_paths[0] if archive_paths else source,
+                controlled_resources=self.resources if params.get('controlled_archives') else None,
                 archive_paths=archive_paths or None,
                 platform=self.platform,
                 library_root=self.library_root,

@@ -14,46 +14,68 @@ async function loadEditorTypes(){
  }catch(e){$('type-message').textContent=e.message;}
  finally{if(editingAsset===target){$('edit-type').disabled=!typeContext;document.querySelector('[data-type-action=type-set]').disabled=!typeContext||S.readOnly;}}
 }
+function closeInspectorTypeMenu(restoreFocus = true) {
+  const menu = $('inspector-type-menu');
+  if (!menu?.matches(':popover-open')) return;
+  menu.hidePopover();
+  $('inspector-type-action')?.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) $('inspector-type-action')?.focus({preventScroll: true});
+}
 async function openInspectorTypePicker(){
  if(S.readOnly||S.busy||!S.current)return;
- inspectorTypeContext=null;
+ const menu=$('inspector-type-menu'),trigger=$('inspector-type-action');
+ if(menu.matches(':popover-open'))return closeInspectorTypeMenu();
+ if(menu.dataset.pending)return;
+ menu.dataset.pending='1';
+ closeFileTypeMenu(false);
  const asset=S.current,context={game:$('game').value,snapshot:S.snapshot,token:asset.token,internal_id:asset.internal_id};
  try{
   const data=await rpc('mod-types',context);
-  if(context.game!==$('game').value||context.snapshot!==S.snapshot||S.current?.internal_id!==asset.internal_id)return;
-  inspectorTypeContext={context,data};fillTypeOptions($('inspector-type-select'),data,S.details?.type_id);
-  $('inspector-type-message').textContent='选择后立即保存，不改变用户标签。';
-  $('inspector-type-menu').showPopover();positionMenu($('inspector-type-menu'),$('inspector-type-action'));$('inspector-type-select').focus();
+  if(context.game!==$('game').value||context.snapshot!==S.snapshot||S.current?.internal_id!==asset.internal_id||trigger!==$('inspector-type-action'))return;
+  inspectorTypeContext={context,data};
+  const selected=S.details?.type_id==null?'':String(S.details.type_id);
+  const options=[['', '未设置类型'],...data.types.map(type=>[String(type.type_id), type.name])];
+  menu.innerHTML=options.map(([value,text])=>{
+   const on=value===selected;
+   const mark=on?icon('check'):'<span class="file-type-check-space"></span>';
+   return `<button type="button" role="option" tabindex="-1" data-value="${escape(value)}" aria-selected="${on}"><span>${escape(text)}</span>${mark}</button>`;
+  }).join('');
+  menu.onclick=event=>{
+   const option=event.target.closest('[role="option"]');
+   if(!option||!inspectorTypeContext)return;
+   const value=option.dataset.value;
+   if(option.getAttribute('aria-selected')==='true')return closeInspectorTypeMenu();
+   saveModType(inspectorTypeContext.context,inspectorTypeContext.data,value,true);
+  };
+  trigger.setAttribute('aria-expanded','true');
+  menu.showPopover();
+  placeFileTypeMenu(menu,trigger);
+  (menu.querySelector('[aria-selected="true"]')||menu.querySelector('[role="option"]'))?.focus({preventScroll:true});
  }catch(e){$('results').hidden=false;$('results').textContent=e.message;}
+ finally{delete menu.dataset.pending;}
 }
 async function saveModType(context,data,raw,fromInspector){
  if(S.readOnly||S.busy)return;S.busy=true;
- const message=$(fromInspector?'inspector-type-message':'type-message'),target=editingAsset;
- message.textContent='正在保存类型…';$('inspector-type-select').disabled=$('edit-type').disabled=true;
+ const message=fromInspector?null:$('type-message'),target=editingAsset;
+ if(message)message.textContent='正在保存类型…';
+ if($('edit-type'))$('edit-type').disabled=true;
+ if(fromInspector)closeInspectorTypeMenu(false);
  try{
   await rpc('type-set',{...context,version:data.version,type_id:raw?Number(raw):null},true);
   if(context.game!==$('game').value||context.snapshot!==S.snapshot)return;
-  if(fromInspector)$('inspector-type-menu').hidePopover();
   if(!await refreshCommandView())return;
   if(!fromInspector&&editingAsset===target){
    const asset=S.assets.find(a=>a.internal_id===context.internal_id);
    if(asset){editingAsset={asset,snapshot:S.snapshot,game:context.game,epoch:S.epoch};await loadEditorTypes();}
   }
-  message.textContent='类型已保存；用户标签未改变。';
- }catch(e){message.textContent='保存失败：'+e.message;}
- finally{S.busy=false;$('inspector-type-select').disabled=$('edit-type').disabled=false;syncFavoriteControls();if(S.current&&S.details)drawInspector(S.current,S.details);
-  if(fromInspector&&S.current?.internal_id===context.internal_id&&!$('inspector-type-menu').matches(':popover-open'))$('inspector-type-action')?.focus({preventScroll:true});}
-}
-$('inspector-type-select').onchange=()=>{if(inspectorTypeContext)saveModType(inspectorTypeContext.context,inspectorTypeContext.data,$('inspector-type-select').value,true);};
-$('inspector-type-menu').addEventListener('toggle',event=>{
- $('inspector-type-action')?.setAttribute('aria-expanded',String(event.newState==='open'));
-});
-document.addEventListener('keydown',event=>{
- if(event.key==='Escape'&&$('inspector-type-menu').matches(':popover-open')){
-  event.preventDefault();event.stopImmediatePropagation();$('inspector-type-menu').hidePopover();
-  $('inspector-type-action')?.focus({preventScroll:true});
+  if(message)message.textContent='类型已保存；用户标签未改变。';
+ }catch(e){
+  if(fromInspector){$('results').hidden=false;$('results').textContent='保存失败：'+e.message;}
+  else if(message)message.textContent='保存失败：'+e.message;
  }
-},true);
+ finally{S.busy=false;if($('edit-type'))$('edit-type').disabled=false;syncFavoriteControls();if(S.current&&S.details)drawInspector(S.current,S.details);
+  if(fromInspector&&S.current?.internal_id===context.internal_id)$('inspector-type-action')?.focus({preventScroll:true});}
+}
 document.addEventListener('click',event=>{
  if(event.target.closest('[data-type-action="type-set"]')&&typeContext&&typeData)saveModType(typeContext,typeData,$('edit-type').value,false);
 });

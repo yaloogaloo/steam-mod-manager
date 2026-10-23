@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_DB = ROOT / "data" / "mod_manager.db"
 DEFAULT_LIBRARY = ROOT / "mod"
 

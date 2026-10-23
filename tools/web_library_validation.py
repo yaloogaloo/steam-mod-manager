@@ -25,7 +25,8 @@ from frontend.web_window import WebLibraryWindow
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--output', required=True)
+    from tools.agent_workspace import require_workspace
+    parser.add_argument('--output', type=require_workspace, required=True)
     parser.add_argument('--hold', action='store_true')
     parser.add_argument('--game', help='Explicit real game AppID; default is largest real library')
     parser.add_argument('--inspector-actions', action='store_true', help='Capture only Inspector actions and game picker')

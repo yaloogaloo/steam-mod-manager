@@ -6,6 +6,8 @@ sys.dont_write_bytecode=True
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QTimer
 from frontend.web_window import WebLibraryWindow
+out=Path(__file__).resolve().parents[1] / '_tmp/agent_runs/release-readonly'
+out.mkdir(parents=True,exist_ok=True)
 
 report={};original=WebLibraryWindow.__init__
 def initialize(window,*args,**kwargs):
@@ -22,7 +24,7 @@ def initialize(window,*args,**kwargs):
             window.bridge.command('readonly-proof','favorite-set','{}')
             report.update(native_readonly=window.bridge.adapter.db._read_only,mutation_context=str(current_mutation_context()),readonly_response=replies,
                           width=window.width(),height=window.height(),dpr=window.devicePixelRatioF())
-            window.grab().save('D:/smm-release-20261015/main-readonly.png')
+            window.grab().save(str(out / 'main-readonly.png'))
             window.close()
     timer.timeout.connect(lambda:window.page.runJavaScript("typeof S!=='undefined'&&!!S.snapshot" if step[0]==0 else "S.assets.length===104&&!$('refresh').disabled",ready))
     timer.start(200)

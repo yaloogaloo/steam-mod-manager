@@ -105,3 +105,16 @@ A diagnostic that opens the real `MainWindow` against `data/mod_manager.db`
 and clicks cover change is a production-data bug, not a test convenience.
 
 Longer notes: `docs/architecture/UI_LIFECYCLE_AND_COVER_OWNERSHIP.md`.
+## SMM Agent 临时工作区（强制）
+
+- 所有 AI/Agent 主动创建的临时文件只能位于本项目 `_tmp/`；不得在 D 盘根目录、其他项目或用户工作区创建测试、证据、回放或临时 worktree。
+- 每次任务优先使用 `_tmp/agent_runs/<任务标识>/`。测试数据库、测试归档、Qt 截图、性能采样、日志、缓存和临时 worktree 均纳入 `_tmp/`；按需创建目录，不在项目根散落输出。
+- pytest 使用 `_tmp/tests/` 下的独立 `--basetemp`，Python 临时目录由测试进程或具体调用显式配置。临时目录不可写时立即报告，禁止回退至 D 盘根目录。
+- 未关闭事故的唯一恢复资料放入 `_tmp/protected_recovery/`，禁止自动过期清理。移动恢复资料必须核验哈希、依赖引用及恢复可用性。
+- 任务完成后删除已确认无用的临时产物；删除前核实绝对路径、归属、进程占用及恢复依赖，不跟随链接、junction 或 reparse point。
+- 不得为满足 Agent 临时目录规则修改生产业务路径、Windows 全局 TEMP/TMP、真实归档或正式运行时临时资源机制。正式源码、文档和用户数据保持其权威位置。
+- 所有后续 Cursor/Agent 任务必须复用本规则，不自行另设证据根目录。现有业务安全及回归门禁继续有效。
+
+Agent 测试优先通过 `tools/run_tests.ps1 <测试路径>` 执行；该入口仅设置子进程临时环境，不修改 Windows 全局配置。
+
+临时 Git worktree 使用 `_tmp/worktrees/<任务标识>`，不得使用会在项目外自动生成工作树的入口。

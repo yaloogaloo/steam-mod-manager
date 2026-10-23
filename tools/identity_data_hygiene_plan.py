@@ -12,7 +12,7 @@ Forbidden::
 Usage::
 
     python tools/identity_data_hygiene_plan.py
-    python tools/identity_data_hygiene_plan.py --audit tools/_audit_out/identity_data_hygiene_report.json
+    python tools/identity_data_hygiene_plan.py --audit _tmp/audits/identity_data_hygiene_report.json
 """
 
 from __future__ import annotations
@@ -29,8 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_AUDIT = ROOT / "tools" / "_audit_out" / "identity_data_hygiene_report.json"
-DEFAULT_OUT = ROOT / "tools" / "_audit_out" / "identity_data_hygiene_plan.json"
+DEFAULT_AUDIT = ROOT / "_tmp" / "audits" / "identity_data_hygiene_report.json"
+DEFAULT_OUT = ROOT / "_tmp" / "audits" / "identity_data_hygiene_plan.json"
 
 
 def _now() -> str:

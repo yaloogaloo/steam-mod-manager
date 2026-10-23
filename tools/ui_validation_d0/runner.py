@@ -27,7 +27,9 @@ def process_snapshot(repository):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["preflight", "fixtures", "capture"])
-    parser.add_argument("--root", required=True, type=Path)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.agent_workspace import require_workspace
+    parser.add_argument("--root", required=True, type=require_workspace)
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--scenario", choices=SCENARIOS, default="small")

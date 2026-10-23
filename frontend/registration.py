@@ -21,8 +21,9 @@ def incoming(resources,value):
 
 def fingerprint(path,*,bounded=True):
     files=[path] if path.is_file() else sorted(p for p in path.rglob('*') if p.is_file())
-    if bounded and (len(files)>4096 or sum(p.stat().st_size for p in files)>256*1024*1024):
-        raise ValueError('资源超过 4096 文件或 256 MiB 限制')
+    from services.archive_admission import MAX_FILES,MAX_BYTES
+    if len(files)>MAX_FILES or sum(p.stat().st_size for p in files)>MAX_BYTES:
+        raise ValueError('资源体积或文件数超过受控限额')
     entries=[]
     for p in files:
         digest=hashlib.sha256()
@@ -362,6 +363,12 @@ def complete_content(bridge,args):
                             copied.append(target)
                             while block:=src.read(1024*1024):check_cancel();dest.write(block)
                     check_cancel()
+                    if asset.platform.lower()!='steam' and not sources[0].is_dir() and not old.files:
+                        from core.mod_platform import ModFilesBundle
+                        from services.importers.source_files import build_archive_source_entries
+                        entries=build_archive_source_entries([{'archive_name':source.name,'path':relative.as_posix()}
+                            for source,(item,relative) in zip(sources,files)],source_type=asset.platform)
+                        db.set_mod_files(asset.mod_pk,ModFilesBundle(files=entries))
                     status=rescan(bridge,asset,path)
                     check_cancel()
                     if status!='healthy':raise ValueError('没有可识别本体，补齐未提交')

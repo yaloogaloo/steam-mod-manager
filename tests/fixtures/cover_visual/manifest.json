@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "capture_date": "2026-10-19",
-  "source_snapshot": "D:/smm-cover-audit-20261019/baseline-mod_manager.db",
+  "source_snapshot": "D:/project/steam-mod-manager/_tmp/protected_recovery/smm-cover-audit-20261019/baseline-mod_manager.db",
   "renderer_policy": "bounded image box; cover; 50% 50%; no additional ancestor clipping",
   "samples": [
     {

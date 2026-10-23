@@ -4,8 +4,8 @@ Never mutates DB / .info / backup / lifecycle code.
 
 Outputs::
 
-    tools/_audit_out/identity_cleanup_audit.json
-    tools/_audit_out/identity_cleanup_audit.csv
+    _tmp/audits/identity_cleanup_audit.json
+    _tmp/audits/identity_cleanup_audit.csv
 
 Usage::
 
@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_OUT_JSON = ROOT / "tools" / "_audit_out" / "identity_cleanup_audit.json"
-DEFAULT_OUT_CSV = ROOT / "tools" / "_audit_out" / "identity_cleanup_audit.csv"
+DEFAULT_OUT_JSON = ROOT / "_tmp" / "audits" / "identity_cleanup_audit.json"
+DEFAULT_OUT_CSV = ROOT / "_tmp" / "audits" / "identity_cleanup_audit.csv"
 
 SCAN_ROOTS = ("core", "services", "ui", "scripts", "tools")
 SKIP_DIR_NAMES = {

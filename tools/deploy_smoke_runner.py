@@ -14,7 +14,7 @@ Workshop digit is resolved:
 
 Usage:
   python tools/deploy_smoke_runner.py
-  python tools/deploy_smoke_runner.py --workspace E:/tmp/smoke --out report.json
+  python tools/deploy_smoke_runner.py --workspace _tmp/agent_runs/deploy-smoke --out _tmp/agent_runs/deploy-smoke/report.json
 """
 
 from __future__ import annotations
@@ -611,12 +611,18 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
+    from tools.agent_workspace import require_workspace
     cleanup_workspace = False
+    if args.out is not None:
+        args.out = require_workspace(args.out)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.workspace is not None:
-        workspace = args.workspace.expanduser().resolve()
+        workspace = require_workspace(args.workspace.expanduser())
         workspace.mkdir(parents=True, exist_ok=True)
     else:
-        workspace = Path(tempfile.mkdtemp(prefix="smm_deploy_smoke_"))
+        parent = require_workspace(_REPO_ROOT / "_tmp" / "tests" / "deploy-smoke")
+        parent.mkdir(parents=True, exist_ok=True)
+        workspace = Path(tempfile.mkdtemp(prefix="run-", dir=parent))
         cleanup_workspace = not args.keep
 
     try:

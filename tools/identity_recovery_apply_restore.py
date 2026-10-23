@@ -448,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = (
         Path(args.out_dir)
         if args.out_dir
-        else (ROOT / "tools" / "_audit_out")
+        else (ROOT / "_tmp" / "audits")
     )
     preview_path = (
         Path(args.preview)

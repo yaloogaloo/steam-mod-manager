@@ -13,7 +13,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('--root',required=True)
+    from tools.agent_workspace import require_workspace
+    parser.add_argument('--root',type=require_workspace, required=True)
     parser.add_argument('--verify',action='store_true')
     parser.add_argument('--steam-public',action='store_true',help='Allow only the fixed public Steam metadata endpoint')
     parser.add_argument('--verify-public',action='store_true')

@@ -35,7 +35,7 @@ from core.mod_platform import (  # noqa: E402
     OFFLINE_STATUS_NONE,
 )
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_DB = ROOT / "data" / "mod_manager.db"
 DEFAULT_MAPPING = OUT_DIR / "identity_rebuild_mapping.json"
 DEFAULT_LIBRARY = ROOT / "mod"

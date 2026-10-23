@@ -26,11 +26,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_REPORT = ROOT / "tools" / "_audit_out" / "identity_recovery_report.json"
-DEFAULT_PLAN = ROOT / "tools" / "_audit_out" / "identity_recovery_plan.json"
-DEFAULT_PREVIEW = ROOT / "tools" / "_audit_out" / "identity_repair_preview.json"
-DEFAULT_APPLY_LOG = ROOT / "tools" / "_audit_out" / "identity_recovery_apply_log.json"
-DEFAULT_OUT = ROOT / "tools" / "_audit_out" / "identity_recovery_manual_review.csv"
+DEFAULT_REPORT = ROOT / "_tmp" / "audits" / "identity_recovery_report.json"
+DEFAULT_PLAN = ROOT / "_tmp" / "audits" / "identity_recovery_plan.json"
+DEFAULT_PREVIEW = ROOT / "_tmp" / "audits" / "identity_repair_preview.json"
+DEFAULT_APPLY_LOG = ROOT / "_tmp" / "audits" / "identity_recovery_apply_log.json"
+DEFAULT_OUT = ROOT / "_tmp" / "audits" / "identity_recovery_manual_review.csv"
 
 CSV_COLUMNS = [
     "finding_id",

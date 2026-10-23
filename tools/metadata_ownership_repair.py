@@ -434,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     db = args.db or (ROOT / "data" / "mod_manager.db")
     mod_root = args.mod_root or (ROOT / "mod")
     data_root = args.data_root or (ROOT / "data")
-    out_dir = ROOT / "tools" / "_audit_out"
+    out_dir = ROOT / "_tmp" / "audits"
 
     if args.cmd == "preview":
         plan = build_preview(db_path=db, mod_root=mod_root, data_root=data_root)

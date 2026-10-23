@@ -8,8 +8,8 @@ Never calls IdentityService / Reconcile / Import.
 
 Outputs::
 
-    tools/_audit_out/identity_migration_review.json
-    tools/_audit_out/identity_migration_review.csv
+    _tmp/audits/identity_migration_review.json
+    _tmp/audits/identity_migration_review.csv
 
 Usage::
 
@@ -34,8 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_AUDIT = ROOT / "tools" / "_audit_out" / "identity_data_hygiene_report.json"
-OUT_DIR = ROOT / "tools" / "_audit_out"
+DEFAULT_AUDIT = ROOT / "_tmp" / "audits" / "identity_data_hygiene_report.json"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_JSON = OUT_DIR / "identity_migration_review.json"
 DEFAULT_CSV = OUT_DIR / "identity_migration_review.csv"
 

@@ -5,9 +5,9 @@ Never creates, deletes, or merges Mods.
 
 Outputs::
 
-    tools/_audit_out/identity_data_hygiene_report.json
-    tools/_audit_out/identity_data_hygiene_report.csv
-    tools/_audit_out/identity_boundary_usage_report.json
+    _tmp/audits/identity_data_hygiene_report.json
+    _tmp/audits/identity_data_hygiene_report.csv
+    _tmp/audits/identity_boundary_usage_report.json
 
 Usage::
 
@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_OUT_JSON = OUT_DIR / "identity_data_hygiene_report.json"
 DEFAULT_OUT_CSV = OUT_DIR / "identity_data_hygiene_report.csv"
 DEFAULT_BOUNDARY_JSON = OUT_DIR / "identity_boundary_usage_report.json"

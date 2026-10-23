@@ -18,7 +18,9 @@ from datetime import datetime
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
-    parser.add_argument("--root", required=True, type=Path)
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.agent_workspace import require_workspace
+    parser.add_argument("--root", required=True, type=require_workspace)
     parser.add_argument("--platform", choices=("windows", "offscreen"), default="windows")
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[2]

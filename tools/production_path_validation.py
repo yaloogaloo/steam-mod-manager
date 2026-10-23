@@ -4,6 +4,8 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]));sys.dont_write_bytecode=True
 from PySide6.QtCore import QTimer
 from frontend.web_window import WebLibraryWindow
+out=Path(__file__).resolve().parents[1] / '_tmp/agent_runs/production-entry'
+out.mkdir(parents=True,exist_ok=True)
 report={};original=WebLibraryWindow.__init__
 def init(window,*a,**kw):
  original(window,*a,**kw);QTimer.singleShot(500,lambda:check(window))
@@ -31,5 +33,5 @@ def check(window):
  finally:window.close()
 import main
 report['exit']=main.main([])
-Path('D:/smm-production-entry-evidence/production-paths.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
+(out / 'production-paths.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf8')
 print(json.dumps({'success':report.get('success'), 'error':report.get('error'),'exit':report['exit']}));raise SystemExit(0 if report.get('success') else 1)

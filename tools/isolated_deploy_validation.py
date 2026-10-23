@@ -67,7 +67,8 @@ def snapshot(resources, identity):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', required=True)
+    from tools.agent_workspace import require_workspace
+    parser.add_argument('--root', type=require_workspace, required=True)
     args = parser.parse_args()
     from services.mutation_context import activate_test_context, reset_mutation_context
     from services.deploy import ModDeployer

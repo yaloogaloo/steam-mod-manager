@@ -361,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         args.db or (ROOT / "data" / "mod_manager.db"),
         args.mod_root or (ROOT / "mod"),
         args.data_root or (ROOT / "data"),
-        (args.out.parent if args.out else (ROOT / "tools" / "_audit_out")),
+        (args.out.parent if args.out else (ROOT / "_tmp" / "audits")),
     )
     out_path = args.out or (out_dir / "metadata_ownership_report.json")
 

@@ -225,7 +225,7 @@ def compare_approved(data, actual, sample_key, manifest, fixture_root, differenc
 
 
 def _run_formal():
-    """Canonical main.py composition, production reads only; artifacts stay external."""
+    """Canonical main.py composition, production reads only; artifacts stay under _tmp."""
     import argparse
     import sys
     from pathlib import Path
@@ -237,7 +237,8 @@ def _run_formal():
     import main
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', required=True, help='External evidence directory, outside the production project')
+    from tools.agent_workspace import require_workspace
+    parser.add_argument('--output', type=require_workspace, required=True, help='Evidence directory under project _tmp')
     parser.add_argument('--viewport', default='1728x900')
     parser.add_argument('--expected-dpr', type=float)
     args = parser.parse_args()
@@ -250,7 +251,7 @@ def _run_formal():
     manifest = json.loads((fixtures / 'manifest.json').read_text(encoding='utf8'))
     samples = manifest['samples'] + [manifest['no_cover']]
     # Read-only runtime denies new Python file opens for writing. Open only this
-    # explicit external report before entering it; screenshots use Qt's encoder.
+    # explicit _tmp report before entering it; screenshots use Qt's encoder.
     stream = (output / 'results.json').open('x', encoding='utf8')
     report = {'mode': 'canonical main.py --read-only; real production assets',
               'viewport': viewport, 'cases': [], 'console': [], 'automatic_pass': False}

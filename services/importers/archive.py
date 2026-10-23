@@ -37,7 +37,7 @@ from services.importers.steam import SteamImporter
 
 logger = logging.getLogger(__name__)
 
-ARCHIVE_SUFFIXES = {".zip", ".7z", ".rar"}
+ARCHIVE_SUFFIXES = {'.zip', '.7z', '.rar', '.tar', '.gz', '.tgz', '.bz2', '.tbz2', '.xz', '.txz', '.zst', '.tzst', '.cab', '.cpio', '.ar', '.arj', '.lzh', '.xar'}
 # Used only as a *hint* when choosing a nested Mod root — never as an import gate.
 _MOD_FILE_SUFFIXES = {".pak", ".dll", ".json", ".ini", ".cfg"}
 _MOD_DIR_NAMES = {"logicmods", "paks", "content", "binaries"}
@@ -509,28 +509,14 @@ def extract_archive(
     if not src.is_file():
         raise FileNotFoundError(f"压缩包不存在：{src}")
     suffix = src.suffix.lower()
-    if suffix not in ARCHIVE_SUFFIXES:
-        raise ValueError(f"{UNSUPPORTED_FMT_MSG} {suffix}")
 
     out = Path(dest_dir) if dest_dir else (import_cache_root() / str(uuid.uuid4()))
     out.mkdir(parents=True, exist_ok=True)
 
-    if max_output_bytes is not None:
-        if cancel_check: cancel_check()
-        if suffix == '.zip':
-            _extract_zip(src, out, max_output_bytes=max_output_bytes, cancel_check=cancel_check)
-        elif suffix == '.7z':
-            # Bounded completion never falls back to an unbounded subprocess.
-            import inspect
-            import py7zr
-            if 'max_extract_size' not in inspect.signature(py7zr.SevenZipFile).parameters:
-                raise RuntimeError('当前 py7zr 缺少受限解包能力，不能补齐 7z')
-            with py7zr.SevenZipFile(src, mode='r', max_extract_size=max_output_bytes) as archive:
-                archive.extractall(path=out)
-        else:
-            raise RuntimeError('RAR 补齐尚缺受控、限额的解压组件；当前不支持')
-        if cancel_check: cancel_check()
-        return out
+    if max_output_bytes is not None or suffix not in ('.zip', '.7z', '.rar'):
+        from services.archive_admission import extract_archive as bounded_extract, MAX_BYTES
+        return bounded_extract(src,out,max_bytes=max_output_bytes if max_output_bytes is not None else MAX_BYTES,
+                               cancel_check=cancel_check or (lambda:None))
 
     if suffix == ".zip":
         _extract_zip(src, out)
@@ -880,6 +866,7 @@ def stage_archive_sources(
     archives: Sequence[Path],
     *,
     on_progress: ProgressCallback | None = None,
+    original_names: Sequence[str] | None = None,
 ) -> tuple[Path, list[dict[str, str]]]:
     """
     Copy archives into a staging folder (no extract).
@@ -895,13 +882,13 @@ def stage_archive_sources(
     stage.mkdir(parents=True, exist_ok=False)
     specs: list[dict[str, str]] = []
     try:
-        for src in archives:
+        for index, src in enumerate(archives):
             if not src.is_file():
                 raise FileNotFoundError(f"压缩包不存在：{src}")
             if not is_archive_path(src):
                 raise ValueError(f"不是支持的压缩包：{src.name}")
-            original = src.name
-            stored = _unique_stored_name(stage, original)
+            original = original_names[index] if original_names else src.name
+            stored = _unique_stored_name(stage, src.name)
             shutil.copy2(src, stage / stored)
             specs.append(
                 {
@@ -1041,12 +1028,29 @@ class ArchiveImporter(ModImporter):
                 if dup is not None:
                     return dup
 
+        resources = _kwargs.pop('controlled_resources', None)
+        if resources is not None:
+            from services.content_completion import prepare
+            with prepare(resources,archives,platform=PLATFORM_STEAM,
+                         cancel_check=_kwargs.pop('cancel_check',lambda:None)) as files:
+                merged = import_cache_root() / str(uuid.uuid4())
+                merged.mkdir(parents=True)
+                try:
+                    for item,relative in files:
+                        target=merged/relative;target.parent.mkdir(parents=True,exist_ok=True)
+                        shutil.copy2(item,target)
+                    return self._import_steam_extracted(archives=archives,workshop_id=workshop_id,title=title,
+                        library_root=library_root,game_name=game_name,app_id=app_id,on_progress=on_progress,
+                        _prepared_source=merged,**_kwargs)
+                finally:cleanup_import_cache(merged)
         archive = archives[0]
         extract_dir: Path | None = None
         try:
-            resolved, extract_dir = self.prepare_source_folder(
-                archive, on_progress=on_progress
-            )
+            extract_dir = _kwargs.pop('_prepared_source', None)
+            if extract_dir is not None:
+                resolved = find_mod_root(extract_dir) or extract_dir
+            else:
+                resolved, extract_dir = self.prepare_source_folder(archive, on_progress=on_progress)
         except FileNotFoundError as exc:
             return ImportResult(success=False, error=str(exc))
         except ValueError as exc:
@@ -1160,10 +1164,25 @@ class ArchiveImporter(ModImporter):
             if dup is not None:
                 return dup
 
+        resources = _kwargs.pop('controlled_resources', None)
+        if resources is not None:
+            from services.content_completion import prepare
+            with prepare(resources,archives,platform=platform,
+                         cancel_check=_kwargs.pop('cancel_check',lambda:None)) as files:
+                prepared=[]
+                for item,relative in files:
+                    renamed=item.with_name(relative.name)
+                    if renamed!=item:item.rename(renamed)
+                    prepared.append(renamed)
+                return self._import_nexus_github_archives(archives=prepared,platform=platform,
+                    title=title,library_root=library_root,nexus_url=nexus_url,nexus_id=nexus_id,
+                    github_url=github_url,modio_url=modio_url,modio_id=modio_id,source_url=source_url,
+                    game_name=game_name,app_id=app_id,on_progress=on_progress,
+                    _archive_original_names=[p.name for p in archives],**_kwargs)
         staging_dir: Path | None = None
         try:
             staging_dir, specs = stage_archive_sources(
-                archives, on_progress=on_progress
+                archives, on_progress=on_progress, original_names=_kwargs.pop('_archive_original_names',None)
             )
         except FileNotFoundError as exc:
             return ImportResult(success=False, error=str(exc))

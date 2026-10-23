@@ -7,7 +7,7 @@ not a Qt / curl / native-code sandbox. There is no unsafe override switch.
 From the repository, with output outside the repository:
 
 ```powershell
-python -B tools/ui_validation_d0/runner.py preflight --root D:\smm-ui-validation-d0\isolated-run
+python -B tools/ui_validation_d0/runner.py preflight --root D:\project\steam-mod-manager\_tmp\agent_runs\ui-validation\isolated-run
 ```
 
 Exit `3` means mandatory admission is NOT CLOSED, not successful validation.
@@ -23,7 +23,7 @@ Large row fixtures support `--count 10000`; they are not performance evidence.
 Targeted foundation tests (no UI/business imports):
 
 ```powershell
-$env:SMM_D0_TEST_OUTPUT = 'D:\smm-ui-validation-d0\unit-output'
+$env:SMM_D0_TEST_OUTPUT = 'D:\project\steam-mod-manager\_tmp\tests\ui-validation'
 $env:PYTHONDONTWRITEBYTECODE = '1'
 python -B -m unittest discover -s tools/ui_validation_d0/tests -v
 ```

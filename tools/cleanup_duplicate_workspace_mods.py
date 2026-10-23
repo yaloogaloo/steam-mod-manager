@@ -7,7 +7,7 @@ rows and folders under the project root.
 
 Usage::
 
-    # dry-run → tools/_audit_out/workspace_duplicate_cleanup_report.json
+    # dry-run → _tmp/audits/workspace_duplicate_cleanup_report.json
     python tools/cleanup_duplicate_workspace_mods.py
 
     # apply only strategy-confirmed items
@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-OUT_DIR = ROOT / "tools" / "_audit_out"
+OUT_DIR = ROOT / "_tmp" / "audits"
 DEFAULT_REPORT = OUT_DIR / "workspace_duplicate_cleanup_report.json"
 
 INFO_DIR_NAMES = (".info", "info")

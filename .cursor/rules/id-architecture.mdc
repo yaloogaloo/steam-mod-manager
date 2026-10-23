@@ -29,3 +29,8 @@ Use names `internal_id`, `mod_id`, `workspace_id`, `external_id`. Do not use amb
 Ordinary UI shows **Workspace ID** only. Debug UI may show **SQLite PK**. `.info/internal_id` is filesystem registration proof (same Entity `internal_id`), not a folder-name identity.
 
 Do not introduce `entity_key` as an identity field. A temporary legacy JSON key named `entity_key` may be read once and migrated to `internal_id`; never write it as canonical.
+
+
+## Agent temporary artifacts
+
+Follow the canonical [project AGENTS.md](../../AGENTS.md), section “SMM Agent 临时工作区（强制）”, for all temporary outputs and recovery evidence. Do not define another workspace root here.

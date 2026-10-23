@@ -47,8 +47,8 @@ from services.file_ops import (  # noqa: E402
 ANNO_APP = 916440
 PROD_DB = _ROOT / "data" / "mod_manager.db"
 PROD_LIB = _ROOT / "mod"
-# Report under tools/_audit_out (created if missing — NOT production data/mod).
-REPORT_DIR = _ROOT / "tools" / "_audit_out"
+# Report under _tmp/audits (created if missing — NOT production data/mod).
+REPORT_DIR = _ROOT / "_tmp" / "audits"
 
 
 @dataclass
